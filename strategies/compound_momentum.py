@@ -190,9 +190,20 @@ class CompoundMomentumStrategy(BaseStrategy):
         return None
 
     def _check_exit(self, df: object, price: float) -> Optional[Signal]:
-        """Exit when momentum fades -- don't overstay."""
+        """Only close LOSING positions when momentum has died.
+
+        RIDE THE WINNERS: if in profit, NEVER close from strategy.
+        Let the trailing stop do its job -- it will ratchet up and
+        eventually get hit when the move exhausts. That's the exit.
+
+        CUT THE LOSERS: if in a loss AND momentum has faded AND
+        volume is gone, close it. The trade thesis failed.
+        """
         import pandas as pd
         assert isinstance(df, pd.DataFrame)
+
+        if not self._entry_time:
+            return None
 
         rsi = ta.momentum.RSIIndicator(df["close"], window=self.rsi_period).rsi()
         current_rsi = rsi.iloc[-1]
@@ -201,17 +212,33 @@ class CompoundMomentumStrategy(BaseStrategy):
         recent_vol = df["volume"].iloc[-3:].mean()
         volume_drying = recent_vol < avg_vol * 0.5
 
-        if self._position_side == "long" and current_rsi >= self.exit_rsi_overbought and volume_drying:
+        # Estimate if position is in loss (compare current price to entry-area price)
+        entry_candle_idx = max(0, len(df) - self.spike_candles - 1)
+        entry_area_price = df["close"].iloc[entry_candle_idx]
+        if entry_area_price == 0:
+            return None
+
+        if self._position_side == "long":
+            in_profit = price > entry_area_price
+        else:
+            in_profit = price < entry_area_price
+
+        # IN PROFIT -> ride it. Trailing stop will handle the exit.
+        if in_profit:
+            return None
+
+        # IN LOSS + momentum dead + volume gone -> cut the loser
+        if self._position_side == "long" and current_rsi < 45 and volume_drying:
             return Signal(
                 symbol=self.symbol, action=SignalAction.CLOSE, strategy=self.name,
-                reason=f"Take profit - momentum fade (RSI={current_rsi:.0f})",
+                reason=f"Cut loser - momentum dead (RSI={current_rsi:.0f}, vol drying)",
                 market_type=self.market_type,
             )
 
-        if self._position_side == "short" and current_rsi <= self.exit_rsi_oversold and volume_drying:
+        if self._position_side == "short" and current_rsi > 55 and volume_drying:
             return Signal(
                 symbol=self.symbol, action=SignalAction.CLOSE, strategy=self.name,
-                reason=f"Take profit - momentum fade (RSI={current_rsi:.0f})",
+                reason=f"Cut loser - momentum dead (RSI={current_rsi:.0f}, vol drying)",
                 market_type=self.market_type,
             )
 

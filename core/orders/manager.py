@@ -138,7 +138,18 @@ class OrderManager:
                 entry_price=order.average_price, current_price=order.average_price,
                 leverage=actual_leverage, market_type=market_type.value,
             )
-            self.trailing.register(pos, low_liquidity=low_liquidity)
+            # PYRAMID: use a very wide initial stop -- the planned drawdown
+            # from DCA is NOT a loss to cut. We only apply a real stop after
+            # the first DCA add lands (or if the whole thesis is invalidated).
+            if pyramid:
+                pyramid_stop = sp.dca_interval_pct * (sp.max_adds + 1)
+                self.trailing.register(
+                    pos, initial_stop_pct=pyramid_stop, low_liquidity=low_liquidity,
+                )
+                logger.info("PYRAMID wide stop for {}: {:.1f}% (planned DCA zone)",
+                            signal.symbol, pyramid_stop)
+            else:
+                self.trailing.register(pos, low_liquidity=low_liquidity)
 
         self._active_orders.append(order)
         return order
@@ -488,24 +499,42 @@ class OrderManager:
     # ------------------------------------------------------------------ #
 
     async def close_expired_quick_trades(self, active_signals: list[Signal]) -> list[Order]:
+        """Close quick trades that exceeded max hold time -- BUT only losers.
+
+        RIDE THE WINNERS: if the trade is in profit when time expires,
+        don't close it. Let the trailing stop handle the exit. The time
+        limit exists to CUT LOSERS that are going nowhere, not to cap
+        winners that are still running.
+        """
         closed: list[Order] = []
         now = datetime.now(timezone.utc)
+        positions = await self.exchange.fetch_positions()
+        pos_map = {p.symbol: p for p in positions}
 
         for signal in active_signals:
             if not signal.quick_trade or not signal.max_hold_minutes:
                 continue
             elapsed = (now - signal.timestamp).total_seconds() / 60
-            if elapsed >= signal.max_hold_minutes:
-                close_signal = Signal(
-                    symbol=signal.symbol, action=SignalAction.CLOSE,
-                    strategy=signal.strategy, reason="max_hold_time_exceeded",
-                    market_type=signal.market_type,
-                )
-                order = await self.execute_signal(close_signal)
-                if order:
-                    closed.append(order)
-                    self.scaler.remove(signal.symbol)
-                    logger.info("Auto-closed quick trade {} after {:.0f}m", signal.symbol, elapsed)
+            if elapsed < signal.max_hold_minutes:
+                continue
+
+            pos = pos_map.get(signal.symbol)
+            if pos and pos.pnl_pct > 1.0:
+                # In meaningful profit -- let the trailing stop ride it
+                logger.info("Quick trade {} expired but in profit ({:+.1f}%) -- letting trail ride",
+                            signal.symbol, pos.pnl_pct)
+                continue
+
+            close_signal = Signal(
+                symbol=signal.symbol, action=SignalAction.CLOSE,
+                strategy=signal.strategy, reason="max_hold_time_exceeded",
+                market_type=signal.market_type,
+            )
+            order = await self.execute_signal(close_signal)
+            if order:
+                closed.append(order)
+                self.scaler.remove(signal.symbol)
+                logger.info("Cut expired quick trade {} after {:.0f}m (not in profit)", signal.symbol, elapsed)
 
         return closed
 
