@@ -229,18 +229,30 @@ class MarketIntel:
             c.top_trader_long_ratio = btc_whale.oi_snapshot.top_trader_long_ratio
 
         # -- Composite position size multiplier --
-        c.position_size_multiplier = min(
-            fg_mult * liq_mult * macro_mult * defi_mult * santi_mult * glass_mult,
-            1.5,  # cap at 1.5x even if everything is screaming "buy"
+        raw_mult = fg_mult * liq_mult * macro_mult * defi_mult * santi_mult * glass_mult
+        c.position_size_multiplier = min(raw_mult, 1.5)
+
+        logger.debug(
+            "Intel multipliers: F&G={:.2f} Liq={:.2f} Macro={:.2f} "
+            "DeFi={:.2f} Santi={:.2f} Glass={:.2f} => raw={:.3f} capped={:.2f}",
+            fg_mult, liq_mult, macro_mult, defi_mult, santi_mult, glass_mult,
+            raw_mult, c.position_size_multiplier,
         )
 
         # -- Should reduce exposure --
-        c.should_reduce_exposure = (
-            c.macro_event_imminent or
-            self.fear_greed.is_extreme_greed or
-            (btc is not None and btc.is_overleveraged_longs) or
-            c.distribution_phase
-        )
+        reduce_reasons = []
+        if c.macro_event_imminent:
+            reduce_reasons.append("macro_imminent")
+        if self.fear_greed.is_extreme_greed:
+            reduce_reasons.append(f"extreme_greed({c.fear_greed})")
+        if btc is not None and btc.is_overleveraged_longs:
+            reduce_reasons.append("overleveraged_longs")
+        if c.distribution_phase:
+            reduce_reasons.append("distribution_phase")
+        c.should_reduce_exposure = len(reduce_reasons) > 0
+
+        if reduce_reasons:
+            logger.debug("Intel: REDUCE EXPOSURE — {}", ", ".join(reduce_reasons))
 
         # -- Preferred direction --
         votes = {"long": 0, "short": 0, "neutral": 0}
@@ -248,14 +260,20 @@ class MarketIntel:
         votes[c.liquidation_bias] += 2 if c.mass_liquidation else 1
         votes[c.whale_bias] += 1
 
-        # TradingView BTC consensus gets 2 votes (strong technical signal)
         tv_dir = c.tv_btc_consensus
         if tv_dir in votes:
             votes[tv_dir] += 2
 
-        # On-chain bias gets 1 vote
         if c.on_chain_bias in votes:
             votes[c.on_chain_bias] += 1
+
+        logger.debug(
+            "Intel direction votes: L={} S={} N={} | "
+            "sources: fg={} liq={} whale={} tv={} chain={}",
+            votes["long"], votes["short"], votes["neutral"],
+            c.fear_greed_bias, c.liquidation_bias, c.whale_bias,
+            tv_dir, c.on_chain_bias,
+        )
 
         if votes["long"] > votes["short"] and votes["long"] > votes["neutral"]:
             c.preferred_direction = "long"

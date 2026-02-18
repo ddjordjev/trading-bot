@@ -60,8 +60,16 @@ class TrailingStop(BaseModel):
             return True
 
         profit_pct = (price - self.entry_price) / self.entry_price * 100
+        distance_to_stop = (price - self.current_stop) / price * 100
 
-        # Break-even lock: once at +5%, move stop to entry price (zero risk)
+        logger.debug(
+            "Trail {}: price={:.6f} pnl={:+.2f}% stop={:.6f} dist={:.2f}% "
+            "be={} trail={} peak={:.6f}",
+            self.symbol, price, profit_pct, self.current_stop,
+            distance_to_stop, self.breakeven_locked, self.activated,
+            self.peak_price,
+        )
+
         if not self.breakeven_locked and profit_pct >= self.breakeven_trigger_pct:
             self.breakeven_locked = True
             if self.entry_price > self.current_stop:
@@ -94,6 +102,15 @@ class TrailingStop(BaseModel):
             return True
 
         profit_pct = (self.entry_price - price) / self.entry_price * 100
+        distance_to_stop = (self.current_stop - price) / price * 100
+
+        logger.debug(
+            "Trail {}: price={:.6f} pnl={:+.2f}% stop={:.6f} dist={:.2f}% "
+            "be={} trail={} peak={:.6f}",
+            self.symbol, price, profit_pct, self.current_stop,
+            distance_to_stop, self.breakeven_locked, self.activated,
+            self.peak_price,
+        )
 
         if not self.breakeven_locked and profit_pct >= self.breakeven_trigger_pct:
             self.breakeven_locked = True

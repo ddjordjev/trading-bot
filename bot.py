@@ -214,6 +214,15 @@ class TradingBot:
         balance = balance_map.get("USDT", 0.0)
         self.target.update_balance(balance)
 
+        logger.debug(
+            "=== TICK === bal=${:.2f} pnl={:+.2f}% tier={} aggr={:.2f} "
+            "strats={} dynamic={} trade={}",
+            balance, self.target.todays_pnl_pct, self.target.tier.value,
+            self.target.aggression_multiplier(),
+            len(self._strategies), len(self._dynamic_strategies),
+            self.target.should_trade(),
+        )
+
         # 0. Manual override check
         if self.target.manual_close_all:
             logger.critical("CLOSE_ALL detected -- closing all positions NOW")
@@ -301,15 +310,28 @@ class TradingBot:
 
         # 9. Trading gates
         allow_new_entries = self.target.should_trade()
-        aggression = self.target.aggression_multiplier()
+        base_aggression = self.target.aggression_multiplier()
+        aggression = base_aggression
         allow_gambling = self.target.todays_pnl_pct > 10 and self.target.todays_pnl_pct > 0
 
-        # Apply intel adjustments to aggression and entry gates
         if intel_condition:
             aggression *= intel_condition.position_size_multiplier
             if intel_condition.should_reduce_exposure:
                 aggression *= 0.7
-                logger.info("Intel: reducing exposure (regime={})", intel_condition.regime.value)
+
+            logger.debug(
+                "Gates: allow={} tier={} base_aggr={:.2f} intel_mult={:.2f} "
+                "reduce={} regime={} final_aggr={:.3f} gambling={}",
+                allow_new_entries, self.target.tier.value, base_aggression,
+                intel_condition.position_size_multiplier,
+                intel_condition.should_reduce_exposure,
+                intel_condition.regime.value, aggression, allow_gambling,
+            )
+        else:
+            logger.debug(
+                "Gates: allow={} tier={} aggr={:.2f} gambling={} (no intel)",
+                allow_new_entries, self.target.tier.value, aggression, allow_gambling,
+            )
 
         # 10. Run all strategies (collect candles for hedge analysis)
         candles_map: dict[str, list] = {}
@@ -329,7 +351,17 @@ class TradingBot:
 
                 sig = strategy.analyze(candles, ticker)
                 if not sig:
+                    logger.debug("Strategy '{}' on {} — no signal this tick",
+                                 strategy.name, strategy.symbol)
                     continue
+
+                logger.debug(
+                    "Signal: {} {} {} str={:.2f} strat={} reason={} "
+                    "quick={} mkt={}",
+                    sig.action.value, sig.symbol, sig.market_type,
+                    sig.strength, sig.strategy, sig.reason[:50],
+                    sig.quick_trade, sig.market_type,
+                )
 
                 if sig.action == SignalAction.CLOSE:
                     await self._process_signal(sig)
@@ -397,6 +429,13 @@ class TradingBot:
                         continue
 
                 sig = self._adjust_for_target(sig, aggression)
+
+                logger.debug(
+                    "Final signal: {} {} str={:.3f} (tv={:.2f} analytics={:.2f} "
+                    "aggr={:.2f}) pyramid={} | executing",
+                    sig.action.value, sig.symbol, sig.strength,
+                    tv_boost, strat_weight, aggression, use_pyramid,
+                )
                 await self._process_signal(sig, pyramid=use_pyramid)
 
             except Exception as e:

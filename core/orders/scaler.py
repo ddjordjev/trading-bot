@@ -128,6 +128,7 @@ class ScaledPosition(BaseModel):
 
     def should_add(self, current_price: float) -> bool:
         if self.phase == ScalePhase.GAMBLING:
+            logger.debug("Scale {}: skip add — gambling phase (no adds)", self.symbol)
             return False
         if not self.has_room_to_add:
             if self.phase != ScalePhase.FULL:
@@ -143,18 +144,26 @@ class ScaledPosition(BaseModel):
     def _should_add_winners(self, current_price: float) -> bool:
         profit_pct = self._current_profit_pct(current_price)
         if profit_pct < self.min_profit_to_add_pct:
+            logger.debug("Scale {}: WINNERS no add — profit {:.2f}% < min {:.1f}%",
+                         self.symbol, profit_pct, self.min_profit_to_add_pct)
             return False
 
         if self.peak_since_entry > 0:
             peak_profit = self._profit_at_price(self.peak_since_entry)
             if peak_profit - profit_pct > self.pullback_tolerance_pct:
+                logger.debug("Scale {}: WINNERS no add — pullback {:.2f}% from peak",
+                             self.symbol, peak_profit - profit_pct)
                 return False
 
         if self.last_add_price > 0:
             dist = abs(current_price - self.last_add_price) / self.last_add_price * 100
             if dist < self.min_profit_to_add_pct * 0.5:
+                logger.debug("Scale {}: WINNERS no add — too close to last add ({:.2f}%)",
+                             self.symbol, dist)
                 return False
 
+        logger.debug("Scale {}: WINNERS add OK — profit {:.2f}%, adds={}",
+                     self.symbol, profit_pct, self.adds)
         return True
 
     def _should_add_pyramid(self, current_price: float) -> bool:
@@ -182,7 +191,14 @@ class ScaledPosition(BaseModel):
                         "liquidity grab done, good DCA point", self.symbol, trough_drop, drop_pct)
             return True
 
-        return drop_pct >= self.dca_interval_pct
+        should = drop_pct >= self.dca_interval_pct
+        logger.debug(
+            "Scale {}: PYRAMID check — drop={:.2f}% interval={:.1f}% trough={:.2f}% "
+            "price={:.6f} last_add={:.6f} => {}",
+            self.symbol, drop_pct, self.dca_interval_pct, trough_drop,
+            current_price, self.last_add_price, "ADD" if should else "wait",
+        )
+        return should
 
     def should_lever_up(self, current_price: float) -> bool:
         if self.mode != ScaleMode.PYRAMID:
@@ -193,7 +209,13 @@ class ScaledPosition(BaseModel):
             return False
 
         profit_pct = self._current_profit_pct(current_price)
-        return profit_pct >= self.profit_to_lever_up_pct
+        should = profit_pct >= self.profit_to_lever_up_pct
+        if should:
+            logger.debug("Scale {}: lever-up ready — profit {:.2f}% >= {:.1f}%, "
+                         "lev {}x -> {}x",
+                         self.symbol, profit_pct, self.profit_to_lever_up_pct,
+                         self.current_leverage, self.target_leverage)
+        return should
 
     def should_take_partial(self, current_price: float) -> bool:
         if self.mode != ScaleMode.PYRAMID:
@@ -204,7 +226,13 @@ class ScaledPosition(BaseModel):
             return False
 
         profit_pct = self._current_profit_pct(current_price)
-        return profit_pct >= self.profit_to_lever_up_pct * 2
+        threshold = self.profit_to_lever_up_pct * 2
+        should = profit_pct >= threshold
+        if should:
+            logger.debug("Scale {}: partial take ready — profit {:.2f}% >= {:.1f}%, "
+                         "taking {:.0f}% off",
+                         self.symbol, profit_pct, threshold, self.partial_take_pct)
+        return should
 
     def get_partial_take_amount(self) -> float:
         return self.current_size * (self.partial_take_pct / 100)
