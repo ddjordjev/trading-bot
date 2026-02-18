@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     gambling_budget_pct: float = 2.0  # max % of balance for low-liq yolo bets
     min_liquidity_volume: float = 1_000_000  # 24h volume below this = "low liquidity"
 
+    # Pyramid / DCA mode
+    dca_interval_pct: float = 2.0    # add every 2% the price drops
+    dca_multiplier: float = 1.5      # each DCA add is 1.5x the previous
+    dca_profit_to_lever_pct: float = 1.0  # raise leverage once avg entry is +1%
+    dca_partial_take_pct: float = 30.0  # take 30% off the table after lever-up
+
     # Email
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587

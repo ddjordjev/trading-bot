@@ -12,18 +12,21 @@ from core.models import (
 )
 from core.risk.manager import RiskManager
 from core.orders.trailing import TrailingStopManager
-from core.orders.scaler import PositionScaler, ScalePhase
+from core.orders.scaler import PositionScaler, ScalePhase, ScaleMode
 
 
 class OrderManager:
     """Translates signals into orders, manages open positions, and enforces stops.
 
-    Key MEXC-specific behaviors:
-    - Stop-losses on low-liq coins are unreliable (wick-through liquidation).
-      For those, we manage stops ourselves via polling + market close, never
-      trusting exchange SL orders.
-    - ALWAYS start small and add to winners (scaled entries).
-    - Once at +5% profit, lock stop to break-even.
+    Supports two scaling modes:
+
+    WINNERS: Start small -> add to winners -> trail -> break-even lock
+    PYRAMID: Start tiny at low leverage -> DCA down as it drops ->
+             average entry improves -> when it recovers:
+             raise leverage, take partial profit, lock break-even,
+             ride the rest with a trail
+
+    MEXC-specific: low-liq stops are self-managed (no exchange SL trust).
     """
 
     def __init__(self, exchange: BaseExchange, risk: RiskManager, settings: Settings):
@@ -39,8 +42,12 @@ class OrderManager:
         self._active_orders: list[Order] = []
         self._trade_log: list[dict] = []
 
-    async def execute_signal(self, signal: Signal, low_liquidity: bool = False) -> Order | None:
-        """Execute a trading signal if it passes risk checks."""
+    # ------------------------------------------------------------------ #
+    #  Signal execution
+    # ------------------------------------------------------------------ #
+
+    async def execute_signal(self, signal: Signal, low_liquidity: bool = False,
+                             pyramid: bool = False) -> Order | None:
         balance_map = await self.exchange.fetch_balance()
         balance = balance_map.get("USDT", 0.0)
         positions = await self.exchange.fetch_positions()
@@ -52,21 +59,21 @@ class OrderManager:
 
         if signal.action == SignalAction.CLOSE:
             return await self._close_position(signal)
-
         if signal.action == SignalAction.HOLD:
             return None
 
-        return await self._open_position(signal, balance, low_liquidity)
+        return await self._open_position(signal, balance, low_liquidity, pyramid)
 
     async def _open_position(self, signal: Signal, balance: float,
-                             low_liquidity: bool = False) -> Order | None:
+                             low_liquidity: bool = False,
+                             pyramid: bool = False) -> Order | None:
         price = signal.suggested_price or 0
-        leverage = signal.leverage or self.settings.default_leverage
+        target_leverage = signal.leverage or self.settings.default_leverage
         market_type = MarketType(signal.market_type) if signal.market_type else MarketType.SPOT
+        mode = ScaleMode.PYRAMID if pyramid else ScaleMode.WINNERS
 
-        # Calculate full intended size
         full_amount = self.risk.calculate_position_size(
-            balance, price, leverage if market_type == MarketType.FUTURES else 1,
+            balance, price, target_leverage if market_type == MarketType.FUTURES else 1,
         )
         if full_amount <= 0:
             logger.warning("Calculated position size is 0, skipping")
@@ -75,25 +82,37 @@ class OrderManager:
         side = OrderSide.BUY if signal.action == SignalAction.BUY else OrderSide.SELL
         side_str = "long" if side == OrderSide.BUY else "short"
 
-        # Create scaled position tracker
         if low_liquidity:
-            # Gambling bet: tiny initial, 1 add max
-            amount = self.scaler.gambling_size(balance, price, leverage)
+            amount = self.scaler.gambling_size(balance, price, target_leverage)
             sp = self.scaler.create(
                 symbol=signal.symbol, side=side_str,
-                intended_size=amount * 2,  # allow one add
-                strategy=signal.strategy, market_type=signal.market_type or "futures",
-                leverage=leverage, low_liquidity=True,
+                intended_size=amount * 2, strategy=signal.strategy,
+                market_type=signal.market_type or "futures",
+                leverage=target_leverage, low_liquidity=True,
             )
-            logger.info("LOW-LIQ gambling bet on {} | size: {:.6f} (pocket money)", signal.symbol, amount)
-        else:
-            # Normal: start with initial_pct of intended size
+            actual_leverage = target_leverage
+            logger.info("LOW-LIQ gambling bet on {} | size: {:.6f}", signal.symbol, amount)
+
+        elif pyramid:
             sp = self.scaler.create(
                 symbol=signal.symbol, side=side_str,
                 intended_size=full_amount, strategy=signal.strategy,
-                market_type=signal.market_type or "futures", leverage=leverage,
+                market_type=signal.market_type or "futures",
+                leverage=target_leverage, mode=ScaleMode.PYRAMID,
             )
             amount = sp.get_initial_amount()
+            actual_leverage = sp.initial_leverage
+            logger.info("PYRAMID entry on {} | initial: {:.6f} / {:.6f} | lev: {}x (target: {}x)",
+                        signal.symbol, amount, full_amount, actual_leverage, target_leverage)
+        else:
+            sp = self.scaler.create(
+                symbol=signal.symbol, side=side_str,
+                intended_size=full_amount, strategy=signal.strategy,
+                market_type=signal.market_type or "futures",
+                leverage=target_leverage,
+            )
+            amount = sp.get_initial_amount()
+            actual_leverage = target_leverage
             logger.info("Scaled entry on {} | initial: {:.6f} / {:.6f} ({:.0f}%)",
                         signal.symbol, amount, full_amount, sp.initial_pct * 100)
 
@@ -101,42 +120,36 @@ class OrderManager:
             return None
 
         order = await self.exchange.place_order(
-            symbol=signal.symbol,
-            side=side,
-            order_type=OrderType.MARKET,
-            amount=amount,
-            leverage=leverage,
-            market_type=market_type,
+            symbol=signal.symbol, side=side,
+            order_type=OrderType.MARKET, amount=amount,
+            leverage=actual_leverage, market_type=market_type,
         )
 
         if order.status == OrderStatus.FILLED:
             sp.record_add(order.filled, order.average_price)
             self._log_trade(signal, order, "open")
-            logger.info("Opened {} {} {} @ {:.6f} (phase: {})",
+            logger.info("Opened {} {} {} @ {:.6f} (phase: {}, mode: {})",
                         signal.market_type, side.value, signal.symbol,
-                        order.average_price, sp.phase.value)
+                        order.average_price, sp.phase.value, sp.mode.value)
 
             pos = Position(
                 symbol=signal.symbol, side=side, amount=amount,
                 entry_price=order.average_price, current_price=order.average_price,
-                leverage=leverage, market_type=market_type.value,
+                leverage=actual_leverage, market_type=market_type.value,
             )
             self.trailing.register(pos, low_liquidity=low_liquidity)
 
         self._active_orders.append(order)
         return order
 
-    async def try_scale_in(self) -> list[Order]:
-        """Check all scaled positions and add to winners.
+    # ------------------------------------------------------------------ #
+    #  Scaling: add to positions (both WINNERS and PYRAMID)
+    # ------------------------------------------------------------------ #
 
-        Called every tick. Only adds if:
-        - Price is in profit beyond min_profit_to_add_pct
-        - Not pulling back too hard
-        - Position isn't already at max size
-        """
+    async def try_scale_in(self) -> list[Order]:
+        """Add to existing positions (winners or DCA-down)."""
         added: list[Order] = []
         positions = await self.exchange.fetch_positions()
-
         prices = {p.symbol: p.current_price for p in positions}
         to_add = self.scaler.get_symbols_to_add(prices)
 
@@ -152,28 +165,26 @@ class OrderManager:
             side = OrderSide.BUY if sp.side == "long" else OrderSide.SELL
             market_type = MarketType(sp.market_type) if sp.market_type else MarketType.FUTURES
 
-            logger.info("SCALING IN to {} | add #{} | amount: {:.6f} | profit: {:.2f}%",
-                        symbol, sp.adds + 1, amount, pos.pnl_pct)
+            tag = "DCA DOWN" if sp.mode == ScaleMode.PYRAMID else "SCALE UP"
+            logger.info("{} into {} | add #{} | amount: {:.6f} | profit: {:.2f}% | avg: {:.6f}",
+                        tag, symbol, sp.adds + 1, amount, pos.pnl_pct, sp.avg_entry_price)
 
             order = await self.exchange.place_order(
-                symbol=symbol,
-                side=side,
-                order_type=OrderType.MARKET,
-                amount=amount,
-                leverage=sp.leverage,
+                symbol=symbol, side=side, order_type=OrderType.MARKET,
+                amount=amount, leverage=sp.current_leverage,
                 market_type=market_type,
             )
 
             if order.status == OrderStatus.FILLED:
                 sp.record_add(order.filled, order.average_price)
                 self._log_trade(
-                    Signal(symbol=symbol, action=SignalAction.BUY if side == OrderSide.BUY else SignalAction.SELL,
-                           strategy=sp.strategy, reason=f"scale_in_#{sp.adds}",
+                    Signal(symbol=symbol,
+                           action=SignalAction.BUY if side == OrderSide.BUY else SignalAction.SELL,
+                           strategy=sp.strategy, reason=f"{sp.mode.value}_add_#{sp.adds}",
                            market_type=sp.market_type),
                     order, "scale_in",
                 )
 
-                # Update trailing stop with new average entry
                 ts = self.trailing.get(symbol)
                 if ts:
                     ts.entry_price = sp.avg_entry_price
@@ -182,6 +193,103 @@ class OrderManager:
                 added.append(order)
 
         return added
+
+    # ------------------------------------------------------------------ #
+    #  PYRAMID: leverage raise when in profit
+    # ------------------------------------------------------------------ #
+
+    async def try_lever_up(self) -> list[str]:
+        """For PYRAMID positions: raise leverage once avg entry is in profit.
+
+        Flow: start at low leverage -> DCA down -> price recovers above avg ->
+        raise leverage to amplify gains -> lock break-even stop.
+        """
+        levered: list[str] = []
+        positions = await self.exchange.fetch_positions()
+        prices = {p.symbol: p.current_price for p in positions}
+
+        symbols = self.scaler.get_symbols_to_lever_up(prices)
+        for symbol in symbols:
+            sp = self.scaler.get(symbol)
+            if not sp:
+                continue
+
+            new_lev = sp.target_leverage
+            logger.info("LEVER UP {} | {}x -> {}x | avg entry: {:.6f} | current: {:.6f}",
+                        symbol, sp.current_leverage, new_lev,
+                        sp.avg_entry_price, prices.get(symbol, 0))
+
+            try:
+                await self.exchange.set_leverage(symbol, new_lev)
+                sp.record_lever_up(new_lev)
+
+                # Lock break-even on the trailing stop
+                ts = self.trailing.get(symbol)
+                if ts and sp.breakeven_after_lever:
+                    ts.breakeven_locked = True
+                    ts.current_stop = sp.avg_entry_price
+                    logger.info("BREAK-EVEN locked for {} after leverage raise (stop -> {:.6f})",
+                                symbol, sp.avg_entry_price)
+
+                levered.append(symbol)
+            except Exception as e:
+                logger.error("Failed to raise leverage on {}: {}", symbol, e)
+
+        return levered
+
+    # ------------------------------------------------------------------ #
+    #  PYRAMID: partial profit take (pull money out)
+    # ------------------------------------------------------------------ #
+
+    async def try_partial_take(self) -> list[Order]:
+        """For PYRAMID positions: close a portion to pull capital off the table.
+
+        After leverage is raised and position is in deeper profit,
+        sell e.g. 30% to reduce risk. The remaining 70% rides with trail.
+        """
+        taken: list[Order] = []
+        positions = await self.exchange.fetch_positions()
+        prices = {p.symbol: p.current_price for p in positions}
+
+        to_take = self.scaler.get_symbols_for_partial_take(prices)
+        for symbol, amount in to_take:
+            sp = self.scaler.get(symbol)
+            if not sp:
+                continue
+
+            pos = next((p for p in positions if p.symbol == symbol), None)
+            if not pos:
+                continue
+
+            close_side = OrderSide.SELL if sp.side == "long" else OrderSide.BUY
+            market_type = MarketType(sp.market_type) if sp.market_type else MarketType.FUTURES
+
+            logger.info("PARTIAL TAKE on {} | closing {:.4f} ({:.0f}%) | profit: {:.2f}%",
+                        symbol, amount, sp.partial_take_pct, pos.pnl_pct)
+
+            order = await self.exchange.place_order(
+                symbol=symbol, side=close_side,
+                order_type=OrderType.MARKET, amount=amount,
+                leverage=sp.current_leverage, market_type=market_type,
+            )
+
+            if order.status == OrderStatus.FILLED:
+                pnl_portion = pos.unrealized_pnl * (amount / pos.amount) if pos.amount > 0 else 0
+                self.risk.record_pnl(pnl_portion)
+                sp.record_partial_close(order.filled)
+                self._log_trade(
+                    Signal(symbol=symbol, action=SignalAction.CLOSE,
+                           strategy=sp.strategy, reason="partial_take_profit",
+                           market_type=sp.market_type),
+                    order, "partial_close", pnl_portion,
+                )
+                taken.append(order)
+
+        return taken
+
+    # ------------------------------------------------------------------ #
+    #  Close position
+    # ------------------------------------------------------------------ #
 
     async def _close_position(self, signal: Signal) -> Order | None:
         positions = await self.exchange.fetch_positions(signal.symbol)
@@ -194,12 +302,9 @@ class OrderManager:
         market_type = MarketType(pos.market_type) if pos.market_type else MarketType.SPOT
 
         order = await self.exchange.place_order(
-            symbol=signal.symbol,
-            side=close_side,
-            order_type=OrderType.MARKET,
-            amount=pos.amount,
-            leverage=pos.leverage,
-            market_type=market_type,
+            symbol=signal.symbol, side=close_side,
+            order_type=OrderType.MARKET, amount=pos.amount,
+            leverage=pos.leverage, market_type=market_type,
         )
 
         if order.status == OrderStatus.FILLED:
@@ -211,12 +316,11 @@ class OrderManager:
 
         return order
 
-    async def check_stops(self) -> list[Order]:
-        """Check trailing stops and liquidation risk for all positions.
+    # ------------------------------------------------------------------ #
+    #  Stop management
+    # ------------------------------------------------------------------ #
 
-        For low-liquidity coins, we NEVER trust exchange stop orders.
-        We poll prices and close via market order ourselves.
-        """
+    async def check_stops(self) -> list[Order]:
         closed: list[Order] = []
         positions = await self.exchange.fetch_positions()
         balance_map = await self.exchange.fetch_balance()
@@ -226,7 +330,7 @@ class OrderManager:
         for symbol in stopped_symbols:
             ts = self.trailing.get(symbol)
             pnl_info = f" (locked PnL ~{ts.pnl_from_stop:+.1f}%)" if ts else ""
-            liq_tag = " [LOW-LIQ self-managed]" if ts and ts.low_liquidity else ""
+            liq_tag = " [LOW-LIQ]" if ts and ts.low_liquidity else ""
 
             if ts and ts.activated:
                 reason = "trailing_stop"
@@ -249,7 +353,6 @@ class OrderManager:
                 self.trailing.remove(symbol)
                 self.scaler.remove(symbol)
 
-        # Liquidation risk
         for pos in positions:
             if pos.symbol in stopped_symbols:
                 continue
@@ -267,6 +370,10 @@ class OrderManager:
                     self.scaler.remove(pos.symbol)
 
         return closed
+
+    # ------------------------------------------------------------------ #
+    #  Quick trade expiry
+    # ------------------------------------------------------------------ #
 
     async def close_expired_quick_trades(self, active_signals: list[Signal]) -> list[Order]:
         closed: list[Order] = []
@@ -290,6 +397,10 @@ class OrderManager:
 
         return closed
 
+    # ------------------------------------------------------------------ #
+    #  Logging
+    # ------------------------------------------------------------------ #
+
     def _log_trade(self, signal: Signal, order: Order, action: str, pnl: float = 0.0) -> None:
         sp = self.scaler.get(signal.symbol)
         self._trade_log.append({
@@ -303,7 +414,9 @@ class OrderManager:
             "reason": signal.reason,
             "pnl": pnl,
             "scale_phase": sp.phase.value if sp else "n/a",
+            "scale_mode": sp.mode.value if sp else "n/a",
             "scale_fill_pct": sp.fill_pct if sp else 0,
+            "leverage": sp.current_leverage if sp else 0,
         })
 
     @property
