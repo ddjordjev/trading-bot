@@ -13,20 +13,15 @@ from core.models import (
 from core.risk.manager import RiskManager
 from core.orders.trailing import TrailingStopManager
 from core.orders.scaler import PositionScaler, ScalePhase, ScaleMode
+from core.orders.hedge import HedgeManager, HedgeState
 
 
 class OrderManager:
     """Translates signals into orders, manages open positions, and enforces stops.
 
-    Supports two scaling modes:
-
-    WINNERS: Start small -> add to winners -> trail -> break-even lock
-    PYRAMID: Start tiny at low leverage -> DCA down as it drops ->
-             average entry improves -> when it recovers:
-             raise leverage, take partial profit, lock break-even,
-             ride the rest with a trail
-
-    MEXC-specific: low-liq stops are self-managed (no exchange SL trust).
+    Scaling modes: WINNERS (add to winners) / PYRAMID (DCA down, lever up)
+    Hedging: when a profitable position shows reversal signs, open a small
+             counter-position to exploit the pullback while protecting the main.
     """
 
     def __init__(self, exchange: BaseExchange, risk: RiskManager, settings: Settings):
@@ -39,6 +34,12 @@ class OrderManager:
             breakeven_pct=settings.breakeven_lock_pct,
         )
         self.scaler = PositionScaler(gambling_budget_pct=settings.gambling_budget_pct)
+        self.hedger = HedgeManager(
+            hedge_ratio=settings.hedge_ratio,
+            min_main_profit_pct=settings.hedge_min_profit_pct,
+            hedge_stop_pct=settings.hedge_stop_pct,
+            max_hedges=settings.max_hedges,
+        )
         self._active_orders: list[Order] = []
         self._trade_log: list[dict] = []
 
@@ -286,6 +287,117 @@ class OrderManager:
                 taken.append(order)
 
         return taken
+
+    # ------------------------------------------------------------------ #
+    #  Hedging: counter-positions on reversal signals
+    # ------------------------------------------------------------------ #
+
+    async def try_hedge(self, candles_map: dict[str, list["Candle"]]) -> list[Order]:
+        """Check profitable positions for reversal signals and open hedges.
+
+        Example: Long $2500 BTC at +5%. RSI overextended, volume fading.
+        -> Tighten stop on the long
+        -> Open $500 short (20% of main) with tight 1% stop
+        -> If reversal: short prints, long stopped at profit
+        -> If no reversal: short stopped for tiny loss, long keeps running
+        """
+        from core.models import Candle  # avoid circular import at module level
+
+        opened: list[Order] = []
+        positions = await self.exchange.fetch_positions()
+
+        # Ensure all profitable positions are tracked
+        for pos in positions:
+            if pos.pnl_pct > 0 and not self.hedger.get(pos.symbol):
+                self.hedger.track_position(pos)
+
+        # Update reversal scores and get symbols ready to hedge
+        ready = self.hedger.update(positions, candles_map)
+
+        for symbol in ready:
+            if self.hedger.has_active_hedge(symbol):
+                continue
+
+            pos = next((p for p in positions if p.symbol == symbol), None)
+            if not pos:
+                continue
+
+            params = self.hedger.get_hedge_params(
+                symbol, pos.current_price, pos.leverage,
+            )
+            if not params:
+                continue
+
+            reasons_str = ", ".join(params["reasons"])
+            logger.info("HEDGE OPENING on {} | reversal: {:.0f}% ({}) | "
+                        "main: {} ${:.0f} +{:.1f}% | hedge: {} ${:.0f}",
+                        symbol, params["reversal_score"] * 100, reasons_str,
+                        "long" if pos.side == OrderSide.BUY else "short",
+                        pos.notional_value, pos.pnl_pct,
+                        params["side"].value, pos.notional_value * self.hedger.hedge_ratio)
+
+            # Tighten the main position's trailing stop before hedging
+            ts = self.trailing.get(symbol)
+            if ts and not ts.breakeven_locked and pos.pnl_pct > 2.0:
+                old_stop = ts.current_stop
+                if pos.side == OrderSide.BUY:
+                    tight_stop = pos.current_price * (1 - 1.5 / 100)
+                    if tight_stop > ts.current_stop:
+                        ts.current_stop = tight_stop
+                else:
+                    tight_stop = pos.current_price * (1 + 1.5 / 100)
+                    if tight_stop < ts.current_stop:
+                        ts.current_stop = tight_stop
+                logger.info("Tightened main stop for {} before hedge: {:.6f} -> {:.6f}",
+                            symbol, old_stop, ts.current_stop)
+
+            market_type = MarketType(pos.market_type) if pos.market_type else MarketType.FUTURES
+
+            order = await self.exchange.place_order(
+                symbol=symbol,
+                side=params["side"],
+                order_type=OrderType.MARKET,
+                amount=params["amount"],
+                leverage=params["leverage"],
+                market_type=market_type,
+            )
+
+            if order.status == OrderStatus.FILLED:
+                self.hedger.activate(symbol, order.average_price, order.filled, order.id)
+
+                # Register a tight trailing stop for the hedge
+                hedge_side = params["side"]
+                hedge_pos = Position(
+                    symbol=symbol, side=hedge_side,
+                    amount=params["amount"],
+                    entry_price=order.average_price,
+                    current_price=order.average_price,
+                    leverage=params["leverage"],
+                    market_type=market_type.value,
+                )
+                hedge_sym = f"{symbol}:hedge"
+                self.trailing.register(
+                    hedge_pos,
+                    initial_stop_pct=self.hedger.hedge_stop_pct,
+                    trail_pct=self.hedger.hedge_stop_pct * 0.5,
+                )
+
+                self._log_trade(
+                    Signal(symbol=symbol,
+                           action=SignalAction.SELL if hedge_side == OrderSide.SELL else SignalAction.BUY,
+                           strategy="hedge", reason=reasons_str,
+                           market_type=pos.market_type),
+                    order, "hedge_open",
+                )
+                opened.append(order)
+
+        # Clean up closed main positions
+        active_symbols = {p.symbol for p in positions if p.amount > 0}
+        for sym in list(self.hedger.active_pairs.keys()):
+            if sym not in active_symbols:
+                self.hedger.remove(sym)
+
+        return opened
 
     # ------------------------------------------------------------------ #
     #  Close position

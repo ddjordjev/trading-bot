@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     dca_profit_to_lever_pct: float = 1.0  # raise leverage once avg entry is +1%
     dca_partial_take_pct: float = 30.0  # take 30% off the table after lever-up
 
+    # Hedging
+    hedge_enabled: bool = True
+    hedge_ratio: float = 0.20           # hedge is 20% of main position size
+    hedge_min_profit_pct: float = 3.0   # main must be +3% before hedging
+    hedge_stop_pct: float = 1.0         # tight stop on hedge (it's a probe)
+    max_hedges: int = 2                 # max simultaneous hedges
+
     # Email
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587

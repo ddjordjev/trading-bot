@@ -183,12 +183,14 @@ class TradingBot:
         aggression = self.target.aggression_multiplier()
         allow_gambling = self.target.target_reached and self.target.todays_pnl_pct > 0
 
-        # 7. Run all strategies
+        # 7. Run all strategies (collect candles for hedge analysis)
+        candles_map: dict[str, list] = {}
         all_strategies = list(self._strategies) + list(self._dynamic_strategies.values())
         for strategy in all_strategies:
             try:
                 candles = await self.exchange.fetch_candles(strategy.symbol, "1m", limit=200)
                 ticker = await self.exchange.fetch_ticker(strategy.symbol)
+                candles_map[strategy.symbol] = candles
 
                 for c in candles:
                     strategy.feed_candle(c)
@@ -235,7 +237,16 @@ class TradingBot:
             except Exception as e:
                 logger.error("Strategy '{}' error for {}: {}", strategy.name, strategy.symbol, e)
 
-        # 8. Status + daily reset
+        # 8. Hedge check: open counter-positions on reversal signals
+        if self.settings.hedge_enabled:
+            try:
+                hedges = await self.orders.try_hedge(candles_map)
+                if hedges:
+                    logger.info("Opened {} hedge position(s)", len(hedges))
+            except Exception as e:
+                logger.error("Hedge tick error: {}", e)
+
+        # 9. Status + daily reset
         await self._log_status()
         await self._check_daily_reset()
 
@@ -349,6 +360,11 @@ class TradingBot:
                 logger.info("  Trail {}: stop={:.6f} peak={:.6f} pnl={:+.1f}% active={}{}{}",
                             sym, ts.current_stop, ts.peak_price, ts.pnl_from_stop,
                             ts.activated, be_tag, liq_tag)
+
+        hedges = self.orders.hedger.active_pairs
+        if hedges:
+            for sym, hp in hedges.items():
+                logger.info("  {}", hp.status_line())
 
     async def _check_daily_reset(self) -> None:
         now = datetime.now(timezone.utc)
