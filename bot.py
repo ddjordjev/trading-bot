@@ -25,19 +25,27 @@ from scanner import TrendingScanner, TrendingCoin
 from intel import MarketIntel, MarketCondition
 
 
-# Strategies that should use PYRAMID mode (DCA down, lever up on recovery)
-PYRAMID_STRATEGIES = {"swing_opportunity"}
+# PYRAMID (DCA in) is the DEFAULT for all strategies. Nobody can predict exact
+# bottoms, and market makers deliberately wick through expected support to grab
+# stop-loss liquidity. Instead of getting stopped out, we DCA into the wick.
+# Only these scalp-only strategies use WINNERS mode (add to winners only):
+SCALP_ONLY_STRATEGIES: set[str] = set()  # currently none -- everything pyramids
 
 
 class TradingBot:
     """Main bot orchestrator.
 
-    Two position-building modes run in parallel:
+    Default mode: PYRAMID (DCA in). Nobody can predict exact bottoms.
+    Market makers wick through expected support to grab liquidity, then
+    reverse. We embrace the wick as a DCA entry instead of getting stopped out.
 
-    WINNERS (scalps): start small -> add to winners -> trail -> break-even lock
-    PYRAMID (conviction): start tiny at low leverage -> DCA down as it drops ->
+    PYRAMID (default for all strategies):
+      Start with $50 at low leverage -> let it go red -> DCA down into wicks ->
       avg entry improves -> price recovers -> raise leverage -> take partial
       profit (pull capital out) -> lock break-even -> ride the rest
+
+    WINNERS (rare, for ultra-short scalps only):
+      Start with $50 -> add when in profit -> trail -> break-even lock
 
     MEXC-specific:
     - Low-liq coins: only gambling-sized bets, self-managed stops
@@ -90,7 +98,7 @@ class TradingBot:
             raise ValueError(f"Unknown strategy: {name}. Available: {list(BUILTIN_STRATEGIES.keys())}")
         strategy = cls(symbol=symbol, market_type=market_type, leverage=lev, **params)
         self._strategies.append(strategy)
-        mode = "PYRAMID" if name in PYRAMID_STRATEGIES else "WINNERS"
+        mode = "WINNERS" if name in SCALP_ONLY_STRATEGIES else "PYRAMID"
         logger.info("Added strategy '{}' for {} ({}, {}x, mode={})", name, symbol, market_type, lev, mode)
 
     def add_custom_strategy(self, strategy: BaseStrategy) -> None:
@@ -107,8 +115,9 @@ class TradingBot:
         logger.info("Daily target: {:.0f}% (compounding)", self.target.daily_target_pct)
         logger.info("Strategies: {}", len(self._strategies))
         logger.info("Leverage: {}x default", self.settings.default_leverage)
-        logger.info("PYRAMID mode: DCA down -> lever up -> partial take -> ride")
-        logger.info("WINNERS mode: start small -> add to winners -> trail")
+        logger.info("DEFAULT mode: PYRAMID (DCA into wicks, lever up on recovery)")
+        logger.info("Scalp-only: {} (these use WINNERS mode instead)",
+                     SCALP_ONLY_STRATEGIES or "none -- everything pyramids")
         logger.info("Initial risk: ${:.0f} | Notional cap: ${:.0f}K",
                      self.settings.initial_risk_amount, self.settings.max_notional_position / 1000)
         logger.info("Gambling budget: {}% for low-liq coins", self.settings.gambling_budget_pct)
@@ -234,7 +243,7 @@ class TradingBot:
                     continue
 
                 is_swing = sig.strategy == "swing_opportunity"
-                use_pyramid = sig.strategy in PYRAMID_STRATEGIES
+                use_pyramid = sig.strategy not in SCALP_ONLY_STRATEGIES
 
                 liq = self.market_filter.assess_liquidity(candles, ticker)
                 is_low_liq = liq.tier in (LiquidityTier.LOW, LiquidityTier.DEAD)

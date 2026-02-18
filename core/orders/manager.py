@@ -140,15 +140,18 @@ class OrderManager:
                 entry_price=order.average_price, current_price=order.average_price,
                 leverage=actual_leverage, market_type=market_type.value,
             )
-            # PYRAMID: use a very wide initial stop -- the planned drawdown
-            # from DCA is NOT a loss to cut. We only apply a real stop after
-            # the first DCA add lands (or if the whole thesis is invalidated).
+            # PYRAMID: ultra-wide initial stop. Market makers wick through
+            # expected support to grab stop-loss liquidity, then reverse.
+            # We WANT to survive the wick and DCA into it. The initial $50
+            # risk is small — even if we get wicked 15-20%, the dollar loss
+            # is tiny. The real stop is "thesis invalidated" level, not a
+            # tight technical level that MMs will hunt.
             if pyramid:
-                pyramid_stop = sp.dca_interval_pct * 6
+                pyramid_stop = max(sp.dca_interval_pct * 8, 15.0)
                 self.trailing.register(
                     pos, initial_stop_pct=pyramid_stop, low_liquidity=low_liquidity,
                 )
-                logger.info("PYRAMID wide stop for {}: {:.1f}% (planned DCA zone)",
+                logger.info("PYRAMID wide stop for {}: {:.1f}% (survive wicks, DCA zone)",
                             signal.symbol, pyramid_stop)
             else:
                 self.trailing.register(pos, low_liquidity=low_liquidity)

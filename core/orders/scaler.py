@@ -17,27 +17,25 @@ class ScalePhase(str, Enum):
 
 
 class ScaleMode(str, Enum):
-    WINNERS = "winners"     # add to winning positions only (default scalp mode)
-    PYRAMID = "pyramid"     # DCA down: buy dips, average down, lever up on recovery
+    WINNERS = "winners"     # add to winning positions only (rare, ultra-short scalps)
+    PYRAMID = "pyramid"     # DCA down: buy dips, average down, lever up on recovery (DEFAULT)
 
 
 class ScaledPosition(BaseModel):
     """Tracks a position being built up in stages.
 
-    Philosophy: risk $50 to start. If it works, keep adding. If not, cut.
+    Philosophy: risk $50 to start. Nobody can predict exact bottoms.
+    Market makers wick through expected support to grab liquidity.
+    Instead of getting stopped out by the wick, we DCA into it.
     Stop adding once the leveraged (notional) position hits $100K.
-    There is no hard limit on number of adds -- the notional cap is the limit.
 
-    Two modes:
-
-    WINNERS mode (default for scalps):
-        Start with $50 -> add when in profit -> ride with trail -> cap at $100K notional
-
-    PYRAMID mode (DCA / conviction entries):
-        Start with $50 at low leverage -> let it go red ->
-        add more at lower prices to improve avg entry ->
-        when it recovers above avg entry, raise leverage + lock break-even ->
+    PYRAMID mode (DEFAULT for all strategies):
+        Start with $50 at low leverage -> let it go red -> DCA into wicks ->
+        avg entry improves -> price recovers -> raise leverage + lock break-even ->
         take partial profit to pull capital out -> ride the rest -> cap at $100K
+
+    WINNERS mode (rare, for ultra-short scalps only):
+        Start with $50 -> add when in profit -> ride with trail -> cap at $100K
 
     """
 
@@ -160,13 +158,29 @@ class ScaledPosition(BaseModel):
         return True
 
     def _should_add_pyramid(self, current_price: float) -> bool:
+        """Add when price has dropped another dca_interval_pct from last add.
+
+        Market makers wick through expected support to grab stop-loss liquidity,
+        then reverse. We WANT to buy the wick, not get stopped by it.
+        If price has recovered from a deeper trough (wick-through), that's
+        actually the best time to add — the liquidity grab is done.
+        """
         if self.last_add_price == 0:
             return False
 
         if self.side == "long":
             drop_pct = (self.last_add_price - current_price) / self.last_add_price * 100
+            trough_drop = (self.last_add_price - self.trough_since_entry) / self.last_add_price * 100 if self.trough_since_entry > 0 else 0
+            bounced_from_wick = trough_drop >= self.dca_interval_pct and drop_pct < trough_drop * 0.7
         else:
             drop_pct = (current_price - self.last_add_price) / self.last_add_price * 100
+            trough_drop = (self.trough_since_entry - self.last_add_price) / self.last_add_price * 100 if self.trough_since_entry > 0 else 0
+            bounced_from_wick = trough_drop >= self.dca_interval_pct and drop_pct < trough_drop * 0.7
+
+        if bounced_from_wick:
+            logger.info("Wick-through detected on {} | wicked {:.1f}% but now only {:.1f}% down -- "
+                        "liquidity grab done, good DCA point", self.symbol, trough_drop, drop_pct)
+            return True
 
         return drop_pct >= self.dca_interval_pct
 
