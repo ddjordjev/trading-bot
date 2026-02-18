@@ -33,9 +33,10 @@ from intel.coinmarketcap import CoinMarketCapClient
 from intel.coingecko import CoinGeckoClient
 from scanner.trending import TrendingScanner, TrendingCoin
 from shared.state import SharedState
+from services.signal_generator import SignalGenerator
 from shared.models import (
     BotDeploymentStatus, DeploymentLevel,
-    IntelSnapshot, TrendingSnapshot, TVSymbolSnapshot,
+    IntelSnapshot, SignalPriority, TrendingSnapshot, TVSymbolSnapshot,
 )
 
 
@@ -85,6 +86,8 @@ class MonitorService:
             min_volume_24h=5_000_000,
             min_market_cap=50_000_000,
         )
+
+        self.signal_gen = SignalGenerator()
 
         self._running = False
         self._current_level = DeploymentLevel.HUNTING
@@ -152,13 +155,28 @@ class MonitorService:
                 snapshot = self._build_snapshot(multipliers)
                 self.state.write_intel(snapshot)
 
+                # Generate trade proposals from the intel snapshot
+                try:
+                    trade_queue = self.state.read_trade_queue()
+                    trade_queue = self.signal_gen.generate(snapshot, trade_queue)
+                    self.state.write_trade_queue(trade_queue)
+                except Exception as e:
+                    logger.debug("Signal generator error: {}", e)
+
                 if tick_count % 10 == 0:
-                    logger.info("Monitor [{}] | mult={:.1f}x | sources={} | movers={} | tv={}",
-                                self._current_level.value,
-                                multipliers["base"],
-                                len(snapshot.sources_active),
-                                len(snapshot.hot_movers),
-                                len(snapshot.tv_analyses))
+                    tq = self.state.read_trade_queue()
+                    logger.info(
+                        "Monitor [{}] | mult={:.1f}x | sources={} | movers={} | "
+                        "tv={} | queue: C={} D={} S={}",
+                        self._current_level.value,
+                        multipliers["base"],
+                        len(snapshot.sources_active),
+                        len(snapshot.hot_movers),
+                        len(snapshot.tv_analyses),
+                        len(tq.get_actionable(SignalPriority.CRITICAL)),
+                        len(tq.get_actionable(SignalPriority.DAILY)),
+                        len(tq.get_actionable(SignalPriority.SWING)),
+                    )
 
                 tick_count += 1
                 sleep_time = self._base_tick * multipliers["base"]

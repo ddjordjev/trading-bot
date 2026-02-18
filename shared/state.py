@@ -14,6 +14,7 @@ from shared.models import (
     BotDeploymentStatus,
     IntelSnapshot,
     AnalyticsSnapshot,
+    TradeQueue,
 )
 
 T = TypeVar("T", bound=BaseModel)
@@ -106,3 +107,13 @@ class SharedState:
     def read_analytics(self) -> AnalyticsSnapshot:
         s = self._read(self._data_dir / "analytics_state.json", AnalyticsSnapshot)
         return s or AnalyticsSnapshot()
+
+    # ---- Trade queue (written by monitor, read+updated by bot) ---- #
+
+    def write_trade_queue(self, queue: TradeQueue) -> None:
+        queue.updated_at = datetime.now(timezone.utc).isoformat()
+        self._write(self._data_dir / "trade_queue.json", queue)
+
+    def read_trade_queue(self) -> TradeQueue:
+        q = self._read(self._data_dir / "trade_queue.json", TradeQueue)
+        return q or TradeQueue()

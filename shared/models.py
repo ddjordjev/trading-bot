@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -13,6 +15,166 @@ class DeploymentLevel(str, Enum):
     ACTIVE = "active"        # some positions, still has capacity → normal monitoring
     DEPLOYED = "deployed"    # fully deployed, positions running well → low monitoring
     STRESSED = "stressed"    # positions losing, need exit/hedge intel → high monitoring
+
+
+# ---------------------------------------------------------------------------
+# Trade Priority Queue — monitor/intel proposes trades, bot consumes them
+# ---------------------------------------------------------------------------
+
+class SignalPriority(str, Enum):
+    CRITICAL = "critical"   # act within seconds — spikes, liq cascades, wick scalps
+    DAILY = "daily"         # valid hours — momentum entries, trending setups
+    SWING = "swing"         # limit order plan — valid days, with full entry/exit plan
+
+
+class EntryPlan(BaseModel):
+    """Execution blueprint for SWING proposals.
+
+    The bot uses this to place limit orders and manage the position
+    lifecycle (DCA levels, leverage ramps, partial takes).
+    """
+
+    entry_price: float = 0.0
+    entry_zone_low: float = 0.0
+    entry_zone_high: float = 0.0
+    stop_loss: float = 0.0
+    take_profit_targets: list[float] = []
+    dca_levels: list[float] = []
+    initial_leverage: int = 1
+    max_leverage: int = 10
+    scale_in_pct: float = 2.0
+    notes: str = ""
+
+
+class TradeProposal(BaseModel):
+    """A proposed trade produced by the monitor/intel layer."""
+
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    priority: SignalPriority
+    symbol: str
+    side: str = "long"
+    strategy: str = ""
+    reason: str = ""
+    strength: float = 0.5
+    market_type: str = "futures"
+    leverage: int = 10
+    quick_trade: bool = False
+    max_hold_minutes: int = 0
+
+    created_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    valid_until: str = ""
+    max_age_seconds: int = 0
+
+    entry_plan: Optional[EntryPlan] = None
+
+    consumed: bool = False
+    consumed_at: str = ""
+    rejected: bool = False
+    reject_reason: str = ""
+
+    source: str = ""
+
+    @property
+    def is_expired(self) -> bool:
+        now = datetime.now(timezone.utc)
+        if self.valid_until:
+            try:
+                deadline = datetime.fromisoformat(self.valid_until)
+                if now > deadline:
+                    return True
+            except ValueError:
+                pass
+        if self.max_age_seconds > 0:
+            try:
+                created = datetime.fromisoformat(self.created_at)
+                if (now - created).total_seconds() > self.max_age_seconds:
+                    return True
+            except ValueError:
+                pass
+        return False
+
+    @property
+    def age_seconds(self) -> float:
+        try:
+            created = datetime.fromisoformat(self.created_at)
+            return (datetime.now(timezone.utc) - created).total_seconds()
+        except ValueError:
+            return 0.0
+
+
+class TradeQueue(BaseModel):
+    """Priority queue of trade proposals from monitor/intel to the bot.
+
+    Written by the monitor service to data/trade_queue.json.
+    Read (and consumed) by the bot each tick.
+    """
+
+    critical: list[TradeProposal] = []
+    daily: list[TradeProposal] = []
+    swing: list[TradeProposal] = []
+    updated_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+    @property
+    def total(self) -> int:
+        return len(self.critical) + len(self.daily) + len(self.swing)
+
+    @property
+    def pending_count(self) -> int:
+        return sum(
+            1 for p in self.critical + self.daily + self.swing
+            if not p.consumed and not p.rejected and not p.is_expired
+        )
+
+    def add(self, proposal: TradeProposal) -> None:
+        bucket = self._bucket(proposal.priority)
+        if any(p.id == proposal.id for p in bucket):
+            return
+        bucket.append(proposal)
+
+    def get_actionable(self, priority: SignalPriority) -> list[TradeProposal]:
+        return [
+            p for p in self._bucket(priority)
+            if not p.consumed and not p.rejected and not p.is_expired
+        ]
+
+    def mark_consumed(self, proposal_id: str) -> None:
+        for p in self.critical + self.daily + self.swing:
+            if p.id == proposal_id:
+                p.consumed = True
+                p.consumed_at = datetime.now(timezone.utc).isoformat()
+                return
+
+    def mark_rejected(self, proposal_id: str, reason: str = "") -> None:
+        for p in self.critical + self.daily + self.swing:
+            if p.id == proposal_id:
+                p.rejected = True
+                p.reject_reason = reason
+                return
+
+    def purge_stale(self, max_consumed_age: int = 3600, max_expired_age: int = 600) -> int:
+        """Remove consumed/expired proposals older than thresholds."""
+        removed = 0
+        now = datetime.now(timezone.utc)
+        for attr in ("critical", "daily", "swing"):
+            bucket: list[TradeProposal] = getattr(self, attr)
+            keep = []
+            for p in bucket:
+                age = p.age_seconds
+                if p.consumed and age > max_consumed_age:
+                    removed += 1
+                elif p.is_expired and age > max_expired_age:
+                    removed += 1
+                else:
+                    keep.append(p)
+            setattr(self, attr, keep)
+        return removed
+
+    def _bucket(self, priority: SignalPriority) -> list[TradeProposal]:
+        return getattr(self, priority.value)
 
 
 class BotDeploymentStatus(BaseModel):

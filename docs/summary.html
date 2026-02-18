@@ -35,7 +35,7 @@
 <body>
 
 <h1>Trading Bot — Requirements &amp; Implementation Summary</h1>
-<p class="meta">Last updated: 2026-02-18 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchange: MEXC (extensible)</p>
+<p class="meta">Last updated: 2026-02-18 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: MEXC, Binance, Bybit</p>
 
 <!-- ============================================================ -->
 <h2>1. Core Philosophy &amp; Trading Principles</h2>
@@ -80,6 +80,8 @@
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
   <tr><td>Start with MEXC, but extensible to other exchanges later</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/base.py (abstract), core/exchange/mexc.py, core/exchange/factory.py</td></tr>
+  <tr><td>Binance exchange support</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/binance.py — spot + USDT-M futures via ccxt</td></tr>
+  <tr><td>Bybit exchange support</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/bybit.py — spot + USDT perpetual via ccxt</td></tr>
   <tr><td>Spot &amp; Futures trading</td><td><span class="badge done">Done</span></td><td class="file">core/models/market.py (MarketType enum)</td></tr>
   <tr><td>Crypto, tokenized stocks, and commodities</td><td><span class="badge done">Done</span></td><td class="file">Any symbol pair supported by MEXC</td></tr>
   <tr><td>Configurable leverage (10x default)</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → default_leverage</td></tr>
@@ -101,6 +103,7 @@
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
   <tr><td>Pluggable strategy framework (add my own later)</td><td><span class="badge done">Done</span></td><td class="file">strategies/base.py (BaseStrategy abstract class)</td></tr>
+  <tr><td>Custom user-defined strategies (drop .py in custom_strategies/)</td><td><span class="badge done">Done</span></td><td class="file">strategies/custom_loader.py, custom_strategies/_example.py</td></tr>
   <tr><td>Common strategies: RSI, MACD, Bollinger Bands, EMA</td><td><span class="badge done">Done</span></td><td class="file">strategies/rsi.py, macd.py, bollinger.py</td></tr>
   <tr><td>Mean reversion &amp; grid strategies</td><td><span class="badge done">Done</span></td><td class="file">strategies/mean_reversion.py, grid.py</td></tr>
   <tr><td>Market-open volatility strategy (US &amp; Asia opens)</td><td><span class="badge done">Done</span></td><td class="file">strategies/market_open_volatility.py</td></tr>
@@ -257,9 +260,40 @@
   <tr><td><strong>CoinMarketCap</strong>: trending coins, top gainers/losers, recently added listings. Feeds the scanner with coins worth investigating. Works without key (public endpoints), pro key for higher rate limits.</td><td><span class="badge done">Done</span></td><td class="file">intel/coinmarketcap.py → coinmarketcap.com</td></tr>
   <tr><td><strong>CoinGecko</strong>: trending search coins, top 100 by volume with sparklines, movers &gt;5%, ATH tracking. Free API (no key), pro key for higher limits. Merged into scanner for pair discovery.</td><td><span class="badge done">Done</span></td><td class="file">intel/coingecko.py → coingecko.com</td></tr>
   <tr><td>Unified MarketIntel orchestrator adjusting sizing, direction, exposure each tick. Now integrates TV consensus (2 votes in direction), CMC/CoinGecko data, and TV signal_boost per trade.</td><td><span class="badge done">Done</span></td><td class="file">intel/market_intel.py → MarketCondition, MarketRegime</td></tr>
+  <tr><td><strong>DeFiLlama</strong>: TVL flows across DeFi — capital inflows/outflows, chain rotation, position bias based on TVL trend. Free, no key needed.</td><td><span class="badge done">Done</span></td><td class="file">intel/defillama.py → defillama.com</td></tr>
+  <tr><td><strong>Santiment</strong>: Social volume, dev activity, whale transactions. Sentiment signal + social spike detection. Free tier, optional key for rate limits.</td><td><span class="badge done">Done</span></td><td class="file">intel/santiment.py → santiment.net GraphQL API</td></tr>
+  <tr><td><strong>Glassnode</strong>: On-chain metrics — exchange net flows, NUPL, SOPR, active addresses. Detects distribution vs accumulation phases. Requires free API key.</td><td><span class="badge done">Done</span></td><td class="file">intel/glassnode.py → glassnode.com</td></tr>
+  <tr><td><strong>CoinGlass OI expansion</strong>: Total open interest, 1h OI change, top trader long ratios, OI history for trend detection.</td><td><span class="badge done">Done</span></td><td class="file">intel/whale_sentiment.py → OISnapshot model</td></tr>
+  <tr><td>MarketIntel now uses 10 data sources: F&amp;G, Liq, Macro, Whales, TV, CMC, CoinGecko, DeFiLlama, Santiment, Glassnode</td><td><span class="badge done">Done</span></td><td class="file">intel/market_intel.py → assess() composite multiplier</td></tr>
 </table>
 
-<h3>2.17 Manual Override / Kill Switch</h3>
+<h3>2.17 Trade Priority Queue System</h3>
+
+<div class="principle">
+  <strong>The queue is advisory, never forced.</strong> The monitor and intel layer produce trade proposals at three priority tiers. The bot only consumes them when it has genuine spare capacity, budget, and secured positions. A successful day means existing trades ride — the queue does not pressure new entries.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td><strong>CRITICAL</strong> tier: act within seconds (spikes, mass-liq reversals, wick scalps)</td><td><span class="badge done">Done</span></td><td class="file">shared/models.py → SignalPriority.CRITICAL</td></tr>
+  <tr><td><strong>DAILY</strong> tier: valid for hours (momentum entries, trending setups, TV alignment)</td><td><span class="badge done">Done</span></td><td class="file">shared/models.py → SignalPriority.DAILY</td></tr>
+  <tr><td><strong>SWING</strong> tier: limit-order plans with full entry blueprint, valid for days</td><td><span class="badge done">Done</span></td><td class="file">shared/models.py → SignalPriority.SWING, EntryPlan</td></tr>
+  <tr><td>Signal generator converts intel snapshots into proposals</td><td><span class="badge done">Done</span></td><td class="file">services/signal_generator.py</td></tr>
+  <tr><td>Monitor writes proposals to data/trade_queue.json each tick</td><td><span class="badge done">Done</span></td><td class="file">services/monitor.py, shared/state.py</td></tr>
+  <tr><td>Bot consumes queue only when idle with spare capacity and budget</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _process_trade_queue()</td></tr>
+  <tr><td>Proposals auto-expire, get rejected with reasons, purge when stale</td><td><span class="badge done">Done</span></td><td class="file">shared/models.py → TradeQueue.purge_stale()</td></tr>
+  <tr><td>SWING proposals include full entry plans (entry zone, DCA levels, leverage ramp)</td><td><span class="badge done">Done</span></td><td class="file">shared/models.py → EntryPlan</td></tr>
+</table>
+
+<h3>2.18 Preflight Check &amp; Live Run Prep</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>API key validation, exchange connectivity test, balance check</td><td><span class="badge done">Done</span></td><td class="file">scripts/preflight_check.py</td></tr>
+  <tr><td>Futures market availability, leverage setting, risk config audit</td><td><span class="badge done">Done</span></td><td class="file">scripts/preflight_check.py</td></tr>
+</table>
+
+<h3>2.19 Manual Override / Kill Switch</h3>
+<!-- Note: sections renumbered after adding 2.17 (Trade Queue) and 2.18 (Preflight) -->
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
   <tr><td>Create <code>STOP</code> file → halt all new trades (existing ride)</td><td><span class="badge done">Done</span></td><td class="file">core/risk/daily_target.py → manual_stop</td></tr>
@@ -267,7 +301,7 @@
   <tr><td>Delete the file to resume normal operation</td><td><span class="badge done">Done</span></td><td class="file">File check happens every tick</td></tr>
 </table>
 
-<h3>2.18 Trade Analytics &amp; Pattern Detection</h3>
+<h3>2.20 Trade Analytics &amp; Pattern Detection</h3>
 
 <div class="principle">
   <strong>Learn from every trade.</strong> Every closed position is logged to a local SQLite database with full context: strategy, market regime, Fear &amp; Greed, time of day, volatility, DCA depth, signal strength. The analytics engine detects patterns in losing trades and generates concrete modification suggestions. Strategy weights are automatically adjusted based on historical performance.
@@ -286,7 +320,7 @@
   <tr><td>Daily refresh + on-demand via dashboard</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _check_daily_reset(), /api/analytics/refresh</td></tr>
 </table>
 
-<h3>2.19 Web Dashboard</h3>
+<h3>2.21 Web Dashboard</h3>
 
 <div class="principle">
   <strong>Full control via browser.</strong> React + FastAPI dashboard running on port 8080 alongside the bot. Real-time WebSocket updates every 2 seconds. Token-based auth for remote access.
@@ -306,7 +340,7 @@
   <tr><td>WebSocket real-time updates (2s interval)</td><td><span class="badge done">Done</span></td><td class="file">web/server.py WebSocket endpoint</td></tr>
 </table>
 
-<h3>2.20 Service Architecture &amp; Adaptive Monitoring</h3>
+<h3>2.22 Service Architecture &amp; Adaptive Monitoring</h3>
 
 <div class="principle">
   <strong>Don't waste cycles when fully deployed.</strong> Monitoring and analytics run as separate programs that communicate via JSON state files. When the bot is fully deployed and positions are running well, monitoring drops to background mode. When hunting for new trades, it runs at full speed. When positions are stressed (losing), monitoring escalates to find exit/hedge opportunities.
@@ -347,7 +381,8 @@
   <li><strong>Partial take</strong> — PYRAMID: pull capital off the table after lever-up</li>
   <li><strong>Wick scalps</strong> — if a PYRAMID position is getting wicked, open a quick counter-scalp to ride the wick</li>
   <li><strong>Expire losers</strong> — close quick trades that timed out <em>and are losing</em> (winners keep riding)</li>
-  <li><strong>Assess intel</strong> — Fear &amp; Greed, liquidations, macro calendar, whale data → MarketCondition</li>
+  <li><strong>Process trade queue</strong> — read proposals from monitor (CRITICAL → DAILY → SWING). Only act if idle with spare capacity and budget. Queue is advisory, never forced.</li>
+  <li><strong>Assess intel</strong> — Fear &amp; Greed, liquidations, macro, whales, DeFiLlama, Santiment, Glassnode → MarketCondition</li>
   <li><strong>Legendary check</strong> — at 100%+ daily: close all if reversal risk, or email + ride</li>
   <li><strong>Apply gates</strong> — should we trade at all? (tier, drawdown, intel regime, STOP file)</li>
   <li><strong>Run strategies</strong> — for each symbol, analyze and generate signals:
@@ -376,6 +411,8 @@
   <tr><td><code>config/settings.py</code></td><td>All configuration via .env (Pydantic settings)</td></tr>
   <tr><td><code>core/exchange/base.py</code></td><td>Abstract exchange interface (extend for new exchanges)</td></tr>
   <tr><td><code>core/exchange/mexc.py</code></td><td>MEXC implementation via ccxt</td></tr>
+  <tr><td><code>core/exchange/binance.py</code></td><td>Binance implementation (spot + USDT-M futures) via ccxt</td></tr>
+  <tr><td><code>core/exchange/bybit.py</code></td><td>Bybit implementation (spot + USDT perpetual) via ccxt</td></tr>
   <tr><td><code>core/exchange/paper.py</code></td><td>Paper trading (simulated orders, real market data)</td></tr>
   <tr><td><code>core/exchange/factory.py</code></td><td>Exchange factory — picks the right implementation from config</td></tr>
   <tr><td><code>core/models/market.py</code></td><td>Candle, Ticker, OrderBook, MarketType</td></tr>
@@ -395,6 +432,8 @@
   <tr><td><code>strategies/market_open_volatility.py</code></td><td>US &amp; Asia market open window scalps</td></tr>
   <tr><td><code>strategies/rsi.py, macd.py, bollinger.py</code></td><td>Standard TA strategies</td></tr>
   <tr><td><code>strategies/mean_reversion.py, grid.py</code></td><td>Mean reversion and grid strategies</td></tr>
+  <tr><td><code>strategies/custom_loader.py</code></td><td>Dynamic loader for user-defined strategies in custom_strategies/</td></tr>
+  <tr><td><code>custom_strategies/_example.py</code></td><td>Template showing how to create a custom strategy</td></tr>
   <tr><td><code>intel/fear_greed.py</code></td><td>Fear &amp; Greed Index (alternative.me API)</td></tr>
   <tr><td><code>intel/liquidations.py</code></td><td>CoinGlass liquidation monitor ($1B+ = reversal zone)</td></tr>
   <tr><td><code>intel/macro_calendar.py</code></td><td>ForexFactory macro events (FOMC, CPI, NFP)</td></tr>
@@ -402,7 +441,10 @@
   <tr><td><code>intel/tradingview.py</code></td><td>TradingView scanner: oscillators, MAs, summary ratings, signal_boost</td></tr>
   <tr><td><code>intel/coinmarketcap.py</code></td><td>CMC trending, gainers/losers, new listings</td></tr>
   <tr><td><code>intel/coingecko.py</code></td><td>CoinGecko trending, top volume, movers, sparklines</td></tr>
-  <tr><td><code>intel/market_intel.py</code></td><td>Orchestrator: combines all intel into MarketCondition</td></tr>
+  <tr><td><code>intel/defillama.py</code></td><td>DeFiLlama TVL flows — capital movement, chain rotation</td></tr>
+  <tr><td><code>intel/santiment.py</code></td><td>Santiment social volume, sentiment, dev activity, whale txns</td></tr>
+  <tr><td><code>intel/glassnode.py</code></td><td>Glassnode on-chain: exchange flows, NUPL, SOPR, accumulation/distribution</td></tr>
+  <tr><td><code>intel/market_intel.py</code></td><td>Orchestrator: combines all 10 intel sources into MarketCondition</td></tr>
   <tr><td><code>volatility/detector.py</code></td><td>Price spike detection engine</td></tr>
   <tr><td><code>news/monitor.py</code></td><td>RSS feed monitoring, sentiment analysis, spike correlation</td></tr>
   <tr><td><code>scanner/trending.py</code></td><td>Multi-source scanner: CryptoBubbles + CMC + CoinGecko</td></tr>
@@ -411,8 +453,9 @@
   <tr><td><code>db/models.py</code></td><td>TradeRecord, StrategyScore, PatternInsight, ModificationSuggestion</td></tr>
   <tr><td><code>analytics/engine.py</code></td><td>Pattern detection, strategy scoring, weight factors, modification suggestions</td></tr>
   <tr><td><code>shared/state.py</code></td><td>Atomic JSON read/write for inter-process communication</td></tr>
-  <tr><td><code>shared/models.py</code></td><td>BotDeploymentStatus, IntelSnapshot, AnalyticsSnapshot models</td></tr>
-  <tr><td><code>services/monitor.py</code></td><td>Standalone monitoring service with adaptive intensity</td></tr>
+  <tr><td><code>shared/models.py</code></td><td>BotDeploymentStatus, IntelSnapshot, AnalyticsSnapshot, TradeQueue, TradeProposal</td></tr>
+  <tr><td><code>services/monitor.py</code></td><td>Standalone monitoring service with adaptive intensity + signal generation</td></tr>
+  <tr><td><code>services/signal_generator.py</code></td><td>Converts intel snapshots into CRITICAL/DAILY/SWING trade proposals</td></tr>
   <tr><td><code>services/analytics_service.py</code></td><td>Standalone analytics service (reads trades.db, writes scores)</td></tr>
   <tr><td><code>run_monitor.py</code></td><td>Entry point for standalone monitor</td></tr>
   <tr><td><code>run_analytics.py</code></td><td>Entry point for standalone analytics</td></tr>
@@ -424,6 +467,7 @@
   <tr><td><code>scripts/run-local.sh</code></td><td>Local setup + run script</td></tr>
   <tr><td><code>scripts/deploy-digitalocean.sh</code></td><td>DigitalOcean Docker deployment</td></tr>
   <tr><td><code>scripts/build-dashboard.sh</code></td><td>Build the React frontend for production</td></tr>
+  <tr><td><code>scripts/preflight_check.py</code></td><td>Pre-live sanity check: API keys, balance, futures, leverage, risk</td></tr>
 </table>
 
 <!-- ============================================================ -->
@@ -447,6 +491,11 @@
   <tr><td><code>TV_INTERVALS</code></td><td>1h,4h,1D</td><td>Timeframes for TV analysis</td></tr>
   <tr><td><code>CMC_API_KEY</code></td><td>(empty)</td><td>CoinMarketCap pro API key (optional, free works)</td></tr>
   <tr><td><code>COINGECKO_API_KEY</code></td><td>(empty)</td><td>CoinGecko pro API key (optional, free works)</td></tr>
+  <tr><td><code>DEFILLAMA_ENABLED</code></td><td>true</td><td>Enable DeFiLlama TVL flow tracking</td></tr>
+  <tr><td><code>SANTIMENT_API_KEY</code></td><td>(empty)</td><td>Santiment API key (optional, free tier works)</td></tr>
+  <tr><td><code>GLASSNODE_API_KEY</code></td><td>(empty)</td><td>Glassnode API key (required, free key at glassnode.com)</td></tr>
+  <tr><td><code>BINANCE_API_KEY/SECRET</code></td><td>(empty)</td><td>Binance API credentials (if using Binance exchange)</td></tr>
+  <tr><td><code>BYBIT_API_KEY/SECRET</code></td><td>(empty)</td><td>Bybit API credentials (if using Bybit exchange)</td></tr>
   <tr><td><code>DASHBOARD_ENABLED</code></td><td>true</td><td>Enable web dashboard on port 8080</td></tr>
   <tr><td><code>DASHBOARD_TOKEN</code></td><td>(empty)</td><td>Secret token for remote access; empty = no auth</td></tr>
   <tr><td><code>DASHBOARD_PORT</code></td><td>8080</td><td>Dashboard HTTP port</td></tr>

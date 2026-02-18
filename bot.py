@@ -14,7 +14,7 @@ from core.models import Ticker, Candle, Signal, SignalAction
 from core.orders import OrderManager
 from core.orders.scaler import ScaleMode
 from core.risk import RiskManager
-from core.risk.daily_target import DailyTargetTracker
+from core.risk.daily_target import DailyTargetTracker, DailyTier
 from core.risk.market_filter import MarketQualityFilter, LiquidityTier
 from notifications import Notifier, NotificationType
 from news import NewsMonitor, NewsItem
@@ -29,6 +29,7 @@ from analytics import AnalyticsEngine
 from shared.state import SharedState
 from shared.models import (
     BotDeploymentStatus, DeploymentLevel, IntelSnapshot, AnalyticsSnapshot,
+    SignalPriority, TradeProposal, TradeQueue,
 )
 
 
@@ -244,6 +245,9 @@ class TradingBot:
         # 6. Close expired quick trades
         await self.orders.close_expired_quick_trades(self._active_signals)
 
+        # 6b. Process trade queue (CRITICAL → DAILY → SWING)
+        await self._process_trade_queue()
+
         # 7. Assess market intelligence
         # Prefer shared state from monitor service; fall back to in-process
         intel_condition = self._read_shared_intel()
@@ -397,6 +401,199 @@ class TradingBot:
         # 13. Status + daily reset
         await self._log_status()
         await self._check_daily_reset()
+
+    # -- Trade Queue Consumer (advisory, never forced) -- #
+
+    async def _process_trade_queue(self) -> None:
+        """Consume proposals from the monitor's trade queue.
+
+        The queue is strictly advisory — the bot only acts when it has
+        genuine spare capacity, budget, and secured positions.  A
+        successful day means existing trades are protected; new queue
+        items are not forced just because they exist.
+        """
+        try:
+            queue = self.shared.read_trade_queue()
+        except Exception:
+            return
+
+        if queue.pending_count == 0:
+            return
+
+        positions = await self.exchange.fetch_positions()
+        active_count = sum(1 for p in positions if p.amount > 0)
+        max_pos = self.settings.max_concurrent_positions
+        free_slots = max(0, max_pos - active_count)
+
+        tier = self.target.tier
+        allow_new = self.target.should_trade()
+        aggression = self.target.aggression_multiplier()
+        pnl_pct = self.target.todays_pnl_pct
+
+        # Positions are "secured" when all have break-even stops or are profitable
+        avg_health = 0.0
+        if active_count > 0:
+            pnls = [p.pnl_pct for p in positions if p.amount > 0]
+            avg_health = sum(pnls) / len(pnls)
+        positions_secured = active_count == 0 or avg_health >= 0
+
+        executed = 0
+        modified = False
+
+        # --- CRITICAL: time-sensitive, but still respect capacity ---
+        for proposal in queue.get_actionable(SignalPriority.CRITICAL):
+            if free_slots <= 0:
+                queue.mark_rejected(proposal.id, "no free slots")
+                modified = True
+                continue
+            if not allow_new:
+                queue.mark_rejected(proposal.id, f"tier={tier.value} — not trading")
+                modified = True
+                continue
+            if proposal.strength * aggression < 0.2:
+                queue.mark_rejected(proposal.id, "strength too low after aggression")
+                modified = True
+                continue
+
+            ok = await self._execute_proposal(proposal, aggression)
+            if ok:
+                queue.mark_consumed(proposal.id)
+                free_slots -= 1
+                executed += 1
+            else:
+                queue.mark_rejected(proposal.id, "execution failed")
+            modified = True
+
+        # --- DAILY: only when idle with spare capacity and budget ---
+        idle_enough = (
+            free_slots >= 2
+            or (free_slots >= 1 and active_count == 0)
+        )
+        budget_ok = tier in (DailyTier.BUILDING, DailyTier.LOSING) or (
+            tier == DailyTier.STRONG and positions_secured
+        )
+
+        if allow_new and idle_enough and budget_ok:
+            for proposal in queue.get_actionable(SignalPriority.DAILY):
+                if free_slots <= 0:
+                    break
+                if proposal.strength * aggression < 0.3:
+                    queue.mark_rejected(proposal.id, "daily: strength too low")
+                    modified = True
+                    continue
+
+                ok = await self._execute_proposal(proposal, aggression)
+                if ok:
+                    queue.mark_consumed(proposal.id)
+                    free_slots -= 1
+                    executed += 1
+                else:
+                    queue.mark_rejected(proposal.id, "execution failed")
+                modified = True
+
+        # --- SWING: only when truly idle, positions secured, day is stable ---
+        genuinely_idle = (
+            active_count == 0
+            or (free_slots >= 2 and positions_secured and pnl_pct >= 0)
+        )
+
+        if allow_new and genuinely_idle:
+            for proposal in queue.get_actionable(SignalPriority.SWING):
+                if free_slots <= 0:
+                    break
+                if proposal.strength * aggression < 0.3:
+                    continue
+
+                ok = await self._execute_swing_proposal(proposal, aggression)
+                if ok:
+                    queue.mark_consumed(proposal.id)
+                    free_slots -= 1
+                    executed += 1
+                else:
+                    queue.mark_rejected(proposal.id, "swing execution failed")
+                modified = True
+
+        if modified:
+            self.shared.write_trade_queue(queue)
+
+        if executed > 0:
+            logger.info("Queue: executed {} proposal(s) this tick "
+                        "(remaining: C={} D={} S={})",
+                        executed,
+                        len(queue.get_actionable(SignalPriority.CRITICAL)),
+                        len(queue.get_actionable(SignalPriority.DAILY)),
+                        len(queue.get_actionable(SignalPriority.SWING)))
+
+    async def _execute_proposal(self, proposal: TradeProposal,
+                                aggression: float) -> bool:
+        """Convert a queue proposal into a trading signal and execute it."""
+        action = SignalAction.BUY if proposal.side == "long" else SignalAction.SELL
+        sig = Signal(
+            symbol=proposal.symbol,
+            action=action,
+            strength=min(1.0, proposal.strength * aggression),
+            strategy=proposal.strategy,
+            reason=f"[QUEUE/{proposal.priority.value}] {proposal.reason}",
+            market_type=proposal.market_type,
+            leverage=proposal.leverage,
+            quick_trade=proposal.quick_trade,
+            max_hold_minutes=proposal.max_hold_minutes or None,
+        )
+
+        logger.info("Queue exec [{}/{}]: {} {} {} (str={:.2f})",
+                     proposal.priority.value, proposal.strategy,
+                     proposal.side.upper(), proposal.symbol,
+                     proposal.reason[:60], sig.strength)
+
+        use_pyramid = not proposal.quick_trade
+        try:
+            await self._process_signal(sig, pyramid=use_pyramid)
+            return True
+        except Exception as e:
+            logger.error("Queue execution error for {}: {}", proposal.symbol, e)
+            return False
+
+    async def _execute_swing_proposal(self, proposal: TradeProposal,
+                                      aggression: float) -> bool:
+        """Execute a swing proposal using its entry plan.
+
+        Swing proposals include a full plan: entry zone, DCA levels,
+        stop loss, take profit targets, leverage ramp.  The bot places
+        the initial entry and lets PYRAMID mode handle the rest.
+        """
+        plan = proposal.entry_plan
+        strength = min(1.0, proposal.strength * aggression)
+
+        action = SignalAction.BUY if proposal.side == "long" else SignalAction.SELL
+        leverage = plan.initial_leverage if plan else proposal.leverage
+
+        sig = Signal(
+            symbol=proposal.symbol,
+            action=action,
+            strength=strength,
+            strategy=proposal.strategy,
+            reason=f"[QUEUE/swing] {proposal.reason}",
+            market_type=proposal.market_type,
+            leverage=leverage,
+            suggested_stop_loss=plan.stop_loss if plan and plan.stop_loss else None,
+            suggested_take_profit=(
+                plan.take_profit_targets[0]
+                if plan and plan.take_profit_targets else None
+            ),
+        )
+
+        plan_notes = plan.notes if plan else "no plan"
+        logger.info("Swing entry [{}/{}]: {} {} (lev={}x) — {}",
+                     proposal.strategy, proposal.symbol,
+                     proposal.side.upper(), proposal.symbol,
+                     leverage, plan_notes[:80])
+
+        try:
+            await self._process_signal(sig, pyramid=True)
+            return True
+        except Exception as e:
+            logger.error("Swing execution error for {}: {}", proposal.symbol, e)
+            return False
 
     def _apply_intel_to_signal(self, sig: Signal, condition: MarketCondition) -> Signal:
         """Adjust signal based on external market intelligence."""

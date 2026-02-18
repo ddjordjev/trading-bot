@@ -3,6 +3,7 @@ from shared.models import (
     BotDeploymentStatus, DeploymentLevel,
     IntelSnapshot, TrendingSnapshot, TVSymbolSnapshot,
     AnalyticsSnapshot, StrategyWeightEntry,
+    SignalPriority, EntryPlan, TradeProposal, TradeQueue,
 )
 
 __all__ = [
@@ -10,4 +11,5 @@ __all__ = [
     "BotDeploymentStatus", "DeploymentLevel",
     "IntelSnapshot", "TrendingSnapshot", "TVSymbolSnapshot",
     "AnalyticsSnapshot", "StrategyWeightEntry",
+    "SignalPriority", "EntryPlan", "TradeProposal", "TradeQueue",
 ]
