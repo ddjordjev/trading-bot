@@ -19,10 +19,11 @@ class Settings(BaseSettings):
     binance_api_secret: str = ""
     bybit_api_key: str = ""
     bybit_api_secret: str = ""
-    binance_api_key: str = ""
-    binance_api_secret: str = ""
-    bybit_api_key: str = ""
-    bybit_api_secret: str = ""
+
+    # Per-exchange capability flags — set based on your account type.
+    # MEXC restricts futures to institutional accounts, so retail = "spot" only.
+    # Comma-separated: "spot", "futures", or "spot,futures"
+    allowed_market_types: str = "spot,futures"
 
     default_leverage: int = 10
 
@@ -137,6 +138,21 @@ class Settings(BaseSettings):
     @property
     def tv_interval_list(self) -> list[str]:
         return [s.strip() for s in self.tv_intervals.split(",") if s.strip()]
+
+    @property
+    def allowed_market_type_list(self) -> list[str]:
+        return [t.strip().lower() for t in self.allowed_market_types.split(",") if t.strip()]
+
+    @property
+    def spot_allowed(self) -> bool:
+        return "spot" in self.allowed_market_type_list
+
+    @property
+    def futures_allowed(self) -> bool:
+        return "futures" in self.allowed_market_type_list
+
+    def is_market_type_allowed(self, market_type: str) -> bool:
+        return market_type.lower() in self.allowed_market_type_list
 
     def is_paper(self) -> bool:
         return self.trading_mode == "paper"

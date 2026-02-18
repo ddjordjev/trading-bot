@@ -45,6 +45,7 @@ async def run_checks() -> bool:
 
     # 1. Config loaded
     check("Config loaded", True, f"mode={settings.trading_mode}, exchange={settings.exchange}")
+    check("Allowed market types", True, settings.allowed_market_types)
 
     # 2. API keys present
     key_map = {
@@ -87,23 +88,30 @@ async def run_checks() -> bool:
     except Exception as e:
         check("Market data", False, str(e))
 
-    # 6. Futures availability
-    try:
-        symbols = await exchange.get_available_symbols(market_type="futures")
-        has_futures = len(symbols) > 0
-        check("Futures markets", has_futures,
-              f"{len(symbols)} pairs" if has_futures else "NOT AVAILABLE — spot only")
-    except Exception as e:
-        check("Futures markets", False, str(e))
+    # 6. Futures availability (skip if not allowed in config)
+    if settings.futures_allowed:
+        try:
+            symbols = await exchange.get_available_symbols(market_type="futures")
+            has_futures = len(symbols) > 0
+            check("Futures markets", has_futures,
+                  f"{len(symbols)} pairs" if has_futures else
+                  "NOT AVAILABLE — set ALLOWED_MARKET_TYPES=spot in .env")
+        except Exception as e:
+            check("Futures markets", False,
+                  f"{e} — if this exchange blocks futures for retail, "
+                  f"set ALLOWED_MARKET_TYPES=spot in .env")
 
-    # 7. Leverage setting
-    try:
-        await exchange.set_leverage("BTC/USDT", settings.default_leverage)
-        check("Leverage setting", True,
-              f"{settings.default_leverage}x on BTC/USDT")
-    except Exception as e:
-        check("Leverage setting", False,
-              f"Cannot set {settings.default_leverage}x — {e}")
+        # 7. Leverage setting
+        try:
+            await exchange.set_leverage("BTC/USDT", settings.default_leverage)
+            check("Leverage setting", True,
+                  f"{settings.default_leverage}x on BTC/USDT")
+        except Exception as e:
+            check("Leverage setting", False,
+                  f"Cannot set {settings.default_leverage}x — {e}")
+    else:
+        logger.info("  [SKIP] Futures checks — not in ALLOWED_MARKET_TYPES")
+        logger.info("  [SKIP] Leverage checks — futures not enabled")
 
     # 8. Risk config sanity
     check("Daily loss limit", settings.max_daily_loss_pct <= 10,

@@ -111,7 +111,20 @@ class TradingBot:
 
     def add_strategy(self, name: str, symbol: str, market_type: str = "spot",
                      leverage: int = 0, **params: object) -> None:
-        lev = leverage or self.settings.default_leverage
+        if not self.settings.is_market_type_allowed(market_type):
+            fallback = "spot" if self.settings.spot_allowed else None
+            if fallback and market_type != fallback:
+                logger.warning("Market type '{}' not allowed — falling back to '{}' for {} ({})",
+                               market_type, fallback, name, symbol)
+                market_type = fallback
+                leverage = 1
+            else:
+                logger.warning("Skipping strategy '{}' for {} — market type '{}' not allowed "
+                               "(allowed: {})", name, symbol, market_type,
+                               self.settings.allowed_market_types)
+                return
+
+        lev = leverage or (self.settings.default_leverage if market_type == "futures" else 1)
         cls = BUILTIN_STRATEGIES.get(name)
         if not cls:
             raise ValueError(f"Unknown strategy: {name}. Available: {list(BUILTIN_STRATEGIES.keys())}")
@@ -130,7 +143,8 @@ class TradingBot:
         logger.info("=" * 60)
         logger.info("TRADING BOT v0.6.0")
         logger.info("Mode: {}", self.settings.trading_mode.upper())
-        logger.info("Exchange: {}", self.settings.exchange)
+        logger.info("Exchange: {} | Allowed: {}", self.settings.exchange,
+                     self.settings.allowed_market_types)
         logger.info("Daily target: {:.0f}% (compounding)", self.target.daily_target_pct)
         logger.info("Strategies: {}", len(self._strategies))
         logger.info("Leverage: {}x default", self.settings.default_leverage)
@@ -321,6 +335,11 @@ class TradingBot:
                     await self._process_signal(sig)
                     continue
 
+                if not self.settings.is_market_type_allowed(sig.market_type):
+                    logger.debug("Skipping {} signal — market type '{}' not allowed",
+                                 strategy.symbol, sig.market_type)
+                    continue
+
                 is_swing = sig.strategy == "swing_opportunity"
                 use_pyramid = sig.strategy not in SCALP_ONLY_STRATEGIES
 
@@ -442,6 +461,10 @@ class TradingBot:
 
         # --- CRITICAL: time-sensitive, but still respect capacity ---
         for proposal in queue.get_actionable(SignalPriority.CRITICAL):
+            if not self.settings.is_market_type_allowed(proposal.market_type):
+                queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
+                modified = True
+                continue
             if free_slots <= 0:
                 queue.mark_rejected(proposal.id, "no free slots")
                 modified = True
@@ -475,6 +498,10 @@ class TradingBot:
 
         if allow_new and idle_enough and budget_ok:
             for proposal in queue.get_actionable(SignalPriority.DAILY):
+                if not self.settings.is_market_type_allowed(proposal.market_type):
+                    queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
+                    modified = True
+                    continue
                 if free_slots <= 0:
                     break
                 if proposal.strength * aggression < 0.3:
@@ -499,6 +526,10 @@ class TradingBot:
 
         if allow_new and genuinely_idle:
             for proposal in queue.get_actionable(SignalPriority.SWING):
+                if not self.settings.is_market_type_allowed(proposal.market_type):
+                    queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
+                    modified = True
+                    continue
                 if free_slots <= 0:
                     break
                 if proposal.strength * aggression < 0.3:
@@ -898,9 +929,11 @@ class TradingBot:
                             pair, coin.volume_24h / 1e6, coin.market_cap / 1e6)
 
             from strategies.compound_momentum import CompoundMomentumStrategy
+            mkt = "futures" if self.settings.futures_allowed else "spot"
+            lev = self.settings.default_leverage if mkt == "futures" else 1
             strategy = CompoundMomentumStrategy(
-                symbol=pair, market_type="futures",
-                leverage=self.settings.default_leverage,
+                symbol=pair, market_type=mkt,
+                leverage=lev,
                 spike_pct=1.0, spike_max_hold=10,
             )
             self._dynamic_strategies[pair] = strategy
@@ -997,12 +1030,13 @@ def main() -> None:
 
     bot = TradingBot(settings, daily_target_pct=10.0)
 
-    bot.add_strategy("compound_momentum", "BTC/USDT", market_type="futures")
-    bot.add_strategy("compound_momentum", "ETH/USDT", market_type="futures")
-    bot.add_strategy("market_open_volatility", "BTC/USDT", market_type="futures")
-    bot.add_strategy("market_open_volatility", "ETH/USDT", market_type="futures")
-    bot.add_strategy("swing_opportunity", "BTC/USDT", market_type="futures")
-    bot.add_strategy("swing_opportunity", "ETH/USDT", market_type="futures")
+    mkt = "futures" if settings.futures_allowed else "spot"
+    bot.add_strategy("compound_momentum", "BTC/USDT", market_type=mkt)
+    bot.add_strategy("compound_momentum", "ETH/USDT", market_type=mkt)
+    bot.add_strategy("market_open_volatility", "BTC/USDT", market_type=mkt)
+    bot.add_strategy("market_open_volatility", "ETH/USDT", market_type=mkt)
+    bot.add_strategy("swing_opportunity", "BTC/USDT", market_type=mkt)
+    bot.add_strategy("swing_opportunity", "ETH/USDT", market_type=mkt)
 
     loop = asyncio.new_event_loop()
 
