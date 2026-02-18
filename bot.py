@@ -22,6 +22,7 @@ from strategies.base import BaseStrategy
 from strategies import BUILTIN_STRATEGIES
 from volatility import VolatilityDetector, SpikeEvent
 from scanner import TrendingScanner, TrendingCoin
+from intel import MarketIntel, MarketCondition
 
 
 # Strategies that should use PYRAMID mode (DCA down, lever up on recovery)
@@ -63,6 +64,12 @@ class TradingBot:
             min_hourly_move_pct=2.0,
             min_daily_move_pct=5.0,
         )
+        self.intel: Optional[MarketIntel] = None
+        if self.settings.intel_enabled:
+            self.intel = MarketIntel(
+                coinglass_key=self.settings.coinglass_api_key,
+                symbols=self.settings.intel_symbol_list,
+            )
 
         self._strategies: list[BaseStrategy] = []
         self._dynamic_strategies: dict[str, BaseStrategy] = {}
@@ -94,7 +101,7 @@ class TradingBot:
 
     async def start(self) -> None:
         logger.info("=" * 60)
-        logger.info("TRADING BOT v0.3.0")
+        logger.info("TRADING BOT v0.4.0")
         logger.info("Mode: {}", self.settings.trading_mode.upper())
         logger.info("Exchange: {}", self.settings.exchange)
         logger.info("Daily target: {:.0f}% (compounding)", self.target.daily_target_pct)
@@ -103,12 +110,15 @@ class TradingBot:
         logger.info("PYRAMID mode: DCA down -> lever up -> partial take -> ride")
         logger.info("WINNERS mode: start small -> add to winners -> trail")
         logger.info("Gambling budget: {}% for low-liq coins", self.settings.gambling_budget_pct)
+        logger.info("Intel: {}", "ENABLED" if self.intel else "disabled")
         logger.info("=" * 60)
 
         await self.exchange.connect()
         await self.notifier.start()
         await self.news.start()
         await self.scanner.start()
+        if self.intel:
+            await self.intel.start()
         self.news.on_news(self._on_news)
         self.scanner.on_trending(self._on_trending)
 
@@ -129,6 +139,8 @@ class TradingBot:
         logger.info("Shutting down...")
         logger.info("Final status: {}", self.target.status_report())
         self._running = False
+        if self.intel:
+            await self.intel.stop()
         await self.scanner.stop()
         await self.news.stop()
         await self.notifier.stop()
@@ -178,12 +190,24 @@ class TradingBot:
         # 5. Close expired quick trades
         await self.orders.close_expired_quick_trades(self._active_signals)
 
-        # 6. Trading gates
+        # 6. Assess market intelligence (external feeds)
+        intel_condition: Optional[MarketCondition] = None
+        if self.intel:
+            intel_condition = self.intel.assess()
+
+        # 7. Trading gates
         allow_new_entries = self.target.should_trade()
         aggression = self.target.aggression_multiplier()
         allow_gambling = self.target.target_reached and self.target.todays_pnl_pct > 0
 
-        # 7. Run all strategies (collect candles for hedge analysis)
+        # Apply intel adjustments to aggression and entry gates
+        if intel_condition:
+            aggression *= intel_condition.position_size_multiplier
+            if intel_condition.should_reduce_exposure:
+                aggression *= 0.7
+                logger.info("Intel: reducing exposure (regime={})", intel_condition.regime.value)
+
+        # 8. Run all strategies (collect candles for hedge analysis)
         candles_map: dict[str, list] = {}
         all_strategies = list(self._strategies) + list(self._dynamic_strategies.values())
         for strategy in all_strategies:
@@ -226,10 +250,23 @@ class TradingBot:
                     logger.debug("Skipping entry signal -- target/risk says sit out")
                     continue
 
+                # Intel: direction filter -- don't go against strong crowd consensus
+                if intel_condition and sig.action in (SignalAction.LONG, SignalAction.SHORT):
+                    sig = self._apply_intel_to_signal(sig, intel_condition)
+                    if sig.strength <= 0:
+                        continue
+
                 tradeable, reason = self.market_filter.is_tradeable(candles, ticker)
                 if not tradeable:
                     logger.info("Skipping {} -- {}", strategy.symbol, reason)
                     continue
+
+                # Intel: boost signals during capitulation / mass liquidation reversal
+                if intel_condition and intel_condition.macro_spike_opportunity:
+                    logger.info("MACRO SPIKE OPPORTUNITY -- boosting signal for {}", sig.symbol)
+                    sig = sig.model_copy()
+                    sig.quick_trade = True
+                    sig.max_hold_minutes = 15
 
                 sig = self._adjust_for_target(sig, aggression)
                 await self._process_signal(sig, pyramid=use_pyramid)
@@ -237,7 +274,7 @@ class TradingBot:
             except Exception as e:
                 logger.error("Strategy '{}' error for {}: {}", strategy.name, strategy.symbol, e)
 
-        # 8. Hedge check: open counter-positions on reversal signals
+        # 9. Hedge check: open counter-positions on reversal signals
         if self.settings.hedge_enabled:
             try:
                 hedges = await self.orders.try_hedge(candles_map)
@@ -246,9 +283,51 @@ class TradingBot:
             except Exception as e:
                 logger.error("Hedge tick error: {}", e)
 
-        # 9. Status + daily reset
+        # 10. Status + daily reset
         await self._log_status()
         await self._check_daily_reset()
+
+    def _apply_intel_to_signal(self, sig: Signal, condition: MarketCondition) -> Signal:
+        """Adjust signal based on external market intelligence."""
+        adjusted = sig.model_copy()
+
+        preferred = condition.preferred_direction
+        if preferred == "neutral":
+            return adjusted
+
+        is_long = sig.action == SignalAction.LONG
+        is_short = sig.action == SignalAction.SHORT
+
+        # Going against mass liquidation reversal bias = bad idea
+        if condition.mass_liquidation:
+            if (preferred == "long" and is_short) or (preferred == "short" and is_long):
+                logger.info("Intel BLOCKED {} {} -- mass liq bias is {} (reversal zone)",
+                            sig.action.value, sig.symbol, preferred)
+                adjusted.strength = 0
+                return adjusted
+
+        # Going against extreme fear/greed = reduce strength but don't block
+        if (condition.fear_greed <= 25 and is_short) or (condition.fear_greed >= 75 and is_long):
+            adjusted.strength *= 0.5
+            logger.info("Intel REDUCED {} {} -- F&G={} (contrarian says {})",
+                        sig.action.value, sig.symbol, condition.fear_greed, preferred)
+
+        # Going against whale positioning = slight caution
+        if condition.overleveraged_side:
+            if condition.overleveraged_side == "longs" and is_long:
+                adjusted.strength *= 0.7
+                logger.info("Intel CAUTION {} long -- longs overleveraged (contrarian says short)",
+                            sig.symbol)
+            elif condition.overleveraged_side == "shorts" and is_short:
+                adjusted.strength *= 0.7
+                logger.info("Intel CAUTION {} short -- shorts overleveraged (contrarian says long)",
+                            sig.symbol)
+
+        # Aligned with intel = slight boost
+        if (preferred == "long" and is_long) or (preferred == "short" and is_short):
+            adjusted.strength = min(1.0, adjusted.strength * 1.15)
+
+        return adjusted
 
     def _adjust_for_target(self, sig: Signal, aggression: float) -> Signal:
         adjusted = sig.model_copy()
@@ -346,6 +425,8 @@ class TradingBot:
         logger.info(self.target.status_report())
         logger.info(self.risk.risk_summary())
         logger.info(self.scanner.scan_summary())
+        if self.intel:
+            logger.info(self.intel.full_summary())
         logger.info("Active strategies: {} static + {} dynamic",
                      len(self._strategies), len(self._dynamic_strategies))
 
@@ -379,6 +460,8 @@ class TradingBot:
             logger.info("Total growth since start: {:.1f}%", self.target.total_growth_pct)
 
             compound_report = self.target.compound_report()
+            if self.intel:
+                compound_report += "\n\n" + self.intel.full_summary()
             logger.info("\n{}", compound_report)
 
             await self.notifier.send_daily_summary(

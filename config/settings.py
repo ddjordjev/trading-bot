@@ -70,11 +70,25 @@ class Settings(BaseSettings):
     asia_market_open_utc: int = 1
     asia_market_close_utc: int = 8
 
+    # Market Intelligence
+    coinglass_api_key: str = ""            # optional, for CoinGlass premium endpoints
+    intel_enabled: bool = True             # master switch for all external feeds
+    fear_greed_poll: int = 3600            # how often to poll Fear & Greed (seconds)
+    liquidation_poll: int = 300            # CoinGlass liquidation poll interval
+    macro_calendar_poll: int = 1800        # ForexFactory calendar poll interval
+    whale_sentiment_poll: int = 300        # CoinGlass funding/OI/L-S poll interval
+    intel_symbols: str = "BTC,ETH"         # symbols to track for whale sentiment
+    mass_liquidation_threshold: float = 1_000_000_000  # $1B = mass liq event
+
     log_level: str = "INFO"
 
     @property
     def notification_list(self) -> list[str]:
         return [n.strip() for n in self.notifications_enabled.split(",") if n.strip()]
+
+    @property
+    def intel_symbol_list(self) -> list[str]:
+        return [s.strip().upper() for s in self.intel_symbols.split(",") if s.strip()]
 
     @property
     def news_source_list(self) -> list[str]:
