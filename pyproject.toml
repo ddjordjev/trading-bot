@@ -1,0 +1,9 @@
+[project]
+name = "trading-bot"
+version = "0.1.0"
+description = "Modular crypto trading bot with volatility exploitation"
+requires-python = ">=3.11"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
