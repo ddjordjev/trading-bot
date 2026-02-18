@@ -7,6 +7,7 @@ from strategies.grid import GridStrategy
 from strategies.market_open_volatility import MarketOpenVolatilityStrategy
 from strategies.compound_momentum import CompoundMomentumStrategy
 from strategies.swing_opportunity import SwingOpportunityStrategy
+from strategies.custom_loader import load_custom_strategies
 
 BUILTIN_STRATEGIES: dict[str, type[BaseStrategy]] = {
     "rsi": RSIStrategy,
@@ -19,6 +20,12 @@ BUILTIN_STRATEGIES: dict[str, type[BaseStrategy]] = {
     "swing_opportunity": SwingOpportunityStrategy,
 }
 
+
+def get_all_strategies() -> dict[str, type[BaseStrategy]]:
+    """Built-in strategies merged with custom strategies from custom_strategies/."""
+    return {**BUILTIN_STRATEGIES, **load_custom_strategies()}
+
+
 __all__ = [
     "BaseStrategy",
     "RSIStrategy",
@@ -30,4 +37,6 @@ __all__ = [
     "CompoundMomentumStrategy",
     "SwingOpportunityStrategy",
     "BUILTIN_STRATEGIES",
+    "load_custom_strategies",
+    "get_all_strategies",
 ]

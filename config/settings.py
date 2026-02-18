@@ -15,6 +15,14 @@ class Settings(BaseSettings):
     exchange: str = "mexc"
     mexc_api_key: str = ""
     mexc_api_secret: str = ""
+    binance_api_key: str = ""
+    binance_api_secret: str = ""
+    bybit_api_key: str = ""
+    bybit_api_secret: str = ""
+    binance_api_key: str = ""
+    binance_api_secret: str = ""
+    bybit_api_key: str = ""
+    bybit_api_secret: str = ""
 
     default_leverage: int = 10
 
@@ -93,6 +101,18 @@ class Settings(BaseSettings):
     # CoinGecko
     coingecko_api_key: str = ""            # optional, for CoinGecko pro API
     coingecko_poll_interval: int = 300     # seconds between CoinGecko refreshes
+
+    # DeFiLlama (free, no key needed)
+    defillama_enabled: bool = True
+    defillama_poll_interval: int = 600     # seconds between TVL refreshes
+
+    # Santiment (free tier, optional key for higher rate limits)
+    santiment_api_key: str = ""
+    santiment_poll_interval: int = 600     # seconds between social data refreshes
+
+    # Glassnode (requires free API key from glassnode.com)
+    glassnode_api_key: str = ""
+    glassnode_poll_interval: int = 900     # seconds between on-chain refreshes
 
     # Dashboard
     dashboard_enabled: bool = True

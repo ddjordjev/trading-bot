@@ -9,10 +9,29 @@ from loguru import logger
 from pydantic import BaseModel
 
 
+class OISnapshot(BaseModel):
+    """Historical open interest data point."""
+    total_oi_usd: float = 0.0
+    oi_change_1h_pct: float = 0.0
+    oi_change_24h_pct: float = 0.0
+    oi_weighted_funding: float = 0.0  # OI-weighted avg funding across exchanges
+    top_trader_long_ratio: float = 0.5  # Binance top trader L/S
+    timestamp: datetime = datetime.now(timezone.utc)
+
+    @property
+    def oi_surging(self) -> bool:
+        return self.oi_change_1h_pct > 3.0
+
+    @property
+    def oi_collapsing(self) -> bool:
+        return self.oi_change_1h_pct < -5.0
+
+
 class WhaleSentimentData(BaseModel):
     long_short_ratio: float = 1.0  # >1 = more longs, <1 = more shorts
     open_interest_24h_change_pct: float = 0.0
     funding_rate: float = 0.0      # positive = longs pay shorts
+    oi_snapshot: Optional[OISnapshot] = None
     timestamp: datetime = datetime.now(timezone.utc)
 
     @property
@@ -56,6 +75,8 @@ class WhaleSentiment:
     COINGLASS_LS_URL = "https://fapi.coinglass.com/api/futures/longShortRate"
     COINGLASS_FUNDING_URL = "https://fapi.coinglass.com/api/futures/funding/v2"
     COINGLASS_OI_URL = "https://fapi.coinglass.com/api/futures/openInterest/chart"
+    COINGLASS_OI_HISTORY_URL = "https://fapi.coinglass.com/api/futures/openInterest/ohlc-history"
+    COINGLASS_TOP_TRADERS_URL = "https://fapi.coinglass.com/api/futures/topLongShortAccountRatio"
 
     def __init__(self, symbols: list[str] = None, poll_interval: int = 300,
                  coinglass_key: str = ""):
@@ -162,6 +183,46 @@ class WhaleSentiment:
                                     break
             except Exception:
                 pass
+
+            # Open interest details
+            oi_snap = OISnapshot(timestamp=datetime.now(timezone.utc))
+            try:
+                params = {"symbol": symbol, "timeType": 2}
+                async with session.get(self.COINGLASS_OI_URL, params=params,
+                                       headers=headers,
+                                       timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        json_data = await resp.json()
+                        oi_data = json_data.get("data", [])
+                        if oi_data and isinstance(oi_data, list) and len(oi_data) >= 2:
+                            latest = oi_data[-1] if isinstance(oi_data[-1], dict) else {}
+                            prev = oi_data[-2] if isinstance(oi_data[-2], dict) else {}
+                            cur_oi = float(latest.get("y", 0) or 0)
+                            prev_oi = float(prev.get("y", 0) or 0)
+                            oi_snap.total_oi_usd = cur_oi
+                            if prev_oi > 0:
+                                oi_snap.oi_change_1h_pct = ((cur_oi - prev_oi) / prev_oi) * 100
+                            data.open_interest_24h_change_pct = oi_snap.oi_change_1h_pct
+            except Exception:
+                pass
+
+            # Top trader positions (Binance top trader L/S)
+            try:
+                params = {"symbol": symbol, "timeType": 2}
+                async with session.get(self.COINGLASS_TOP_TRADERS_URL, params=params,
+                                       headers=headers,
+                                       timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        json_data = await resp.json()
+                        tt_data = json_data.get("data", [])
+                        if tt_data and isinstance(tt_data, list):
+                            latest = tt_data[-1] if isinstance(tt_data[-1], dict) else {}
+                            oi_snap.top_trader_long_ratio = float(
+                                latest.get("longRate", 50)) / 100.0
+            except Exception:
+                pass
+
+            data.oi_snapshot = oi_snap
 
         self._data[symbol] = data
 

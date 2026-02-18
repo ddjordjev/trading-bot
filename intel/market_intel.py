@@ -13,6 +13,9 @@ from intel.whale_sentiment import WhaleSentiment
 from intel.tradingview import TradingViewClient
 from intel.coinmarketcap import CoinMarketCapClient
 from intel.coingecko import CoinGeckoClient
+from intel.defillama import DeFiLlamaClient
+from intel.santiment import SantimentClient
+from intel.glassnode import GlassnodeClient
 
 
 class MarketRegime(str, Enum):
@@ -42,6 +45,23 @@ class MarketCondition(BaseModel):
     # TradingView consensus
     tv_btc_consensus: str = "neutral"
     tv_eth_consensus: str = "neutral"
+
+    # DeFiLlama
+    tvl_trend: str = "stable"
+
+    # Santiment
+    social_sentiment: str = "neutral"
+    social_spike: bool = False
+
+    # Glassnode
+    on_chain_bias: str = "neutral"
+    distribution_phase: bool = False
+    accumulation_phase: bool = False
+
+    # OI details
+    btc_oi_total_usd: float = 0.0
+    btc_oi_change_1h_pct: float = 0.0
+    top_trader_long_ratio: float = 0.5
 
     # Composite multipliers for the bot
     position_size_multiplier: float = 1.0  # applied to all new entries
@@ -89,7 +109,10 @@ class MarketIntel:
                  symbols: list[str] | None = None,
                  tv_exchange: str = "MEXC",
                  cmc_api_key: str = "",
-                 coingecko_api_key: str = ""):
+                 coingecko_api_key: str = "",
+                 santiment_api_key: str = "",
+                 glassnode_api_key: str = "",
+                 defillama_enabled: bool = True):
         self.fear_greed = FearGreedClient(poll_interval=3600)
         self.liquidations = LiquidationMonitor(poll_interval=300, api_key=coinglass_key)
         self.macro = MacroCalendar(poll_interval=1800)
@@ -111,6 +134,10 @@ class MarketIntel:
             api_key=coingecko_api_key,
             poll_interval=300,
         )
+        self.defillama = DeFiLlamaClient(poll_interval=600)
+        self.santiment = SantimentClient(api_key=santiment_api_key, poll_interval=600)
+        self.glassnode = GlassnodeClient(api_key=glassnode_api_key, poll_interval=900)
+        self._defillama_enabled = defillama_enabled
         self._condition = MarketCondition()
 
     async def start(self) -> None:
@@ -121,8 +148,12 @@ class MarketIntel:
         await self.tradingview.start()
         await self.coinmarketcap.start()
         await self.coingecko.start()
+        if self._defillama_enabled:
+            await self.defillama.start()
+        await self.santiment.start()
+        await self.glassnode.start()
         logger.info("MarketIntel started -- all external feeds active "
-                     "(F&G, Liq, Macro, Whales, TV, CMC, CoinGecko)")
+                     "(F&G, Liq, Macro, Whales, TV, CMC, CoinGecko, DeFiLlama, Santiment, Glassnode)")
 
     async def stop(self) -> None:
         await self.fear_greed.stop()
@@ -132,6 +163,9 @@ class MarketIntel:
         await self.tradingview.stop()
         await self.coinmarketcap.stop()
         await self.coingecko.stop()
+        await self.defillama.stop()
+        await self.santiment.stop()
+        await self.glassnode.stop()
 
     def assess(self) -> MarketCondition:
         """Combine all signals into a single MarketCondition."""
@@ -172,9 +206,31 @@ class MarketIntel:
         c.tv_btc_consensus = self.tradingview.consensus("BTC/USDT")
         c.tv_eth_consensus = self.tradingview.consensus("ETH/USDT")
 
+        # DeFiLlama TVL flows
+        c.tvl_trend = self.defillama.tvl_trend
+        defi_mult = self.defillama.position_bias()
+
+        # Santiment social sentiment
+        c.social_sentiment = self.santiment.sentiment_signal("BTC")
+        c.social_spike = self.santiment.is_social_spike("BTC")
+        santi_mult = self.santiment.position_bias()
+
+        # Glassnode on-chain
+        c.on_chain_bias = self.glassnode.on_chain_bias("BTC")
+        c.distribution_phase = self.glassnode.is_distribution_phase()
+        c.accumulation_phase = self.glassnode.is_accumulation_phase()
+        glass_mult = self.glassnode.position_bias()
+
+        # CoinGlass OI details
+        btc_whale = self.whales.get("BTC")
+        if btc_whale and btc_whale.oi_snapshot:
+            c.btc_oi_total_usd = btc_whale.oi_snapshot.total_oi_usd
+            c.btc_oi_change_1h_pct = btc_whale.oi_snapshot.oi_change_1h_pct
+            c.top_trader_long_ratio = btc_whale.oi_snapshot.top_trader_long_ratio
+
         # -- Composite position size multiplier --
         c.position_size_multiplier = min(
-            fg_mult * liq_mult * macro_mult,
+            fg_mult * liq_mult * macro_mult * defi_mult * santi_mult * glass_mult,
             1.5,  # cap at 1.5x even if everything is screaming "buy"
         )
 
@@ -182,7 +238,8 @@ class MarketIntel:
         c.should_reduce_exposure = (
             c.macro_event_imminent or
             self.fear_greed.is_extreme_greed or
-            (btc is not None and btc.is_overleveraged_longs)
+            (btc is not None and btc.is_overleveraged_longs) or
+            c.distribution_phase
         )
 
         # -- Preferred direction --
@@ -195,6 +252,10 @@ class MarketIntel:
         tv_dir = c.tv_btc_consensus
         if tv_dir in votes:
             votes[tv_dir] += 2
+
+        # On-chain bias gets 1 vote
+        if c.on_chain_bias in votes:
+            votes[c.on_chain_bias] += 1
 
         if votes["long"] > votes["short"] and votes["long"] > votes["neutral"]:
             c.preferred_direction = "long"
@@ -262,6 +323,9 @@ class MarketIntel:
             self.tradingview.summary(),
             self.coinmarketcap.summary(),
             self.coingecko.summary(),
+            self.defillama.summary(),
+            self.santiment.summary(),
+            self.glassnode.summary(),
             f"Regime: {self._condition.regime.value} | "
             f"Size: {self._condition.position_size_multiplier:.1f}x | "
             f"Direction: {self._condition.preferred_direction}",
