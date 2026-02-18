@@ -14,14 +14,16 @@ from core.risk.manager import RiskManager
 from core.orders.trailing import TrailingStopManager
 from core.orders.scaler import PositionScaler, ScalePhase, ScaleMode
 from core.orders.hedge import HedgeManager, HedgeState
+from core.orders.wick_scalp import WickScalpDetector
 
 
 class OrderManager:
     """Translates signals into orders, manages open positions, and enforces stops.
 
-    Scaling modes: WINNERS (add to winners) / PYRAMID (DCA down, lever up)
-    Hedging: when a profitable position shows reversal signs, open a small
-             counter-position to exploit the pullback while protecting the main.
+    Scaling modes: PYRAMID (DCA down, lever up) is the default. WINNERS for rare scalps.
+    Hedging: when a profitable position shows reversal signs, open a counter-position.
+    Wick scalping: when a PYRAMID position is getting wicked, open a quick counter-scalp
+                   to profit from the wick while the main position DCA-s down.
     """
 
     def __init__(self, exchange: BaseExchange, risk: RiskManager, settings: Settings):
@@ -44,6 +46,7 @@ class OrderManager:
             hedge_stop_pct=settings.hedge_stop_pct,
             max_hedges=settings.max_hedges,
         )
+        self.wick_scalper = WickScalpDetector()
         self._active_orders: list[Order] = []
         self._trade_log: list[dict] = []
 
@@ -413,6 +416,104 @@ class OrderManager:
             if sym not in active_symbols:
                 self.hedger.remove(sym)
 
+        return opened
+
+    # ------------------------------------------------------------------ #
+    #  Wick scalping: counter-trade wicks while PYRAMID DCA-s
+    # ------------------------------------------------------------------ #
+
+    async def try_wick_scalps(self) -> list[Order]:
+        """Detect wicks on PYRAMID positions and open quick counter-scalps.
+
+        When a PYRAMID long is getting wicked down, open a short scalp to
+        ride the wick. When the wick reverses, the scalp profits and the
+        main position gets a better DCA entry. Double win.
+        """
+        opened: list[Order] = []
+        positions = await self.exchange.fetch_positions()
+
+        for pos in positions:
+            sp = self.scaler.get(pos.symbol)
+            if not sp or sp.mode != ScaleMode.PYRAMID:
+                continue
+
+            self.wick_scalper.feed_price(pos.symbol, pos.current_price)
+
+            scalp = self.wick_scalper.check_for_wick(
+                symbol=pos.symbol,
+                main_side=sp.side,
+                current_price=pos.current_price,
+                entry_price=sp.avg_entry_price,
+            )
+            if not scalp:
+                continue
+
+            scalp_side_order = OrderSide.SELL if scalp.scalp_side == "short" else OrderSide.BUY
+            market_type = MarketType(sp.market_type) if sp.market_type else MarketType.FUTURES
+
+            scalp_dollars = self.settings.initial_risk_amount
+            scalp_leverage = sp.target_leverage
+            if pos.current_price <= 0:
+                continue
+            scalp_amount = (scalp_dollars * scalp_leverage) / pos.current_price
+
+            logger.info("WICK SCALP on {} | main={} pyramid | scalp={} ${:.0f} @ {}x",
+                        pos.symbol, sp.side, scalp.scalp_side, scalp_dollars, scalp_leverage)
+
+            order = await self.exchange.place_order(
+                symbol=pos.symbol,
+                side=scalp_side_order,
+                order_type=OrderType.MARKET,
+                amount=scalp_amount,
+                leverage=scalp_leverage,
+                market_type=market_type,
+            )
+
+            if order.status == OrderStatus.FILLED:
+                self.wick_scalper.activate(
+                    pos.symbol, scalp, order.average_price, order.filled, order.id,
+                )
+
+                scalp_pos = Position(
+                    symbol=pos.symbol, side=scalp_side_order,
+                    amount=scalp_amount, entry_price=order.average_price,
+                    current_price=order.average_price,
+                    leverage=scalp_leverage, market_type=market_type.value,
+                )
+                wick_sym = f"{pos.symbol}:wick"
+                self.trailing.register(
+                    scalp_pos,
+                    initial_stop_pct=scalp.stop_pct,
+                    trail_pct=scalp.trail_pct,
+                )
+
+                self._log_trade(
+                    Signal(symbol=pos.symbol,
+                           action=SignalAction.SELL if scalp.scalp_side == "short" else SignalAction.BUY,
+                           strategy="wick_scalp",
+                           reason=f"wick on {sp.side} pyramid",
+                           market_type=sp.market_type),
+                    order, "wick_scalp_open",
+                )
+                opened.append(order)
+
+        # Close expired wick scalps
+        for sym in self.wick_scalper.get_expired():
+            scalp = self.wick_scalper.get(sym)
+            if not scalp:
+                continue
+            close_side = OrderSide.BUY if scalp.scalp_side == "short" else OrderSide.SELL
+            close_signal = Signal(
+                symbol=sym, action=SignalAction.CLOSE,
+                strategy="wick_scalp", reason="wick_scalp_expired",
+                market_type="futures",
+            )
+            order = await self.execute_signal(close_signal)
+            if order:
+                self.wick_scalper.close(sym)
+                opened.append(order)
+
+        self.wick_scalper.cleanup()
         return opened
 
     # ------------------------------------------------------------------ #

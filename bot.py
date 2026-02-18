@@ -198,15 +198,23 @@ class TradingBot:
         if partials:
             logger.info("Partial profit taken on {} position(s)", len(partials))
 
-        # 5. Close expired quick trades
+        # 5. Wick scalps: counter-trade wicks while PYRAMID DCA-s
+        try:
+            wick_orders = await self.orders.try_wick_scalps()
+            if wick_orders:
+                logger.info("Wick scalp: {} order(s) this tick", len(wick_orders))
+        except Exception as e:
+            logger.error("Wick scalp error: {}", e)
+
+        # 6. Close expired quick trades
         await self.orders.close_expired_quick_trades(self._active_signals)
 
-        # 6. Assess market intelligence (external feeds)
+        # 7. Assess market intelligence (external feeds)
         intel_condition: Optional[MarketCondition] = None
         if self.intel:
             intel_condition = self.intel.assess()
 
-        # 7. Trading gates
+        # 8. Trading gates
         allow_new_entries = self.target.should_trade()
         aggression = self.target.aggression_multiplier()
         allow_gambling = self.target.target_reached and self.target.todays_pnl_pct > 0
@@ -218,7 +226,7 @@ class TradingBot:
                 aggression *= 0.7
                 logger.info("Intel: reducing exposure (regime={})", intel_condition.regime.value)
 
-        # 8. Run all strategies (collect candles for hedge analysis)
+        # 9. Run all strategies (collect candles for hedge analysis)
         candles_map: dict[str, list] = {}
         all_strategies = list(self._strategies) + list(self._dynamic_strategies.values())
         for strategy in all_strategies:
@@ -285,7 +293,7 @@ class TradingBot:
             except Exception as e:
                 logger.error("Strategy '{}' error for {}: {}", strategy.name, strategy.symbol, e)
 
-        # 9. Hedge check: open counter-positions on reversal signals
+        # 10. Hedge check: open counter-positions on reversal signals
         if self.settings.hedge_enabled:
             try:
                 hedges = await self.orders.try_hedge(candles_map)
@@ -294,7 +302,7 @@ class TradingBot:
             except Exception as e:
                 logger.error("Hedge tick error: {}", e)
 
-        # 10. Status + daily reset
+        # 11. Status + daily reset
         await self._log_status()
         await self._check_daily_reset()
 
@@ -457,6 +465,12 @@ class TradingBot:
         if hedges:
             for sym, hp in hedges.items():
                 logger.info("  {}", hp.status_line())
+
+        wick_scalps = self.orders.wick_scalper.active_scalps
+        if wick_scalps:
+            for sym, ws in wick_scalps.items():
+                logger.info("  Wick scalp {}: {} @ {:.6f} ({:.0f}m old)",
+                            sym, ws.scalp_side, ws.entry_price, ws.age_minutes)
 
     async def _check_daily_reset(self) -> None:
         now = datetime.now(timezone.utc)
