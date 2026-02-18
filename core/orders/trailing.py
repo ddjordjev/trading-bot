@@ -12,19 +12,29 @@ from core.models import OrderSide, Position
 class TrailingStop(BaseModel):
     """Tracks a trailing stop for an open position.
 
-    The stop ratchets in the profitable direction and never moves backward.
-    Once price retraces past the stop, the position should be closed.
+    Key behaviors:
+    - Initial stop: hard stop from entry (cut the loser fast)
+    - Break-even lock: once profit hits breakeven_trigger_pct, stop moves to entry price
+    - Trailing activation: once profit hits activation_pct, stop follows peak price
+    - Stop never moves backward
+
+    On low-liquidity coins, MEXC may skip stop-loss execution on fast wicks.
+    For those, we use tighter initial stops and rely on our own polling to
+    close via market order rather than trusting exchange stop orders.
     """
 
     symbol: str
     side: OrderSide
     entry_price: float
-    initial_stop_pct: float  # distance from entry as %
-    trail_pct: float         # trailing distance as % from peak
-    peak_price: float = 0.0  # best price seen so far
+    initial_stop_pct: float
+    trail_pct: float
+    peak_price: float = 0.0
     current_stop: float = 0.0
-    activated: bool = False  # trailing only activates once in profit
-    activation_pct: float = 0.5  # min profit % to start trailing
+    activated: bool = False
+    breakeven_locked: bool = False
+    activation_pct: float = 0.5
+    breakeven_trigger_pct: float = 5.0  # move stop to entry once at +5%
+    low_liquidity: bool = False  # if True, we manage stop ourselves (no exchange SL)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def model_post_init(self, __context: object) -> None:
@@ -38,21 +48,31 @@ class TrailingStop(BaseModel):
 
     def update(self, current_price: float) -> bool:
         """Update with latest price. Returns True if stop was hit."""
-
         if self.side == OrderSide.BUY:
             return self._update_long(current_price)
         return self._update_short(current_price)
 
     def _update_long(self, price: float) -> bool:
         if price <= self.current_stop:
-            logger.info("Trailing stop HIT for {} (long) at {:.6f} (stop was {:.6f})",
-                        self.symbol, price, self.current_stop)
+            logger.info("Stop HIT for {} (long) at {:.6f} (stop={:.6f}, locked_be={}, trail={})",
+                        self.symbol, price, self.current_stop,
+                        self.breakeven_locked, self.activated)
             return True
 
         profit_pct = (price - self.entry_price) / self.entry_price * 100
+
+        # Break-even lock: once at +5%, move stop to entry price (zero risk)
+        if not self.breakeven_locked and profit_pct >= self.breakeven_trigger_pct:
+            self.breakeven_locked = True
+            if self.entry_price > self.current_stop:
+                self.current_stop = self.entry_price
+                logger.info("BREAK-EVEN locked for {} at {:.2f}% profit (stop -> {:.6f})",
+                            self.symbol, profit_pct, self.entry_price)
+
+        # Trailing activation
         if not self.activated and profit_pct >= self.activation_pct:
             self.activated = True
-            logger.info("Trailing stop ACTIVATED for {} at {:.2f}% profit", self.symbol, profit_pct)
+            logger.info("Trailing ACTIVATED for {} at {:.2f}% profit", self.symbol, profit_pct)
 
         if price > self.peak_price:
             self.peak_price = price
@@ -61,21 +81,30 @@ class TrailingStop(BaseModel):
                 if new_stop > self.current_stop:
                     old = self.current_stop
                     self.current_stop = new_stop
-                    logger.debug("Trail raised for {}: {:.6f} -> {:.6f} (peak: {:.6f})",
+                    logger.debug("Trail raised {}: {:.6f} -> {:.6f} (peak: {:.6f})",
                                  self.symbol, old, new_stop, price)
 
         return False
 
     def _update_short(self, price: float) -> bool:
         if price >= self.current_stop:
-            logger.info("Trailing stop HIT for {} (short) at {:.6f} (stop was {:.6f})",
-                        self.symbol, price, self.current_stop)
+            logger.info("Stop HIT for {} (short) at {:.6f} (stop={:.6f}, locked_be={}, trail={})",
+                        self.symbol, price, self.current_stop,
+                        self.breakeven_locked, self.activated)
             return True
 
         profit_pct = (self.entry_price - price) / self.entry_price * 100
+
+        if not self.breakeven_locked and profit_pct >= self.breakeven_trigger_pct:
+            self.breakeven_locked = True
+            if self.entry_price < self.current_stop:
+                self.current_stop = self.entry_price
+                logger.info("BREAK-EVEN locked for {} at {:.2f}% profit (stop -> {:.6f})",
+                            self.symbol, profit_pct, self.entry_price)
+
         if not self.activated and profit_pct >= self.activation_pct:
             self.activated = True
-            logger.info("Trailing stop ACTIVATED for {} at {:.2f}% profit", self.symbol, profit_pct)
+            logger.info("Trailing ACTIVATED for {} at {:.2f}% profit", self.symbol, profit_pct)
 
         if price < self.peak_price:
             self.peak_price = price
@@ -84,14 +113,13 @@ class TrailingStop(BaseModel):
                 if new_stop < self.current_stop:
                     old = self.current_stop
                     self.current_stop = new_stop
-                    logger.debug("Trail lowered for {}: {:.6f} -> {:.6f} (peak: {:.6f})",
+                    logger.debug("Trail lowered {}: {:.6f} -> {:.6f} (peak: {:.6f})",
                                  self.symbol, old, new_stop, price)
 
         return False
 
     @property
     def pnl_from_stop(self) -> float:
-        """If stopped out now, what % PnL would result."""
         if self.side == OrderSide.BUY:
             return (self.current_stop - self.entry_price) / self.entry_price * 100
         return (self.entry_price - self.current_stop) / self.entry_price * 100
@@ -100,15 +128,16 @@ class TrailingStop(BaseModel):
 class TrailingStopManager:
     """Manages trailing stops for all open positions."""
 
-    def __init__(self, default_initial_pct: float = 2.0, default_trail_pct: float = 1.0,
-                 activation_pct: float = 0.5):
+    def __init__(self, default_initial_pct: float = 1.5, default_trail_pct: float = 0.5,
+                 activation_pct: float = 0.5, breakeven_pct: float = 5.0):
         self.default_initial_pct = default_initial_pct
         self.default_trail_pct = default_trail_pct
         self.activation_pct = activation_pct
+        self.breakeven_pct = breakeven_pct
         self._stops: dict[str, TrailingStop] = {}
 
     def register(self, position: Position, initial_stop_pct: Optional[float] = None,
-                 trail_pct: Optional[float] = None) -> TrailingStop:
+                 trail_pct: Optional[float] = None, low_liquidity: bool = False) -> TrailingStop:
         ts = TrailingStop(
             symbol=position.symbol,
             side=position.side,
@@ -116,14 +145,16 @@ class TrailingStopManager:
             initial_stop_pct=initial_stop_pct or self.default_initial_pct,
             trail_pct=trail_pct or self.default_trail_pct,
             activation_pct=self.activation_pct,
+            breakeven_trigger_pct=self.breakeven_pct,
+            low_liquidity=low_liquidity,
         )
         self._stops[position.symbol] = ts
-        logger.info("Trailing stop registered for {} - initial stop: {:.6f}, trail: {:.1f}%",
-                     position.symbol, ts.current_stop, ts.trail_pct)
+        liq_tag = " [LOW-LIQ]" if low_liquidity else ""
+        logger.info("Stop registered for {}{} - initial: {:.6f}, BE at +{:.0f}%, trail: {:.1f}%",
+                     position.symbol, liq_tag, ts.current_stop, self.breakeven_pct, ts.trail_pct)
         return ts
 
     def update_all(self, positions: list[Position]) -> list[str]:
-        """Update all trailing stops. Returns symbols that were stopped out."""
         stopped: list[str] = []
         for pos in positions:
             ts = self._stops.get(pos.symbol)

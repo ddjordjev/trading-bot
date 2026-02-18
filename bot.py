@@ -14,7 +14,7 @@ from core.models import Ticker, Candle, Signal, SignalAction
 from core.orders import OrderManager
 from core.risk import RiskManager
 from core.risk.daily_target import DailyTargetTracker
-from core.risk.market_filter import MarketQualityFilter
+from core.risk.market_filter import MarketQualityFilter, LiquidityTier
 from notifications import Notifier, NotificationType
 from news import NewsMonitor, NewsItem
 from strategies.base import BaseStrategy
@@ -24,7 +24,14 @@ from scanner import TrendingScanner, TrendingCoin
 
 
 class TradingBot:
-    """Main bot orchestrator. Connects exchange, strategies, risk, and notifications."""
+    """Main bot orchestrator.
+
+    MEXC-specific rules baked in:
+    1. Always start small, add to winners (scaled entries)
+    2. Low-liq coins: only gambling-sized bets, self-managed stops
+    3. Lock break-even at +5%, then trail
+    4. After a good day, allow tiny yolo bets on trending shitcoins
+    """
 
     def __init__(self, settings: Optional[Settings] = None, daily_target_pct: float = 10.0):
         self.settings = settings or get_settings()
@@ -35,7 +42,9 @@ class TradingBot:
         self.volatility = VolatilityDetector(self.settings)
         self.news = NewsMonitor(self.settings)
         self.target = DailyTargetTracker(daily_target_pct=daily_target_pct, compound=True)
-        self.market_filter = MarketQualityFilter()
+        self.market_filter = MarketQualityFilter(
+            min_liquidity_volume=self.settings.min_liquidity_volume,
+        )
         self.scanner = TrendingScanner(
             poll_interval=60,
             min_volume_24h=5_000_000,
@@ -73,12 +82,17 @@ class TradingBot:
 
     async def start(self) -> None:
         logger.info("=" * 60)
-        logger.info("TRADING BOT v0.1.0")
+        logger.info("TRADING BOT v0.2.0")
         logger.info("Mode: {}", self.settings.trading_mode.upper())
         logger.info("Exchange: {}", self.settings.exchange)
         logger.info("Daily target: {:.0f}% (compounding)", self.target.daily_target_pct)
         logger.info("Strategies: {}", len(self._strategies))
         logger.info("Leverage: {}x default", self.settings.default_leverage)
+        logger.info("Scaled entries: start {}%, add {}%, BE lock at +{}%",
+                     self.settings.initial_entry_pct, (1 - self.settings.initial_entry_pct / 100) * 100,
+                     self.settings.breakeven_lock_pct)
+        logger.info("Gambling budget: {}% of balance for low-liq coins",
+                     self.settings.gambling_budget_pct)
         logger.info("=" * 60)
 
         await self.exchange.connect()
@@ -125,24 +139,31 @@ class TradingBot:
     async def _tick(self) -> None:
         """Single evaluation cycle."""
 
-        # Update balance for target tracker
         balance_map = await self.exchange.fetch_balance()
         balance = balance_map.get("USDT", 0.0)
         self.target.update_balance(balance)
 
-        # 1. Check trailing stops and liquidation
+        # 1. Check trailing stops and liquidation (self-managed for low-liq)
         closed = await self.orders.check_stops()
         for order in closed:
             await self.notifier.alert_liquidation(order.symbol, 0, balance)
 
-        # 2. Close expired quick trades
+        # 2. Scale into existing winners
+        scale_orders = await self.orders.try_scale_in()
+        if scale_orders:
+            logger.info("Scaled into {} position(s) this tick", len(scale_orders))
+
+        # 3. Close expired quick trades
         await self.orders.close_expired_quick_trades(self._active_signals)
 
-        # 3. Check if we should be trading at all today
+        # 4. Should we be trading at all?
         allow_new_entries = self.target.should_trade()
         aggression = self.target.aggression_multiplier()
 
-        # 4. Run all strategies (static + dynamic from scanner)
+        # 5. Allow gambling after a good day (target already hit)
+        allow_gambling = self.target.target_reached and self.target.todays_pnl_pct > 0
+
+        # 6. Run all strategies
         all_strategies = list(self._strategies) + list(self._dynamic_strategies.values())
         for strategy in all_strategies:
             try:
@@ -152,30 +173,40 @@ class TradingBot:
                 for c in candles:
                     strategy.feed_candle(c)
 
-                # Volatility detection always runs (for alerts)
                 spike = self.volatility.update(ticker)
                 if spike:
                     await self._handle_spike(spike)
 
-                # Strategy analysis always runs (for CLOSE signals)
                 sig = strategy.analyze(candles, ticker)
                 if not sig:
                     continue
 
-                # Always allow close signals
                 if sig.action == SignalAction.CLOSE:
                     await self._process_signal(sig)
                     continue
 
-                # Swing opportunities bypass the daily target gate -- these are rare
                 is_swing = sig.strategy == "swing_opportunity"
 
-                # Gate: should we be opening new positions?
+                # Assess liquidity before entry
+                liq = self.market_filter.assess_liquidity(candles, ticker)
+                is_low_liq = liq.tier in (LiquidityTier.LOW, LiquidityTier.DEAD)
+
+                # Low-liq + not gambling mode = skip
+                if is_low_liq and not allow_gambling:
+                    logger.info("Skipping {} -- low liquidity and not in gambling mode", strategy.symbol)
+                    continue
+
+                # Low-liq + gambling allowed: let it through with tiny size
+                if is_low_liq and allow_gambling:
+                    logger.info("GAMBLING BET on {} (low-liq, already had a good day)", strategy.symbol)
+                    await self._process_signal(sig, low_liquidity=True)
+                    continue
+
+                # Normal liquidity flow
                 if not allow_new_entries and not is_swing:
                     logger.debug("Skipping entry signal -- target/risk says sit out")
                     continue
 
-                # Gate: is the market worth trading right now?
                 tradeable, reason = self.market_filter.is_tradeable(candles, ticker)
                 if not tradeable:
                     logger.info("Skipping {} -- {}", strategy.symbol, reason)
@@ -187,14 +218,11 @@ class TradingBot:
             except Exception as e:
                 logger.error("Strategy '{}' error for {}: {}", strategy.name, strategy.symbol, e)
 
-        # 5. Periodic status log
+        # 7. Status + daily reset
         await self._log_status()
-
-        # 6. Daily reset check
         await self._check_daily_reset()
 
     def _adjust_for_target(self, sig: Signal, aggression: float) -> Signal:
-        """Scale signal strength by daily target progress."""
         adjusted = sig.model_copy()
         adjusted.strength = min(1.0, sig.strength * aggression)
 
@@ -204,16 +232,16 @@ class TradingBot:
 
         return adjusted
 
-    async def _process_signal(self, sig: Signal) -> None:
-        logger.info("Signal: {} {} {} (str={:.2f}, strat={}, reason={})",
+    async def _process_signal(self, sig: Signal, low_liquidity: bool = False) -> None:
+        logger.info("Signal: {} {} {} (str={:.2f}, strat={}, reason={}, low_liq={})",
                      sig.action.value, sig.symbol, sig.market_type,
-                     sig.strength, sig.strategy, sig.reason)
+                     sig.strength, sig.strategy, sig.reason, low_liquidity)
 
         if sig.strength < 0.2 and sig.action != SignalAction.CLOSE:
             logger.debug("Signal too weak ({:.2f}), skipping", sig.strength)
             return
 
-        order = await self.orders.execute_signal(sig)
+        order = await self.orders.execute_signal(sig, low_liquidity=low_liquidity)
         if order:
             self._active_signals.append(sig)
             self.target.record_trade()
@@ -230,21 +258,18 @@ class TradingBot:
             logger.info("Spike on {} confirmed by news: {}", spike.symbol, news_item.headline)
 
     async def _on_trending(self, movers: list[TrendingCoin]) -> None:
-        """Called when the scanner finds new hot movers. Dynamically spin up strategies."""
         available = set()
         try:
             available = set(await self.exchange.get_available_symbols())
         except Exception:
             pass
 
-        # Clean up strategies for coins that are no longer hot
         current_symbols = {m.trading_pair for m in movers}
         for sym in list(self._dynamic_strategies.keys()):
             if sym not in current_symbols:
                 del self._dynamic_strategies[sym]
                 logger.info("Removed dynamic strategy for {} (no longer trending)", sym)
 
-        # Add strategies for new hot movers
         for coin in movers:
             pair = coin.trading_pair
             if pair in self._dynamic_strategies:
@@ -253,9 +278,13 @@ class TradingBot:
             if available and pair not in available:
                 continue
 
-            # Skip symbols that already have a static strategy
             if any(s.symbol == pair for s in self._strategies):
                 continue
+
+            # Warn about low-liq trending coins
+            if coin.is_low_liquidity:
+                logger.info("Trending {} is LOW-LIQ (vol:{:.0f}M, cap:{:.0f}M) -- gambling only",
+                            pair, coin.volume_24h / 1e6, coin.market_cap / 1e6)
 
             from strategies.compound_momentum import CompoundMomentumStrategy
             strategy = CompoundMomentumStrategy(
@@ -267,8 +296,9 @@ class TradingBot:
             )
             self._dynamic_strategies[pair] = strategy
             direction = "BULL" if coin.momentum_score > 0 else "BEAR"
-            logger.info("Dynamic strategy added: {} [{}] (1h:{:+.1f}% 24h:{:+.1f}%)",
-                        pair, direction, coin.change_1h, coin.change_24h)
+            liq_tag = " [LOW-LIQ]" if coin.is_low_liquidity else ""
+            logger.info("Dynamic strategy added: {} [{}]{} (1h:{:+.1f}% 24h:{:+.1f}%)",
+                        pair, direction, liq_tag, coin.change_1h, coin.change_24h)
 
     async def _on_news(self, item: NewsItem) -> None:
         self._recent_news.append(item)
@@ -291,11 +321,21 @@ class TradingBot:
         logger.info(self.scanner.scan_summary())
         logger.info("Active strategies: {} static + {} dynamic",
                      len(self._strategies), len(self._dynamic_strategies))
+
+        # Scaled positions status
+        for sym, sp in self.orders.scaler.active_positions.items():
+            logger.info("  Scale {}: phase={} fill={:.0f}% adds={} avg={:.6f} low_liq={}",
+                        sym, sp.phase.value, sp.fill_pct, sp.adds,
+                        sp.avg_entry_price, sp.low_liquidity)
+
         stops = self.orders.trailing.active_stops
         if stops:
             for sym, ts in stops.items():
-                logger.info("  Trail {}: stop={:.6f} peak={:.6f} locked_pnl={:+.1f}% active={}",
-                            sym, ts.current_stop, ts.peak_price, ts.pnl_from_stop, ts.activated)
+                be_tag = " [BE-LOCKED]" if ts.breakeven_locked else ""
+                liq_tag = " [LOW-LIQ]" if ts.low_liquidity else ""
+                logger.info("  Trail {}: stop={:.6f} peak={:.6f} pnl={:+.1f}% active={}{}{}",
+                            sym, ts.current_stop, ts.peak_price, ts.pnl_from_stop,
+                            ts.activated, be_tag, liq_tag)
 
     async def _check_daily_reset(self) -> None:
         now = datetime.now(timezone.utc)
@@ -334,7 +374,7 @@ def main() -> None:
 
     bot = TradingBot(settings, daily_target_pct=10.0)
 
-    # --- PRIMARY: Scalping / hit-and-run ---
+    # --- PRIMARY: Scalping / hit-and-run (scaled entries always) ---
     bot.add_strategy("compound_momentum", "BTC/USDT", market_type="futures")
     bot.add_strategy("compound_momentum", "ETH/USDT", market_type="futures")
 

@@ -24,7 +24,6 @@ class TrendingCoin(BaseModel):
 
     @property
     def trading_pair(self) -> str:
-        """Convert symbol to exchange trading pair format."""
         clean = self.symbol.upper().replace(" ", "")
         if clean.endswith("USDT") or clean.endswith("USD"):
             return clean
@@ -32,8 +31,20 @@ class TrendingCoin(BaseModel):
 
     @property
     def momentum_score(self) -> float:
-        """Composite momentum score. Positive = bullish, negative = bearish."""
         return self.change_1h * 3 + self.change_24h * 2 + self.change_7d * 0.5
+
+    @property
+    def is_low_liquidity(self) -> bool:
+        """Flag coins that are likely too thin for reliable stop execution."""
+        return self.volume_24h < 5_000_000 or self.market_cap < 50_000_000
+
+    @property
+    def volatility_to_liquidity_ratio(self) -> float:
+        """High volatility + low volume = wick-through-your-SL territory.
+        Higher ratio = more dangerous."""
+        vol = max(self.volume_24h, 1)
+        move = max(abs(self.change_1h), abs(self.change_24h) / 4)
+        return move / (vol / 1e6)
 
 
 class TrendingScanner:
