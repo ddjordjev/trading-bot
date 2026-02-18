@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
 from typing import Optional
 
 from loguru import logger
@@ -18,13 +21,34 @@ class DailyRecord(BaseModel):
     trades: int = 0
 
 
-class DailyTargetTracker:
-    """Tracks progress toward a daily return target with compounding.
+class DailyTier(str, Enum):
+    """Behavior tiers based on daily PnL percentage."""
+    LOSING = "losing"         # in the red — capital preservation mode
+    BUILDING = "building"     # 0-10% — working toward base target
+    STRONG = "strong"         # 10-20% — base target hit, still room to grow
+    EXCELLENT = "excellent"   # 20-50% — exceptional day, start tightening
+    MONSTER = "monster"       # 50-100% — protect hard, only ride existing
+    LEGENDARY = "legendary"   # 100%+ — close all if reversal risk, or email + ride
 
-    Adjusts position sizing aggression based on how close we are to the
-    daily goal. If we're behind, allows slightly larger positions. If we've
-    hit the target, reduces aggression to protect gains.
+
+class DailyTargetTracker:
+    """Tracks progress toward daily return targets with tiered behavior.
+
+    Priority hierarchy:
+    1. CAPITAL IS SAFE (never risk what you have)
+    2. Target 10% daily (base goal)
+    3. Let it grow to 20%, 50% (reduce activity progressively)
+    4. At 100%: close all if reversal risk detected, OR email owner
+       explaining why we're letting it ride
+
+    Manual override via files in the working directory:
+    - Create a file named STOP  → halt all new trades (existing positions ride)
+    - Create a file named CLOSE_ALL → close all positions immediately
+    - Delete the file to resume normal operation
     """
+
+    STOP_FILE = Path("STOP")
+    CLOSE_ALL_FILE = Path("CLOSE_ALL")
 
     def __init__(self, daily_target_pct: float = 10.0, compound: bool = True):
         self.daily_target_pct = daily_target_pct
@@ -37,6 +61,7 @@ class DailyTargetTracker:
         self._last_reset: Optional[datetime] = None
         self._history: list[DailyRecord] = []
         self._todays_trades: int = 0
+        self._legendary_email_sent: bool = False
 
     def record_trade(self) -> None:
         self._todays_trades += 1
@@ -114,42 +139,149 @@ class DailyTargetTracker:
             "3_months": b * (mult ** 90),
         }
 
+    @property
+    def tier(self) -> DailyTier:
+        pnl = self.todays_pnl_pct
+        if pnl < 0:
+            return DailyTier.LOSING
+        if pnl < 10:
+            return DailyTier.BUILDING
+        if pnl < 20:
+            return DailyTier.STRONG
+        if pnl < 50:
+            return DailyTier.EXCELLENT
+        if pnl < 100:
+            return DailyTier.MONSTER
+        return DailyTier.LEGENDARY
+
+    @property
+    def manual_stop(self) -> bool:
+        """Check if the user dropped a STOP file to halt trading."""
+        return self.STOP_FILE.exists()
+
+    @property
+    def manual_close_all(self) -> bool:
+        """Check if the user dropped a CLOSE_ALL file to close everything."""
+        return self.CLOSE_ALL_FILE.exists()
+
+    def clear_close_all(self) -> None:
+        """Remove the CLOSE_ALL file after positions are closed."""
+        try:
+            self.CLOSE_ALL_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def aggression_multiplier(self) -> float:
-        """Position sizing multiplier. NEVER above 1.0 -- we don't chase losses.
+        """Position sizing multiplier based on tier. NEVER above 1.0.
 
-        - Losing money:        0.5x (cut size, preserve capital)
-        - Flat / behind:       0.8x (cautious)
-        - On track (50-90%):   1.0x (normal)
-        - Near target (90%+):  0.7x (protect gains)
-        - Target exceeded:     0.4x (ride existing winners only)
+        LOSING:     0.5x  — capital preservation, shrink everything
+        BUILDING:   0.8-1.0x — working toward 10%
+        STRONG:     0.6x  — 10% hit, reduce new entries
+        EXCELLENT:  0.3x  — 20-50%, only very high conviction
+        MONSTER:    0.15x — 50-100%, almost nothing new
+        LEGENDARY:  0.0x  — 100%+, no new trades at all
         """
-        p = self.progress_pct
+        t = self.tier
 
-        if p < -20:
-            return 0.5
-        if p < 0:
-            return 0.6
-        if p < 50:
-            return 0.8
-        if p < 90:
+        if t == DailyTier.LOSING:
+            return 0.5 if self.todays_pnl_pct < -3 else 0.7
+        if t == DailyTier.BUILDING:
+            p = self.progress_pct
+            if p < 50:
+                return 0.8
             return 1.0
-        if p < 100:
-            return 0.7
-        return 0.4
+        if t == DailyTier.STRONG:
+            return 0.6
+        if t == DailyTier.EXCELLENT:
+            return 0.3
+        if t == DailyTier.MONSTER:
+            return 0.15
+        return 0.0  # LEGENDARY: no new trades
 
     def should_trade(self) -> bool:
-        """Whether we should open new positions. Returns False to sit out entirely."""
-        if self.target_reached:
-            logger.info("Daily target reached ({:.1f}%) -- only riding existing winners",
+        """Whether we should open new positions.
+
+        Manual override: STOP file kills all new entries.
+        Tier-based: at MONSTER (50-100%) only high-conviction.
+        At LEGENDARY (100%+): no new trades, ride existing only.
+        """
+        if self.manual_stop:
+            logger.warning("MANUAL STOP active (STOP file detected) -- no new trades")
+            return False
+
+        if self.manual_close_all:
+            logger.warning("MANUAL CLOSE_ALL active -- closing all positions")
+            return False
+
+        t = self.tier
+
+        if t == DailyTier.LEGENDARY:
+            logger.info("LEGENDARY day ({:+.1f}%) -- no new trades, riding existing",
                         self.todays_pnl_pct)
             return False
 
-        if self.todays_pnl_pct < -self.daily_target_pct * 0.3:
+        if t == DailyTier.MONSTER:
+            logger.info("MONSTER day ({:+.1f}%) -- only ultra-high conviction",
+                        self.todays_pnl_pct)
+            return True  # but aggression is 0.15x so almost nothing will pass
+
+        if t == DailyTier.EXCELLENT:
+            logger.info("EXCELLENT day ({:+.1f}%) -- reducing entries, protecting gains",
+                        self.todays_pnl_pct)
+            return True  # aggression 0.3x
+
+        if t == DailyTier.LOSING and self.todays_pnl_pct < -self.daily_target_pct * 0.3:
             logger.warning("Down {:.1f}% today -- sitting out to preserve capital",
                            self.todays_pnl_pct)
             return False
 
         return True
+
+    def should_close_all(self, reversal_risk: bool = False) -> tuple[bool, str]:
+        """At 100%+ daily: should we close everything?
+
+        Returns (should_close, reason).
+        If reversal_risk is True and we're at LEGENDARY, close all.
+        If no reversal risk, let it ride but flag for email notification.
+        """
+        if self.manual_close_all:
+            return True, "Manual CLOSE_ALL file detected"
+
+        if self.tier != DailyTier.LEGENDARY:
+            return False, ""
+
+        if reversal_risk:
+            return True, (f"LEGENDARY day ({self.todays_pnl_pct:+.1f}%) with reversal risk "
+                          f"-- closing all to lock in gains")
+
+        return False, ""
+
+    def legendary_ride_reason(self, intel_summary: str = "") -> str:
+        """Generate email content explaining why we're letting a 100%+ day ride."""
+        self._legendary_email_sent = True
+        return (
+            f"LEGENDARY DAY ALERT\n"
+            f"{'=' * 50}\n\n"
+            f"Daily PnL: {self.todays_pnl_pct:+.1f}% (${self.todays_pnl:+,.2f})\n"
+            f"Balance: ${self._current_balance:,.2f}\n"
+            f"Trades today: {self._todays_trades}\n\n"
+            f"DECISION: Letting positions ride.\n\n"
+            f"Reasons to continue:\n"
+            f"- No strong reversal signals detected\n"
+            f"- Trailing stops are protecting all positions\n"
+            f"- Break-even locks are active on profitable positions\n\n"
+            f"Market conditions:\n{intel_summary}\n\n"
+            f"To close everything immediately:\n"
+            f"  Create a file named CLOSE_ALL in the bot directory\n"
+            f"  Or: touch CLOSE_ALL\n\n"
+            f"To stop new trades but keep existing:\n"
+            f"  Create a file named STOP in the bot directory\n"
+            f"  Or: touch STOP\n"
+        )
+
+    @property
+    def legendary_email_sent(self) -> bool:
+        return self._legendary_email_sent
 
     @property
     def history(self) -> list[DailyRecord]:
@@ -182,12 +314,17 @@ class DailyTargetTracker:
         return min(self._history, key=lambda d: d.pnl_pct) if self._history else None
 
     def status_report(self) -> str:
+        manual = ""
+        if self.manual_stop:
+            manual = " ** MANUAL STOP **"
+        elif self.manual_close_all:
+            manual = " ** CLOSE ALL **"
         return (
-            f"Day {self._day_number} | "
+            f"Day {self._day_number} [{self.tier.value.upper()}] | "
             f"PnL: {self.todays_pnl:+.2f} ({self.todays_pnl_pct:+.1f}%) | "
             f"Target: {self.daily_target_pct:.1f}% | "
             f"Progress: {self.progress_pct:.0f}% | "
-            f"Balance: {self._current_balance:.2f}"
+            f"Balance: {self._current_balance:.2f}{manual}"
         )
 
     def compound_report(self) -> str:

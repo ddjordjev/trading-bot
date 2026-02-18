@@ -23,6 +23,13 @@ from strategies import BUILTIN_STRATEGIES
 from volatility import VolatilityDetector, SpikeEvent
 from scanner import TrendingScanner, TrendingCoin
 from intel import MarketIntel, MarketCondition
+from db import TradeDB
+from db.models import TradeRecord
+from analytics import AnalyticsEngine
+from shared.state import SharedState
+from shared.models import (
+    BotDeploymentStatus, DeploymentLevel, IntelSnapshot, AnalyticsSnapshot,
+)
 
 
 # PYRAMID (DCA in) is the DEFAULT for all strategies. Nobody can predict exact
@@ -65,24 +72,35 @@ class TradingBot:
         self.market_filter = MarketQualityFilter(
             min_liquidity_volume=self.settings.min_liquidity_volume,
         )
+        self.intel: Optional[MarketIntel] = None
+        if self.settings.intel_enabled:
+            self.intel = MarketIntel(
+                coinglass_key=self.settings.coinglass_api_key,
+                symbols=self.settings.intel_symbol_list,
+                tv_exchange=self.settings.tv_exchange,
+                cmc_api_key=self.settings.cmc_api_key,
+                coingecko_api_key=self.settings.coingecko_api_key,
+            )
+
         self.scanner = TrendingScanner(
             poll_interval=60,
             min_volume_24h=5_000_000,
             min_market_cap=50_000_000,
             min_hourly_move_pct=2.0,
             min_daily_move_pct=5.0,
+            intel=self.intel,
         )
-        self.intel: Optional[MarketIntel] = None
-        if self.settings.intel_enabled:
-            self.intel = MarketIntel(
-                coinglass_key=self.settings.coinglass_api_key,
-                symbols=self.settings.intel_symbol_list,
-            )
+
+        self.trade_db = TradeDB()
+        self.trade_db.connect()
+        self.analytics = AnalyticsEngine(self.trade_db)
+        self.shared = SharedState()
 
         self._strategies: list[BaseStrategy] = []
         self._dynamic_strategies: dict[str, BaseStrategy] = {}
         self._active_signals: list[Signal] = []
         self._recent_news: list[NewsItem] = []
+        self._whale_alerted: set[str] = set()  # symbols already alerted for whale position
         self._running = False
         self._tick_interval = 60
         self._status_interval = 300
@@ -109,7 +127,7 @@ class TradingBot:
 
     async def start(self) -> None:
         logger.info("=" * 60)
-        logger.info("TRADING BOT v0.4.0")
+        logger.info("TRADING BOT v0.6.0")
         logger.info("Mode: {}", self.settings.trading_mode.upper())
         logger.info("Exchange: {}", self.settings.exchange)
         logger.info("Daily target: {:.0f}% (compounding)", self.target.daily_target_pct)
@@ -122,7 +140,12 @@ class TradingBot:
                      self.settings.initial_risk_amount, self.settings.max_notional_position / 1000)
         logger.info("Gambling budget: {}% for low-liq coins", self.settings.gambling_budget_pct)
         logger.info("Intel: {}", "ENABLED" if self.intel else "disabled")
+        logger.info("Analytics DB: {} trades logged", self.trade_db.trade_count())
         logger.info("=" * 60)
+
+        self.analytics.refresh()
+        if self.analytics.scores:
+            logger.info(self.analytics.summary())
 
         await self.exchange.connect()
         await self.notifier.start()
@@ -156,6 +179,7 @@ class TradingBot:
         await self.news.stop()
         await self.notifier.stop()
         await self.exchange.disconnect()
+        self.trade_db.close()
         logger.info("Bot stopped")
 
     async def _run_loop(self) -> None:
@@ -175,10 +199,18 @@ class TradingBot:
         balance = balance_map.get("USDT", 0.0)
         self.target.update_balance(balance)
 
+        # 0. Manual override check
+        if self.target.manual_close_all:
+            logger.critical("CLOSE_ALL detected -- closing all positions NOW")
+            await self._close_all_positions("Manual CLOSE_ALL file")
+            self.target.clear_close_all()
+            return
+
         # 1. Check trailing stops and liquidation
         closed = await self.orders.check_stops()
         for order in closed:
             await self.notifier.alert_liquidation(order.symbol, 0, balance)
+            self._log_closed_trade(order, "stop")
 
         # 2. Scale into positions (both WINNERS adds and PYRAMID DCA-downs)
         scale_orders = await self.orders.try_scale_in()
@@ -198,7 +230,10 @@ class TradingBot:
         if partials:
             logger.info("Partial profit taken on {} position(s)", len(partials))
 
-        # 5. Wick scalps: counter-trade wicks while PYRAMID DCA-s
+        # 5. Whale position alert: $100K+ notional at 20%+ profit
+        await self._check_whale_positions()
+
+        # 6. Wick scalps: counter-trade wicks while PYRAMID DCA-s
         try:
             wick_orders = await self.orders.try_wick_scalps()
             if wick_orders:
@@ -209,15 +244,47 @@ class TradingBot:
         # 6. Close expired quick trades
         await self.orders.close_expired_quick_trades(self._active_signals)
 
-        # 7. Assess market intelligence (external feeds)
-        intel_condition: Optional[MarketCondition] = None
-        if self.intel:
+        # 7. Assess market intelligence
+        # Prefer shared state from monitor service; fall back to in-process
+        intel_condition = self._read_shared_intel()
+        if intel_condition is None and self.intel:
             intel_condition = self.intel.assess()
+            active_symbols = list(self.orders.scaler.active_positions.keys())
+            if active_symbols:
+                try:
+                    await self.intel.tradingview.analyze_multi(active_symbols, "1h")
+                except Exception as e:
+                    logger.debug("TV multi-analyze error: {}", e)
 
-        # 8. Trading gates
+        # 8. Legendary day check: at 100%+ decide whether to close or ride
+        if self.target.tier.value == "legendary":
+            reversal_risk = (intel_condition is not None and
+                             intel_condition.should_reduce_exposure)
+            should_close, reason = self.target.should_close_all(reversal_risk)
+            if should_close:
+                logger.critical("LEGENDARY DAY + REVERSAL RISK -- closing all: {}", reason)
+                await self._close_all_positions(reason)
+                await self.notifier.send(
+                    NotificationType.DAILY_SUMMARY,
+                    f"LEGENDARY DAY CLOSED: {self.target.todays_pnl_pct:+.1f}%",
+                    reason,
+                )
+                return
+
+            if not self.target.legendary_email_sent:
+                intel_text = self.intel.full_summary() if self.intel else "Intel disabled"
+                ride_reason = self.target.legendary_ride_reason(intel_text)
+                logger.info("LEGENDARY DAY -- letting it ride, emailing owner")
+                await self.notifier.send(
+                    NotificationType.DAILY_SUMMARY,
+                    f"LEGENDARY DAY RIDING: {self.target.todays_pnl_pct:+.1f}% -- positions open",
+                    ride_reason,
+                )
+
+        # 9. Trading gates
         allow_new_entries = self.target.should_trade()
         aggression = self.target.aggression_multiplier()
-        allow_gambling = self.target.target_reached and self.target.todays_pnl_pct > 0
+        allow_gambling = self.target.todays_pnl_pct > 10 and self.target.todays_pnl_pct > 0
 
         # Apply intel adjustments to aggression and entry gates
         if intel_condition:
@@ -226,7 +293,7 @@ class TradingBot:
                 aggression *= 0.7
                 logger.info("Intel: reducing exposure (regime={})", intel_condition.regime.value)
 
-        # 9. Run all strategies (collect candles for hedge analysis)
+        # 10. Run all strategies (collect candles for hedge analysis)
         candles_map: dict[str, list] = {}
         all_strategies = list(self._strategies) + list(self._dynamic_strategies.values())
         for strategy in all_strategies:
@@ -287,13 +354,32 @@ class TradingBot:
                     sig.quick_trade = True
                     sig.max_hold_minutes = 15
 
+                # TradingView alignment: boost/penalize based on TV technical analysis
+                side = "long" if sig.action == SignalAction.BUY else "short"
+                tv_boost = self._get_tv_boost(sig.symbol, side)
+                if tv_boost != 1.0:
+                    sig = sig.model_copy()
+                    sig.strength *= tv_boost
+                    logger.debug("TV boost for {} {}: {:.2f}x -> strength={:.2f}",
+                                 sig.symbol, side, tv_boost, sig.strength)
+
+                # Analytics weight: reduce signal strength for underperforming strategies
+                strat_weight = self._read_shared_analytics_weight(sig.strategy)
+                if strat_weight < 1.0:
+                    sig = sig.model_copy()
+                    sig.strength *= strat_weight
+                    if sig.strength <= 0:
+                        logger.info("Analytics: {} weight {:.2f} killed signal for {}",
+                                    sig.strategy, strat_weight, sig.symbol)
+                        continue
+
                 sig = self._adjust_for_target(sig, aggression)
                 await self._process_signal(sig, pyramid=use_pyramid)
 
             except Exception as e:
                 logger.error("Strategy '{}' error for {}: {}", strategy.name, strategy.symbol, e)
 
-        # 10. Hedge check: open counter-positions on reversal signals
+        # 11. Hedge check: open counter-positions on reversal signals
         if self.settings.hedge_enabled:
             try:
                 hedges = await self.orders.try_hedge(candles_map)
@@ -302,7 +388,13 @@ class TradingBot:
             except Exception as e:
                 logger.error("Hedge tick error: {}", e)
 
-        # 11. Status + daily reset
+        # 12. Write deployment status for monitor service
+        try:
+            await self._write_deployment_status()
+        except Exception as e:
+            logger.debug("Failed to write deployment status: {}", e)
+
+        # 13. Status + daily reset
         await self._log_status()
         await self._check_daily_reset()
 
@@ -347,6 +439,201 @@ class TradingBot:
             adjusted.strength = min(1.0, adjusted.strength * 1.15)
 
         return adjusted
+
+    def _log_closed_trade(self, order: "Order", close_reason: str = "") -> None:
+        """Log a completed trade to the analytics database."""
+        try:
+            now = datetime.now(timezone.utc)
+            sp = self.orders.scaler.get(order.symbol)
+            intel_cond = self.intel.condition if self.intel else None
+
+            record = TradeRecord(
+                symbol=order.symbol,
+                side=order.side.value if hasattr(order.side, "value") else str(order.side),
+                strategy=order.strategy or close_reason,
+                action="close",
+                scale_mode=sp.mode.value if sp else "",
+                entry_price=order.average_price or order.price or 0,
+                exit_price=order.average_price or 0,
+                amount=order.filled or order.amount,
+                leverage=order.leverage,
+                pnl_usd=0,
+                pnl_pct=0,
+                is_winner=False,
+                dca_count=sp.adds if sp else 0,
+                was_quick_trade=False,
+                was_low_liquidity=sp.low_liquidity if sp else False,
+                market_regime=intel_cond.regime.value if intel_cond else "",
+                fear_greed=intel_cond.fear_greed if intel_cond else 50,
+                daily_tier=self.target.tier.value,
+                daily_pnl_at_entry=self.target.todays_pnl_pct,
+                signal_strength=0,
+                hour_utc=now.hour,
+                day_of_week=now.weekday(),
+                closed_at=now.isoformat(),
+            )
+            self.trade_db.log_trade(record)
+            self._whale_alerted.discard(order.symbol)
+        except Exception as e:
+            logger.debug("Failed to log trade: {}", e)
+
+    async def _close_all_positions(self, reason: str) -> None:
+        """Emergency close all open positions."""
+        positions = await self.exchange.fetch_positions()
+        for pos in positions:
+            if pos.amount <= 0:
+                continue
+            signal = Signal(
+                symbol=pos.symbol, action=SignalAction.CLOSE,
+                strategy="manual_override", reason=reason,
+                market_type=pos.market_type,
+            )
+            try:
+                await self.orders.execute_signal(signal)
+                logger.info("Closed {} ({})", pos.symbol, reason)
+            except Exception as e:
+                logger.error("Failed to close {}: {}", pos.symbol, e)
+
+    # -- Whale position alerts -- #
+
+    WHALE_NOTIONAL_THRESHOLD = 100_000.0
+    WHALE_PROFIT_PCT_THRESHOLD = 20.0
+
+    async def _check_whale_positions(self) -> None:
+        """Alert once per position when it hits $100K+ notional AND 20%+ profit."""
+        positions = await self.exchange.fetch_positions()
+        prices = {p.symbol: p.current_price for p in positions if p.amount > 0}
+
+        for sym, sp in self.orders.scaler.active_positions.items():
+            if sym in self._whale_alerted:
+                continue
+
+            price = prices.get(sym, 0)
+            if price <= 0:
+                continue
+
+            notional = sp.current_size * price * sp.current_leverage
+            profit_pct = sp._current_profit_pct(price)
+
+            if notional >= self.WHALE_NOTIONAL_THRESHOLD and profit_pct >= self.WHALE_PROFIT_PCT_THRESHOLD:
+                profit_usd = sp.current_size * (price - sp.avg_entry_price) * sp.current_leverage
+                if sp.side == "short":
+                    profit_usd = sp.current_size * (sp.avg_entry_price - price) * sp.current_leverage
+
+                dashboard_url = f"http://localhost:{self.settings.dashboard_port}"
+                await self.notifier.alert_whale_position(
+                    symbol=sym,
+                    notional=notional,
+                    profit_pct=profit_pct,
+                    profit_usd=profit_usd,
+                    entry_price=sp.avg_entry_price,
+                    current_price=price,
+                    leverage=sp.current_leverage,
+                    adds=sp.adds,
+                    dashboard_url=dashboard_url,
+                )
+                self._whale_alerted.add(sym)
+                logger.info("WHALE ALERT sent for {} -- ${:.0f} notional at +{:.1f}%", sym, notional, profit_pct)
+
+    # -- Shared State (inter-process communication) -- #
+
+    async def _write_deployment_status(self) -> None:
+        """Tell the monitor service how busy we are so it adjusts intensity."""
+        positions = await self.exchange.fetch_positions()
+        active = [p for p in positions if p.amount > 0]
+
+        avg_health = 0.0
+        worst = 0.0
+        if active:
+            pnls = [p.pnl_pct for p in active]
+            avg_health = sum(pnls) / len(pnls)
+            worst = min(pnls)
+
+        # Determine deployment level
+        capacity = 1.0 - (len(active) / max(self.settings.max_concurrent_positions, 1))
+        positions_healthy = avg_health > -1.0
+
+        if len(active) == 0:
+            level = DeploymentLevel.HUNTING
+        elif worst < -5.0 or (len(active) > 0 and avg_health < -2.0):
+            level = DeploymentLevel.STRESSED
+        elif capacity <= 0.1 and positions_healthy:
+            level = DeploymentLevel.DEPLOYED
+        else:
+            level = DeploymentLevel.ACTIVE
+
+        status = BotDeploymentStatus(
+            level=level,
+            open_positions=len(active),
+            max_positions=self.settings.max_concurrent_positions,
+            capacity_pct=capacity * 100,
+            daily_pnl_pct=self.target.todays_pnl_pct,
+            daily_tier=self.target.tier.value,
+            avg_position_health=avg_health,
+            worst_position_pnl=worst,
+            should_trade=self.target.should_trade(),
+            manual_stop=self.target.manual_stop,
+        )
+        self.shared.write_bot_status(status)
+
+    def _read_shared_intel(self) -> Optional[MarketCondition]:
+        """Read intel from shared state file (written by monitor service).
+
+        If the monitor is running, we use its data instead of running our
+        own intel clients. Falls back to in-process intel if stale or missing.
+        """
+        intel_age = self.shared.intel_age_seconds()
+        if intel_age > 600:  # stale after 10 minutes
+            return None  # fall back to in-process
+
+        snap = self.shared.read_intel()
+        if not snap.sources_active:
+            return None
+
+        return MarketCondition(
+            regime=snap.regime,
+            fear_greed=snap.fear_greed,
+            fear_greed_bias=snap.fear_greed_bias,
+            liquidation_24h=snap.liquidation_24h,
+            mass_liquidation=snap.mass_liquidation,
+            liquidation_bias=snap.liquidation_bias,
+            macro_event_imminent=snap.macro_event_imminent,
+            macro_exposure_mult=snap.macro_exposure_mult,
+            macro_spike_opportunity=snap.macro_spike_opportunity,
+            next_macro_event=snap.next_macro_event,
+            whale_bias=snap.whale_bias,
+            overleveraged_side=snap.overleveraged_side,
+            tv_btc_consensus=snap.tv_btc_consensus,
+            tv_eth_consensus=snap.tv_eth_consensus,
+            position_size_multiplier=snap.position_size_multiplier,
+            should_reduce_exposure=snap.should_reduce_exposure,
+            preferred_direction=snap.preferred_direction,
+        )
+
+    def _read_shared_analytics_weight(self, strategy: str) -> float:
+        """Read strategy weight from shared analytics state.
+
+        If the analytics service is running, use its weights.
+        Falls back to in-process analytics engine.
+        """
+        snap = self.shared.read_analytics()
+        if not snap.weights:
+            return self.analytics.get_weight(strategy)
+
+        for w in snap.weights:
+            if w.strategy == strategy:
+                return w.weight
+        return 1.0
+
+    def _get_tv_boost(self, symbol: str, side: str) -> float:
+        """Get TradingView signal boost, preferring shared state."""
+        snap = self.shared.read_intel()
+        for tv in snap.tv_analyses:
+            if tv.symbol == symbol and tv.interval == "1h":
+                return tv.signal_boost_long if side == "long" else tv.signal_boost_short
+        if self.intel:
+            return self.intel.tv_signal_boost(symbol, side)
+        return 1.0
 
     def _adjust_for_target(self, sig: Signal, aggression: float) -> Signal:
         adjusted = sig.model_copy()
@@ -484,7 +771,9 @@ class TradingBot:
             logger.info(self.target.status_report())
             logger.info("Total growth since start: {:.1f}%", self.target.total_growth_pct)
 
+            self.analytics.refresh()
             compound_report = self.target.compound_report()
+            compound_report += "\n\n" + self.analytics.summary()
             if self.intel:
                 compound_report += "\n\n" + self.intel.full_summary()
             logger.info("\n{}", compound_report)
@@ -511,36 +800,56 @@ def main() -> None:
 
     bot = TradingBot(settings, daily_target_pct=10.0)
 
-    # --- PRIMARY: Scalping / hit-and-run (WINNERS mode) ---
     bot.add_strategy("compound_momentum", "BTC/USDT", market_type="futures")
     bot.add_strategy("compound_momentum", "ETH/USDT", market_type="futures")
-
-    # --- Market open volatility scalps (WINNERS mode) ---
     bot.add_strategy("market_open_volatility", "BTC/USDT", market_type="futures")
     bot.add_strategy("market_open_volatility", "ETH/USDT", market_type="futures")
-
-    # --- RARE: Swing opportunity (PYRAMID mode -- DCA down, lever up, ride) ---
     bot.add_strategy("swing_opportunity", "BTC/USDT", market_type="futures")
     bot.add_strategy("swing_opportunity", "ETH/USDT", market_type="futures")
 
-    # --- Scanner adds dynamic strategies for trending coins automatically ---
-    # bot.add_strategy("compound_momentum", "SOL/USDT", market_type="futures")
-
     loop = asyncio.new_event_loop()
 
-    def _shutdown(sig: int, frame: object) -> None:
-        logger.info("Received signal {}, shutting down...", sig)
+    def _shutdown(sig_num: int, frame: object) -> None:
+        logger.info("Received signal {}, shutting down...", sig_num)
         loop.create_task(bot.stop())
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    try:
-        loop.run_until_complete(bot.start())
-    except KeyboardInterrupt:
-        loop.run_until_complete(bot.stop())
-    finally:
-        loop.close()
+    if settings.dashboard_enabled:
+        import uvicorn
+        from web.server import app, set_bot
+
+        set_bot(bot)
+        config = uvicorn.Config(
+            app, host=settings.dashboard_host, port=settings.dashboard_port,
+            log_level="warning", loop="none",
+        )
+        server = uvicorn.Server(config)
+
+        async def _run_all() -> None:
+            bot_task = asyncio.create_task(bot.start())
+            web_task = asyncio.create_task(server.serve())
+            logger.info("Dashboard: http://{}:{}", settings.dashboard_host, settings.dashboard_port)
+            done, pending = await asyncio.wait(
+                [bot_task, web_task], return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+
+        try:
+            loop.run_until_complete(_run_all())
+        except KeyboardInterrupt:
+            loop.run_until_complete(bot.stop())
+        finally:
+            loop.close()
+    else:
+        try:
+            loop.run_until_complete(bot.start())
+        except KeyboardInterrupt:
+            loop.run_until_complete(bot.stop())
+        finally:
+            loop.close()
 
 
 if __name__ == "__main__":

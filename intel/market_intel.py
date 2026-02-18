@@ -10,6 +10,9 @@ from intel.fear_greed import FearGreedClient
 from intel.liquidations import LiquidationMonitor
 from intel.macro_calendar import MacroCalendar
 from intel.whale_sentiment import WhaleSentiment
+from intel.tradingview import TradingViewClient
+from intel.coinmarketcap import CoinMarketCapClient
+from intel.coingecko import CoinGeckoClient
 
 
 class MarketRegime(str, Enum):
@@ -36,6 +39,10 @@ class MarketCondition(BaseModel):
     whale_bias: str = "neutral"
     overleveraged_side: str = ""
 
+    # TradingView consensus
+    tv_btc_consensus: str = "neutral"
+    tv_eth_consensus: str = "neutral"
+
     # Composite multipliers for the bot
     position_size_multiplier: float = 1.0  # applied to all new entries
     should_reduce_exposure: bool = False
@@ -51,6 +58,7 @@ class MarketCondition(BaseModel):
             f"{' | ' + self.next_macro_event if self.next_macro_event else ''}",
             f"Whale: {self.whale_bias}"
             f"{' | overleveraged ' + self.overleveraged_side if self.overleveraged_side else ''}",
+            f"TV: BTC={self.tv_btc_consensus} ETH={self.tv_eth_consensus}",
             f"=> size: {self.position_size_multiplier:.1f}x | "
             f"direction: {self.preferred_direction} | "
             f"reduce: {self.should_reduce_exposure}",
@@ -66,6 +74,9 @@ class MarketIntel:
     - Liquidation data (CoinGlass)
     - Macro calendar (ForexFactory)
     - Whale sentiment (CoinGlass funding/OI/L-S ratios)
+    - TradingView technical analysis (scanner API)
+    - CoinMarketCap trending/gainers (web API or pro API)
+    - CoinGecko trending/market data (free or pro API)
 
     The bot reads MarketCondition each tick to adjust:
     - Position sizing (multiplier)
@@ -75,7 +86,10 @@ class MarketIntel:
     """
 
     def __init__(self, coinglass_key: str = "",
-                 symbols: list[str] = None):
+                 symbols: list[str] | None = None,
+                 tv_exchange: str = "MEXC",
+                 cmc_api_key: str = "",
+                 coingecko_api_key: str = ""):
         self.fear_greed = FearGreedClient(poll_interval=3600)
         self.liquidations = LiquidationMonitor(poll_interval=300, api_key=coinglass_key)
         self.macro = MacroCalendar(poll_interval=1800)
@@ -84,6 +98,19 @@ class MarketIntel:
             poll_interval=300,
             coinglass_key=coinglass_key,
         )
+        self.tradingview = TradingViewClient(
+            exchange=tv_exchange,
+            intervals=["1h", "4h", "1D"],
+            poll_interval=120,
+        )
+        self.coinmarketcap = CoinMarketCapClient(
+            api_key=cmc_api_key,
+            poll_interval=300,
+        )
+        self.coingecko = CoinGeckoClient(
+            api_key=coingecko_api_key,
+            poll_interval=300,
+        )
         self._condition = MarketCondition()
 
     async def start(self) -> None:
@@ -91,13 +118,20 @@ class MarketIntel:
         await self.liquidations.start()
         await self.macro.start()
         await self.whales.start()
-        logger.info("MarketIntel started -- all external feeds active")
+        await self.tradingview.start()
+        await self.coinmarketcap.start()
+        await self.coingecko.start()
+        logger.info("MarketIntel started -- all external feeds active "
+                     "(F&G, Liq, Macro, Whales, TV, CMC, CoinGecko)")
 
     async def stop(self) -> None:
         await self.fear_greed.stop()
         await self.liquidations.stop()
         await self.macro.stop()
         await self.whales.stop()
+        await self.tradingview.stop()
+        await self.coinmarketcap.stop()
+        await self.coingecko.stop()
 
     def assess(self) -> MarketCondition:
         """Combine all signals into a single MarketCondition."""
@@ -134,6 +168,10 @@ class MarketIntel:
             elif btc.is_overleveraged_shorts:
                 c.overleveraged_side = "shorts"
 
+        # TradingView consensus (BTC and ETH as market leaders)
+        c.tv_btc_consensus = self.tradingview.consensus("BTC/USDT")
+        c.tv_eth_consensus = self.tradingview.consensus("ETH/USDT")
+
         # -- Composite position size multiplier --
         c.position_size_multiplier = min(
             fg_mult * liq_mult * macro_mult,
@@ -152,6 +190,11 @@ class MarketIntel:
         votes[c.fear_greed_bias] += 2
         votes[c.liquidation_bias] += 2 if c.mass_liquidation else 1
         votes[c.whale_bias] += 1
+
+        # TradingView BTC consensus gets 2 votes (strong technical signal)
+        tv_dir = c.tv_btc_consensus
+        if tv_dir in votes:
+            votes[tv_dir] += 2
 
         if votes["long"] > votes["short"] and votes["long"] > votes["neutral"]:
             c.preferred_direction = "long"
@@ -180,6 +223,35 @@ class MarketIntel:
     def condition(self) -> MarketCondition:
         return self._condition
 
+    async def analyze_symbol(self, symbol: str) -> Optional[float]:
+        """Run TradingView analysis for a symbol.
+
+        Returns signal_boost multiplier (0.7-1.3) or None if no data.
+        """
+        analysis = await self.tradingview.analyze(symbol, "1h")
+        if not analysis:
+            return None
+        await self.tradingview.analyze(symbol, "4h")
+        return None  # boost is fetched via tradingview.signal_boost() per signal
+
+    def tv_signal_boost(self, symbol: str, side: str) -> float:
+        """Get TradingView signal alignment boost for a proposed trade."""
+        return self.tradingview.signal_boost(symbol, side)
+
+    def get_discovery_symbols(self) -> list[str]:
+        """Aggregate interesting symbols from CMC and CoinGecko for the scanner."""
+        symbols: set[str] = set()
+
+        for coin in self.coinmarketcap.all_interesting:
+            if coin.is_tradable_size:
+                symbols.add(coin.symbol.upper())
+
+        for coin in self.coingecko.all_interesting:
+            if coin.volume_24h >= 1_000_000:
+                symbols.add(coin.symbol.upper())
+
+        return sorted(symbols)
+
     def full_summary(self) -> str:
         lines = [
             "=== MARKET INTELLIGENCE ===",
@@ -187,6 +259,9 @@ class MarketIntel:
             self.liquidations.summary(),
             self.macro.summary(),
             self.whales.summary(),
+            self.tradingview.summary(),
+            self.coinmarketcap.summary(),
+            self.coingecko.summary(),
             f"Regime: {self._condition.regime.value} | "
             f"Size: {self._condition.position_size_multiplier:.1f}x | "
             f"Direction: {self._condition.preferred_direction}",

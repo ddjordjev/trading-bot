@@ -81,6 +81,25 @@ class Settings(BaseSettings):
     intel_symbols: str = "BTC,ETH"         # symbols to track for whale sentiment
     mass_liquidation_threshold: float = 1_000_000_000  # $1B = mass liq event
 
+    # TradingView
+    tv_exchange: str = "MEXC"              # exchange name for TradingView scanner
+    tv_intervals: str = "1h,4h,1D"        # timeframes to analyze
+    tv_poll_interval: int = 120            # seconds between TV refreshes
+
+    # CoinMarketCap
+    cmc_api_key: str = ""                  # optional, for CMC pro API (higher rate limits)
+    cmc_poll_interval: int = 300           # seconds between CMC refreshes
+
+    # CoinGecko
+    coingecko_api_key: str = ""            # optional, for CoinGecko pro API
+    coingecko_poll_interval: int = 300     # seconds between CoinGecko refreshes
+
+    # Dashboard
+    dashboard_enabled: bool = True
+    dashboard_host: str = "0.0.0.0"
+    dashboard_port: int = 8080
+    dashboard_token: str = ""  # set a secret token for remote access
+
     log_level: str = "INFO"
 
     @property
@@ -94,6 +113,10 @@ class Settings(BaseSettings):
     @property
     def news_source_list(self) -> list[str]:
         return [s.strip() for s in self.news_sources.split(",") if s.strip()]
+
+    @property
+    def tv_interval_list(self) -> list[str]:
+        return [s.strip() for s in self.tv_intervals.split(",") if s.strip()]
 
     def is_paper(self) -> bool:
         return self.trading_mode == "paper"

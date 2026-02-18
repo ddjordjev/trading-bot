@@ -1,13 +1,51 @@
 version: "3.8"
 
+# Shared volume for inter-process communication (JSON state files + SQLite)
+volumes:
+  bot-data:
+
 services:
   trading-bot:
     build: .
     container_name: trading-bot
     restart: unless-stopped
     env_file: .env
+    command: python bot.py
+    ports:
+      - "${DASHBOARD_PORT:-8080}:8080"
     volumes:
       - ./logs:/app/logs
+      - bot-data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  monitor:
+    build: .
+    container_name: trading-bot-monitor
+    restart: unless-stopped
+    env_file: .env
+    command: python run_monitor.py
+    volumes:
+      - ./logs:/app/logs
+      - bot-data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  analytics:
+    build: .
+    container_name: trading-bot-analytics
+    restart: unless-stopped
+    env_file: .env
+    command: python run_analytics.py
+    volumes:
+      - ./logs:/app/logs
+      - bot-data:/app/data
     logging:
       driver: "json-file"
       options:

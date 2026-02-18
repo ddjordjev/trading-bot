@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trading Bot — Requirements &amp; Implementation Summary</title>
+<style>
+  :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #c9d1d9; --heading: #f0f6fc; --accent: #58a6ff; --green: #3fb950; --red: #f85149; --yellow: #d29922; --purple: #bc8cff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; padding: 2rem; max-width: 1100px; margin: 0 auto; }
+  h1 { color: var(--heading); font-size: 2rem; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border); padding-bottom: 1rem; }
+  h2 { color: var(--accent); font-size: 1.4rem; margin: 2rem 0 1rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--border); }
+  h3 { color: var(--purple); font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+  p, li { margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; }
+  .meta { color: #8b949e; font-size: 0.85rem; margin-bottom: 2rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { padding: 0.6rem 0.8rem; border: 1px solid var(--border); text-align: left; }
+  th { background: var(--surface); color: var(--heading); font-weight: 600; }
+  td { background: var(--bg); }
+  code { background: var(--surface); padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.85em; color: var(--accent); }
+  .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+  .done { background: #1a3a2a; color: var(--green); }
+  .file { color: #8b949e; font-size: 0.8rem; }
+  .principle { background: var(--surface); border-left: 3px solid var(--yellow); padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .principle strong { color: var(--yellow); }
+  .section-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem; margin: 1rem 0; }
+  details { margin: 0.5rem 0; }
+  details summary { cursor: pointer; color: var(--accent); font-weight: 500; padding: 0.3rem 0; }
+  details summary:hover { text-decoration: underline; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>Trading Bot — Requirements &amp; Implementation Summary</h1>
+<p class="meta">Last updated: 2026-02-18 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchange: MEXC (extensible)</p>
+
+<!-- ============================================================ -->
+<h2>1. Core Philosophy &amp; Trading Principles</h2>
+<!-- ============================================================ -->
+
+<div class="principle">
+  <strong>Capital Preservation First.</strong> Missing a good trade is fine. Taking a bad trade is not. The bot should happily sit idle all day if nothing is worth deploying capital on.
+</div>
+
+<div class="principle">
+  <strong>Cut Losers, Ride Winners.</strong> Every system in the bot enforces this:
+  <ul style="margin-top:0.4rem">
+    <li>Losers get cut by trailing stops, time limits, and cooldowns</li>
+    <li>Winners are <em>never</em> closed by time limits — only trailing stops manage the exit</li>
+    <li>Exception: planned losses from DCA layering are not "losers" — those are intentional</li>
+  </ul>
+</div>
+
+<div class="principle">
+  <strong>Hit and Run (Scalping) is the primary mode.</strong> Quick in-and-outs on spikes and breakouts. Swing trades are allowed only for "opportunity of a lifetime" events (e.g., BTC drops 20% to major weekly support).
+</div>
+
+<div class="principle">
+  <strong>Start Small, DCA In, Ride It Out.</strong> Always risk ~$50 to start. Nobody can predict exact bottoms — market makers wick through expected support to grab stop-loss liquidity, then reverse. Instead of getting stopped out, DCA into the wick. Keep adding until $100K notional. When in profit: raise leverage, pull capital out, lock break-even, ride.
+</div>
+
+<!-- ============================================================ -->
+<h2>2. All Requirements (Extracted from Conversation)</h2>
+<!-- ============================================================ -->
+
+<h3>2.1 Infrastructure &amp; Deployment</h3>
+<table>
+  <tr><th style="width:60%">Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Run locally from my machine</td><td><span class="badge done">Done</span></td><td class="file">scripts/run-local.sh</td></tr>
+  <tr><td>Run on DigitalOcean with Docker</td><td><span class="badge done">Done</span></td><td class="file">Dockerfile, docker-compose.yml, scripts/deploy-digitalocean.sh</td></tr>
+  <tr><td>Python as the language</td><td><span class="badge done">Done</span></td><td class="file">requirements.txt, pyproject.toml</td></tr>
+  <tr><td>Name the app "trading-bot"</td><td><span class="badge done">Done</span></td><td class="file">pyproject.toml</td></tr>
+  <tr><td>Private GitHub repo</td><td><span class="badge done">Done</span></td><td class="file">github.com/ddjordjev/trading-bot</td></tr>
+</table>
+
+<h3>2.2 Exchange &amp; Market Support</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Start with MEXC, but extensible to other exchanges later</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/base.py (abstract), core/exchange/mexc.py, core/exchange/factory.py</td></tr>
+  <tr><td>Spot &amp; Futures trading</td><td><span class="badge done">Done</span></td><td class="file">core/models/market.py (MarketType enum)</td></tr>
+  <tr><td>Crypto, tokenized stocks, and commodities</td><td><span class="badge done">Done</span></td><td class="file">Any symbol pair supported by MEXC</td></tr>
+  <tr><td>Configurable leverage (10x default)</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → default_leverage</td></tr>
+  <tr><td>Paper trading vs. real trading config</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/paper.py, config → TRADING_MODE</td></tr>
+  <tr><td>Honor exchange limits</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/mexc.py (via ccxt)</td></tr>
+</table>
+
+<h3>2.3 Core Trading Features</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Real-time price feeds</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/ (fetch_candles, fetch_ticker)</td></tr>
+  <tr><td>Order placement (market, limit)</td><td><span class="badge done">Done</span></td><td class="file">core/orders/manager.py</td></tr>
+  <tr><td>Position management &amp; tracking</td><td><span class="badge done">Done</span></td><td class="file">core/models/order.py (Position model)</td></tr>
+  <tr><td>PnL tracking</td><td><span class="badge done">Done</span></td><td class="file">core/risk/manager.py, core/risk/daily_target.py</td></tr>
+  <tr><td>Trailing stop-loss</td><td><span class="badge done">Done</span></td><td class="file">core/orders/trailing.py</td></tr>
+</table>
+
+<h3>2.4 Strategy Layer</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Pluggable strategy framework (add my own later)</td><td><span class="badge done">Done</span></td><td class="file">strategies/base.py (BaseStrategy abstract class)</td></tr>
+  <tr><td>Common strategies: RSI, MACD, Bollinger Bands, EMA</td><td><span class="badge done">Done</span></td><td class="file">strategies/rsi.py, macd.py, bollinger.py</td></tr>
+  <tr><td>Mean reversion &amp; grid strategies</td><td><span class="badge done">Done</span></td><td class="file">strategies/mean_reversion.py, grid.py</td></tr>
+  <tr><td>Market-open volatility strategy (US &amp; Asia opens)</td><td><span class="badge done">Done</span></td><td class="file">strategies/market_open_volatility.py</td></tr>
+  <tr><td>Compound momentum (spike scalping &amp; breakout)</td><td><span class="badge done">Done</span></td><td class="file">strategies/compound_momentum.py</td></tr>
+  <tr><td>Swing opportunity (rare "opportunity of a lifetime" events only)</td><td><span class="badge done">Done</span></td><td class="file">strategies/swing_opportunity.py</td></tr>
+</table>
+
+<h3>2.5 Risk Management &amp; Capital Preservation</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Daily loss limit — stop trading if exceeded</td><td><span class="badge done">Done</span></td><td class="file">core/risk/manager.py → max_daily_loss_pct</td></tr>
+  <tr><td>Consecutive loss cooldown (pause after N losses)</td><td><span class="badge done">Done</span></td><td class="file">core/risk/manager.py → consecutive_loss_cooldown</td></tr>
+  <tr><td>Max concurrent positions</td><td><span class="badge done">Done</span></td><td class="file">core/risk/manager.py → max_concurrent</td></tr>
+  <tr><td>Minimum signal strength gate (ignore weak signals)</td><td><span class="badge done">Done</span></td><td class="file">core/risk/manager.py → min_strength</td></tr>
+  <tr><td>Progressive drawdown protection (shrink positions as losses accumulate)</td><td><span class="badge done">Done</span></td><td class="file">core/risk/manager.py → calculate_position_size</td></tr>
+  <tr><td>If no good trades, don't deploy anything — sit idle</td><td><span class="badge done">Done</span></td><td class="file">core/risk/daily_target.py → should_trade()</td></tr>
+  <tr><td>Aggression multiplier that NEVER goes above 1.0 (no chasing losses)</td><td><span class="badge done">Done</span></td><td class="file">core/risk/daily_target.py → aggression_multiplier()</td></tr>
+</table>
+
+<h3>2.6 Tiered Daily Targets &amp; Manual Override</h3>
+
+<div class="principle">
+  <strong>Priority hierarchy:</strong>
+  <ol style="margin-top:0.3rem">
+    <li>Capital is safe (never risk what you have)</li>
+    <li>Target 10% daily (base goal)</li>
+    <li>Let it grow to 20%, 50% (reduce activity progressively)</li>
+    <li>At 100%: close all if reversal risk detected, or email owner explaining why we ride</li>
+  </ol>
+</div>
+
+<table>
+  <tr><th>Tier</th><th>Daily PnL</th><th>Behavior</th><th>Aggression</th></tr>
+  <tr><td>LOSING</td><td>&lt; 0%</td><td>Capital preservation, shrink positions</td><td>0.5-0.7x</td></tr>
+  <tr><td>BUILDING</td><td>0-10%</td><td>Normal trading, working toward base target</td><td>0.8-1.0x</td></tr>
+  <tr><td>STRONG</td><td>10-20%</td><td>Base target hit, reduce new entries</td><td>0.6x</td></tr>
+  <tr><td>EXCELLENT</td><td>20-50%</td><td>Only very high conviction trades</td><td>0.3x</td></tr>
+  <tr><td>MONSTER</td><td>50-100%</td><td>Almost no new trades, ride existing</td><td>0.15x</td></tr>
+  <tr><td>LEGENDARY</td><td>100%+</td><td>No new trades. Close all if reversal risk, else email + ride</td><td>0.0x</td></tr>
+</table>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Tiered behavior (LOSING → LEGENDARY)</td><td><span class="badge done">Done</span></td><td class="file">core/risk/daily_target.py → DailyTier enum</td></tr>
+  <tr><td>At 100%+: close all if reversal risk</td><td><span class="badge done">Done</span></td><td class="file">bot.py → legendary day check in _tick()</td></tr>
+  <tr><td>At 100%+ no reversal: email explaining why we ride</td><td><span class="badge done">Done</span></td><td class="file">daily_target.py → legendary_ride_reason()</td></tr>
+  <tr><td>Daily email with PnL and compound report</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py → send_daily_summary()</td></tr>
+  <tr><td><strong>Manual stop: create STOP file</strong> → halt new trades</td><td><span class="badge done">Done</span></td><td class="file">daily_target.py → manual_stop property</td></tr>
+  <tr><td><strong>Manual close all: create CLOSE_ALL file</strong> → close everything</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _close_all_positions()</td></tr>
+</table>
+
+<h3>2.7 Position Scaling ("Start Small, Add as It Grows")</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Start with fixed $50 initial risk, not a percentage</td><td><span class="badge done">Done</span></td><td class="file">config → initial_risk_amount=50</td></tr>
+  <tr><td>No hard limit on number of adds — stop at $100K notional</td><td><span class="badge done">Done</span></td><td class="file">core/orders/scaler.py → max_notional</td></tr>
+  <tr><td>Break-even stop lock at +5% profit</td><td><span class="badge done">Done</span></td><td class="file">core/orders/trailing.py → breakeven_trigger_pct</td></tr>
+</table>
+
+<h3>2.8 Pyramid / DCA as the DEFAULT Mode</h3>
+
+<div class="principle">
+  <strong>PYRAMID (DCA in) is the default for ALL strategies.</strong>
+  Nobody can accurately predict exact bottoms. Market makers and other bots exploit expected support levels — they wick through to grab stop-loss liquidity, then reverse right back up. Instead of getting caught, we DCA into the wick and treat it as an entry opportunity. Only ultra-short scalps (currently none) would use WINNERS mode.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>PYRAMID is the default for ALL strategies, not just swing</td><td><span class="badge done">Done</span></td><td class="file">bot.py → SCALP_ONLY_STRATEGIES (empty), scaler default mode</td></tr>
+  <tr><td>Start small, let it go red, add more at lower prices</td><td><span class="badge done">Done</span></td><td class="file">core/orders/scaler.py → PYRAMID mode, _should_add_pyramid()</td></tr>
+  <tr><td>Start with low/no leverage initially</td><td><span class="badge done">Done</span></td><td class="file">core/orders/scaler.py → initial_leverage = target/5</td></tr>
+  <tr><td>When in profit: raise leverage, pull out money, lock break-even</td><td><span class="badge done">Done</span></td><td class="file">core/orders/manager.py → try_lever_up(), try_partial_take()</td></tr>
+  <tr><td>Ultra-wide initial stop (min 15%) — survive market maker wicks</td><td><span class="badge done">Done</span></td><td class="file">core/orders/manager.py → max(dca_interval*8, 15%)</td></tr>
+  <tr><td>Wick-through detection: if price wicked deep then bounced, DCA at the bounce</td><td><span class="badge done">Done</span></td><td class="file">core/orders/scaler.py → _should_add_pyramid() wick logic</td></tr>
+  <tr><td>Don't get caught by market maker liquidity grabs</td><td><span class="badge done">Done</span></td><td class="file">Wide stops + DCA into wicks instead of getting stopped</td></tr>
+</table>
+
+<h3>2.9 Wick Scalping ("Exploit the Wick in the Opposite Direction")</h3>
+
+<div class="principle">
+  <strong>While PYRAMID DCA-s into a wick, simultaneously scalp the wick itself.</strong>
+  If your main position is a PYRAMID long and price wicks down, open a quick short scalp to ride the wick. When the wick reverses: the short scalp profits, AND the main long got a better DCA entry. Double win from the same event.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Detect wicks on PYRAMID positions (fast move against direction)</td><td><span class="badge done">Done</span></td><td class="file">core/orders/wick_scalp.py → WickScalpDetector</td></tr>
+  <tr><td>Open quick counter-scalp ($50, full leverage, tight trail)</td><td><span class="badge done">Done</span></td><td class="file">core/orders/manager.py → try_wick_scalps()</td></tr>
+  <tr><td>Very short max hold (5 min) — just ride the wick</td><td><span class="badge done">Done</span></td><td class="file">core/orders/wick_scalp.py → max_hold_minutes=5</td></tr>
+  <tr><td>Tight 0.3% trail to lock wick profit fast</td><td><span class="badge done">Done</span></td><td class="file">core/orders/wick_scalp.py → trail_pct=0.3</td></tr>
+  <tr><td>Max 2 concurrent wick scalps</td><td><span class="badge done">Done</span></td><td class="file">core/orders/wick_scalp.py → max_concurrent_scalps=2</td></tr>
+</table>
+
+<h3>2.10 MEXC Liquidity Awareness</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Avoid low-liquidity shitcoins for serious positions (stop losses unreliable)</td><td><span class="badge done">Done</span></td><td class="file">core/risk/market_filter.py → LiquidityTier, assess_liquidity()</td></tr>
+  <tr><td>Allow gambling-sized bets on low-liq coins after a good day</td><td><span class="badge done">Done</span></td><td class="file">bot.py → allow_gambling logic, core/orders/scaler.py → GAMBLING phase</td></tr>
+  <tr><td>Self-manage stops for low-liquidity assets (don't trust exchange SL)</td><td><span class="badge done">Done</span></td><td class="file">core/orders/trailing.py → low_liquidity flag</td></tr>
+</table>
+
+<h3>2.11 Hedging</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>If profitable position might reverse: raise stop + open small counter-position</td><td><span class="badge done">Done</span></td><td class="file">core/orders/hedge.py → HedgeManager</td></tr>
+  <tr><td>Reversal detection (RSI, volume divergence, momentum fade, wicks)</td><td><span class="badge done">Done</span></td><td class="file">core/orders/hedge.py → ReversalDetector</td></tr>
+  <tr><td>Hedge is 20% of main position, tight 1% stop</td><td><span class="badge done">Done</span></td><td class="file">config → hedge_ratio=0.20, hedge_stop_pct=1.0</td></tr>
+  <tr><td>Tighten main position stop before opening hedge</td><td><span class="badge done">Done</span></td><td class="file">core/orders/manager.py → try_hedge()</td></tr>
+</table>
+
+<h3>2.12 Volatility Exploitation</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Exploit volatility spikes as the main strategy</td><td><span class="badge done">Done</span></td><td class="file">strategies/compound_momentum.py, volatility/detector.py</td></tr>
+  <tr><td>Market-open windows (US &amp; Asia) as high-volatility periods</td><td><span class="badge done">Done</span></td><td class="file">strategies/market_open_volatility.py</td></tr>
+  <tr><td>Spikes and news = quick in-and-outs only, not long-term positions</td><td><span class="badge done">Done</span></td><td class="file">Signal.quick_trade=True, max_hold_minutes</td></tr>
+</table>
+
+<h3>2.13 News Monitoring</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Monitor news to confirm spike causes</td><td><span class="badge done">Done</span></td><td class="file">news/monitor.py → correlate_spike()</td></tr>
+  <tr><td>RSS feeds from CoinDesk, CoinTelegraph, CryptoPanic</td><td><span class="badge done">Done</span></td><td class="file">news/monitor.py</td></tr>
+  <tr><td>News + spike = quick trade only</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _handle_spike()</td></tr>
+</table>
+
+<h3>2.14 Trending / Scanner</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Monitor cryptobubbles.com, coinmarketcap.com, and coingecko.com for trending/tradable coins</td><td><span class="badge done">Done</span></td><td class="file">scanner/trending.py → TrendingScanner (multi-source)</td></tr>
+  <tr><td>Auto-add strategies for trending coins, remove when no longer trending</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _on_trending(), _dynamic_strategies</td></tr>
+  <tr><td>Flag low-liquidity trending coins for gambling-only</td><td><span class="badge done">Done</span></td><td class="file">scanner/trending.py → TrendingCoin.is_low_liquidity</td></tr>
+</table>
+
+<h3>2.15 Notifications &amp; Alerts</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Email notifications, configurable types</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py</td></tr>
+  <tr><td>"Liquidated and no more funds" always on by default</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py → NotificationType.LIQUIDATION</td></tr>
+  <tr><td>Daily PnL email with compound growth report</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py → send_daily_summary()</td></tr>
+  <tr><td>Spike detected alerts</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py → alert_spike()</td></tr>
+  <tr><td>LEGENDARY day email: explain why positions are riding</td><td><span class="badge done">Done</span></td><td class="file">daily_target.py → legendary_ride_reason()</td></tr>
+  <tr><td>Whale position alert: $100K+ notional at 20%+ profit (always on, one-shot per position)</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py → alert_whale_position(), bot.py → _check_whale_positions()</td></tr>
+</table>
+
+<h3>2.16 External Market Intelligence</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Fear &amp; Greed Index: buy in fear, sell in greed</td><td><span class="badge done">Done</span></td><td class="file">intel/fear_greed.py → alternative.me</td></tr>
+  <tr><td>Liquidation data: $1B+ = reversal zone</td><td><span class="badge done">Done</span></td><td class="file">intel/liquidations.py → coinglass.com</td></tr>
+  <tr><td>Macro calendar: FOMC, CPI, NFP cause volatility — reduce exposure before, scalp during</td><td><span class="badge done">Done</span></td><td class="file">intel/macro_calendar.py → forexfactory.com</td></tr>
+  <tr><td>Whale sentiment: long/short ratios, funding rates — contrarian positioning</td><td><span class="badge done">Done</span></td><td class="file">intel/whale_sentiment.py → coinglass.com</td></tr>
+  <tr><td><strong>TradingView</strong>: technical analysis (oscillators, MAs, summary ratings) for any pair across 1h/4h/1D. Signal boost (1.3x) when TV agrees with trade, penalty (0.7x) when TV disagrees. Cross-interval consensus (long/short/neutral) feeds into direction voting. No API key needed — uses public scanner endpoint.</td><td><span class="badge done">Done</span></td><td class="file">intel/tradingview.py → scanner.tradingview.com</td></tr>
+  <tr><td><strong>CoinMarketCap</strong>: trending coins, top gainers/losers, recently added listings. Feeds the scanner with coins worth investigating. Works without key (public endpoints), pro key for higher rate limits.</td><td><span class="badge done">Done</span></td><td class="file">intel/coinmarketcap.py → coinmarketcap.com</td></tr>
+  <tr><td><strong>CoinGecko</strong>: trending search coins, top 100 by volume with sparklines, movers &gt;5%, ATH tracking. Free API (no key), pro key for higher limits. Merged into scanner for pair discovery.</td><td><span class="badge done">Done</span></td><td class="file">intel/coingecko.py → coingecko.com</td></tr>
+  <tr><td>Unified MarketIntel orchestrator adjusting sizing, direction, exposure each tick. Now integrates TV consensus (2 votes in direction), CMC/CoinGecko data, and TV signal_boost per trade.</td><td><span class="badge done">Done</span></td><td class="file">intel/market_intel.py → MarketCondition, MarketRegime</td></tr>
+</table>
+
+<h3>2.17 Manual Override / Kill Switch</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Create <code>STOP</code> file → halt all new trades (existing ride)</td><td><span class="badge done">Done</span></td><td class="file">core/risk/daily_target.py → manual_stop</td></tr>
+  <tr><td>Create <code>CLOSE_ALL</code> file → close all positions immediately</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _close_all_positions()</td></tr>
+  <tr><td>Delete the file to resume normal operation</td><td><span class="badge done">Done</span></td><td class="file">File check happens every tick</td></tr>
+</table>
+
+<h3>2.18 Trade Analytics &amp; Pattern Detection</h3>
+
+<div class="principle">
+  <strong>Learn from every trade.</strong> Every closed position is logged to a local SQLite database with full context: strategy, market regime, Fear &amp; Greed, time of day, volatility, DCA depth, signal strength. The analytics engine detects patterns in losing trades and generates concrete modification suggestions. Strategy weights are automatically adjusted based on historical performance.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Local SQLite database for trade history</td><td><span class="badge done">Done</span></td><td class="file">db/store.py → data/trades.db</td></tr>
+  <tr><td>Log every trade with full market context</td><td><span class="badge done">Done</span></td><td class="file">db/models.py → TradeRecord (27 fields)</td></tr>
+  <tr><td>Strategy scoring: win rate, profit factor, expectancy</td><td><span class="badge done">Done</span></td><td class="file">analytics/engine.py → StrategyScore</td></tr>
+  <tr><td>Automatic weight factors (0.05-2.0x) based on performance</td><td><span class="badge done">Done</span></td><td class="file">analytics/engine.py → _compute_weight()</td></tr>
+  <tr><td>Pattern detection: time, regime, strategy-symbol combos, volatility, DCA depth</td><td><span class="badge done">Done</span></td><td class="file">analytics/engine.py → _detect_patterns()</td></tr>
+  <tr><td>Modification suggestions: disable, reduce weight, time filter, regime filter</td><td><span class="badge done">Done</span></td><td class="file">analytics/engine.py → _generate_suggestions()</td></tr>
+  <tr><td>Apply weights to signal strength in bot tick loop</td><td><span class="badge done">Done</span></td><td class="file">bot.py → analytics weight applied before _adjust_for_target()</td></tr>
+  <tr><td>Dashboard: scores table, patterns, suggestions, hourly/regime charts</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Analytics.tsx</td></tr>
+  <tr><td>Daily refresh + on-demand via dashboard</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _check_daily_reset(), /api/analytics/refresh</td></tr>
+</table>
+
+<h3>2.19 Web Dashboard</h3>
+
+<div class="principle">
+  <strong>Full control via browser.</strong> React + FastAPI dashboard running on port 8080 alongside the bot. Real-time WebSocket updates every 2 seconds. Token-based auth for remote access.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Real-time positions with PnL, close/take-profit/tighten actions</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Dashboard.tsx</td></tr>
+  <tr><td>Start/stop bot, halt trading, resume, close all</td><td><span class="badge done">Done</span></td><td class="file">web/server.py REST endpoints</td></tr>
+  <tr><td>Intel tab: F&amp;G gauge, liquidations, macro, whale</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Intel.tsx</td></tr>
+  <tr><td>Scanner tab: trending coins</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Scanner.tsx</td></tr>
+  <tr><td>Strategies tab: static + dynamic</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Strategies.tsx</td></tr>
+  <tr><td>Analytics tab: PnL history, compound report, projections</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Analytics.tsx</td></tr>
+  <tr><td>Modules tab: toggle intel/scanner/news/volatility</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Modules.tsx</td></tr>
+  <tr><td>Summary tab: embedded requirements HTML doc</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Summary.tsx</td></tr>
+  <tr><td>Token-based auth for remote access</td><td><span class="badge done">Done</span></td><td class="file">web/auth.py, DASHBOARD_TOKEN env var</td></tr>
+  <tr><td>WebSocket real-time updates (2s interval)</td><td><span class="badge done">Done</span></td><td class="file">web/server.py WebSocket endpoint</td></tr>
+</table>
+
+<h3>2.20 Service Architecture &amp; Adaptive Monitoring</h3>
+
+<div class="principle">
+  <strong>Don't waste cycles when fully deployed.</strong> Monitoring and analytics run as separate programs that communicate via JSON state files. When the bot is fully deployed and positions are running well, monitoring drops to background mode. When hunting for new trades, it runs at full speed. When positions are stressed (losing), monitoring escalates to find exit/hedge opportunities.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Separate monitor process (TV, CMC, CoinGecko, F&amp;G, Liq, Macro, Whales, Scanner)</td><td><span class="badge done">Done</span></td><td class="file">services/monitor.py → run_monitor.py</td></tr>
+  <tr><td>Separate analytics process (trade DB → scores, patterns, suggestions)</td><td><span class="badge done">Done</span></td><td class="file">services/analytics_service.py → run_analytics.py</td></tr>
+  <tr><td>Shared state via atomic JSON files in <code>data/</code></td><td><span class="badge done">Done</span></td><td class="file">shared/state.py (write-to-temp → fsync → rename)</td></tr>
+  <tr><td>Bot writes deployment status (level, positions, health, capacity)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _write_deployment_status()</td></tr>
+  <tr><td>Bot reads intel from shared state; falls back to in-process if stale</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _read_shared_intel()</td></tr>
+  <tr>
+    <td>Adaptive monitoring intensity:<br>
+      <strong>HUNTING</strong> (idle) → full speed (1.0x)<br>
+      <strong>ACTIVE</strong> (some positions) → normal (1.0x base, 1.5x scanner)<br>
+      <strong>DEPLOYED</strong> (full, running well) → background (3-5x slower)<br>
+      <strong>STRESSED</strong> (positions losing) → elevated (0.5-0.7x faster)
+    </td>
+    <td><span class="badge done">Done</span></td>
+    <td class="file">services/monitor.py → INTENSITY_TABLE</td>
+  </tr>
+  <tr><td>Docker Compose: 3 services (bot, monitor, analytics) with shared volume</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml (multi-service), docker-compose.single.yml (all-in-one)</td></tr>
+  <tr><td>Backwards compatible: bot still works in single-process mode</td><td><span class="badge done">Done</span></td><td class="file">bot.py falls back to in-process intel/analytics if shared state stale</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>3. How It All Fits Together</h2>
+<!-- ============================================================ -->
+
+<div class="section-card">
+<h3>Every 60 seconds (one "tick"), the bot does:</h3>
+<ol>
+  <li><strong>Manual override check</strong> — if CLOSE_ALL file exists, close everything and stop</li>
+  <li><strong>Check stops</strong> — close positions that hit trailing/breakeven stops</li>
+  <li><strong>Scale in</strong> — add to winning positions (WINNERS) or DCA down (PYRAMID)</li>
+  <li><strong>Lever up</strong> — PYRAMID positions that recovered: raise leverage</li>
+  <li><strong>Partial take</strong> — PYRAMID: pull capital off the table after lever-up</li>
+  <li><strong>Wick scalps</strong> — if a PYRAMID position is getting wicked, open a quick counter-scalp to ride the wick</li>
+  <li><strong>Expire losers</strong> — close quick trades that timed out <em>and are losing</em> (winners keep riding)</li>
+  <li><strong>Assess intel</strong> — Fear &amp; Greed, liquidations, macro calendar, whale data → MarketCondition</li>
+  <li><strong>Legendary check</strong> — at 100%+ daily: close all if reversal risk, or email + ride</li>
+  <li><strong>Apply gates</strong> — should we trade at all? (tier, drawdown, intel regime, STOP file)</li>
+  <li><strong>Run strategies</strong> — for each symbol, analyze and generate signals:
+    <ul>
+      <li>Filter by liquidity (low-liq → gambling only or skip)</li>
+      <li>Filter by intel (don't go long when everyone is overleveraged long)</li>
+      <li>Filter by market quality (spread, volume)</li>
+      <li>Boost during macro spike opportunities</li>
+      <li>Apply aggression multiplier (never &gt; 1.0)</li>
+      <li>Execute: $50 initial, trail, add if it works</li>
+    </ul>
+  </li>
+  <li><strong>Hedge check</strong> — profitable positions showing reversal? Open counter-position</li>
+  <li><strong>Log status</strong> — PnL, positions, stops, intel summary</li>
+  <li><strong>Daily reset</strong> — at midnight UTC: email report, reset counters, compound</li>
+</ol>
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Project File Map</h2>
+<!-- ============================================================ -->
+
+<table>
+  <tr><th>File</th><th>Purpose</th></tr>
+  <tr><td><code>bot.py</code></td><td>Main orchestrator — the tick loop, strategy dispatch, all gates</td></tr>
+  <tr><td><code>config/settings.py</code></td><td>All configuration via .env (Pydantic settings)</td></tr>
+  <tr><td><code>core/exchange/base.py</code></td><td>Abstract exchange interface (extend for new exchanges)</td></tr>
+  <tr><td><code>core/exchange/mexc.py</code></td><td>MEXC implementation via ccxt</td></tr>
+  <tr><td><code>core/exchange/paper.py</code></td><td>Paper trading (simulated orders, real market data)</td></tr>
+  <tr><td><code>core/exchange/factory.py</code></td><td>Exchange factory — picks the right implementation from config</td></tr>
+  <tr><td><code>core/models/market.py</code></td><td>Candle, Ticker, OrderBook, MarketType</td></tr>
+  <tr><td><code>core/models/order.py</code></td><td>Order, Position, OrderSide, OrderType, OrderStatus</td></tr>
+  <tr><td><code>core/models/signal.py</code></td><td>Signal, SignalAction — what strategies emit</td></tr>
+  <tr><td><code>core/orders/manager.py</code></td><td>Executes signals → orders. Integrates scaler, hedger, trailing stops</td></tr>
+  <tr><td><code>core/orders/trailing.py</code></td><td>Trailing stop-loss with break-even lock and low-liq awareness</td></tr>
+  <tr><td><code>core/orders/scaler.py</code></td><td>Position scaling: $50 initial → add to winners → cap at $100K notional</td></tr>
+  <tr><td><code>core/orders/hedge.py</code></td><td>HedgeManager + ReversalDetector — counter-positions on reversal</td></tr>
+  <tr><td><code>core/orders/wick_scalp.py</code></td><td>WickScalpDetector — counter-trade wicks while PYRAMID DCA-s</td></tr>
+  <tr><td><code>core/risk/manager.py</code></td><td>Risk enforcement: daily loss, cooldown, signal strength, position sizing</td></tr>
+  <tr><td><code>core/risk/daily_target.py</code></td><td>Tiered daily targets (LOSING→LEGENDARY), manual override, compounding</td></tr>
+  <tr><td><code>core/risk/market_filter.py</code></td><td>Liquidity tiers (HIGH/MED/LOW/DEAD), spread &amp; volume checks</td></tr>
+  <tr><td><code>strategies/base.py</code></td><td>Abstract base for all strategies</td></tr>
+  <tr><td><code>strategies/compound_momentum.py</code></td><td>Primary scalping: spike + breakout detection, quick in-and-out</td></tr>
+  <tr><td><code>strategies/swing_opportunity.py</code></td><td>Rare swing trades: 15-20% crash to major support, PYRAMID mode</td></tr>
+  <tr><td><code>strategies/market_open_volatility.py</code></td><td>US &amp; Asia market open window scalps</td></tr>
+  <tr><td><code>strategies/rsi.py, macd.py, bollinger.py</code></td><td>Standard TA strategies</td></tr>
+  <tr><td><code>strategies/mean_reversion.py, grid.py</code></td><td>Mean reversion and grid strategies</td></tr>
+  <tr><td><code>intel/fear_greed.py</code></td><td>Fear &amp; Greed Index (alternative.me API)</td></tr>
+  <tr><td><code>intel/liquidations.py</code></td><td>CoinGlass liquidation monitor ($1B+ = reversal zone)</td></tr>
+  <tr><td><code>intel/macro_calendar.py</code></td><td>ForexFactory macro events (FOMC, CPI, NFP)</td></tr>
+  <tr><td><code>intel/whale_sentiment.py</code></td><td>CoinGlass funding rates, L/S ratios, OI</td></tr>
+  <tr><td><code>intel/tradingview.py</code></td><td>TradingView scanner: oscillators, MAs, summary ratings, signal_boost</td></tr>
+  <tr><td><code>intel/coinmarketcap.py</code></td><td>CMC trending, gainers/losers, new listings</td></tr>
+  <tr><td><code>intel/coingecko.py</code></td><td>CoinGecko trending, top volume, movers, sparklines</td></tr>
+  <tr><td><code>intel/market_intel.py</code></td><td>Orchestrator: combines all intel into MarketCondition</td></tr>
+  <tr><td><code>volatility/detector.py</code></td><td>Price spike detection engine</td></tr>
+  <tr><td><code>news/monitor.py</code></td><td>RSS feed monitoring, sentiment analysis, spike correlation</td></tr>
+  <tr><td><code>scanner/trending.py</code></td><td>Multi-source scanner: CryptoBubbles + CMC + CoinGecko</td></tr>
+  <tr><td><code>notifications/notifier.py</code></td><td>Email alerts (liquidation, stops, spikes, daily summary, legendary ride)</td></tr>
+  <tr><td><code>db/store.py</code></td><td>SQLite trade database — logs every trade with full context</td></tr>
+  <tr><td><code>db/models.py</code></td><td>TradeRecord, StrategyScore, PatternInsight, ModificationSuggestion</td></tr>
+  <tr><td><code>analytics/engine.py</code></td><td>Pattern detection, strategy scoring, weight factors, modification suggestions</td></tr>
+  <tr><td><code>shared/state.py</code></td><td>Atomic JSON read/write for inter-process communication</td></tr>
+  <tr><td><code>shared/models.py</code></td><td>BotDeploymentStatus, IntelSnapshot, AnalyticsSnapshot models</td></tr>
+  <tr><td><code>services/monitor.py</code></td><td>Standalone monitoring service with adaptive intensity</td></tr>
+  <tr><td><code>services/analytics_service.py</code></td><td>Standalone analytics service (reads trades.db, writes scores)</td></tr>
+  <tr><td><code>run_monitor.py</code></td><td>Entry point for standalone monitor</td></tr>
+  <tr><td><code>run_analytics.py</code></td><td>Entry point for standalone analytics</td></tr>
+  <tr><td><code>web/server.py</code></td><td>FastAPI dashboard — REST API + WebSocket + static file serving</td></tr>
+  <tr><td><code>web/auth.py</code></td><td>Token-based authentication for dashboard</td></tr>
+  <tr><td><code>web/schemas.py</code></td><td>Pydantic response models for API endpoints</td></tr>
+  <tr><td><code>web/frontend/</code></td><td>React + Vite + TypeScript dashboard SPA</td></tr>
+  <tr><td><code>docs/summary.html</code></td><td>This document — requirements &amp; implementation summary</td></tr>
+  <tr><td><code>scripts/run-local.sh</code></td><td>Local setup + run script</td></tr>
+  <tr><td><code>scripts/deploy-digitalocean.sh</code></td><td>DigitalOcean Docker deployment</td></tr>
+  <tr><td><code>scripts/build-dashboard.sh</code></td><td>Build the React frontend for production</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>5. Key Configuration</h2>
+<!-- ============================================================ -->
+
+<table>
+  <tr><th>Setting</th><th>Default</th><th>What it does</th></tr>
+  <tr><td><code>TRADING_MODE</code></td><td>paper</td><td>Paper or live trading</td></tr>
+  <tr><td><code>DEFAULT_LEVERAGE</code></td><td>10</td><td>Default futures leverage</td></tr>
+  <tr><td><code>INITIAL_RISK_AMOUNT</code></td><td>50</td><td>Fixed $ for first entry</td></tr>
+  <tr><td><code>MAX_NOTIONAL_POSITION</code></td><td>100,000</td><td>Stop adding at this leveraged value</td></tr>
+  <tr><td><code>MAX_DAILY_LOSS_PCT</code></td><td>3%</td><td>Hard daily loss limit</td></tr>
+  <tr><td><code>STOP_LOSS_PCT</code></td><td>1.5%</td><td>Default stop-loss</td></tr>
+  <tr><td><code>BREAKEVEN_LOCK_PCT</code></td><td>5%</td><td>Move stop to entry at this profit</td></tr>
+  <tr><td><code>CONSECUTIVE_LOSS_COOLDOWN</code></td><td>3</td><td>Pause after N losses in a row</td></tr>
+  <tr><td><code>MAX_CONCURRENT_POSITIONS</code></td><td>3</td><td>Max open positions at once</td></tr>
+  <tr><td><code>HEDGE_ENABLED</code></td><td>true</td><td>Enable counter-position hedging</td></tr>
+  <tr><td><code>INTEL_ENABLED</code></td><td>true</td><td>Enable external data feeds</td></tr>
+  <tr><td><code>TV_EXCHANGE</code></td><td>MEXC</td><td>Exchange name for TradingView scanner</td></tr>
+  <tr><td><code>TV_INTERVALS</code></td><td>1h,4h,1D</td><td>Timeframes for TV analysis</td></tr>
+  <tr><td><code>CMC_API_KEY</code></td><td>(empty)</td><td>CoinMarketCap pro API key (optional, free works)</td></tr>
+  <tr><td><code>COINGECKO_API_KEY</code></td><td>(empty)</td><td>CoinGecko pro API key (optional, free works)</td></tr>
+  <tr><td><code>DASHBOARD_ENABLED</code></td><td>true</td><td>Enable web dashboard on port 8080</td></tr>
+  <tr><td><code>DASHBOARD_TOKEN</code></td><td>(empty)</td><td>Secret token for remote access; empty = no auth</td></tr>
+  <tr><td><code>DASHBOARD_PORT</code></td><td>8080</td><td>Dashboard HTTP port</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>6. Manual Controls</h2>
+<!-- ============================================================ -->
+
+<div class="section-card">
+<h3>How to stop the bot or close trades manually:</h3>
+<table>
+  <tr><th>Action</th><th>How</th><th>Effect</th></tr>
+  <tr>
+    <td><strong>Stop new trades</strong></td>
+    <td><code>touch STOP</code> in the bot directory</td>
+    <td>No new positions will be opened. Existing positions continue riding with their trailing stops.</td>
+  </tr>
+  <tr>
+    <td><strong>Close everything</strong></td>
+    <td><code>touch CLOSE_ALL</code> in the bot directory</td>
+    <td>All open positions are market-closed immediately. The file is auto-deleted after execution.</td>
+  </tr>
+  <tr>
+    <td><strong>Resume trading</strong></td>
+    <td><code>rm STOP</code></td>
+    <td>Normal operation resumes on the next tick.</td>
+  </tr>
+</table>
+</div>
+
+</body>
+</html>

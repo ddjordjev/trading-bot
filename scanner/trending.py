@@ -48,10 +48,10 @@ class TrendingCoin(BaseModel):
 
 
 class TrendingScanner:
-    """Scans cryptobubbles.net and exchange tickers for trending/moving coins.
+    """Scans cryptobubbles.net, CoinMarketCap, and CoinGecko for trending/moving coins.
 
-    Runs on a configurable interval, identifies the biggest movers, and
-    calls back with opportunities the bot should consider trading.
+    Aggregates data from multiple sources, deduplicates, and identifies the
+    biggest movers to present as trading opportunities.
     """
 
     def __init__(
@@ -62,6 +62,7 @@ class TrendingScanner:
         top_movers_count: int = 10,
         min_hourly_move_pct: float = 2.0,
         min_daily_move_pct: float = 5.0,
+        intel: object = None,
     ):
         self.poll_interval = poll_interval
         self.min_volume_24h = min_volume_24h
@@ -69,6 +70,7 @@ class TrendingScanner:
         self.top_movers_count = top_movers_count
         self.min_hourly_move_pct = min_hourly_move_pct
         self.min_daily_move_pct = min_daily_move_pct
+        self._intel = intel  # MarketIntel reference for CMC/CoinGecko data
 
         self._callbacks: list[Callable] = []
         self._running = False
@@ -101,6 +103,14 @@ class TrendingScanner:
         while self._running:
             try:
                 coins = await self._fetch_cryptobubbles()
+                extra = self._merge_external_sources()
+                if extra:
+                    seen = {c.symbol.upper() for c in coins}
+                    for ec in extra:
+                        if ec.symbol.upper() not in seen:
+                            coins.append(ec)
+                            seen.add(ec.symbol.upper())
+
                 if coins:
                     self._latest_scan = coins
                     movers = self._filter_movers(coins)
@@ -124,6 +134,46 @@ class TrendingScanner:
                 logger.error("Scanner error: {}", e)
 
             await asyncio.sleep(self.poll_interval)
+
+    def _merge_external_sources(self) -> list[TrendingCoin]:
+        """Pull trending coins from CoinMarketCap and CoinGecko via MarketIntel."""
+        if not self._intel:
+            return []
+
+        coins: list[TrendingCoin] = []
+        try:
+            from intel.coinmarketcap import CoinMarketCapClient
+            from intel.coingecko import CoinGeckoClient
+
+            intel = self._intel
+            if hasattr(intel, "coinmarketcap"):
+                for cmc in intel.coinmarketcap.all_interesting:
+                    coins.append(TrendingCoin(
+                        symbol=cmc.symbol,
+                        name=cmc.name,
+                        price=cmc.price,
+                        market_cap=cmc.market_cap,
+                        volume_24h=cmc.volume_24h,
+                        change_1h=cmc.change_1h,
+                        change_24h=cmc.change_24h,
+                        change_7d=cmc.change_7d,
+                    ))
+            if hasattr(intel, "coingecko"):
+                for gc in intel.coingecko.all_interesting:
+                    coins.append(TrendingCoin(
+                        symbol=gc.symbol,
+                        name=gc.name,
+                        price=gc.price,
+                        market_cap=gc.market_cap,
+                        volume_24h=gc.volume_24h,
+                        change_1h=gc.change_1h,
+                        change_24h=gc.change_24h,
+                        change_7d=gc.change_7d,
+                    ))
+        except Exception as e:
+            logger.debug("External source merge error: {}", e)
+
+        return coins
 
     async def _fetch_cryptobubbles(self) -> list[TrendingCoin]:
         """Fetch market data from cryptobubbles.net."""
@@ -228,7 +278,14 @@ class TrendingScanner:
         if not self._hot_movers:
             return "Scanner: No hot movers found"
 
-        lines = [f"Scanner: {len(self._hot_movers)} hot movers"]
+        sources = ["CryptoBubbles"]
+        if self._intel:
+            if hasattr(self._intel, "coinmarketcap") and self._intel.coinmarketcap.trending:
+                sources.append("CMC")
+            if hasattr(self._intel, "coingecko") and self._intel.coingecko.trending:
+                sources.append("CoinGecko")
+
+        lines = [f"Scanner: {len(self._hot_movers)} hot movers (sources: {', '.join(sources)})"]
         for coin in self._hot_movers[:5]:
             direction = "UP" if coin.momentum_score > 0 else "DN"
             lines.append(

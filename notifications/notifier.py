@@ -21,6 +21,7 @@ class NotificationType(str, Enum):
     DAILY_SUMMARY = "daily_summary"
     SPIKE_DETECTED = "spike_detected"
     NEWS_ALERT = "news_alert"
+    WHALE_POSITION = "whale_position"  # always on: $100K+ position at 20%+ profit
 
 
 class Notifier:
@@ -36,7 +37,11 @@ class Notifier:
         self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
         self._running = False
 
+    ALWAYS_ON = {NotificationType.LIQUIDATION, NotificationType.WHALE_POSITION}
+
     def is_enabled(self, ntype: NotificationType) -> bool:
+        if ntype in self.ALWAYS_ON:
+            return True
         return ntype.value in self.enabled_types
 
     async def start(self) -> None:
@@ -92,6 +97,48 @@ class Notifier:
             f"News Alert - {', '.join(symbols)}",
             f"Relevant news detected:\n\n{headline}\n\nSource: {source}\n"
             f"Related symbols: {', '.join(symbols)}",
+        )
+
+    async def alert_whale_position(
+        self,
+        symbol: str,
+        notional: float,
+        profit_pct: float,
+        profit_usd: float,
+        entry_price: float,
+        current_price: float,
+        leverage: int,
+        adds: int,
+        dashboard_url: str = "",
+    ) -> None:
+        """Alert when a position hits $100K+ notional AND 20%+ profit.
+
+        This is always enabled -- the user explicitly asked to be notified
+        so they can decide the next course of action on the dashboard.
+        """
+        await self.send(
+            NotificationType.WHALE_POSITION,
+            f"WHALE POSITION - {symbol} +{profit_pct:.1f}% (${notional:,.0f})",
+            (
+                f"WHALE POSITION ALERT\n"
+                f"{'=' * 50}\n\n"
+                f"  Symbol:          {symbol}\n"
+                f"  Notional value:  ${notional:,.0f}\n"
+                f"  Profit:          +{profit_pct:.1f}% (${profit_usd:,.2f})\n"
+                f"  Entry price:     {entry_price:.6f}\n"
+                f"  Current price:   {current_price:.6f}\n"
+                f"  Leverage:        {leverage}x\n"
+                f"  DCA adds:        {adds}\n"
+                f"  Time:            {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+                f"This position has grown to full size and is running well.\n"
+                f"You should decide what to do next:\n"
+                f"  - Take partial profit\n"
+                f"  - Tighten the stop-loss\n"
+                f"  - Let it ride with trailing stop\n"
+                f"  - Close it entirely\n\n"
+                + (f"Dashboard: {dashboard_url}\n\n" if dashboard_url else "")
+                + f"The bot will NOT auto-close this. It's your call.\n"
+            ),
         )
 
     async def send_daily_summary(

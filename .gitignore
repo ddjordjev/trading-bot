@@ -11,4 +11,12 @@ build/
 .pytest_cache/
 logs/
 *.log
-.chat_history.md
+.cursor/chat_history.md
+.github/.commit_msg*
+.github/.commitmsg
+.idea/
+node_modules/
+data/
+STOP
+CLOSE_ALL
+htmlcov/

@@ -22,7 +22,34 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
-mkdir -p logs
+mkdir -p logs data
 
-echo "Starting bot..."
-python bot.py
+MODE="${1:-all}"
+
+if [ "$MODE" = "bot" ]; then
+    echo "Starting bot only (no separate monitor/analytics)..."
+    python bot.py
+elif [ "$MODE" = "monitor" ]; then
+    echo "Starting monitor service only..."
+    python run_monitor.py
+elif [ "$MODE" = "analytics" ]; then
+    echo "Starting analytics service only..."
+    python run_analytics.py
+else
+    echo "Starting all services..."
+    echo "  Bot + Dashboard:  python bot.py"
+    echo "  Monitor service:  python run_monitor.py"
+    echo "  Analytics service: python run_analytics.py"
+    echo ""
+    echo "Launching in parallel (Ctrl+C to stop all)..."
+    python bot.py &
+    BOT_PID=$!
+    sleep 2
+    python run_monitor.py &
+    MON_PID=$!
+    python run_analytics.py &
+    ANA_PID=$!
+
+    trap "kill $BOT_PID $MON_PID $ANA_PID 2>/dev/null; exit" INT TERM
+    wait
+fi
