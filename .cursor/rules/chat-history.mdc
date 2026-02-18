@@ -1,0 +1,27 @@
+---
+description: Maintain persistent chat history across sessions in .chat_history.md
+alwaysApply: true
+---
+
+# Chat History Protocol
+
+This project uses `.chat_history.md` (in the project root) to persist conversation context across Cursor AI sessions.
+
+## On Session Start
+1. **Always** read `.chat_history.md` before doing anything else.
+2. Review any **Pending Actions** and proactively summarize them for the user.
+
+## During the Session
+- After completing significant work or decisions, append updates to `.chat_history.md`.
+- Keep the **Pending Actions** section current — mark items done, add new ones.
+
+## On Session End / Before Closing
+- If the user says goodbye, wraps up, or switches context: **update `.chat_history.md` immediately** with:
+  - What was accomplished this session.
+  - Any new or remaining pending actions.
+  - Key decisions or context the next session will need.
+
+## File Format
+- Each session is an `## Session N — YYYY-MM-DD` heading.
+- Subsections: `### Context`, `### What Was Done`, `### Pending Actions`.
+- Append new sessions at the bottom (before the `<!-- NEW SESSIONS -->` marker).

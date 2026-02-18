@@ -33,7 +33,11 @@ class OrderManager:
             default_trail_pct=max(0.5, settings.stop_loss_pct * 0.4),
             breakeven_pct=settings.breakeven_lock_pct,
         )
-        self.scaler = PositionScaler(gambling_budget_pct=settings.gambling_budget_pct)
+        self.scaler = PositionScaler(
+            initial_risk_amount=settings.initial_risk_amount,
+            max_notional=settings.max_notional_position,
+            gambling_budget_pct=settings.gambling_budget_pct,
+        )
         self.hedger = HedgeManager(
             hedge_ratio=settings.hedge_ratio,
             min_main_profit_pct=settings.hedge_min_profit_pct,
@@ -69,16 +73,12 @@ class OrderManager:
                              low_liquidity: bool = False,
                              pyramid: bool = False) -> Order | None:
         price = signal.suggested_price or 0
+        if price <= 0:
+            logger.warning("No price for {}, skipping", signal.symbol)
+            return None
+
         target_leverage = signal.leverage or self.settings.default_leverage
         market_type = MarketType(signal.market_type) if signal.market_type else MarketType.SPOT
-        mode = ScaleMode.PYRAMID if pyramid else ScaleMode.WINNERS
-
-        full_amount = self.risk.calculate_position_size(
-            balance, price, target_leverage if market_type == MarketType.FUTURES else 1,
-        )
-        if full_amount <= 0:
-            logger.warning("Calculated position size is 0, skipping")
-            return None
 
         side = OrderSide.BUY if signal.action == SignalAction.BUY else OrderSide.SELL
         side_str = "long" if side == OrderSide.BUY else "short"
@@ -87,35 +87,37 @@ class OrderManager:
             amount = self.scaler.gambling_size(balance, price, target_leverage)
             sp = self.scaler.create(
                 symbol=signal.symbol, side=side_str,
-                intended_size=amount * 2, strategy=signal.strategy,
+                strategy=signal.strategy,
                 market_type=signal.market_type or "futures",
                 leverage=target_leverage, low_liquidity=True,
             )
             actual_leverage = target_leverage
-            logger.info("LOW-LIQ gambling bet on {} | size: {:.6f}", signal.symbol, amount)
+            logger.info("LOW-LIQ gambling bet on {} | ${:.0f} | size: {:.6f}",
+                        signal.symbol, amount * price, amount)
 
         elif pyramid:
             sp = self.scaler.create(
                 symbol=signal.symbol, side=side_str,
-                intended_size=full_amount, strategy=signal.strategy,
+                strategy=signal.strategy,
                 market_type=signal.market_type or "futures",
                 leverage=target_leverage, mode=ScaleMode.PYRAMID,
             )
-            amount = sp.get_initial_amount()
+            amount = sp.get_initial_amount(price)
             actual_leverage = sp.initial_leverage
-            logger.info("PYRAMID entry on {} | initial: {:.6f} / {:.6f} | lev: {}x (target: {}x)",
-                        signal.symbol, amount, full_amount, actual_leverage, target_leverage)
+            logger.info("PYRAMID entry on {} | ${:.0f} initial (cap: ${:.0f}K) | lev: {}x (target: {}x)",
+                        signal.symbol, amount * price, sp.max_notional / 1000,
+                        actual_leverage, target_leverage)
         else:
             sp = self.scaler.create(
                 symbol=signal.symbol, side=side_str,
-                intended_size=full_amount, strategy=signal.strategy,
+                strategy=signal.strategy,
                 market_type=signal.market_type or "futures",
                 leverage=target_leverage,
             )
-            amount = sp.get_initial_amount()
+            amount = sp.get_initial_amount(price)
             actual_leverage = target_leverage
-            logger.info("Scaled entry on {} | initial: {:.6f} / {:.6f} ({:.0f}%)",
-                        signal.symbol, amount, full_amount, sp.initial_pct * 100)
+            logger.info("Scaled entry on {} | ${:.0f} initial (cap: ${:.0f}K notional)",
+                        signal.symbol, amount * price, sp.max_notional / 1000)
 
         if amount <= 0:
             return None
@@ -142,7 +144,7 @@ class OrderManager:
             # from DCA is NOT a loss to cut. We only apply a real stop after
             # the first DCA add lands (or if the whole thesis is invalidated).
             if pyramid:
-                pyramid_stop = sp.dca_interval_pct * (sp.max_adds + 1)
+                pyramid_stop = sp.dca_interval_pct * 6
                 self.trailing.register(
                     pos, initial_stop_pct=pyramid_stop, low_liquidity=low_liquidity,
                 )

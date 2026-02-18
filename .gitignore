@@ -11,3 +11,4 @@ build/
 .pytest_cache/
 logs/
 *.log
+.chat_history.md

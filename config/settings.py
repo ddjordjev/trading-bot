@@ -29,9 +29,9 @@ class Settings(BaseSettings):
 
     # Liquidity-aware scaling
     breakeven_lock_pct: float = 5.0  # move stop to entry once at this profit %
-    initial_entry_pct: float = 30.0  # start with 30% of intended size
+    initial_risk_amount: float = 50.0  # fixed $ amount for the first entry
+    max_notional_position: float = 100_000.0  # stop adding once leveraged position hits this
     min_profit_to_add_pct: float = 1.0  # must be +1% before adding to position
-    max_scale_adds: int = 3
     gambling_budget_pct: float = 2.0  # max % of balance for low-liq yolo bets
     min_liquidity_volume: float = 1_000_000  # 24h volume below this = "low liquidity"
 

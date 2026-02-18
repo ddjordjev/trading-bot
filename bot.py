@@ -109,6 +109,8 @@ class TradingBot:
         logger.info("Leverage: {}x default", self.settings.default_leverage)
         logger.info("PYRAMID mode: DCA down -> lever up -> partial take -> ride")
         logger.info("WINNERS mode: start small -> add to winners -> trail")
+        logger.info("Initial risk: ${:.0f} | Notional cap: ${:.0f}K",
+                     self.settings.initial_risk_amount, self.settings.max_notional_position / 1000)
         logger.info("Gambling budget: {}% for low-liq coins", self.settings.gambling_budget_pct)
         logger.info("Intel: {}", "ENABLED" if self.intel else "disabled")
         logger.info("=" * 60)
