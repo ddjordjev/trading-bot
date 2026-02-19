@@ -7,10 +7,11 @@ import { Strategies } from "./pages/Strategies";
 import { Analytics } from "./pages/Analytics";
 import { Modules } from "./pages/Modules";
 import { Summary } from "./pages/Summary";
+import { Monitoring } from "./pages/Monitoring";
 import { setToken } from "./api/client";
 
 const TABS = [
-  "Dashboard", "Intel", "Scanner", "Strategies", "Analytics", "Modules", "Summary",
+  "Dashboard", "Intel", "Scanner", "Strategies", "Analytics", "Monitoring", "Modules", "Summary",
 ] as const;
 type Tab = typeof TABS[number];
 
@@ -82,6 +83,7 @@ export function App() {
       {tab === "Scanner" && <Scanner />}
       {tab === "Strategies" && <Strategies />}
       {tab === "Analytics" && <Analytics />}
+      {tab === "Monitoring" && <Monitoring />}
       {tab === "Modules" && <Modules />}
       {tab === "Summary" && <Summary />}
     </div>

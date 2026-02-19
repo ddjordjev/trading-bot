@@ -7,6 +7,7 @@ from loguru import logger
 
 from config.settings import Settings
 from core.exchange.base import BaseExchange
+from web.metrics import timed
 from core.models import (
     Candle,
     MarketType,
@@ -57,12 +58,13 @@ class OrderManager:
         self.wick_scalper = WickScalpDetector()
         self._active_orders: list[Order] = []
         self._trade_log: list[dict[str, Any]] = []
-        self._closed_scalers: dict[str, ScaledPosition] = {}  # stashed before removal for logging
+        self._closed_scalers: dict[str, list[ScaledPosition]] = {}  # stashed before removal for logging
 
     # ------------------------------------------------------------------ #
     #  Signal execution
     # ------------------------------------------------------------------ #
 
+    @timed("orders.execute_signal")
     async def execute_signal(self, signal: Signal, low_liquidity: bool = False, pyramid: bool = False) -> Order | None:
         balance_map = await self.exchange.fetch_balance()
         balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
@@ -667,8 +669,14 @@ class OrderManager:
             logger.info("Closed {} {} PnL: {:.2f}", signal.symbol, pos.side.value, pnl)
             sp = self.scaler.get(signal.symbol)
             if sp:
-                self._closed_scalers[signal.symbol] = sp
+                self._closed_scalers.setdefault(signal.symbol, []).append(sp)
             self.scaler.remove(signal.symbol)
+            # Full close: clean up trailing stops (main + hedge/wick) and related state
+            self.trailing.remove(signal.symbol)
+            self.trailing.remove(f"{signal.symbol}:hedge")
+            self.trailing.remove(f"{signal.symbol}:wick")
+            self.hedger.remove(signal.symbol)
+            self.wick_scalper.close(signal.symbol)
 
         return order
 
@@ -676,6 +684,7 @@ class OrderManager:
     #  Stop management
     # ------------------------------------------------------------------ #
 
+    @timed("orders.check_stops")
     async def check_stops(self) -> list[Order]:
         closed: list[Order] = []
         positions = await self.exchange.fetch_positions()

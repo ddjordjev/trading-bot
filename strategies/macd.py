@@ -38,6 +38,8 @@ class MACDStrategy(BaseStrategy):
         curr_hist = histogram.iloc[-1]
         prev_hist = histogram.iloc[-2]
         price = df["close"].iloc[-1]
+        if price <= 0:
+            return None
 
         if prev_hist <= 0 < curr_hist:
             return Signal(

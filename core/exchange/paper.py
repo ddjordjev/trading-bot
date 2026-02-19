@@ -6,6 +6,7 @@ from collections.abc import Callable
 from loguru import logger
 
 from core.exchange.base import BaseExchange
+from web.metrics import timed
 from core.models import (
     Candle,
     MarketType,
@@ -44,12 +45,14 @@ class PaperExchange(BaseExchange):
 
     # -- Market Data (pass-through to real exchange) --
 
+    @timed("exchange.fetch_ticker")
     async def fetch_ticker(self, symbol: str) -> Ticker:
         return await self._real.fetch_ticker(symbol)
 
     async def fetch_tickers(self, symbols: list[str] | None = None) -> list[Ticker]:
         return await self._real.fetch_tickers(symbols)
 
+    @timed("exchange.fetch_candles")
     async def fetch_candles(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list[Candle]:
         return await self._real.fetch_candles(symbol, timeframe, limit)
 
@@ -58,9 +61,11 @@ class PaperExchange(BaseExchange):
 
     # -- Account --
 
+    @timed("exchange.fetch_balance")
     async def fetch_balance(self) -> dict[str, float]:
         return {k: v for k, v in self._balances.items() if v > 0}
 
+    @timed("exchange.fetch_positions")
     async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
         targets = [p for p in self._positions if p.symbol == symbol] if symbol else list(self._positions)
         for pos in targets:
@@ -83,6 +88,7 @@ class PaperExchange(BaseExchange):
         """Extract the base asset from a trading pair (e.g. 'BTC/USDT' -> 'BTC')."""
         return symbol.split("/")[0] if "/" in symbol else symbol
 
+    @timed("exchange.place_order")
     async def place_order(
         self,
         symbol: str,
@@ -186,7 +192,12 @@ class PaperExchange(BaseExchange):
 
         Returns False if insufficient margin to open/add to a position.
         """
+        if order.leverage <= 0:
+            logger.error("[PAPER] Invalid leverage {} for {} — clamping to 1", order.leverage, order.symbol)
+            order.leverage = 1
         existing = next((p for p in self._positions if p.symbol == order.symbol), None)
+        if existing and existing.leverage <= 0:
+            existing.leverage = 1
 
         if existing and existing.side != order.side:
             close_amount = min(order.amount, existing.amount)

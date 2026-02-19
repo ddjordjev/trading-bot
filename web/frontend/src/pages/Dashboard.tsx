@@ -75,7 +75,7 @@ export function Dashboard({ data }: { data: FullSnapshot | null }) {
                 {s.exchange_name} ↗
               </a>
               <div style={{ fontSize: "0.65rem", color: "var(--text-muted)", marginTop: 2 }}>
-                {s.trading_mode === "paper" ? "TESTNET" : "LIVE"}
+                {s.trading_mode.startsWith("paper") ? s.trading_mode.toUpperCase().replace("_", " ") : "LIVE"}
               </div>
             </div>
           </div>

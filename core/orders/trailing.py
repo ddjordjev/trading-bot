@@ -52,6 +52,8 @@ class TrailingStop(BaseModel):
         return self._update_short(current_price)
 
     def _update_long(self, price: float) -> bool:
+        if self.entry_price <= 0:
+            return False
         if price <= self.current_stop:
             logger.info(
                 "Stop HIT for {} (long) at {:.6f} (stop={:.6f}, locked_be={}, trail={})",
@@ -106,6 +108,8 @@ class TrailingStop(BaseModel):
         return False
 
     def _update_short(self, price: float) -> bool:
+        if self.entry_price <= 0:
+            return False
         if price >= self.current_stop:
             logger.info(
                 "Stop HIT for {} (short) at {:.6f} (stop={:.6f}, locked_be={}, trail={})",
@@ -160,6 +164,8 @@ class TrailingStop(BaseModel):
 
     @property
     def pnl_from_stop(self) -> float:
+        if self.entry_price <= 0:
+            return 0.0
         if self.side == OrderSide.BUY:
             return (self.current_stop - self.entry_price) / self.entry_price * 100
         return (self.entry_price - self.current_stop) / self.entry_price * 100

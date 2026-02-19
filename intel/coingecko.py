@@ -217,6 +217,10 @@ class CoinGeckoClient:
             logger.debug("CoinGecko markets error: {}", e)
             return
 
+        if not isinstance(data, list):
+            logger.debug("CoinGecko markets returned non-list: {}", type(data).__name__)
+            return
+
         stablecoins = {"usdt", "usdc", "dai", "tusd", "busd", "fdusd", "pyusd", "usdp", "usdd"}
 
         coins: list[GeckoCoin] = []

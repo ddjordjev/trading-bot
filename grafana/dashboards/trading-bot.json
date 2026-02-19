@@ -1,0 +1,524 @@
+{
+  "uid": "trading-bot",
+  "title": "Trading Bot",
+  "tags": ["trading"],
+  "timezone": "utc",
+  "refresh": "15s",
+  "time": { "from": "now-3h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+
+    {
+      "id": 100,
+      "title": "",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+
+    {
+      "id": 1,
+      "title": "System CPU %",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": { "mode": "fixed", "fixedColor": "#58a6ff" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15, "gradientMode": "scheme", "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
+      "targets": [{ "expr": "system_cpu_percent", "legendFormat": "CPU %", "refId": "A" }]
+    },
+    {
+      "id": 2,
+      "title": "System Memory",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15, "gradientMode": "scheme", "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Used" }, "properties": [{ "id": "color", "value": { "fixedColor": "#f0883e", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Available" }, "properties": [{ "id": "color", "value": { "fixedColor": "#3fb950", "mode": "fixed" } }] }
+        ]
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "system_memory_used_bytes", "legendFormat": "Used", "refId": "A" },
+        { "expr": "system_memory_available_bytes", "legendFormat": "Available", "refId": "B" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Disk Usage",
+      "type": "gauge",
+      "gridPos": { "h": 7, "w": 4, "x": 16, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0, "max": 100,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "#3fb950", "value": null },
+            { "color": "#d29922", "value": 70 },
+            { "color": "#f85149", "value": 90 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false, "showThresholdMarkers": true },
+      "targets": [{ "expr": "system_disk_percent", "legendFormat": "Disk %", "refId": "A" }]
+    },
+    {
+      "id": 4,
+      "title": "Load Average",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 4, "x": 20, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "system_load_1m", "legendFormat": "1m", "refId": "A" },
+        { "expr": "system_load_5m", "legendFormat": "5m", "refId": "B" },
+        { "expr": "system_load_15m", "legendFormat": "15m", "refId": "C" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Swap Usage",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 4, "x": 16, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "#3fb950", "value": null },
+            { "color": "#d29922", "value": 50 },
+            { "color": "#f85149", "value": 80 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area", "textMode": "auto" },
+      "targets": [{ "expr": "system_swap_percent", "legendFormat": "Swap", "refId": "A" }]
+    },
+    {
+      "id": 6,
+      "title": "Network I/O",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "rate(system_net_bytes_sent[1m])", "legendFormat": "Sent/s", "refId": "A" },
+        { "expr": "rate(system_net_bytes_recv[1m])", "legendFormat": "Recv/s", "refId": "B" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Memory % (sys + process)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0,
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "system_memory_percent", "legendFormat": "System", "refId": "A" },
+        { "expr": "process_memory_percent", "legendFormat": "Bot process", "refId": "B" }
+      ]
+    },
+
+    {
+      "id": 200,
+      "title": "Bot Process",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "collapsed": false,
+      "panels": []
+    },
+
+    {
+      "id": 10,
+      "title": "Process CPU %",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": { "mode": "fixed", "fixedColor": "#bc8cff" },
+          "custom": { "lineWidth": 2, "fillOpacity": 20, "gradientMode": "scheme", "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
+      "targets": [{ "expr": "process_cpu_percent", "legendFormat": "CPU %", "refId": "A" }]
+    },
+    {
+      "id": 11,
+      "title": "Process Memory (RSS / VMS)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "process_memory_rss_bytes", "legendFormat": "RSS", "refId": "A" },
+        { "expr": "process_memory_vms_bytes", "legendFormat": "VMS", "refId": "B" }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Threads",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 2, "x": 16, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "#58a6ff", "value": null },
+            { "color": "#d29922", "value": 50 },
+            { "color": "#f85149", "value": 100 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none", "textMode": "auto" },
+      "targets": [{ "expr": "process_threads", "legendFormat": "Threads", "refId": "A" }]
+    },
+    {
+      "id": 13,
+      "title": "Open FDs",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 2, "x": 18, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "#58a6ff", "value": null },
+            { "color": "#d29922", "value": 200 },
+            { "color": "#f85149", "value": 500 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none", "textMode": "auto" },
+      "targets": [{ "expr": "process_open_fds", "legendFormat": "FDs", "refId": "A" }]
+    },
+    {
+      "id": 14,
+      "title": "GC Objects",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 4, "x": 20, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "#d29922" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
+      "targets": [{ "expr": "python_gc_objects", "legendFormat": "GC objects", "refId": "A" }]
+    },
+    {
+      "id": 15,
+      "title": "GC Collections",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 19 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "rate(python_gc_collections_total{generation=\"0\"}[5m])", "legendFormat": "Gen 0", "refId": "A" },
+        { "expr": "rate(python_gc_collections_total{generation=\"1\"}[5m])", "legendFormat": "Gen 1", "refId": "B" },
+        { "expr": "rate(python_gc_collections_total{generation=\"2\"}[5m])", "legendFormat": "Gen 2", "refId": "C" }
+      ]
+    },
+
+    {
+      "id": 300,
+      "title": "Method Performance",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "collapsed": false,
+      "panels": []
+    },
+
+    {
+      "id": 20,
+      "title": "Tick Duration",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 24 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "fixed", "fixedColor": "#58a6ff" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15, "gradientMode": "scheme", "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
+      "targets": [
+        { "expr": "rate(bot_tick_duration_seconds_sum[1m]) / rate(bot_tick_duration_seconds_count[1m])", "legendFormat": "avg tick", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, rate(bot_tick_duration_seconds_bucket[5m]))", "legendFormat": "p95", "refId": "B" }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Event Loop Lag",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 4, "x": 8, "y": 24 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "fixed", "fixedColor": "#f0883e" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "#3fb950", "value": null },
+            { "color": "#d29922", "value": 0.1 },
+            { "color": "#f85149", "value": 0.5 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
+      "targets": [{ "expr": "bot_event_loop_lag_seconds", "legendFormat": "lag", "refId": "A" }]
+    },
+    {
+      "id": 22,
+      "title": "Method Duration — p95",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 24 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, rate(bot_method_duration_seconds_bucket[5m]))", "legendFormat": "{{ method }}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 23,
+      "title": "Method Call Rate (per min)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 31 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "opm",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 5, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "rate(bot_method_duration_seconds_count[1m]) * 60", "legendFormat": "{{ method }}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 24,
+      "title": "Method Errors (per min)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 31 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "opm",
+          "color": { "mode": "fixed", "fixedColor": "#f85149" },
+          "custom": { "lineWidth": 2, "fillOpacity": 20, "showPoints": "never", "spanNulls": true, "drawStyle": "bars" }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "rate(bot_method_errors_total[1m]) * 60", "legendFormat": "{{ method }}", "refId": "A" }
+      ]
+    },
+
+    {
+      "id": 400,
+      "title": "Trading State",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 },
+      "collapsed": false,
+      "panels": []
+    },
+
+    {
+      "id": 30,
+      "title": "Balance",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 39 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "color": { "mode": "fixed", "fixedColor": "#58a6ff" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15, "gradientMode": "scheme", "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
+      "targets": [{ "expr": "trading_bot_balance", "legendFormat": "Balance", "refId": "A" }]
+    },
+    {
+      "id": 31,
+      "title": "Daily PnL ($)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 39 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": { "lineWidth": 2, "fillOpacity": 20, "gradientMode": "scheme", "showPoints": "never", "spanNulls": true, "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "#f85149", "value": null }, { "color": "#3fb950", "value": 0 }] },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
+      "targets": [{ "expr": "trading_bot_daily_pnl_usd", "legendFormat": "PnL", "refId": "A" }]
+    },
+    {
+      "id": 32,
+      "title": "Open Positions",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 2, "x": 16, "y": 39 },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0, "max": 10,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "#3fb950", "value": null }, { "color": "#d29922", "value": 5 }, { "color": "#f85149", "value": 8 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false, "showThresholdMarkers": true },
+      "targets": [{ "expr": "trading_bot_open_positions", "legendFormat": "Pos", "refId": "A" }]
+    },
+    {
+      "id": 33,
+      "title": "Win Rate",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 2, "x": 18, "y": 39 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0, "max": 100,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "#f85149", "value": null }, { "color": "#d29922", "value": 40 }, { "color": "#3fb950", "value": 55 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false, "showThresholdMarkers": true },
+      "targets": [{ "expr": "trading_bot_win_rate", "legendFormat": "Win %", "refId": "A" }]
+    },
+    {
+      "id": 34,
+      "title": "Fear & Greed",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 2, "x": 20, "y": 39 },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0, "max": 100,
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "#f85149", "value": null }, { "color": "#d29922", "value": 25 }, { "color": "#3fb950", "value": 50 }, { "color": "#d29922", "value": 75 }, { "color": "#f85149", "value": 90 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false, "showThresholdMarkers": true },
+      "targets": [{ "expr": "trading_bot_fear_greed", "legendFormat": "FGI", "refId": "A" }]
+    },
+    {
+      "id": 35,
+      "title": "Trades Today",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 2, "x": 22, "y": 39 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "#58a6ff", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none", "textMode": "auto" },
+      "targets": [{ "expr": "trading_bot_trades_today", "legendFormat": "Trades", "refId": "A" }]
+    },
+    {
+      "id": 36,
+      "title": "Ticks Total",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 2, "x": 22, "y": 42 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "#8b949e", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area", "textMode": "auto" },
+      "targets": [{ "expr": "bot_ticks_total", "legendFormat": "Ticks", "refId": "A" }]
+    },
+    {
+      "id": 37,
+      "title": "Daily PnL %",
+      "type": "stat",
+      "gridPos": { "h": 3, "w": 4, "x": 16, "y": 43 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "#f85149", "value": null }, { "color": "#3fb950", "value": 0 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area", "textMode": "auto" },
+      "targets": [{ "expr": "trading_bot_daily_pnl_pct", "legendFormat": "PnL %", "refId": "A" }]
+    },
+    {
+      "id": 38,
+      "title": "Daily Loss %",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 46 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": { "mode": "fixed", "fixedColor": "#f85149" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
+      "targets": [{ "expr": "trading_bot_daily_loss_pct", "legendFormat": "Loss %", "refId": "A" }]
+    }
+  ],
+  "schemaVersion": 39
+}

@@ -17,13 +17,13 @@ class RiskManager:
     """
 
     def __init__(self, settings: Settings):
-        self.max_position_pct = settings.max_position_size_pct
-        self.max_daily_loss_pct = settings.max_daily_loss_pct
+        self.max_position_pct = settings.effective_max_position_size_pct
+        self.max_daily_loss_pct = settings.effective_max_daily_loss_pct
         self.default_stop_loss_pct = settings.stop_loss_pct
         self.default_take_profit_pct = settings.take_profit_pct
-        self.max_concurrent = settings.max_concurrent_positions
-        self.min_strength = settings.min_signal_strength
-        self.loss_cooldown_threshold = settings.consecutive_loss_cooldown
+        self.max_concurrent = settings.effective_max_concurrent_positions
+        self.min_strength = settings.effective_min_signal_strength
+        self.loss_cooldown_threshold = settings.effective_consecutive_loss_cooldown
 
         self._daily_pnl: float = 0.0
         self._day_start_balance: float = 0.0

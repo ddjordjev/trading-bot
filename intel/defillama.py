@@ -86,8 +86,12 @@ class DeFiLlamaClient:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             chains = await self._fetch_chains(session)
             if chains:
-                total = sum(c.get("tvl", 0) for c in chains)
-                sorted_chains = sorted(chains, key=lambda c: c.get("change_1d", 0) or 0, reverse=True)
+                total = sum(float(c.get("tvl", 0) or 0) for c in chains)
+                sorted_chains = sorted(
+                    chains,
+                    key=lambda c: float(c.get("change_1d", 0) or 0),
+                    reverse=True,
+                )
 
                 change_pct = 0.0
                 if self._prev_tvl > 0:

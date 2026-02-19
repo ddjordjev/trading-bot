@@ -33,7 +33,7 @@ class Notifier:
         self.smtp_password = settings.smtp_password
         self.notify_email = settings.notify_email
         self.enabled_types = set(settings.notification_list)
-        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=100)
         self._running = False
         self._background_tasks: list = []
 
@@ -61,6 +61,9 @@ class Notifier:
             logger.info("NOTIFICATION [{}]: {} - {}", ntype.value, subject, body)
             return
 
+        if self._queue.full():
+            logger.warning("Notification queue full ({}), dropping: {}", self._queue.maxsize, subject)
+            return
         await self._queue.put((subject, body))
 
     async def alert_liquidation(self, symbol: str, pnl: float, balance: float) -> None:

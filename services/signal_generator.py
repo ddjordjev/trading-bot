@@ -29,7 +29,8 @@ from shared.models import (
 class SignalGenerator:
     """Stateful generator that avoids duplicate proposals via cooldowns."""
 
-    def __init__(self) -> None:
+    def __init__(self, preferred_market_type: str = "futures") -> None:
+        self._preferred_market_type = preferred_market_type
         self._recent_ids: dict[str, datetime] = {}
         self._cooldown_seconds = {
             SignalPriority.CRITICAL: 30,
@@ -315,6 +316,8 @@ class SignalGenerator:
 
     def _propose(self, queue: TradeQueue, proposal: TradeProposal) -> None:
         """Add proposal if not on cooldown and not a duplicate."""
+        if proposal.market_type == "futures" and self._preferred_market_type != "futures":
+            proposal.market_type = self._preferred_market_type
         key = f"{proposal.priority.value}_{proposal.symbol}_{proposal.strategy}"
 
         if key in self._recent_ids:

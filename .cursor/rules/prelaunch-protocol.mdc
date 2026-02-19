@@ -17,23 +17,15 @@ After reading chat history (per the chat-history rule), immediately execute
 steps 1–6 below. Do NOT read `docs/EXECUTION_PLAN.md` — everything needed
 is in this rule. Just go.
 
-### Step 1: Check Audit Cache
+### Step 1: Always Full Analysis
 
-Read `.cursor/last_audit.json` with the Read tool (NOT shell). Then run
-`git rev-parse HEAD` to get the current commit.
+**The audit cache is DISABLED.** Every session runs a full analysis on all
+4 groups regardless of what changed. Previous audits have repeatedly missed
+bugs that only a fresh full scan catches. The cache will be re-enabled once
+the bot completes a clean 10-day run.
 
-**If commit matches cached commit AND result is "clean":**
-- Print: "Audit cache hit — code unchanged since `<commit>`. Skipping
-  codebase analysis."
-- Jump to Step 3 (Preflight).
-
-**If commit differs:**
-- Run `git diff --name-only <cached_commit> HEAD`
-- Map changed files to analysis groups (see File → Group Mapping below).
-- Only launch analysis agents for groups with changes (Step 2).
-- Print "Group X: unchanged — skipping" for clean groups.
-
-**If no cache or empty commit:** Run full analysis on all 4 groups.
+Read `.cursor/last_audit.json` with the Read tool (NOT shell) for context
+on what was previously found, but always proceed to Step 2 with all 4 groups.
 
 ### Step 2: Codebase Analysis (only changed groups)
 

@@ -8,6 +8,7 @@ import ccxt.async_support as ccxt
 from loguru import logger
 
 from core.exchange.base import BaseExchange, parse_order_status, ts_to_dt
+from web.metrics import timed
 from core.models import (
     Candle,
     MarketType,
@@ -71,6 +72,7 @@ class BinanceExchange(BaseExchange):
         await self._futures.close()
         logger.info("Binance disconnected")
 
+    @timed("exchange.fetch_ticker")
     async def fetch_ticker(self, symbol: str) -> Ticker:
         data = await self._spot.fetch_ticker(symbol)
         return Ticker(
@@ -98,6 +100,7 @@ class BinanceExchange(BaseExchange):
             for sym, d in raw.items()
         ]
 
+    @timed("exchange.fetch_candles")
     async def fetch_candles(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list[Candle]:
         data = await self._spot.fetch_ohlcv(symbol, timeframe, limit=limit)
         return [Candle(timestamp=ts_to_dt(c[0]), open=c[1], high=c[2], low=c[3], close=c[4], volume=c[5]) for c in data]
@@ -111,6 +114,7 @@ class BinanceExchange(BaseExchange):
             timestamp=ts_to_dt(data.get("timestamp")),
         )
 
+    @timed("exchange.fetch_balance")
     async def fetch_balance(self) -> dict[str, float]:
         data = await self._spot.fetch_balance()
         result: dict[str, float] = {}
@@ -119,6 +123,7 @@ class BinanceExchange(BaseExchange):
                 result[asset] = float(info["free"])
         return result
 
+    @timed("exchange.fetch_positions")
     async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
         try:
             raw = await self._futures.fetch_positions(symbols=[symbol] if symbol else None)
@@ -145,6 +150,7 @@ class BinanceExchange(BaseExchange):
             )
         return positions
 
+    @timed("exchange.place_order")
     async def place_order(
         self,
         symbol: str,

@@ -43,58 +43,122 @@ def _signal(action=SignalAction.BUY, strength=0.7, price=100.0) -> Signal:
     )
 
 
-class TestDailyLossLimit:
-    def test_blocks_when_exceeded(self, risk: RiskManager):
-        risk.record_pnl(-350.0)  # 3.5% of 10000 > 3% limit
-        sig = _signal()
-        assert risk.check_signal(sig, 10000.0, []) is False
+class TestPaperLocalAggressive:
+    """Paper_local uses relaxed risk for bug-finding. Verify limits are wide open."""
 
-    def test_allows_when_within_limit(self, risk: RiskManager):
-        risk.record_pnl(-100.0)
+    def test_daily_loss_does_not_block(self, risk: RiskManager):
+        risk.record_pnl(-350.0)  # 3.5% loss — would block in live, not in paper_local
         sig = _signal()
         assert risk.check_signal(sig, 10000.0, []) is True
 
+    def test_no_cooldown_after_losses(self, risk: RiskManager):
+        for _ in range(5):
+            risk.record_pnl(-10.0)
+        assert risk._in_cooldown is False  # cooldown threshold is 999
 
-class TestCooldown:
-    def test_activates_after_consecutive_losses(self, risk: RiskManager):
-        risk.record_pnl(-10.0)
-        risk.record_pnl(-10.0)
-        risk.record_pnl(-10.0)  # 3 consecutive losses
-        assert risk._in_cooldown is True
-        sig = _signal()
-        assert risk.check_signal(sig, 10000.0, []) is False
-
-    def test_resets_on_win(self, risk: RiskManager):
-        risk.record_pnl(-10.0)
-        risk.record_pnl(-10.0)
-        risk.record_pnl(50.0)  # win breaks the streak
-        assert risk._in_cooldown is False
-        assert risk._consecutive_losses == 0
-
-
-class TestSignalStrength:
-    def test_rejects_weak_signal(self, risk: RiskManager):
-        sig = _signal(strength=0.2)
-        assert risk.check_signal(sig, 10000.0, []) is False
-
-    def test_accepts_strong_signal(self, risk: RiskManager):
-        sig = _signal(strength=0.8)
+    def test_weak_signal_accepted(self, risk: RiskManager):
+        sig = _signal(strength=0.2)  # min_strength=0.2 in paper_local
         assert risk.check_signal(sig, 10000.0, []) is True
 
-
-class TestConcurrentPositions:
-    def test_blocks_at_max_positions(self, risk: RiskManager):
+    def test_many_positions_allowed(self, risk: RiskManager):
         positions = [
             Position(symbol=f"COIN{i}/USDT", side=OrderSide.BUY, amount=1.0, entry_price=10.0, current_price=10.0)
             for i in range(5)
         ]
         sig = _signal()
-        assert risk.check_signal(sig, 10000.0, positions) is False
+        assert risk.check_signal(sig, 10000.0, positions) is True  # max_concurrent=10
 
-    def test_allows_below_max(self, risk: RiskManager):
-        positions = [Position(symbol="ETH/USDT", side=OrderSide.BUY, amount=1.0, entry_price=10.0, current_price=10.0)]
+    def test_aggressive_params_set(self, risk: RiskManager):
+        assert risk.max_daily_loss_pct == 100.0
+        assert risk.max_concurrent == 10
+        assert risk.min_strength == 0.2
+        assert risk.loss_cooldown_threshold == 999
+
+
+class TestPaperRelaxedDisabled:
+    """paper_local with PAPER_RISK_RELAXED=false should use prod params."""
+
+    @pytest.fixture
+    def strict_risk(self, monkeypatch: pytest.MonkeyPatch) -> RiskManager:
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
+        monkeypatch.setenv("EXCHANGE", "mexc")
+        monkeypatch.setenv("PAPER_RISK_RELAXED", "false")
+        monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")
+        monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "5")
+        monkeypatch.setenv("MIN_SIGNAL_STRENGTH", "0.4")
+        monkeypatch.setenv("CONSECUTIVE_LOSS_COOLDOWN", "3")
+        s = Settings(_env_file=None)
+        rm = RiskManager(s)
+        rm.reset_daily(10000.0)
+        return rm
+
+    def test_uses_prod_params(self, strict_risk: RiskManager):
+        assert strict_risk.max_daily_loss_pct == 3.0
+        assert strict_risk.max_concurrent == 5
+        assert strict_risk.min_strength == 0.4
+        assert strict_risk.loss_cooldown_threshold == 3
+
+    def test_daily_loss_blocks(self, strict_risk: RiskManager):
+        strict_risk.record_pnl(-350.0)
         sig = _signal()
-        assert risk.check_signal(sig, 10000.0, positions) is True
+        assert strict_risk.check_signal(sig, 10000.0, []) is False
+
+    def test_cooldown_activates(self, strict_risk: RiskManager):
+        strict_risk.record_pnl(-10.0)
+        strict_risk.record_pnl(-10.0)
+        strict_risk.record_pnl(-10.0)
+        assert strict_risk._in_cooldown is True
+
+
+class TestConservativeMode:
+    """Non-paper modes enforce real risk limits."""
+
+    @pytest.fixture
+    def live_risk(self, monkeypatch: pytest.MonkeyPatch) -> RiskManager:
+        monkeypatch.setenv("TRADING_MODE", "paper_live")
+        monkeypatch.setenv("EXCHANGE", "mexc")
+        monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")
+        monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "5")
+        monkeypatch.setenv("MIN_SIGNAL_STRENGTH", "0.4")
+        monkeypatch.setenv("CONSECUTIVE_LOSS_COOLDOWN", "3")
+        s = Settings(_env_file=None)
+        rm = RiskManager(s)
+        rm.reset_daily(10000.0)
+        return rm
+
+    def test_daily_loss_blocks(self, live_risk: RiskManager):
+        live_risk.record_pnl(-350.0)
+        sig = _signal()
+        assert live_risk.check_signal(sig, 10000.0, []) is False
+
+    def test_cooldown_activates(self, live_risk: RiskManager):
+        live_risk.record_pnl(-10.0)
+        live_risk.record_pnl(-10.0)
+        live_risk.record_pnl(-10.0)
+        assert live_risk._in_cooldown is True
+
+    def test_weak_signal_rejected(self, live_risk: RiskManager):
+        sig = _signal(strength=0.2)
+        assert live_risk.check_signal(sig, 10000.0, []) is False
+
+    def test_max_positions_blocks(self, live_risk: RiskManager):
+        positions = [
+            Position(symbol=f"COIN{i}/USDT", side=OrderSide.BUY, amount=1.0, entry_price=10.0, current_price=10.0)
+            for i in range(5)
+        ]
+        sig = _signal()
+        assert live_risk.check_signal(sig, 10000.0, positions) is False
+
+    def test_allows_when_within_limits(self, live_risk: RiskManager):
+        sig = _signal(strength=0.8)
+        assert live_risk.check_signal(sig, 10000.0, []) is True
+
+    def test_resets_on_win(self, live_risk: RiskManager):
+        live_risk.record_pnl(-10.0)
+        live_risk.record_pnl(-10.0)
+        live_risk.record_pnl(50.0)
+        assert live_risk._in_cooldown is False
+        assert live_risk._consecutive_losses == 0
 
 
 class TestCloseAlwaysAllowed:

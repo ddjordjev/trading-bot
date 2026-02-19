@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import os
 import tempfile
 from datetime import UTC, datetime
@@ -96,7 +97,10 @@ class SharedState:
         if not raw.updated_at:
             return 999999
         try:
-            updated = datetime.fromisoformat(raw.updated_at)
+            ts = raw.updated_at.replace("Z", "+00:00")
+            updated = datetime.fromisoformat(ts)
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=UTC)
             return (datetime.now(UTC) - updated).total_seconds()
         except Exception:
             return 999999
@@ -112,11 +116,29 @@ class SharedState:
         return s or AnalyticsSnapshot()
 
     # ---- Trade queue (written by monitor, read+updated by bot) ---- #
+    # Uses a file lock to prevent lost-update race between bot and monitor.
+
+    def _queue_lock_path(self) -> Path:
+        return self._data_dir / "trade_queue.lock"
 
     def write_trade_queue(self, queue: TradeQueue) -> None:
         queue.updated_at = datetime.now(UTC).isoformat()
-        self._write(self._data_dir / "trade_queue.json", queue)
+        lock_path = self._queue_lock_path()
+        lock_path.touch(exist_ok=True)
+        with open(lock_path) as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                self._write(self._data_dir / "trade_queue.json", queue)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
     def read_trade_queue(self) -> TradeQueue:
-        q = self._read(self._data_dir / "trade_queue.json", TradeQueue)
+        lock_path = self._queue_lock_path()
+        lock_path.touch(exist_ok=True)
+        with open(lock_path) as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_SH)
+            try:
+                q = self._read(self._data_dir / "trade_queue.json", TradeQueue)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
         return q or TradeQueue()

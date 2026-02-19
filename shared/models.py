@@ -79,26 +79,32 @@ class TradeProposal(BaseModel):
         now = datetime.now(UTC)
         if self.valid_until:
             try:
-                deadline = datetime.fromisoformat(self.valid_until)
+                deadline = datetime.fromisoformat(self.valid_until.replace("Z", "+00:00"))
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=UTC)
                 if now > deadline:
                     return True
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
         if self.max_age_seconds > 0:
             try:
-                created = datetime.fromisoformat(self.created_at)
+                created = datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=UTC)
                 if (now - created).total_seconds() > self.max_age_seconds:
                     return True
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
         return False
 
     @property
     def age_seconds(self) -> float:
         try:
-            created = datetime.fromisoformat(self.created_at)
+            created = datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=UTC)
             return (datetime.now(UTC) - created).total_seconds()
-        except ValueError:
+        except (ValueError, TypeError):
             return 0.0
 
 
@@ -259,6 +265,7 @@ class IntelSnapshot(BaseModel):
     monitor_intensity: str = "normal"
     poll_multiplier: float = 1.0
     updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    source_timestamps: dict[str, str] = {}
     sources_active: list[str] = []
 
 

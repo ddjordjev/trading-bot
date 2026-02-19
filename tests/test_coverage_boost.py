@@ -150,10 +150,10 @@ class TestRiskManagerExtended:
         sig = _sig(strength=0.8)
         assert risk.check_signal(sig, 10000.0, positions) is False
 
-    def test_drawdown_zone_rejects_weak(self, risk):
-        risk.record_pnl(-200.0)  # 2% loss, >50% of 3% limit
-        sig = _sig(strength=0.5)  # < 0.7 threshold
-        assert risk.check_signal(sig, 10000.0, []) is False
+    def test_drawdown_zone_paper_local_allows_weak(self, risk):
+        risk.record_pnl(-200.0)
+        sig = _sig(strength=0.5)
+        assert risk.check_signal(sig, 10000.0, []) is True  # paper_local = aggressive
 
     def test_drawdown_zone_allows_strong(self, risk):
         risk.record_pnl(-200.0)
@@ -169,13 +169,11 @@ class TestRiskManagerExtended:
         sig = _sig(action=SignalAction.HOLD)
         assert risk.check_signal(sig, 10000.0, []) is True
 
-    def test_cooldown_lifts_on_win(self, risk):
+    def test_cooldown_not_triggered_in_paper_local(self, risk):
         risk.record_pnl(-10.0)
         risk.record_pnl(-10.0)
         risk.record_pnl(-10.0)
-        assert risk._in_cooldown is True
-        risk.record_pnl(50.0)
-        assert risk._in_cooldown is False
+        assert risk._in_cooldown is False  # threshold=999 in aggressive mode
 
 
 # ── TradeQueue (shared/models) ───────────────────────────────────────────────

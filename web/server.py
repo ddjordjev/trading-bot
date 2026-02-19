@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import Depends, FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
@@ -189,6 +189,21 @@ def _recent_logs() -> list[LogEntry]:
 @app.get("/health")
 async def health():
     return {"status": "ok", "bot_running": _bot._running if _bot else False}
+
+
+@app.get("/api/grafana-url")
+async def grafana_url():
+    port = _bot.settings.grafana_port if _bot else 3001
+    return {"port": port, "dashboard_uid": "trading-bot"}
+
+
+@app.get("/metrics")
+async def metrics():
+    from web.metrics import collect_metrics
+
+    uptime = time.time() - _start_time if _start_time else 0
+    body = collect_metrics(_bot, uptime)
+    return Response(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 # --------------- REST endpoints ---------------
@@ -383,6 +398,7 @@ async def bot_start(_: str = Depends(verify_token)):
         return ActionResponse(success=False, message="Bot instance not initialized")
     if _bot._running:
         return ActionResponse(success=False, message="Bot is already running")
+    _background_tasks[:] = [t for t in _background_tasks if not t.done()]
     _background_tasks.append(asyncio.create_task(_bot.start()))
     return ActionResponse(success=True, message="Bot starting")
 

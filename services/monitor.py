@@ -19,6 +19,7 @@ there's no need to hammer APIs for new opportunities.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 from loguru import logger
 
@@ -90,7 +91,8 @@ class MonitorService:
             min_market_cap=50_000_000,
         )
 
-        self.signal_gen = SignalGenerator()
+        mkt = "futures" if self.settings.futures_allowed else "spot"
+        self.signal_gen = SignalGenerator(preferred_market_type=mkt)
 
         self._running = False
         self._current_level = DeploymentLevel.HUNTING
@@ -352,24 +354,38 @@ class MonitorService:
         ]
 
         # Metadata
+        now_iso = datetime.now(UTC).isoformat()
         snap.monitor_intensity = self._current_level.value
         snap.poll_multiplier = multipliers["base"]
         sources = []
+        ts: dict[str, str] = {}
         if self.fear_greed.latest:
             sources.append("fear_greed")
+            ts["fear_greed"] = now_iso
         if self.liquidations.latest:
             sources.append("liquidations")
+            ts["liquidations"] = now_iso
         sources.append("macro")
+        ts["macro"] = now_iso
         sources.append("whales")
+        ts["whales"] = now_iso
         if self.tv._cache:
             sources.append("tradingview")
+            ts["tradingview"] = now_iso
         if self.cmc.trending:
             sources.append("coinmarketcap")
+            ts["coinmarketcap"] = now_iso
         if self.gecko.trending:
             sources.append("coingecko")
+            ts["coingecko"] = now_iso
         if self.scanner.hot_movers:
             sources.append("scanner")
+            ts["scanner"] = now_iso
         snap.sources_active = sources
+        prev = self.state.read_intel()
+        merged_ts = dict(prev.source_timestamps) if prev.source_timestamps else {}
+        merged_ts.update(ts)
+        snap.source_timestamps = merged_ts
 
         return snap
 

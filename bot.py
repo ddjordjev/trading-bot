@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import signal
 import sys
+import time
 from datetime import UTC, datetime
 
 from loguru import logger
@@ -229,8 +230,14 @@ class TradingBot:
     async def _run_loop(self) -> None:
         while self._running:
             try:
+                t0 = time.perf_counter()
                 await self._tick()
+                from web.metrics import record_event_loop_lag, record_tick
+
+                record_tick(time.perf_counter() - t0)
+                loop_start = time.perf_counter()
                 await asyncio.sleep(self._tick_interval)
+                record_event_loop_lag(time.perf_counter() - loop_start - self._tick_interval)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -406,7 +413,10 @@ class TradingBot:
                 if spike:
                     await self._handle_spike(spike)
 
-                sig = strategy.analyze(candles, ticker)
+                from web.metrics import timed_block
+
+                with timed_block(f"strategy.{strategy.name}.analyze"):
+                    sig = strategy.analyze(candles, ticker)
                 if not sig:
                     logger.debug("Strategy '{}' on {} — no signal this tick", strategy.name, strategy.symbol)
                     continue
@@ -817,7 +827,10 @@ class TradingBot:
         """Log a completed trade to the analytics database."""
         try:
             now = datetime.now(UTC)
-            sp = self.orders.scaler.get(order.symbol) or self.orders._closed_scalers.pop(order.symbol, None)
+            sp = self.orders.scaler.get(order.symbol)
+            if not sp:
+                stashed = self.orders._closed_scalers.get(order.symbol, [])
+                sp = stashed.pop(0) if stashed else None
             intel_cond = self.intel.condition if self.intel else None
 
             exit_price = order.average_price or order.price or 0
@@ -1186,6 +1199,8 @@ class TradingBot:
     async def _check_daily_reset(self) -> None:
         now = datetime.now(UTC)
         if now.hour == 0 and now.minute < 2:
+            if self.target._last_reset and self.target._last_reset.date() == now.date():
+                return
             balance_map = await self.exchange.fetch_balance()
             balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
             self.target.update_balance(balance)

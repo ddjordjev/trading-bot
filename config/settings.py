@@ -47,6 +47,45 @@ class Settings(BaseSettings):
     min_signal_strength: float = 0.4  # ignore weak signals entirely
     consecutive_loss_cooldown: int = 3  # pause after N consecutive losses
 
+    # Paper-local risk overrides (only applied when TRADING_MODE=paper_local)
+    # Set PAPER_RISK_RELAXED=false to use prod risk in paper_local.
+    paper_risk_relaxed: bool = True
+    paper_max_position_size_pct: float = 50.0
+    paper_max_daily_loss_pct: float = 100.0
+    paper_max_concurrent_positions: int = 10
+    paper_min_signal_strength: float = 0.2
+    paper_consecutive_loss_cooldown: int = 999
+
+    @property
+    def effective_max_position_size_pct(self) -> float:
+        if self.is_paper_local() and self.paper_risk_relaxed:
+            return self.paper_max_position_size_pct
+        return self.max_position_size_pct
+
+    @property
+    def effective_max_daily_loss_pct(self) -> float:
+        if self.is_paper_local() and self.paper_risk_relaxed:
+            return self.paper_max_daily_loss_pct
+        return self.max_daily_loss_pct
+
+    @property
+    def effective_max_concurrent_positions(self) -> int:
+        if self.is_paper_local() and self.paper_risk_relaxed:
+            return self.paper_max_concurrent_positions
+        return self.max_concurrent_positions
+
+    @property
+    def effective_min_signal_strength(self) -> float:
+        if self.is_paper_local() and self.paper_risk_relaxed:
+            return self.paper_min_signal_strength
+        return self.min_signal_strength
+
+    @property
+    def effective_consecutive_loss_cooldown(self) -> int:
+        if self.is_paper_local() and self.paper_risk_relaxed:
+            return self.paper_consecutive_loss_cooldown
+        return self.consecutive_loss_cooldown
+
     # Liquidity-aware scaling
     breakeven_lock_pct: float = 5.0  # move stop to entry once at this profit %
     initial_risk_amount: float = 50.0  # fixed $ amount for the first entry
@@ -75,7 +114,7 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_password: str = ""
     notify_email: str = ""
-    notifications_enabled: str = "liquidation,stop_loss,spike_detected,daily_summary"
+    notifications_enabled: str = "liquidation,stop_loss,daily_summary"
 
     # Volatility
     spike_threshold_pct: float = 3.0
@@ -126,6 +165,7 @@ class Settings(BaseSettings):
     dashboard_host: str = "0.0.0.0"
     dashboard_port: int = 9035
     dashboard_token: str = ""  # set a secret token for remote access
+    grafana_port: int = 3001
 
     # Exchange platform URL (for quick-link from the dashboard).
     # Leave empty for auto-detection based on exchange + trading_mode.

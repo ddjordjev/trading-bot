@@ -55,14 +55,16 @@ class MarketSession:
         local = dt.astimezone(self.timezone) if dt else self._local_now()
         if self.is_weekend(dt) or self.is_holiday(dt):
             return False
-        open_dt = local.replace(hour=self.open_time.hour, minute=self.open_time.minute, second=0, microsecond=0)
+        open_dt = local.replace(hour=self.open_time.hour, minute=self.open_time.minute, second=0, microsecond=0, fold=0)
         window_end = open_dt + timedelta(minutes=window_minutes)
         return open_dt <= local < window_end
 
     def next_open(self, dt: datetime | None = None) -> datetime:
         """Next market open as a UTC datetime."""
         local = dt.astimezone(self.timezone) if dt else self._local_now()
-        candidate = local.replace(hour=self.open_time.hour, minute=self.open_time.minute, second=0, microsecond=0)
+        candidate = local.replace(
+            hour=self.open_time.hour, minute=self.open_time.minute, second=0, microsecond=0, fold=0
+        )
         if candidate <= local:
             candidate += timedelta(days=1)
         for _ in range(10):

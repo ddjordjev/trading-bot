@@ -93,6 +93,8 @@ class WickScalpDetector:
         prices = self._recent_prices.get(symbol, [])
         if len(prices) < self.velocity_candles + 1:
             return None
+        if entry_price <= 0:
+            return None
 
         recent = prices[-(self.velocity_candles + 1) :]
         velocity = self._calculate_velocity(recent, main_side)
@@ -182,6 +184,8 @@ class WickScalpDetector:
 
         moves = []
         for i in range(1, len(prices)):
+            if prices[i - 1] <= 0:
+                continue
             pct = (prices[i] - prices[i - 1]) / prices[i - 1] * 100
             if main_side == "long":
                 moves.append(-pct)  # negative price move = against long

@@ -8,6 +8,7 @@ export default defineConfig({
       "/api": "http://localhost:9035",
       "/ws": { target: "ws://localhost:9035", ws: true },
       "/docs": "http://localhost:9035",
+      "/metrics": "http://localhost:9035",
     },
   },
 });
