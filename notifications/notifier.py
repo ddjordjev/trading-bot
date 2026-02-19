@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from enum import Enum
-from typing import Optional
 
 import aiosmtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from loguru import logger
 
 from config.settings import Settings
@@ -36,6 +35,7 @@ class Notifier:
         self.enabled_types = set(settings.notification_list)
         self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
         self._running = False
+        self._background_tasks: list = []
 
     ALWAYS_ON = {NotificationType.LIQUIDATION, NotificationType.WHALE_POSITION}
 
@@ -46,7 +46,7 @@ class Notifier:
 
     async def start(self) -> None:
         self._running = True
-        asyncio.create_task(self._process_queue())
+        self._background_tasks.append(asyncio.create_task(self._process_queue()))
         logger.info("Notification system started (enabled: {})", ", ".join(self.enabled_types))
 
     async def stop(self) -> None:
@@ -70,15 +70,14 @@ class Notifier:
             f"Position {symbol} is at risk of liquidation!\n\n"
             f"Unrealized PnL: {pnl:.2f} USDT\n"
             f"Remaining balance: {balance:.2f} USDT\n"
-            f"Time: {datetime.now(timezone.utc).isoformat()}",
+            f"Time: {datetime.now(UTC).isoformat()}",
         )
 
     async def alert_stop_loss(self, symbol: str, entry: float, exit_price: float, pnl: float) -> None:
         await self.send(
             NotificationType.STOP_LOSS,
             f"Stop Loss Hit - {symbol}",
-            f"Stop loss triggered for {symbol}\n\n"
-            f"Entry: {entry:.6f}\nExit: {exit_price:.6f}\nPnL: {pnl:.2f} USDT",
+            f"Stop loss triggered for {symbol}\n\nEntry: {entry:.6f}\nExit: {exit_price:.6f}\nPnL: {pnl:.2f} USDT",
         )
 
     async def alert_spike(self, symbol: str, change_pct: float, direction: str, price: float) -> None:
@@ -88,15 +87,14 @@ class Notifier:
             f"Price spike on {symbol}\n\n"
             f"Direction: {direction}\nChange: {change_pct:.2f}%\n"
             f"Current price: {price:.6f}\n"
-            f"Time: {datetime.now(timezone.utc).isoformat()}",
+            f"Time: {datetime.now(UTC).isoformat()}",
         )
 
     async def alert_news(self, headline: str, symbols: list[str], source: str) -> None:
         await self.send(
             NotificationType.NEWS_ALERT,
             f"News Alert - {', '.join(symbols)}",
-            f"Relevant news detected:\n\n{headline}\n\nSource: {source}\n"
-            f"Related symbols: {', '.join(symbols)}",
+            f"Relevant news detected:\n\n{headline}\n\nSource: {source}\nRelated symbols: {', '.join(symbols)}",
         )
 
     async def alert_whale_position(
@@ -129,7 +127,7 @@ class Notifier:
                 f"  Current price:   {current_price:.6f}\n"
                 f"  Leverage:        {leverage}x\n"
                 f"  DCA adds:        {adds}\n"
-                f"  Time:            {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+                f"  Time:            {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
                 f"This position has grown to full size and is running well.\n"
                 f"You should decide what to do next:\n"
                 f"  - Take partial profit\n"
@@ -137,7 +135,7 @@ class Notifier:
                 f"  - Let it ride with trailing stop\n"
                 f"  - Close it entirely\n\n"
                 + (f"Dashboard: {dashboard_url}\n\n" if dashboard_url else "")
-                + f"The bot will NOT auto-close this. It's your call.\n"
+                + "The bot will NOT auto-close this. It's your call.\n"
             ),
         )
 
@@ -157,7 +155,7 @@ class Notifier:
         body = (
             f"DAILY TRADING REPORT\n"
             f"{'=' * 40}\n\n"
-            f"  Date:            {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
+            f"  Date:            {datetime.now(UTC).strftime('%Y-%m-%d')}\n"
             f"  Balance:         {balance:,.2f} USDT\n"
             f"  Daily PnL:       {pnl:+,.2f} USDT ({pnl_pct:+.1f}%)\n"
             f"  Trades today:    {trades}\n"
@@ -173,7 +171,7 @@ class Notifier:
             try:
                 subject, body = await asyncio.wait_for(self._queue.get(), timeout=5.0)
                 await self._send_email(subject, body)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except Exception as e:
                 logger.error("Failed to send notification: {}", e)

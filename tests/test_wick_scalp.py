@@ -1,7 +1,8 @@
 """Tests for core/orders/wick_scalp.py."""
+
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -10,27 +11,32 @@ from core.orders.wick_scalp import WickScalp, WickScalpDetector
 
 class TestWickScalp:
     def test_age_minutes(self):
-        ws = WickScalp(symbol="BTC/USDT", main_side="long", scalp_side="short",
-                       created_at=datetime.now(timezone.utc) - timedelta(minutes=3))
+        ws = WickScalp(
+            symbol="BTC/USDT", main_side="long", scalp_side="short", created_at=datetime.now(UTC) - timedelta(minutes=3)
+        )
         assert ws.age_minutes >= 2.9
 
     def test_expired(self):
-        ws = WickScalp(symbol="BTC/USDT", main_side="long", scalp_side="short",
-                       max_hold_minutes=5,
-                       created_at=datetime.now(timezone.utc) - timedelta(minutes=6))
+        ws = WickScalp(
+            symbol="BTC/USDT",
+            main_side="long",
+            scalp_side="short",
+            max_hold_minutes=5,
+            created_at=datetime.now(UTC) - timedelta(minutes=6),
+        )
         assert ws.expired is True
 
     def test_not_expired(self):
-        ws = WickScalp(symbol="BTC/USDT", main_side="long", scalp_side="short",
-                       max_hold_minutes=5)
+        ws = WickScalp(symbol="BTC/USDT", main_side="long", scalp_side="short", max_hold_minutes=5)
         assert ws.expired is False
 
 
 class TestWickScalpDetector:
     @pytest.fixture()
     def det(self):
-        return WickScalpDetector(wick_threshold_pct=1.5, velocity_candles=3,
-                                 min_wick_velocity=0.5, max_concurrent_scalps=2)
+        return WickScalpDetector(
+            wick_threshold_pct=1.5, velocity_candles=3, min_wick_velocity=0.5, max_concurrent_scalps=2
+        )
 
     def test_feed_price_buffers(self, det):
         for i in range(25):
@@ -66,8 +72,7 @@ class TestWickScalpDetector:
         assert scalp is None
 
     def test_already_active_blocks_new_scalp(self, det):
-        existing = WickScalp(symbol="BTC/USDT", main_side="long", scalp_side="short",
-                             active=True)
+        existing = WickScalp(symbol="BTC/USDT", main_side="long", scalp_side="short", active=True)
         det._active_scalps["BTC/USDT"] = existing
         prices = [100, 99, 98, 97, 96]
         for p in prices:
@@ -96,17 +101,27 @@ class TestWickScalpDetector:
         assert det.has_active("BTC/USDT") is False
 
     def test_get_expired(self, det):
-        scalp = WickScalp(symbol="BTC/USDT", main_side="long", scalp_side="short",
-                          active=True, max_hold_minutes=5,
-                          created_at=datetime.now(timezone.utc) - timedelta(minutes=6))
+        scalp = WickScalp(
+            symbol="BTC/USDT",
+            main_side="long",
+            scalp_side="short",
+            active=True,
+            max_hold_minutes=5,
+            created_at=datetime.now(UTC) - timedelta(minutes=6),
+        )
         det._active_scalps["BTC/USDT"] = scalp
         expired = det.get_expired()
         assert "BTC/USDT" in expired
 
     def test_cleanup_old_closed(self, det):
-        scalp = WickScalp(symbol="BTC/USDT", main_side="long", scalp_side="short",
-                          active=False, closed=True,
-                          created_at=datetime.now(timezone.utc) - timedelta(minutes=15))
+        scalp = WickScalp(
+            symbol="BTC/USDT",
+            main_side="long",
+            scalp_side="short",
+            active=False,
+            closed=True,
+            created_at=datetime.now(UTC) - timedelta(minutes=15),
+        )
         det._active_scalps["BTC/USDT"] = scalp
         det.cleanup()
         assert "BTC/USDT" not in det._active_scalps
@@ -117,7 +132,7 @@ class TestWickScalpDetector:
         assert "BTC/USDT" in det.active_scalps
 
     def test_velocity_no_against_moves(self, det):
-        prices = [100, 101, 102, 103]
+        prices = [103, 102, 101, 100]
         vel = det._calculate_velocity(prices, "short")
         assert vel == 0.0
 

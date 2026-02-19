@@ -3,14 +3,15 @@
 Wrong weights = wrong position sizing = losing money on bad strategies
 or missing out on good ones.
 """
+
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from db.store import TradeDB
-from db.models import TradeRecord
 from analytics.engine import AnalyticsEngine
+from db.models import TradeRecord
+from db.store import TradeDB
 
 
 @pytest.fixture
@@ -31,8 +32,12 @@ def engine(db: TradeDB):
 def _make_trade(strategy: str, pnl: float, winner: bool, **kwargs) -> TradeRecord:
     return TradeRecord(
         symbol=kwargs.get("symbol", "BTC/USDT"),
-        side="buy", strategy=strategy, action="close",
-        pnl_usd=pnl, pnl_pct=pnl / 10, is_winner=winner,
+        side="buy",
+        strategy=strategy,
+        action="close",
+        pnl_usd=pnl,
+        pnl_pct=pnl / 10,
+        is_winner=winner,
         hour_utc=kwargs.get("hour", 12),
         market_regime=kwargs.get("regime", "normal"),
         signal_strength=0.7,
@@ -42,7 +47,7 @@ def _make_trade(strategy: str, pnl: float, winner: bool, **kwargs) -> TradeRecor
 
 class TestWeightCalculation:
     def test_default_weight_with_few_trades(self, db: TradeDB, engine: AnalyticsEngine):
-        for i in range(5):
+        for _i in range(5):
             db.log_trade(_make_trade("test_strat", 10, True))
         engine.refresh()
         assert engine.get_weight("test_strat") == 1.0  # not enough data

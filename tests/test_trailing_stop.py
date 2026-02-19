@@ -6,7 +6,9 @@ A broken trailing stop means:
 - Break-even doesn't lock → lose a confirmed winner
 These are the highest-stakes bugs in the entire bot.
 """
+
 import pytest
+
 from core.models import OrderSide
 from core.orders.trailing import TrailingStop
 
@@ -14,9 +16,13 @@ from core.orders.trailing import TrailingStop
 class TestLongStop:
     def _make(self, entry: float = 100.0, **kwargs) -> TrailingStop:
         defaults = dict(
-            symbol="BTC/USDT", side=OrderSide.BUY, entry_price=entry,
-            initial_stop_pct=2.0, trail_pct=1.0,
-            activation_pct=1.0, breakeven_trigger_pct=5.0,
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            entry_price=entry,
+            initial_stop_pct=2.0,
+            trail_pct=1.0,
+            activation_pct=1.0,
+            breakeven_trigger_pct=5.0,
         )
         defaults.update(kwargs)
         return TrailingStop(**defaults)
@@ -69,9 +75,13 @@ class TestLongStop:
 class TestShortStop:
     def _make(self, entry: float = 100.0, **kwargs) -> TrailingStop:
         defaults = dict(
-            symbol="BTC/USDT", side=OrderSide.SELL, entry_price=entry,
-            initial_stop_pct=2.0, trail_pct=1.0,
-            activation_pct=1.0, breakeven_trigger_pct=5.0,
+            symbol="BTC/USDT",
+            side=OrderSide.SELL,
+            entry_price=entry,
+            initial_stop_pct=2.0,
+            trail_pct=1.0,
+            activation_pct=1.0,
+            breakeven_trigger_pct=5.0,
         )
         defaults.update(kwargs)
         return TrailingStop(**defaults)
@@ -109,15 +119,21 @@ class TestShortStop:
 class TestPnlFromStop:
     def test_long_positive_pnl(self):
         ts = TrailingStop(
-            symbol="X", side=OrderSide.BUY, entry_price=100.0,
-            initial_stop_pct=2.0, trail_pct=1.0,
+            symbol="X",
+            side=OrderSide.BUY,
+            entry_price=100.0,
+            initial_stop_pct=2.0,
+            trail_pct=1.0,
         )
         ts.update(110.0)  # should raise stop via trail
         assert ts.pnl_from_stop > 0
 
     def test_long_initial_pnl_is_negative(self):
         ts = TrailingStop(
-            symbol="X", side=OrderSide.BUY, entry_price=100.0,
-            initial_stop_pct=2.0, trail_pct=1.0,
+            symbol="X",
+            side=OrderSide.BUY,
+            entry_price=100.0,
+            initial_stop_pct=2.0,
+            trail_pct=1.0,
         )
         assert ts.pnl_from_stop < 0  # initial stop is below entry

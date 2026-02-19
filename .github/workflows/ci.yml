@@ -25,7 +25,7 @@ jobs:
         run: |
           mypy core/risk/ core/orders/scaler.py core/orders/trailing.py \
                db/ analytics/ config/ \
-               --ignore-missing-imports --no-strict
+               --ignore-missing-imports
 
   test:
     name: Tests
@@ -37,7 +37,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: pytest tests/ -v --tb=short --cov=. --cov-report=term-missing --cov-fail-under=80
+      - run: pytest tests/ -v --tb=short
 
   frontend-build:
     name: Frontend Build

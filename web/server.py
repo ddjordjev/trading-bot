@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from fastapi import Depends, FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,28 +14,43 @@ from loguru import logger
 
 from web.auth import verify_token, verify_ws_token
 from web.schemas import (
-    ActionResponse, AnalyticsSnapshot, BotStatus, DailyReportData, FullSnapshot,
-    IntelSnapshot, LogEntry, ModificationSuggestionInfo, ModuleStatus,
-    PatternInsightInfo, PositionInfo, StrategyInfo, StrategyScoreInfo,
-    TradeRecord, TrendingCoinInfo, WickScalpInfo,
+    ActionResponse,
+    AnalyticsSnapshot,
+    BotStatus,
+    DailyReportData,
+    FullSnapshot,
+    IntelSnapshot,
+    LogEntry,
+    ModificationSuggestionInfo,
+    ModuleStatus,
+    PatternInsightInfo,
+    PositionInfo,
+    StrategyInfo,
+    StrategyScoreInfo,
+    TradeRecord,
+    TrendingCoinInfo,
+    WickScalpInfo,
 )
 
 if TYPE_CHECKING:
     from bot import TradingBot
 
-_bot: Optional[TradingBot] = None
+_bot: TradingBot | None = None
 _start_time: float = 0.0
 _log_buffer: deque[dict] = deque(maxlen=200)
+_background_tasks: list = []
 
 
 def _log_sink(message: object) -> None:
     record = message.record  # type: ignore[union-attr]
-    _log_buffer.append({
-        "ts": record["time"].strftime("%H:%M:%S"),
-        "level": record["level"].name,
-        "msg": record["message"],
-        "module": record["name"] or "",
-    })
+    _log_buffer.append(
+        {
+            "ts": record["time"].strftime("%H:%M:%S"),
+            "level": record["level"].name,
+            "msg": record["message"],
+            "module": record["name"] or "",
+        }
+    )
 
 
 def setup_log_capture() -> None:
@@ -61,6 +76,7 @@ app.add_middleware(
 
 
 # --------------- helpers ---------------
+
 
 def _bot_status() -> BotStatus:
     if not _bot:
@@ -97,30 +113,32 @@ async def _positions() -> list[PositionInfo]:
             continue
         ts = _bot.orders.trailing.active_stops.get(pos.symbol)
         sp = _bot.orders.scaler.get(pos.symbol)
-        result.append(PositionInfo(
-            symbol=pos.symbol,
-            side=pos.side.value,
-            amount=pos.amount,
-            entry_price=pos.entry_price,
-            current_price=pos.current_price,
-            pnl_pct=pos.pnl_pct,
-            pnl_usd=pos.unrealized_pnl,
-            leverage=pos.leverage,
-            market_type=pos.market_type,
-            strategy=pos.strategy,
-            stop_loss=ts.current_stop if ts else pos.stop_loss,
-            notional_value=pos.notional_value,
-            age_minutes=(time.time() - pos.opened_at.timestamp()) / 60,
-            breakeven_locked=ts.breakeven_locked if ts else False,
-            scale_mode=sp.mode.value if sp else "",
-            scale_phase=sp.phase.value if sp else "",
-            dca_count=sp.adds if sp else 0,
-            trade_url=_bot.settings.symbol_platform_url(pos.symbol, pos.market_type),
-        ))
+        result.append(
+            PositionInfo(
+                symbol=pos.symbol,
+                side=pos.side.value,
+                amount=pos.amount,
+                entry_price=pos.entry_price,
+                current_price=pos.current_price,
+                pnl_pct=pos.pnl_pct,
+                pnl_usd=pos.unrealized_pnl,
+                leverage=pos.leverage,
+                market_type=pos.market_type,
+                strategy=pos.strategy,
+                stop_loss=ts.current_stop if ts else pos.stop_loss,
+                notional_value=pos.notional_value,
+                age_minutes=(time.time() - pos.opened_at.timestamp()) / 60,
+                breakeven_locked=ts.breakeven_locked if ts else False,
+                scale_mode=sp.mode.value if sp else "",
+                scale_phase=sp.phase.value if sp else "",
+                dca_count=sp.adds if sp else 0,
+                trade_url=_bot.settings.symbol_platform_url(pos.symbol, pos.market_type),
+            )
+        )
     return result
 
 
-def _intel_snapshot() -> Optional[IntelSnapshot]:
+def _intel_snapshot() -> IntelSnapshot | None:
     if not _bot or not _bot.intel:
         return None
     c = _bot.intel.condition
@@ -148,14 +166,16 @@ def _wick_scalps() -> list[WickScalpInfo]:
         return []
     result = []
     for sym, ws in _bot.orders.wick_scalper.active_scalps.items():
-        result.append(WickScalpInfo(
-            symbol=sym,
-            scalp_side=ws.scalp_side,
-            entry_price=ws.entry_price,
-            amount=ws.amount,
-            age_minutes=ws.age_minutes,
-            max_hold_minutes=ws.max_hold_minutes,
-        ))
+        result.append(
+            WickScalpInfo(
+                symbol=sym,
+                scalp_side=ws.scalp_side,
+                entry_price=ws.entry_price,
+                amount=ws.amount,
+                age_minutes=ws.age_minutes,
+                max_hold_minutes=ws.max_hold_minutes,
+            )
+        )
     return result
 
 
@@ -164,6 +184,7 @@ def _recent_logs() -> list[LogEntry]:
 
 
 # --------------- REST endpoints ---------------
+
 
 @app.get("/api/status", response_model=BotStatus)
 async def get_status(_: str = Depends(verify_token)):
@@ -181,20 +202,22 @@ async def get_trades(_: str = Depends(verify_token)):
         return []
     records = []
     for t in _bot.orders._trade_log[-100:]:
-        records.append(TradeRecord(
-            timestamp=t.get("timestamp", ""),
-            symbol=t.get("symbol", ""),
-            side=t.get("side", ""),
-            action=t.get("action", ""),
-            amount=t.get("amount", 0),
-            price=t.get("price", 0),
-            strategy=t.get("strategy", ""),
-            pnl=t.get("pnl", 0),
-        ))
+        records.append(
+            TradeRecord(
+                timestamp=t.get("timestamp", ""),
+                symbol=t.get("symbol", ""),
+                side=t.get("side", ""),
+                action=t.get("action", ""),
+                amount=t.get("amount", 0),
+                price=t.get("price", 0),
+                strategy=t.get("strategy", ""),
+                pnl=t.get("pnl", 0),
+            )
+        )
     return records
 
 
-@app.get("/api/intel", response_model=Optional[IntelSnapshot])
+@app.get("/api/intel", response_model=IntelSnapshot | None)
 async def get_intel(_: str = Depends(verify_token)):
     return _intel_snapshot()
 
@@ -205,17 +228,19 @@ async def get_trending(_: str = Depends(verify_token)):
         return []
     coins = []
     for coin in _bot.scanner.hot_movers:
-        coins.append(TrendingCoinInfo(
-            symbol=coin.symbol,
-            name=coin.name,
-            price=coin.price,
-            volume_24h=coin.volume_24h,
-            market_cap=coin.market_cap,
-            change_1h=coin.change_1h,
-            change_24h=coin.change_24h,
-            is_low_liquidity=coin.is_low_liquidity,
-            has_dynamic_strategy=coin.trading_pair in _bot._dynamic_strategies,
-        ))
+        coins.append(
+            TrendingCoinInfo(
+                symbol=coin.symbol,
+                name=coin.name,
+                price=coin.price,
+                volume_24h=coin.volume_24h,
+                market_cap=coin.market_cap,
+                change_1h=coin.change_1h,
+                change_24h=coin.change_24h,
+                is_low_liquidity=coin.is_low_liquidity,
+                has_dynamic_strategy=coin.trading_pair in _bot._dynamic_strategies,
+            )
+        )
     return coins
 
 
@@ -225,18 +250,29 @@ async def get_strategies(_: str = Depends(verify_token)):
         return []
     result = []
     from bot import SCALP_ONLY_STRATEGIES
+
     for s in _bot._strategies:
-        result.append(StrategyInfo(
-            name=s.name, symbol=s.symbol, market_type=s.market_type,
-            leverage=s.leverage,
-            mode="winners" if s.name in SCALP_ONLY_STRATEGIES else "pyramid",
-            is_dynamic=False,
-        ))
-    for sym, s in _bot._dynamic_strategies.items():
-        result.append(StrategyInfo(
-            name=s.name, symbol=s.symbol, market_type=s.market_type,
-            leverage=s.leverage, mode="pyramid", is_dynamic=True,
-        ))
+        result.append(
+            StrategyInfo(
+                name=s.name,
+                symbol=s.symbol,
+                market_type=s.market_type,
+                leverage=s.leverage,
+                mode="winners" if s.name in SCALP_ONLY_STRATEGIES else "pyramid",
+                is_dynamic=False,
+            )
+        )
+    for _sym, s in _bot._dynamic_strategies.items():
+        result.append(
+            StrategyInfo(
+                name=s.name,
+                symbol=s.symbol,
+                market_type=s.market_type,
+                leverage=s.leverage,
+                mode="pyramid",
+                is_dynamic=True,
+            )
+        )
     return result
 
 
@@ -246,25 +282,29 @@ async def get_modules(_: str = Depends(verify_token)):
         return []
     return [
         ModuleStatus(
-            name="intel", display_name="Market Intelligence",
+            name="intel",
+            display_name="Market Intelligence",
             enabled=_bot.intel is not None and _bot.settings.intel_enabled,
             description="Fear & Greed, liquidations, macro calendar, whale sentiment",
             stats={"regime": _bot.intel.condition.regime.value if _bot.intel else "off"},
         ),
         ModuleStatus(
-            name="scanner", display_name="Trending Scanner",
+            name="scanner",
+            display_name="Trending Scanner",
             enabled=True,
             description="CryptoBubbles-style trending coin scanner",
             stats={"trending_count": len(_bot.scanner.hot_movers)},
         ),
         ModuleStatus(
-            name="news", display_name="News Monitor",
+            name="news",
+            display_name="News Monitor",
             enabled=_bot.settings.news_enabled,
             description="RSS feed monitoring for spike correlation",
             stats={"recent_count": len(_bot._recent_news)},
         ),
         ModuleStatus(
-            name="volatility", display_name="Volatility Detector",
+            name="volatility",
+            display_name="Volatility Detector",
             enabled=True,
             description="Price spike detection engine",
             stats={"threshold": _bot.settings.spike_threshold_pct},
@@ -294,6 +334,7 @@ async def get_daily_report(_: str = Depends(verify_token)):
 
 
 # --------------- analytics endpoints ---------------
+
 
 @app.get("/api/analytics", response_model=AnalyticsSnapshot)
 async def get_analytics(_: str = Depends(verify_token)):
@@ -327,13 +368,14 @@ async def refresh_analytics(_: str = Depends(verify_token)):
 
 # --------------- action endpoints ---------------
 
+
 @app.post("/api/bot/start", response_model=ActionResponse)
 async def bot_start(_: str = Depends(verify_token)):
     if not _bot:
         return ActionResponse(success=False, message="Bot instance not initialized")
     if _bot._running:
         return ActionResponse(success=False, message="Bot is already running")
-    asyncio.create_task(_bot.start())
+    _background_tasks.append(asyncio.create_task(_bot.start()))
     return ActionResponse(success=True, message="Bot starting")
 
 
@@ -352,9 +394,12 @@ async def close_position(symbol: str, _: str = Depends(verify_token)):
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     from core.models import Signal, SignalAction
+
     sig = Signal(
-        symbol=symbol, action=SignalAction.CLOSE,
-        strategy="dashboard", reason="Manual close from dashboard",
+        symbol=symbol,
+        action=SignalAction.CLOSE,
+        strategy="dashboard",
+        reason="Manual close from dashboard",
     )
     try:
         await _bot.orders.execute_signal(sig)
@@ -364,8 +409,7 @@ async def close_position(symbol: str, _: str = Depends(verify_token)):
 
 
 @app.post("/api/position/{symbol}/take-profit", response_model=ActionResponse)
-async def take_profit(symbol: str, pct: float = Query(default=50, ge=1, le=100),
-                      _: str = Depends(verify_token)):
+async def take_profit(symbol: str, pct: float = Query(default=50, ge=1, le=100), _: str = Depends(verify_token)):
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     try:
@@ -375,6 +419,7 @@ async def take_profit(symbol: str, pct: float = Query(default=50, ge=1, le=100),
             return ActionResponse(success=False, message=f"No open position for {symbol}")
         close_amount = pos.amount * (pct / 100)
         from core.models import Order, OrderSide, OrderType
+
         order = Order(
             symbol=symbol,
             side=OrderSide.SELL if pos.side.value == "buy" else OrderSide.BUY,
@@ -384,15 +429,14 @@ async def take_profit(symbol: str, pct: float = Query(default=50, ge=1, le=100),
             market_type=pos.market_type,
             strategy="dashboard_partial",
         )
-        result = await _bot.exchange.place_order(order)
+        _result = await _bot.exchange.place_order(order)
         return ActionResponse(success=True, message=f"Took {pct}% profit on {symbol} ({close_amount:.6f})")
     except Exception as e:
         return ActionResponse(success=False, message=str(e))
 
 
 @app.post("/api/position/{symbol}/tighten-stop", response_model=ActionResponse)
-async def tighten_stop(symbol: str, pct: float = Query(default=2, ge=0.1, le=50),
-                       _: str = Depends(verify_token)):
+async def tighten_stop(symbol: str, pct: float = Query(default=2, ge=0.1, le=50), _: str = Depends(verify_token)):
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     ts = _bot.orders.trailing.active_stops.get(symbol)
@@ -402,8 +446,7 @@ async def tighten_stop(symbol: str, pct: float = Query(default=2, ge=0.1, le=50)
     pos = next((p for p in positions if p.symbol == symbol), None)
     if not pos:
         return ActionResponse(success=False, message=f"No position for {symbol}")
-    new_stop = pos.current_price * (1 - pct / 100) if pos.side.value == "buy" \
-        else pos.current_price * (1 + pct / 100)
+    new_stop = pos.current_price * (1 - pct / 100) if pos.side.value == "buy" else pos.current_price * (1 + pct / 100)
     ts.current_stop = new_stop
     return ActionResponse(success=True, message=f"Stop tightened to {new_stop:.6f} ({pct}% from current)")
 
@@ -443,6 +486,7 @@ async def toggle_module(name: str, _: str = Depends(verify_token)):
             return ActionResponse(success=True, message="Intel disabled")
         else:
             from intel import MarketIntel
+
             _bot.intel = MarketIntel(
                 coinglass_key=_bot.settings.coinglass_api_key,
                 symbols=_bot.settings.intel_symbol_list,
@@ -457,6 +501,7 @@ async def toggle_module(name: str, _: str = Depends(verify_token)):
 
 
 # --------------- WebSocket ---------------
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -481,6 +526,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 # --------------- static files ---------------
+
 
 @app.get("/docs/summary")
 async def serve_summary():

@@ -2,23 +2,22 @@ from __future__ import annotations
 
 from enum import Enum
 
-from loguru import logger
-
 from core.models import Candle, Ticker
 
 
 class LiquidityTier(str, Enum):
-    HIGH = "high"       # major coins, deep books, safe for full positions
-    MEDIUM = "medium"   # decent liquidity, ok for normal trades
-    LOW = "low"         # shitcoin territory -- only gambling bets allowed
-    DEAD = "dead"       # untradeable
+    HIGH = "high"  # major coins, deep books, safe for full positions
+    MEDIUM = "medium"  # decent liquidity, ok for normal trades
+    LOW = "low"  # shitcoin territory -- only gambling bets allowed
+    DEAD = "dead"  # untradeable
 
 
 class LiquidityProfile:
     """Assessment of a symbol's liquidity."""
 
-    def __init__(self, tier: LiquidityTier, volume_24h: float, spread_pct: float,
-                 avg_candle_volume: float, reason: str = ""):
+    def __init__(
+        self, tier: LiquidityTier, volume_24h: float, spread_pct: float, avg_candle_volume: float, reason: str = ""
+    ):
         self.tier = tier
         self.volume_24h = volume_24h
         self.spread_pct = spread_pct
@@ -76,16 +75,19 @@ class MarketQualityFilter:
         spread = ticker.spread_pct
 
         if spread > 1.0 or avg_vol == 0:
-            return LiquidityProfile(LiquidityTier.DEAD, vol_24h, spread, avg_vol,
-                                    f"spread={spread:.2f}%, avg_vol={avg_vol:.0f}")
+            return LiquidityProfile(
+                LiquidityTier.DEAD, vol_24h, spread, avg_vol, f"spread={spread:.2f}%, avg_vol={avg_vol:.0f}"
+            )
 
         if vol_24h < self.min_liquidity_volume or spread > 0.5:
-            return LiquidityProfile(LiquidityTier.LOW, vol_24h, spread, avg_vol,
-                                    f"vol_24h={vol_24h:.0f}, spread={spread:.2f}%")
+            return LiquidityProfile(
+                LiquidityTier.LOW, vol_24h, spread, avg_vol, f"vol_24h={vol_24h:.0f}, spread={spread:.2f}%"
+            )
 
         if vol_24h < self.min_liquidity_volume * 10 or spread > 0.2:
-            return LiquidityProfile(LiquidityTier.MEDIUM, vol_24h, spread, avg_vol,
-                                    f"vol_24h={vol_24h:.0f}, spread={spread:.2f}%")
+            return LiquidityProfile(
+                LiquidityTier.MEDIUM, vol_24h, spread, avg_vol, f"vol_24h={vol_24h:.0f}, spread={spread:.2f}%"
+            )
 
         return LiquidityProfile(LiquidityTier.HIGH, vol_24h, spread, avg_vol, "deep liquidity")
 
@@ -107,7 +109,7 @@ class MarketQualityFilter:
         recent_vol = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else 0
 
         if avg_vol > 0 and recent_vol / avg_vol < self.min_volume_ratio:
-            return False, f"volume dry ({recent_vol/avg_vol:.1f}x vs avg)"
+            return False, f"volume dry ({recent_vol / avg_vol:.1f}x vs avg)"
 
         chop_score = self._choppiness(candles[-20:])
         if chop_score > self.max_chop_score:

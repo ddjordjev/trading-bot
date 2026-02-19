@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
-from typing import Optional, Callable
+from collections.abc import Callable
 
 from loguru import logger
 
 from core.exchange.base import BaseExchange
 from core.models import (
-    Candle, Ticker, OrderBook, Order, OrderSide, OrderType, OrderStatus,
-    Position, MarketType,
+    Candle,
+    MarketType,
+    Order,
+    OrderBook,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Position,
+    Ticker,
 )
 
 
@@ -41,7 +47,7 @@ class PaperExchange(BaseExchange):
     async def fetch_ticker(self, symbol: str) -> Ticker:
         return await self._real.fetch_ticker(symbol)
 
-    async def fetch_tickers(self, symbols: Optional[list[str]] = None) -> list[Ticker]:
+    async def fetch_tickers(self, symbols: list[str] | None = None) -> list[Ticker]:
         return await self._real.fetch_tickers(symbols)
 
     async def fetch_candles(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list[Candle]:
@@ -55,7 +61,7 @@ class PaperExchange(BaseExchange):
     async def fetch_balance(self) -> dict[str, float]:
         return {k: v for k, v in self._balances.items() if v > 0}
 
-    async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
+    async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
         targets = [p for p in self._positions if p.symbol == symbol] if symbol else list(self._positions)
         for pos in targets:
             try:
@@ -78,8 +84,8 @@ class PaperExchange(BaseExchange):
         side: OrderSide,
         order_type: OrderType,
         amount: float,
-        price: Optional[float] = None,
-        stop_price: Optional[float] = None,
+        price: float | None = None,
+        stop_price: float | None = None,
         leverage: int = 1,
         market_type: MarketType = MarketType.SPOT,
     ) -> Order:
@@ -96,8 +102,13 @@ class PaperExchange(BaseExchange):
             if self._balances.get("USDT", 0) < cost:
                 logger.warning("[PAPER] Insufficient balance for {} {} {}", side.value, amount, symbol)
                 return Order(
-                    id=order_id, symbol=symbol, side=side, order_type=order_type,
-                    amount=amount, price=fill_price, status=OrderStatus.FAILED,
+                    id=order_id,
+                    symbol=symbol,
+                    side=side,
+                    order_type=order_type,
+                    amount=amount,
+                    price=fill_price,
+                    status=OrderStatus.FAILED,
                     market_type=market_type.value,
                 )
             self._balances["USDT"] -= cost
@@ -122,8 +133,15 @@ class PaperExchange(BaseExchange):
         elif side == OrderSide.SELL:
             self._balances["USDT"] += fill_price * amount
 
-        logger.info("[PAPER] {} {} {} {} @ {:.6f} (leverage={}x)",
-                     "FILLED", side.value.upper(), amount, symbol, fill_price, leverage)
+        logger.info(
+            "[PAPER] {} {} {} {} @ {:.6f} (leverage={}x)",
+            "FILLED",
+            side.value.upper(),
+            amount,
+            symbol,
+            fill_price,
+            leverage,
+        )
         return order
 
     def _update_position(self, order: Order, fill_price: float) -> None:
@@ -139,32 +157,45 @@ class PaperExchange(BaseExchange):
             logger.info("[PAPER] Closed position {} PnL: {:.2f}", order.symbol, pnl)
             return
 
-        self._positions.append(Position(
-            symbol=order.symbol,
-            side=order.side,
-            amount=order.amount,
-            entry_price=fill_price,
-            current_price=fill_price,
-            leverage=order.leverage,
-            market_type=order.market_type,
-        ))
+        self._positions.append(
+            Position(
+                symbol=order.symbol,
+                side=order.side,
+                amount=order.amount,
+                entry_price=fill_price,
+                current_price=fill_price,
+                leverage=order.leverage,
+                market_type=order.market_type,
+            )
+        )
 
     async def cancel_order(self, order_id: str, symbol: str) -> Order:
         if order_id in self._orders:
             self._orders[order_id].status = OrderStatus.CANCELLED
             return self._orders[order_id]
-        return Order(id=order_id, symbol=symbol, side=OrderSide.BUY,
-                     order_type=OrderType.LIMIT, amount=0, status=OrderStatus.CANCELLED)
+        return Order(
+            id=order_id,
+            symbol=symbol,
+            side=OrderSide.BUY,
+            order_type=OrderType.LIMIT,
+            amount=0,
+            status=OrderStatus.CANCELLED,
+        )
 
     async def fetch_order(self, order_id: str, symbol: str) -> Order:
         if order_id in self._orders:
             return self._orders[order_id]
-        return Order(id=order_id, symbol=symbol, side=OrderSide.BUY,
-                     order_type=OrderType.LIMIT, amount=0, status=OrderStatus.FAILED)
+        return Order(
+            id=order_id,
+            symbol=symbol,
+            side=OrderSide.BUY,
+            order_type=OrderType.LIMIT,
+            amount=0,
+            status=OrderStatus.FAILED,
+        )
 
-    async def fetch_open_orders(self, symbol: Optional[str] = None) -> list[Order]:
-        return [o for o in self._orders.values()
-                if o.status == OrderStatus.OPEN and (not symbol or o.symbol == symbol)]
+    async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:
+        return [o for o in self._orders.values() if o.status == OrderStatus.OPEN and (not symbol or o.symbol == symbol)]
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
         self._leverage_map[symbol] = leverage

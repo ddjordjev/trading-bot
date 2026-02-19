@@ -1,25 +1,36 @@
 """Tests for core/exchange (factory, paper, base)."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 
-from core.exchange.paper import PaperExchange
 from core.exchange.base import BaseExchange
+from core.exchange.paper import PaperExchange
 from core.models import (
-    Candle, Ticker, OrderBook, Order, OrderSide, OrderType, OrderStatus,
-    Position, MarketType,
+    MarketType,
+    OrderBook,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Ticker,
 )
-
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
+
 def _make_ticker(last: float = 100.0) -> Ticker:
-    return Ticker(symbol="BTC/USDT", bid=last - 0.5, ask=last + 0.5,
-                  last=last, volume_24h=1e6, change_pct_24h=1.0,
-                  timestamp=datetime.now(timezone.utc))
+    return Ticker(
+        symbol="BTC/USDT",
+        bid=last - 0.5,
+        ask=last + 0.5,
+        last=last,
+        volume_24h=1e6,
+        change_pct_24h=1.0,
+        timestamp=datetime.now(UTC),
+    )
 
 
 def _mock_real_exchange(ticker_last: float = 100.0) -> AsyncMock:
@@ -30,8 +41,9 @@ def _mock_real_exchange(ticker_last: float = 100.0) -> AsyncMock:
     real.fetch_ticker = AsyncMock(return_value=_make_ticker(ticker_last))
     real.fetch_tickers = AsyncMock(return_value=[_make_ticker(ticker_last)])
     real.fetch_candles = AsyncMock(return_value=[])
-    real.fetch_order_book = AsyncMock(return_value=OrderBook(
-        symbol="BTC/USDT", bids=[], asks=[], timestamp=datetime.now(timezone.utc)))
+    real.fetch_order_book = AsyncMock(
+        return_value=OrderBook(symbol="BTC/USDT", bids=[], asks=[], timestamp=datetime.now(UTC))
+    )
     real.get_available_symbols = AsyncMock(return_value=["BTC/USDT"])
     real.watch_ticker = AsyncMock()
     real.watch_candles = AsyncMock()
@@ -39,6 +51,7 @@ def _mock_real_exchange(ticker_last: float = 100.0) -> AsyncMock:
 
 
 # ── PaperExchange ───────────────────────────────────────────────────
+
 
 class TestPaperExchange:
     @pytest.fixture()
@@ -66,8 +79,7 @@ class TestPaperExchange:
 
     @pytest.mark.asyncio
     async def test_place_market_buy_spot(self, paper):
-        order = await paper.place_order(
-            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0)
+        order = await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0)
         assert order.status == OrderStatus.FILLED
         assert order.filled == 1.0
         bal = await paper.fetch_balance()
@@ -75,15 +87,14 @@ class TestPaperExchange:
 
     @pytest.mark.asyncio
     async def test_place_buy_insufficient_balance(self, paper):
-        order = await paper.place_order(
-            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 200.0)
+        order = await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 200.0)
         assert order.status == OrderStatus.FAILED
 
     @pytest.mark.asyncio
     async def test_place_futures_order(self, paper):
         order = await paper.place_order(
-            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0,
-            leverage=10, market_type=MarketType.FUTURES)
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0, leverage=10, market_type=MarketType.FUTURES
+        )
         assert order.status == OrderStatus.FILLED
         positions = await paper.fetch_positions()
         assert len(positions) == 1
@@ -92,12 +103,12 @@ class TestPaperExchange:
     @pytest.mark.asyncio
     async def test_close_futures_position(self, paper):
         await paper.place_order(
-            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0,
-            leverage=10, market_type=MarketType.FUTURES)
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0, leverage=10, market_type=MarketType.FUTURES
+        )
         paper._real.fetch_ticker = AsyncMock(return_value=_make_ticker(110.0))
         order = await paper.place_order(
-            "BTC/USDT", OrderSide.SELL, OrderType.MARKET, 1.0,
-            leverage=10, market_type=MarketType.FUTURES)
+            "BTC/USDT", OrderSide.SELL, OrderType.MARKET, 1.0, leverage=10, market_type=MarketType.FUTURES
+        )
         assert order.status == OrderStatus.FILLED
         positions = await paper.fetch_positions()
         assert len(positions) == 0
@@ -111,8 +122,7 @@ class TestPaperExchange:
 
     @pytest.mark.asyncio
     async def test_cancel_order(self, paper):
-        order = await paper.place_order(
-            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 0.1)
+        order = await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 0.1)
         cancelled = await paper.cancel_order(order.id, "BTC/USDT")
         assert cancelled.status == OrderStatus.CANCELLED
 
@@ -123,8 +133,7 @@ class TestPaperExchange:
 
     @pytest.mark.asyncio
     async def test_fetch_order(self, paper):
-        order = await paper.place_order(
-            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 0.1)
+        order = await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 0.1)
         fetched = await paper.fetch_order(order.id, "BTC/USDT")
         assert fetched.id == order.id
 
@@ -151,8 +160,8 @@ class TestPaperExchange:
     @pytest.mark.asyncio
     async def test_fetch_positions_by_symbol(self, paper):
         await paper.place_order(
-            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0,
-            leverage=10, market_type=MarketType.FUTURES)
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0, leverage=10, market_type=MarketType.FUTURES
+        )
         positions = await paper.fetch_positions("ETH/USDT")
         assert positions == []
         positions = await paper.fetch_positions("BTC/USDT")
@@ -170,6 +179,7 @@ class TestPaperExchange:
 
 # ── Factory ─────────────────────────────────────────────────────────
 
+
 class TestExchangeFactory:
     def test_paper_mode(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper")
@@ -178,13 +188,15 @@ class TestExchangeFactory:
         monkeypatch.setenv("MEXC_API_SECRET", "s")
         from config.settings import Settings
         from core.exchange.factory import create_exchange
+
         exchange = create_exchange(Settings())
         assert isinstance(exchange, PaperExchange)
 
     def test_unsupported_exchange(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper")
-        monkeypatch.setenv("EXCHANGE", "binance")
+        monkeypatch.setenv("EXCHANGE", "kraken")
         from config.settings import Settings
         from core.exchange.factory import create_exchange
+
         with pytest.raises(ValueError, match="Unsupported exchange"):
             create_exchange(Settings())

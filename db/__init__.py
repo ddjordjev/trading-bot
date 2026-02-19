@@ -1,6 +1,10 @@
+from db.models import ModificationSuggestion, PatternInsight, StrategyScore, TradeRecord
 from db.store import TradeDB
-from db.models import TradeRecord, StrategyScore, PatternInsight, ModificationSuggestion
 
 __all__ = [
-    "TradeDB", "TradeRecord", "StrategyScore", "PatternInsight", "ModificationSuggestion",
+    "ModificationSuggestion",
+    "PatternInsight",
+    "StrategyScore",
+    "TradeDB",
+    "TradeRecord",
 ]

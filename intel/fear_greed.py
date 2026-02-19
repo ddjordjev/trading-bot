@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import aiohttp
 from loguru import logger
@@ -10,8 +9,8 @@ from pydantic import BaseModel
 
 
 class FearGreedReading(BaseModel):
-    value: int                 # 0-100
-    classification: str        # "Extreme Fear", "Fear", "Neutral", "Greed", "Extreme Greed"
+    value: int  # 0-100
+    classification: str  # "Extreme Fear", "Fear", "Neutral", "Greed", "Extreme Greed"
     timestamp: datetime
     previous_value: int = 0
     previous_classification: str = ""
@@ -32,19 +31,20 @@ class FearGreedClient:
 
     def __init__(self, poll_interval: int = 3600):
         self.poll_interval = poll_interval
-        self._latest: Optional[FearGreedReading] = None
+        self._latest: FearGreedReading | None = None
         self._running = False
+        self._background_tasks: list = []
 
     async def start(self) -> None:
         self._running = True
-        asyncio.create_task(self._poll_loop())
+        self._background_tasks.append(asyncio.create_task(self._poll_loop()))
         logger.info("Fear & Greed monitor started (poll={}s)", self.poll_interval)
 
     async def stop(self) -> None:
         self._running = False
 
     @property
-    def latest(self) -> Optional[FearGreedReading]:
+    def latest(self) -> FearGreedReading | None:
         return self._latest
 
     @property
@@ -73,16 +73,16 @@ class FearGreedClient:
         """
         v = self.value
         if v <= 10:
-            return 1.4    # extreme fear = big opportunity
+            return 1.4  # extreme fear = big opportunity
         if v <= 25:
-            return 1.2    # fear = good buying
+            return 1.2  # fear = good buying
         if v <= 40:
             return 1.1
         if v <= 60:
-            return 1.0    # neutral
+            return 1.0  # neutral
         if v <= 75:
-            return 0.8    # greed = tighten up
-        return 0.6        # extreme greed = protect capital
+            return 0.8  # greed = tighten up
+        return 0.6  # extreme greed = protect capital
 
     def trade_direction_bias(self) -> str:
         """Suggests preferred trade direction based on sentiment."""
@@ -101,12 +101,14 @@ class FearGreedClient:
             await asyncio.sleep(self.poll_interval)
 
     async def _fetch(self) -> None:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(self.API_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    logger.warning("Fear & Greed API returned {}", resp.status)
-                    return
-                data = await resp.json()
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(self.API_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp,
+        ):
+            if resp.status != 200:
+                logger.warning("Fear & Greed API returned {}", resp.status)
+                return
+            data = await resp.json()
 
         entries = data.get("data", [])
         if not entries:
@@ -118,21 +120,24 @@ class FearGreedClient:
         self._latest = FearGreedReading(
             value=int(current.get("value", 50)),
             classification=current.get("value_classification", "Neutral"),
-            timestamp=datetime.fromtimestamp(
-                int(current.get("timestamp", 0)), tz=timezone.utc
-            ),
+            timestamp=datetime.fromtimestamp(int(current.get("timestamp", 0)), tz=UTC),
             previous_value=int(previous.get("value", 0)) if previous else 0,
             previous_classification=previous.get("value_classification", "") if previous else "",
         )
 
-        logger.info("Fear & Greed: {} ({}) | prev: {} ({})",
-                     self._latest.value, self._latest.classification,
-                     self._latest.previous_value, self._latest.previous_classification)
+        logger.info(
+            "Fear & Greed: {} ({}) | prev: {} ({})",
+            self._latest.value,
+            self._latest.classification,
+            self._latest.previous_value,
+            self._latest.previous_classification,
+        )
 
     def summary(self) -> str:
         if not self._latest:
             return "Fear & Greed: no data"
         r = self._latest
         direction = self.trade_direction_bias()
-        return (f"Fear & Greed: {r.value} ({r.classification}) | "
-                f"bias: {direction} | size_mult: {self.position_bias():.1f}x")
+        return (
+            f"Fear & Greed: {r.value} ({r.classification}) | bias: {direction} | size_mult: {self.position_bias():.1f}x"
+        )

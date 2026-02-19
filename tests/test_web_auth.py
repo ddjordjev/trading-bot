@@ -1,4 +1,5 @@
 """Tests for web/auth.py."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch

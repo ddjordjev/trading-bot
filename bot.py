@@ -11,6 +11,7 @@ from loguru import logger
 from analytics import AnalyticsEngine
 from config.settings import Settings, get_settings
 from core.exchange import BaseExchange, create_exchange
+from core.market_schedule import get_market_schedule
 from core.models import Signal, SignalAction
 from core.models.order import Order
 from core.orders import OrderManager
@@ -110,19 +111,29 @@ class TradingBot:
 
     # -- Strategy Management --
 
-    def add_strategy(self, name: str, symbol: str, market_type: str = "spot",
-                     leverage: int = 0, **params: object) -> None:
+    def add_strategy(
+        self, name: str, symbol: str, market_type: str = "spot", leverage: int = 0, **params: object
+    ) -> None:
         if not self.settings.is_market_type_allowed(market_type):
             fallback = "spot" if self.settings.spot_allowed else None
             if fallback and market_type != fallback:
-                logger.warning("Market type '{}' not allowed — falling back to '{}' for {} ({})",
-                               market_type, fallback, name, symbol)
+                logger.warning(
+                    "Market type '{}' not allowed — falling back to '{}' for {} ({})",
+                    market_type,
+                    fallback,
+                    name,
+                    symbol,
+                )
                 market_type = fallback
                 leverage = 1
             else:
-                logger.warning("Skipping strategy '{}' for {} — market type '{}' not allowed "
-                               "(allowed: {})", name, symbol, market_type,
-                               self.settings.allowed_market_types)
+                logger.warning(
+                    "Skipping strategy '{}' for {} — market type '{}' not allowed (allowed: {})",
+                    name,
+                    symbol,
+                    market_type,
+                    self.settings.allowed_market_types,
+                )
                 return
 
         lev = leverage or (self.settings.default_leverage if market_type == "futures" else 1)
@@ -144,16 +155,19 @@ class TradingBot:
         logger.info("=" * 60)
         logger.info("TRADING BOT v0.6.0")
         logger.info("Mode: {}", self.settings.trading_mode.upper())
-        logger.info("Exchange: {} | Allowed: {}", self.settings.exchange,
-                     self.settings.allowed_market_types)
+        logger.info("Exchange: {} | Allowed: {}", self.settings.exchange, self.settings.allowed_market_types)
         logger.info("Daily target: {:.0f}% (compounding)", self.target.daily_target_pct)
         logger.info("Strategies: {}", len(self._strategies))
         logger.info("Leverage: {}x default", self.settings.default_leverage)
         logger.info("DEFAULT mode: PYRAMID (DCA into wicks, lever up on recovery)")
-        logger.info("Scalp-only: {} (these use WINNERS mode instead)",
-                     SCALP_ONLY_STRATEGIES or "none -- everything pyramids")
-        logger.info("Initial risk: ${:.0f} | Notional cap: ${:.0f}K",
-                     self.settings.initial_risk_amount, self.settings.max_notional_position / 1000)
+        logger.info(
+            "Scalp-only: {} (these use WINNERS mode instead)", SCALP_ONLY_STRATEGIES or "none -- everything pyramids"
+        )
+        logger.info(
+            "Initial risk: ${:.0f} | Notional cap: ${:.0f}K",
+            self.settings.initial_risk_amount,
+            self.settings.max_notional_position / 1000,
+        )
         logger.info("Gambling budget: {}% for low-liq coins", self.settings.gambling_budget_pct)
         logger.info("Intel: {}", "ENABLED" if self.intel else "disabled")
         logger.info("Analytics DB: {} trades logged", self.trade_db.trade_count())
@@ -162,6 +176,11 @@ class TradingBot:
         self.analytics.refresh()
         if self.analytics.scores:
             logger.info(self.analytics.summary())
+
+        schedule = get_market_schedule()
+        schedule.configure(fmp_api_key=self.settings.coinglass_api_key)
+        await schedule.refresh_holidays()
+        logger.info("Market schedule: {}", schedule.summary())
 
         await self.exchange.connect()
         await self.notifier.start()
@@ -179,11 +198,14 @@ class TradingBot:
 
         projected = self.target.projected_balance
         if self.settings.session_budget > 0:
-            logger.info("Session budget: ${:.2f} (exchange has ${:.2f})",
-                         balance, balance_map.get("USDT", 0.0))
+            logger.info("Session budget: ${:.2f} (exchange has ${:.2f})", balance, balance_map.get("USDT", 0.0))
         logger.info("Starting balance: {:.2f} USDT", balance)
-        logger.info("Projections if target hit daily -> 1w: {:.0f} | 1mo: {:.0f} | 3mo: {:.0f}",
-                     projected["1_week"], projected["1_month"], projected["3_months"])
+        logger.info(
+            "Projections if target hit daily -> 1w: {:.0f} | 1mo: {:.0f} | 3mo: {:.0f}",
+            projected["1_week"],
+            projected["1_month"],
+            projected["3_months"],
+        )
 
         self._running = True
         await self._run_loop()
@@ -219,11 +241,13 @@ class TradingBot:
         self.target.update_balance(balance)
 
         logger.debug(
-            "=== TICK === bal=${:.2f} pnl={:+.2f}% tier={} aggr={:.2f} "
-            "strats={} dynamic={} trade={}",
-            balance, self.target.todays_pnl_pct, self.target.tier.value,
+            "=== TICK === bal=${:.2f} pnl={:+.2f}% tier={} aggr={:.2f} strats={} dynamic={} trade={}",
+            balance,
+            self.target.todays_pnl_pct,
+            self.target.tier.value,
             self.target.aggression_multiplier(),
-            len(self._strategies), len(self._dynamic_strategies),
+            len(self._strategies),
+            len(self._dynamic_strategies),
             self.target.should_trade(),
         )
 
@@ -289,8 +313,7 @@ class TradingBot:
 
         # 10. Legendary day check: at 100%+ decide whether to close or ride
         if self.target.tier.value == "legendary":
-            reversal_risk = (intel_condition is not None and
-                             intel_condition.should_reduce_exposure)
+            reversal_risk = intel_condition is not None and intel_condition.should_reduce_exposure
             should_close, reason = self.target.should_close_all(reversal_risk)
             if should_close:
                 logger.critical("LEGENDARY DAY + REVERSAL RISK -- closing all: {}", reason)
@@ -326,15 +349,22 @@ class TradingBot:
             logger.debug(
                 "Gates: allow={} tier={} base_aggr={:.2f} intel_mult={:.2f} "
                 "reduce={} regime={} final_aggr={:.3f} gambling={}",
-                allow_new_entries, self.target.tier.value, base_aggression,
+                allow_new_entries,
+                self.target.tier.value,
+                base_aggression,
                 intel_condition.position_size_multiplier,
                 intel_condition.should_reduce_exposure,
-                intel_condition.regime.value, aggression, allow_gambling,
+                intel_condition.regime.value,
+                aggression,
+                allow_gambling,
             )
         else:
             logger.debug(
                 "Gates: allow={} tier={} aggr={:.2f} gambling={} (no intel)",
-                allow_new_entries, self.target.tier.value, aggression, allow_gambling,
+                allow_new_entries,
+                self.target.tier.value,
+                aggression,
+                allow_gambling,
             )
 
         # 12. Run all strategies (collect candles for hedge analysis)
@@ -355,16 +385,19 @@ class TradingBot:
 
                 sig = strategy.analyze(candles, ticker)
                 if not sig:
-                    logger.debug("Strategy '{}' on {} — no signal this tick",
-                                 strategy.name, strategy.symbol)
+                    logger.debug("Strategy '{}' on {} — no signal this tick", strategy.name, strategy.symbol)
                     continue
 
                 logger.debug(
-                    "Signal: {} {} {} str={:.2f} strat={} reason={} "
-                    "quick={} mkt={}",
-                    sig.action.value, sig.symbol, sig.market_type,
-                    sig.strength, sig.strategy, sig.reason[:50],
-                    sig.quick_trade, sig.market_type,
+                    "Signal: {} {} {} str={:.2f} strat={} reason={} quick={} mkt={}",
+                    sig.action.value,
+                    sig.symbol,
+                    sig.market_type,
+                    sig.strength,
+                    sig.strategy,
+                    sig.reason[:50],
+                    sig.quick_trade,
+                    sig.market_type,
                 )
 
                 if sig.action == SignalAction.CLOSE:
@@ -372,8 +405,7 @@ class TradingBot:
                     continue
 
                 if not self.settings.is_market_type_allowed(sig.market_type):
-                    logger.debug("Skipping {} signal — market type '{}' not allowed",
-                                 strategy.symbol, sig.market_type)
+                    logger.debug("Skipping {} signal — market type '{}' not allowed", strategy.symbol, sig.market_type)
                     continue
 
                 is_swing = sig.strategy == "swing_opportunity"
@@ -419,8 +451,9 @@ class TradingBot:
                 if tv_boost != 1.0:
                     sig = sig.model_copy()
                     sig.strength *= tv_boost
-                    logger.debug("TV boost for {} {}: {:.2f}x -> strength={:.2f}",
-                                 sig.symbol, side, tv_boost, sig.strength)
+                    logger.debug(
+                        "TV boost for {} {}: {:.2f}x -> strength={:.2f}", sig.symbol, side, tv_boost, sig.strength
+                    )
 
                 # Analytics weight: reduce signal strength for underperforming strategies
                 strat_weight = self._read_shared_analytics_weight(sig.strategy)
@@ -428,17 +461,22 @@ class TradingBot:
                     sig = sig.model_copy()
                     sig.strength *= strat_weight
                     if sig.strength <= 0:
-                        logger.info("Analytics: {} weight {:.2f} killed signal for {}",
-                                    sig.strategy, strat_weight, sig.symbol)
+                        logger.info(
+                            "Analytics: {} weight {:.2f} killed signal for {}", sig.strategy, strat_weight, sig.symbol
+                        )
                         continue
 
                 sig = self._adjust_for_target(sig, aggression)
 
                 logger.debug(
-                    "Final signal: {} {} str={:.3f} (tv={:.2f} analytics={:.2f} "
-                    "aggr={:.2f}) pyramid={} | executing",
-                    sig.action.value, sig.symbol, sig.strength,
-                    tv_boost, strat_weight, aggression, use_pyramid,
+                    "Final signal: {} {} str={:.3f} (tv={:.2f} analytics={:.2f} aggr={:.2f}) pyramid={} | executing",
+                    sig.action.value,
+                    sig.symbol,
+                    sig.strength,
+                    tv_boost,
+                    strat_weight,
+                    aggression,
+                    use_pyramid,
                 )
                 await self._process_signal(sig, pyramid=use_pyramid)
 
@@ -531,13 +569,8 @@ class TradingBot:
             modified = True
 
         # --- DAILY: only when idle with spare capacity and budget ---
-        idle_enough = (
-            free_slots >= 2
-            or (free_slots >= 1 and active_count == 0)
-        )
-        budget_ok = tier in (DailyTier.BUILDING, DailyTier.LOSING) or (
-            tier == DailyTier.STRONG and positions_secured
-        )
+        idle_enough = free_slots >= 2 or (free_slots >= 1 and active_count == 0)
+        budget_ok = tier in (DailyTier.BUILDING, DailyTier.LOSING) or (tier == DailyTier.STRONG and positions_secured)
 
         if allow_new and idle_enough and budget_ok:
             for proposal in queue.get_actionable(SignalPriority.DAILY):
@@ -562,10 +595,7 @@ class TradingBot:
                 modified = True
 
         # --- SWING: only when truly idle, positions secured, day is stable ---
-        genuinely_idle = (
-            active_count == 0
-            or (free_slots >= 2 and positions_secured and pnl_pct >= 0)
-        )
+        genuinely_idle = active_count == 0 or (free_slots >= 2 and positions_secured and pnl_pct >= 0)
 
         if allow_new and genuinely_idle:
             for proposal in queue.get_actionable(SignalPriority.SWING):
@@ -591,15 +621,15 @@ class TradingBot:
             self.shared.write_trade_queue(queue)
 
         if executed > 0:
-            logger.info("Queue: executed {} proposal(s) this tick "
-                        "(remaining: C={} D={} S={})",
-                        executed,
-                        len(queue.get_actionable(SignalPriority.CRITICAL)),
-                        len(queue.get_actionable(SignalPriority.DAILY)),
-                        len(queue.get_actionable(SignalPriority.SWING)))
+            logger.info(
+                "Queue: executed {} proposal(s) this tick (remaining: C={} D={} S={})",
+                executed,
+                len(queue.get_actionable(SignalPriority.CRITICAL)),
+                len(queue.get_actionable(SignalPriority.DAILY)),
+                len(queue.get_actionable(SignalPriority.SWING)),
+            )
 
-    async def _execute_proposal(self, proposal: TradeProposal,
-                                aggression: float) -> bool:
+    async def _execute_proposal(self, proposal: TradeProposal, aggression: float) -> bool:
         """Convert a queue proposal into a trading signal and execute it."""
         try:
             ticker = await self.exchange.fetch_ticker(proposal.symbol)
@@ -622,10 +652,15 @@ class TradingBot:
             max_hold_minutes=proposal.max_hold_minutes or None,
         )
 
-        logger.info("Queue exec [{}/{}]: {} {} {} (str={:.2f})",
-                     proposal.priority.value, proposal.strategy,
-                     proposal.side.upper(), proposal.symbol,
-                     proposal.reason[:60], sig.strength)
+        logger.info(
+            "Queue exec [{}/{}]: {} {} {} (str={:.2f})",
+            proposal.priority.value,
+            proposal.strategy,
+            proposal.side.upper(),
+            proposal.symbol,
+            proposal.reason[:60],
+            sig.strength,
+        )
 
         use_pyramid = not proposal.quick_trade
         try:
@@ -635,8 +670,7 @@ class TradingBot:
             logger.error("Queue execution error for {}: {}", proposal.symbol, e)
             return False
 
-    async def _execute_swing_proposal(self, proposal: TradeProposal,
-                                      aggression: float) -> bool:
+    async def _execute_swing_proposal(self, proposal: TradeProposal, aggression: float) -> bool:
         """Execute a swing proposal using its entry plan.
 
         Swing proposals include a full plan: entry zone, DCA levels,
@@ -666,17 +700,19 @@ class TradingBot:
             market_type=proposal.market_type,
             leverage=leverage,
             suggested_stop_loss=plan.stop_loss if plan and plan.stop_loss else None,
-            suggested_take_profit=(
-                plan.take_profit_targets[0]
-                if plan and plan.take_profit_targets else None
-            ),
+            suggested_take_profit=(plan.take_profit_targets[0] if plan and plan.take_profit_targets else None),
         )
 
         plan_notes = plan.notes if plan else "no plan"
-        logger.info("Swing entry [{}/{}]: {} {} (lev={}x) — {}",
-                     proposal.strategy, proposal.symbol,
-                     proposal.side.upper(), proposal.symbol,
-                     leverage, plan_notes[:80])
+        logger.info(
+            "Swing entry [{}/{}]: {} {} (lev={}x) — {}",
+            proposal.strategy,
+            proposal.symbol,
+            proposal.side.upper(),
+            proposal.symbol,
+            leverage,
+            plan_notes[:80],
+        )
 
         try:
             await self._process_signal(sig, pyramid=True)
@@ -697,30 +733,32 @@ class TradingBot:
         is_short = sig.action == SignalAction.SELL
 
         # Going against mass liquidation reversal bias = bad idea
-        if condition.mass_liquidation and (
-            (preferred == "long" and is_short) or (preferred == "short" and is_long)
-        ):
-                logger.info("Intel BLOCKED {} {} -- mass liq bias is {} (reversal zone)",
-                            sig.action.value, sig.symbol, preferred)
-                adjusted.strength = 0
-                return adjusted
+        if condition.mass_liquidation and ((preferred == "long" and is_short) or (preferred == "short" and is_long)):
+            logger.info(
+                "Intel BLOCKED {} {} -- mass liq bias is {} (reversal zone)", sig.action.value, sig.symbol, preferred
+            )
+            adjusted.strength = 0
+            return adjusted
 
         # Going against extreme fear/greed = reduce strength but don't block
         if (condition.fear_greed <= 25 and is_short) or (condition.fear_greed >= 75 and is_long):
             adjusted.strength *= 0.5
-            logger.info("Intel REDUCED {} {} -- F&G={} (contrarian says {})",
-                        sig.action.value, sig.symbol, condition.fear_greed, preferred)
+            logger.info(
+                "Intel REDUCED {} {} -- F&G={} (contrarian says {})",
+                sig.action.value,
+                sig.symbol,
+                condition.fear_greed,
+                preferred,
+            )
 
         # Going against whale positioning = slight caution
         if condition.overleveraged_side:
             if condition.overleveraged_side == "longs" and is_long:
                 adjusted.strength *= 0.7
-                logger.info("Intel CAUTION {} long -- longs overleveraged (contrarian says short)",
-                            sig.symbol)
+                logger.info("Intel CAUTION {} long -- longs overleveraged (contrarian says short)", sig.symbol)
             elif condition.overleveraged_side == "shorts" and is_short:
                 adjusted.strength *= 0.7
-                logger.info("Intel CAUTION {} short -- shorts overleveraged (contrarian says long)",
-                            sig.symbol)
+                logger.info("Intel CAUTION {} short -- shorts overleveraged (contrarian says long)", sig.symbol)
 
         # Aligned with intel = slight boost
         if (preferred == "long" and is_long) or (preferred == "short" and is_short):
@@ -772,8 +810,10 @@ class TradingBot:
             if pos.amount <= 0:
                 continue
             signal = Signal(
-                symbol=pos.symbol, action=SignalAction.CLOSE,
-                strategy="manual_override", reason=reason,
+                symbol=pos.symbol,
+                action=SignalAction.CLOSE,
+                strategy="manual_override",
+                reason=reason,
                 market_type=pos.market_type,
             )
             try:
@@ -933,19 +973,27 @@ class TradingBot:
 
         return adjusted
 
-    async def _process_signal(self, sig: Signal, low_liquidity: bool = False,
-                              pyramid: bool = False) -> None:
+    async def _process_signal(self, sig: Signal, low_liquidity: bool = False, pyramid: bool = False) -> None:
         mode_tag = "PYRAMID" if pyramid else ("GAMBLING" if low_liquidity else "WINNERS")
-        logger.info("Signal: {} {} {} (str={:.2f}, strat={}, reason={}, mode={})",
-                     sig.action.value, sig.symbol, sig.market_type,
-                     sig.strength, sig.strategy, sig.reason, mode_tag)
+        logger.info(
+            "Signal: {} {} {} (str={:.2f}, strat={}, reason={}, mode={})",
+            sig.action.value,
+            sig.symbol,
+            sig.market_type,
+            sig.strength,
+            sig.strategy,
+            sig.reason,
+            mode_tag,
+        )
 
         if sig.strength < 0.2 and sig.action != SignalAction.CLOSE:
             logger.debug("Signal too weak ({:.2f}), skipping", sig.strength)
             return
 
         order = await self.orders.execute_signal(
-            sig, low_liquidity=low_liquidity, pyramid=pyramid,
+            sig,
+            low_liquidity=low_liquidity,
+            pyramid=pyramid,
         )
         if order:
             self._active_signals.append(sig)
@@ -983,22 +1031,35 @@ class TradingBot:
                 continue
 
             if coin.is_low_liquidity:
-                logger.info("Trending {} is LOW-LIQ (vol:{:.0f}M, cap:{:.0f}M) -- gambling only",
-                            pair, coin.volume_24h / 1e6, coin.market_cap / 1e6)
+                logger.info(
+                    "Trending {} is LOW-LIQ (vol:{:.0f}M, cap:{:.0f}M) -- gambling only",
+                    pair,
+                    coin.volume_24h / 1e6,
+                    coin.market_cap / 1e6,
+                )
 
             from strategies.compound_momentum import CompoundMomentumStrategy
+
             mkt = "futures" if self.settings.futures_allowed else "spot"
             lev = self.settings.default_leverage if mkt == "futures" else 1
             strategy = CompoundMomentumStrategy(
-                symbol=pair, market_type=mkt,
+                symbol=pair,
+                market_type=mkt,
                 leverage=lev,
-                spike_pct=1.0, spike_max_hold=10,
+                spike_pct=1.0,
+                spike_max_hold=10,
             )
             self._dynamic_strategies[pair] = strategy
             direction = "BULL" if coin.momentum_score > 0 else "BEAR"
             liq_tag = " [LOW-LIQ]" if coin.is_low_liquidity else ""
-            logger.info("Dynamic strategy added: {} [{}]{} (1h:{:+.1f}% 24h:{:+.1f}%)",
-                        pair, direction, liq_tag, coin.change_1h, coin.change_24h)
+            logger.info(
+                "Dynamic strategy added: {} [{}]{} (1h:{:+.1f}% 24h:{:+.1f}%)",
+                pair,
+                direction,
+                liq_tag,
+                coin.change_1h,
+                coin.change_24h,
+            )
 
     async def _on_news(self, item: NewsItem) -> None:
         self._recent_news.append(item)
@@ -1006,8 +1067,13 @@ class TradingBot:
             self._recent_news = self._recent_news[-200:]
 
         if item.matched_symbols and abs(item.sentiment_score) > 0.3:
-            logger.info("News [{}]: {} (symbols: {}, sentiment: {})",
-                        item.source, item.headline, item.matched_symbols, item.sentiment)
+            logger.info(
+                "News [{}]: {} (symbols: {}, sentiment: {})",
+                item.source,
+                item.headline,
+                item.matched_symbols,
+                item.sentiment,
+            )
             await self.notifier.alert_news(item.headline, item.matched_symbols, item.source)
 
     async def _log_status(self) -> None:
@@ -1021,8 +1087,7 @@ class TradingBot:
         logger.info(self.scanner.scan_summary())
         if self.intel:
             logger.info(self.intel.full_summary())
-        logger.info("Active strategies: {} static + {} dynamic",
-                     len(self._strategies), len(self._dynamic_strategies))
+        logger.info("Active strategies: {} static + {} dynamic", len(self._strategies), len(self._dynamic_strategies))
 
         for _sym, sp in self.orders.scaler.active_positions.items():
             logger.info("  {}", sp.status_line())
@@ -1032,9 +1097,16 @@ class TradingBot:
             for sym, ts in stops.items():
                 be_tag = " [BE-LOCKED]" if ts.breakeven_locked else ""
                 liq_tag = " [LOW-LIQ]" if ts.low_liquidity else ""
-                logger.info("  Trail {}: stop={:.6f} peak={:.6f} pnl={:+.1f}% active={}{}{}",
-                            sym, ts.current_stop, ts.peak_price, ts.pnl_from_stop,
-                            ts.activated, be_tag, liq_tag)
+                logger.info(
+                    "  Trail {}: stop={:.6f} peak={:.6f} pnl={:+.1f}% active={}{}{}",
+                    sym,
+                    ts.current_stop,
+                    ts.peak_price,
+                    ts.pnl_from_stop,
+                    ts.activated,
+                    be_tag,
+                    liq_tag,
+                )
 
         hedges = self.orders.hedger.active_pairs
         if hedges:
@@ -1044,8 +1116,9 @@ class TradingBot:
         wick_scalps = self.orders.wick_scalper.active_scalps
         if wick_scalps:
             for sym, ws in wick_scalps.items():
-                logger.info("  Wick scalp {}: {} @ {:.6f} ({:.0f}m old)",
-                            sym, ws.scalp_side, ws.entry_price, ws.age_minutes)
+                logger.info(
+                    "  Wick scalp {}: {} @ {:.6f} ({:.0f}m old)", sym, ws.scalp_side, ws.entry_price, ws.age_minutes
+                )
 
     async def _check_daily_reset(self) -> None:
         now = datetime.now(UTC)
@@ -1114,8 +1187,11 @@ def main() -> None:
         setup_log_capture()
         set_bot(bot)
         config = uvicorn.Config(
-            app, host=settings.dashboard_host, port=settings.dashboard_port,
-            log_level="warning", loop="none",
+            app,
+            host=settings.dashboard_host,
+            port=settings.dashboard_port,
+            log_level="warning",
+            loop="none",
         )
         server = uvicorn.Server(config)
 
@@ -1124,7 +1200,8 @@ def main() -> None:
             web_task = asyncio.create_task(server.serve())
             logger.info("Dashboard: http://{}:{}", settings.dashboard_host, settings.dashboard_port)
             _done, pending = await asyncio.wait(
-                [bot_task, web_task], return_when=asyncio.FIRST_COMPLETED,
+                [bot_task, web_task],
+                return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
                 task.cancel()

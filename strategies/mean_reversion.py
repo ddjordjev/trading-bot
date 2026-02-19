@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
-
-from core.models import Candle, Ticker, Signal, SignalAction
+from core.models import Candle, Signal, SignalAction, Ticker
 from strategies.base import BaseStrategy
 
 
@@ -22,7 +20,7 @@ class MeanReversionStrategy(BaseStrategy):
         self.ma_period = int(params.get("ma_period", 50))
         self.deviation_pct = float(params.get("deviation_pct", 2.0))
 
-    def analyze(self, candles: list[Candle], ticker: Optional[Ticker] = None) -> Optional[Signal]:
+    def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:
         df = self.candles_to_df(candles)
         if len(df) < self.ma_period:
             return None
@@ -37,20 +35,26 @@ class MeanReversionStrategy(BaseStrategy):
 
         if deviation <= -self.deviation_pct:
             return Signal(
-                symbol=self.symbol, action=SignalAction.BUY,
+                symbol=self.symbol,
+                action=SignalAction.BUY,
                 strength=min(1.0, abs(deviation) / (self.deviation_pct * 2)),
                 strategy=self.name,
                 reason=f"Price {deviation:.1f}% below {self.ma_period}-period MA",
-                suggested_price=price, market_type=self.market_type, leverage=self.leverage,
+                suggested_price=price,
+                market_type=self.market_type,
+                leverage=self.leverage,
             )
 
         if deviation >= self.deviation_pct:
             return Signal(
-                symbol=self.symbol, action=SignalAction.SELL,
+                symbol=self.symbol,
+                action=SignalAction.SELL,
                 strength=min(1.0, abs(deviation) / (self.deviation_pct * 2)),
                 strategy=self.name,
                 reason=f"Price {deviation:.1f}% above {self.ma_period}-period MA",
-                suggested_price=price, market_type=self.market_type, leverage=self.leverage,
+                suggested_price=price,
+                market_type=self.market_type,
+                leverage=self.leverage,
             )
 
         return None

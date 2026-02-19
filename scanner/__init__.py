@@ -1,3 +1,3 @@
-from scanner.trending import TrendingScanner, TrendingCoin
+from scanner.trending import TrendingCoin, TrendingScanner
 
-__all__ = ["TrendingScanner", "TrendingCoin"]
+__all__ = ["TrendingCoin", "TrendingScanner"]

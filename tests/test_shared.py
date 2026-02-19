@@ -1,20 +1,24 @@
 """Tests for shared/ (models, state)."""
+
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
 from shared.models import (
-    BotDeploymentStatus, DeploymentLevel, IntelSnapshot,
-    AnalyticsSnapshot, TVSymbolSnapshot, TrendingSnapshot,
+    AnalyticsSnapshot,
+    BotDeploymentStatus,
+    DeploymentLevel,
+    IntelSnapshot,
     StrategyWeightEntry,
+    TrendingSnapshot,
+    TVSymbolSnapshot,
 )
 from shared.state import SharedState
 
-
 # ── Shared Models ───────────────────────────────────────────────────
+
 
 class TestBotDeploymentStatus:
     def test_defaults(self):
@@ -72,6 +76,7 @@ class TestDeploymentLevel:
 
 
 # ── SharedState ─────────────────────────────────────────────────────
+
 
 class TestSharedState:
     @pytest.fixture()

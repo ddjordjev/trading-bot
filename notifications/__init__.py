@@ -1,3 +1,3 @@
-from notifications.notifier import Notifier, NotificationType
+from notifications.notifier import NotificationType, Notifier
 
-__all__ = ["Notifier", "NotificationType"]
+__all__ = ["NotificationType", "Notifier"]

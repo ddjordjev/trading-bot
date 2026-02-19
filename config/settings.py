@@ -3,7 +3,6 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -58,17 +57,17 @@ class Settings(BaseSettings):
 
     # Pyramid / DCA mode (DEFAULT for all strategies)
     default_scale_mode: str = "pyramid"  # "pyramid" (DCA in) or "winners" (add to winners)
-    dca_interval_pct: float = 2.0    # add every 2% the price drops
-    dca_multiplier: float = 1.5      # each DCA add is 1.5x the previous
+    dca_interval_pct: float = 2.0  # add every 2% the price drops
+    dca_multiplier: float = 1.5  # each DCA add is 1.5x the previous
     dca_profit_to_lever_pct: float = 1.0  # raise leverage once avg entry is +1%
     dca_partial_take_pct: float = 30.0  # take 30% off the table after lever-up
 
     # Hedging
     hedge_enabled: bool = True
-    hedge_ratio: float = 0.20           # hedge is 20% of main position size
-    hedge_min_profit_pct: float = 3.0   # main must be +3% before hedging
-    hedge_stop_pct: float = 1.0         # tight stop on hedge (it's a probe)
-    max_hedges: int = 2                 # max simultaneous hedges
+    hedge_ratio: float = 0.20  # hedge is 20% of main position size
+    hedge_min_profit_pct: float = 3.0  # main must be +3% before hedging
+    hedge_stop_pct: float = 1.0  # tight stop on hedge (it's a probe)
+    max_hedges: int = 2  # max simultaneous hedges
 
     # Email
     smtp_host: str = "smtp.gmail.com"
@@ -86,51 +85,45 @@ class Settings(BaseSettings):
     news_enabled: bool = False
     news_sources: str = "coindesk,cointelegraph,cryptopanic"
 
-    # Market open windows (UTC)
-    us_market_open_utc: int = 14
-    us_market_close_utc: int = 21
-    asia_market_open_utc: int = 1
-    asia_market_close_utc: int = 8
-
     # Market Intelligence
-    coinglass_api_key: str = ""            # optional, for CoinGlass premium endpoints
-    intel_enabled: bool = True             # master switch for all external feeds
-    fear_greed_poll: int = 3600            # how often to poll Fear & Greed (seconds)
-    liquidation_poll: int = 300            # CoinGlass liquidation poll interval
-    macro_calendar_poll: int = 1800        # ForexFactory calendar poll interval
-    whale_sentiment_poll: int = 300        # CoinGlass funding/OI/L-S poll interval
-    intel_symbols: str = "BTC,ETH"         # symbols to track for whale sentiment
+    coinglass_api_key: str = ""  # optional, for CoinGlass premium endpoints
+    intel_enabled: bool = True  # master switch for all external feeds
+    fear_greed_poll: int = 3600  # how often to poll Fear & Greed (seconds)
+    liquidation_poll: int = 300  # CoinGlass liquidation poll interval
+    macro_calendar_poll: int = 1800  # ForexFactory calendar poll interval
+    whale_sentiment_poll: int = 300  # CoinGlass funding/OI/L-S poll interval
+    intel_symbols: str = "BTC,ETH"  # symbols to track for whale sentiment
     mass_liquidation_threshold: float = 1_000_000_000  # $1B = mass liq event
 
     # TradingView
-    tv_exchange: str = "MEXC"              # exchange name for TradingView scanner
-    tv_intervals: str = "1h,4h,1D"        # timeframes to analyze
-    tv_poll_interval: int = 120            # seconds between TV refreshes
+    tv_exchange: str = "MEXC"  # exchange name for TradingView scanner
+    tv_intervals: str = "1h,4h,1D"  # timeframes to analyze
+    tv_poll_interval: int = 120  # seconds between TV refreshes
 
     # CoinMarketCap
-    cmc_api_key: str = ""                  # optional, for CMC pro API (higher rate limits)
-    cmc_poll_interval: int = 300           # seconds between CMC refreshes
+    cmc_api_key: str = ""  # optional, for CMC pro API (higher rate limits)
+    cmc_poll_interval: int = 300  # seconds between CMC refreshes
 
     # CoinGecko
-    coingecko_api_key: str = ""            # optional, for CoinGecko pro API
-    coingecko_poll_interval: int = 300     # seconds between CoinGecko refreshes
+    coingecko_api_key: str = ""  # optional, for CoinGecko pro API
+    coingecko_poll_interval: int = 300  # seconds between CoinGecko refreshes
 
     # DeFiLlama (free, no key needed)
     defillama_enabled: bool = True
-    defillama_poll_interval: int = 600     # seconds between TVL refreshes
+    defillama_poll_interval: int = 600  # seconds between TVL refreshes
 
     # Santiment (free tier, optional key for higher rate limits)
     santiment_api_key: str = ""
-    santiment_poll_interval: int = 600     # seconds between social data refreshes
+    santiment_poll_interval: int = 600  # seconds between social data refreshes
 
     # Glassnode (requires free API key from glassnode.com)
     glassnode_api_key: str = ""
-    glassnode_poll_interval: int = 900     # seconds between on-chain refreshes
+    glassnode_poll_interval: int = 900  # seconds between on-chain refreshes
 
     # Dashboard
     dashboard_enabled: bool = True
     dashboard_host: str = "0.0.0.0"
-    dashboard_port: int = 8080
+    dashboard_port: int = 9035
     dashboard_token: str = ""  # set a secret token for remote access
 
     # Exchange platform URL (for quick-link from the dashboard).
@@ -184,21 +177,21 @@ class Settings(BaseSettings):
     _PLATFORM_URLS: dict[str, dict[str, str]] = {
         "binance": {
             "paper_futures": "https://demo.binance.com/en/futures",
-            "paper_spot":    "https://demo.binance.com/en/trade",
-            "live_futures":  "https://www.binance.com/en/futures",
-            "live_spot":     "https://www.binance.com/en/trade",
+            "paper_spot": "https://demo.binance.com/en/trade",
+            "live_futures": "https://www.binance.com/en/futures",
+            "live_spot": "https://www.binance.com/en/trade",
         },
         "bybit": {
             "paper_futures": "https://testnet.bybit.com/trade/usdt",
-            "paper_spot":    "https://testnet.bybit.com/trade/spot",
-            "live_futures":  "https://www.bybit.com/trade/usdt",
-            "live_spot":     "https://www.bybit.com/trade/spot",
+            "paper_spot": "https://testnet.bybit.com/trade/spot",
+            "live_futures": "https://www.bybit.com/trade/usdt",
+            "live_spot": "https://www.bybit.com/trade/spot",
         },
         "mexc": {
-            "paper_spot":    "https://www.mexc.com/exchange",
+            "paper_spot": "https://www.mexc.com/exchange",
             "paper_futures": "https://www.mexc.com/exchange",
-            "live_spot":     "https://www.mexc.com/exchange",
-            "live_futures":  "https://www.mexc.com/exchange",
+            "live_spot": "https://www.mexc.com/exchange",
+            "live_futures": "https://www.mexc.com/exchange",
         },
     }
 

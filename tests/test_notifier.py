@@ -1,9 +1,10 @@
 """Tests for notifications/notifier.py."""
+
 from __future__ import annotations
 
 import pytest
 
-from notifications.notifier import Notifier, NotificationType
+from notifications.notifier import NotificationType, Notifier
 
 
 @pytest.fixture()
@@ -14,6 +15,7 @@ def settings(monkeypatch):
     monkeypatch.setenv("SMTP_USER", "")
     monkeypatch.setenv("NOTIFY_EMAIL", "")
     from config.settings import Settings
+
     return Settings()
 
 
@@ -59,6 +61,7 @@ class TestNotifier:
         monkeypatch.setenv("NOTIFY_EMAIL", "admin@test.com")
         monkeypatch.setenv("NOTIFICATIONS_ENABLED", "liquidation")
         from config.settings import Settings
+
         s = Settings()
         n = Notifier(s)
         await n.send(NotificationType.LIQUIDATION, "alert", "body")
@@ -83,22 +86,41 @@ class TestNotifier:
     @pytest.mark.asyncio
     async def test_alert_whale_position(self, notifier):
         await notifier.alert_whale_position(
-            symbol="BTC/USDT", notional=150000, profit_pct=25.0,
-            profit_usd=30000, entry_price=50000, current_price=62500,
-            leverage=10, adds=5, dashboard_url="http://localhost:8080")
+            symbol="BTC/USDT",
+            notional=150000,
+            profit_pct=25.0,
+            profit_usd=30000,
+            entry_price=50000,
+            current_price=62500,
+            leverage=10,
+            adds=5,
+            dashboard_url="http://localhost:8080",
+        )
 
     @pytest.mark.asyncio
     async def test_alert_whale_position_no_dashboard_url(self, notifier):
         await notifier.alert_whale_position(
-            symbol="BTC/USDT", notional=150000, profit_pct=25.0,
-            profit_usd=30000, entry_price=50000, current_price=62500,
-            leverage=10, adds=5)
+            symbol="BTC/USDT",
+            notional=150000,
+            profit_pct=25.0,
+            profit_usd=30000,
+            entry_price=50000,
+            current_price=62500,
+            leverage=10,
+            adds=5,
+        )
 
     @pytest.mark.asyncio
     async def test_send_daily_summary(self, notifier):
         await notifier.send_daily_summary(
-            balance=10500, pnl=500, pnl_pct=5.0, trades=12,
-            open_positions=2, compound_report="Day 1: +5%", target_hit=True)
+            balance=10500,
+            pnl=500,
+            pnl_pct=5.0,
+            trades=12,
+            open_positions=2,
+            compound_report="Day 1: +5%",
+            target_hit=True,
+        )
 
     @pytest.mark.asyncio
     async def test_start_and_stop(self, notifier):

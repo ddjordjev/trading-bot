@@ -21,3 +21,4 @@ data/
 STOP
 CLOSE_ALL
 htmlcov/
+.coverage

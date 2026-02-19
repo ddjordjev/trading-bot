@@ -7,6 +7,7 @@ and verifies configuration sanity. Run this before your first live trade.
 Usage:
     python scripts/preflight_check.py
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -54,8 +55,7 @@ async def run_checks() -> bool:
     }
     api_key, api_secret = key_map.get(settings.exchange, ("", ""))
     has_keys = bool(api_key and api_secret)
-    check(f"API keys for {settings.exchange}", has_keys,
-          "set" if has_keys else "MISSING — set in .env")
+    check(f"API keys for {settings.exchange}", has_keys, "set" if has_keys else "MISSING — set in .env")
 
     if not has_keys:
         print("\nCannot continue without API keys. Set them in .env first.")
@@ -63,10 +63,10 @@ async def run_checks() -> bool:
 
     # 3. Exchange connectivity
     exchange = create_exchange(settings)
-    check("Exchange capabilities", True,
-          f"{exchange.name.upper()} supports: {', '.join(exchange.SUPPORTED_MARKET_TYPES)}")
-    check("Allowed market types", True,
-          f"configured: {settings.allowed_market_types}")
+    check(
+        "Exchange capabilities", True, f"{exchange.name.upper()} supports: {', '.join(exchange.SUPPORTED_MARKET_TYPES)}"
+    )
+    check("Allowed market types", True, f"configured: {settings.allowed_market_types}")
     try:
         await exchange.connect()
         check("Exchange connectivity", True, f"connected to {exchange.name}")
@@ -80,8 +80,11 @@ async def run_checks() -> bool:
         raw_usdt = balance.get("USDT", 0)
         usdt = settings.cap_balance(raw_usdt)
         budget_note = f" (capped from ${raw_usdt:.2f})" if settings.session_budget > 0 and raw_usdt > usdt else ""
-        check("USDT balance", usdt >= settings.initial_risk_amount,
-              f"${usdt:.2f} USDT{budget_note} (min ${settings.initial_risk_amount} needed)")
+        check(
+            "USDT balance",
+            usdt >= settings.initial_risk_amount,
+            f"${usdt:.2f} USDT{budget_note} (min ${settings.initial_risk_amount} needed)",
+        )
         if settings.session_budget > 0:
             check("Session budget", True, f"${settings.session_budget:.2f}")
     except Exception as e:
@@ -90,8 +93,7 @@ async def run_checks() -> bool:
     # 5. Market data
     try:
         ticker = await exchange.fetch_ticker("BTC/USDT")
-        check("Market data (BTC/USDT)", ticker.last > 0,
-              f"last=${ticker.last:,.2f}")
+        check("Market data (BTC/USDT)", ticker.last > 0, f"last=${ticker.last:,.2f}")
     except Exception as e:
         check("Market data", False, str(e))
 
@@ -100,38 +102,36 @@ async def run_checks() -> bool:
         try:
             symbols = await exchange.get_available_symbols(market_type="futures")
             has_futures = len(symbols) > 0
-            check("Futures markets", has_futures,
-                  f"{len(symbols)} pairs" if has_futures else
-                  "NOT AVAILABLE — set ALLOWED_MARKET_TYPES=spot in .env")
+            check(
+                "Futures markets",
+                has_futures,
+                f"{len(symbols)} pairs" if has_futures else "NOT AVAILABLE — set ALLOWED_MARKET_TYPES=spot in .env",
+            )
         except Exception as e:
-            check("Futures markets", False,
-                  f"{e} — if this exchange blocks futures for retail, "
-                  f"set ALLOWED_MARKET_TYPES=spot in .env")
+            check(
+                "Futures markets",
+                False,
+                f"{e} — if this exchange blocks futures for retail, set ALLOWED_MARKET_TYPES=spot in .env",
+            )
 
         # 7. Leverage setting
         try:
             await exchange.set_leverage("BTC/USDT", settings.default_leverage)
-            check("Leverage setting", True,
-                  f"{settings.default_leverage}x on BTC/USDT")
+            check("Leverage setting", True, f"{settings.default_leverage}x on BTC/USDT")
         except Exception as e:
-            check("Leverage setting", False,
-                  f"Cannot set {settings.default_leverage}x — {e}")
+            check("Leverage setting", False, f"Cannot set {settings.default_leverage}x — {e}")
     else:
         logger.info("  [SKIP] Futures checks — not in ALLOWED_MARKET_TYPES")
         logger.info("  [SKIP] Leverage checks — futures not enabled")
 
     # 8. Risk config sanity
-    check("Daily loss limit", settings.max_daily_loss_pct <= 10,
-          f"{settings.max_daily_loss_pct}%")
-    check("Initial risk amount", settings.initial_risk_amount <= 500,
-          f"${settings.initial_risk_amount}")
-    check("Max notional cap", settings.max_notional_position >= 1000,
-          f"${settings.max_notional_position:,.0f}")
+    check("Daily loss limit", settings.max_daily_loss_pct <= 10, f"{settings.max_daily_loss_pct}%")
+    check("Initial risk amount", settings.initial_risk_amount <= 500, f"${settings.initial_risk_amount}")
+    check("Max notional cap", settings.max_notional_position >= 1000, f"${settings.max_notional_position:,.0f}")
 
     # 9. Trading mode
     is_paper = settings.is_paper()
-    check("Trading mode", True,
-          f"{'PAPER (safe)' if is_paper else 'LIVE (real money!)'}")
+    check("Trading mode", True, f"{'PAPER (safe)' if is_paper else 'LIVE (real money!)'}")
 
     if not is_paper:
         print("\n  ⚠  WARNING: You are about to trade with REAL MONEY.")
@@ -139,8 +139,11 @@ async def run_checks() -> bool:
 
     # 10. Email notifications
     has_email = bool(settings.smtp_user and settings.notify_email)
-    check("Email notifications", has_email,
-          f"→ {settings.notify_email}" if has_email else "NOT SET — you won't get alerts")
+    check(
+        "Email notifications",
+        has_email,
+        f"→ {settings.notify_email}" if has_email else "NOT SET — you won't get alerts",
+    )
 
     await exchange.disconnect()
 

@@ -1,13 +1,13 @@
 from strategies.base import BaseStrategy
-from strategies.rsi import RSIStrategy
-from strategies.macd import MACDStrategy
 from strategies.bollinger import BollingerStrategy
-from strategies.mean_reversion import MeanReversionStrategy
-from strategies.grid import GridStrategy
-from strategies.market_open_volatility import MarketOpenVolatilityStrategy
 from strategies.compound_momentum import CompoundMomentumStrategy
-from strategies.swing_opportunity import SwingOpportunityStrategy
 from strategies.custom_loader import load_custom_strategies
+from strategies.grid import GridStrategy
+from strategies.macd import MACDStrategy
+from strategies.market_open_volatility import MarketOpenVolatilityStrategy
+from strategies.mean_reversion import MeanReversionStrategy
+from strategies.rsi import RSIStrategy
+from strategies.swing_opportunity import SwingOpportunityStrategy
 
 BUILTIN_STRATEGIES: dict[str, type[BaseStrategy]] = {
     "rsi": RSIStrategy,
@@ -27,16 +27,16 @@ def get_all_strategies() -> dict[str, type[BaseStrategy]]:
 
 
 __all__ = [
-    "BaseStrategy",
-    "RSIStrategy",
-    "MACDStrategy",
-    "BollingerStrategy",
-    "MeanReversionStrategy",
-    "GridStrategy",
-    "MarketOpenVolatilityStrategy",
-    "CompoundMomentumStrategy",
-    "SwingOpportunityStrategy",
     "BUILTIN_STRATEGIES",
-    "load_custom_strategies",
+    "BaseStrategy",
+    "BollingerStrategy",
+    "CompoundMomentumStrategy",
+    "GridStrategy",
+    "MACDStrategy",
+    "MarketOpenVolatilityStrategy",
+    "MeanReversionStrategy",
+    "RSIStrategy",
+    "SwingOpportunityStrategy",
     "get_all_strategies",
+    "load_custom_strategies",
 ]

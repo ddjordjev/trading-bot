@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import ta
 
-from core.models import Candle, Ticker, Signal, SignalAction
+from core.models import Candle, Signal, SignalAction, Ticker
 from strategies.base import BaseStrategy
 
 
@@ -24,7 +22,7 @@ class RSIStrategy(BaseStrategy):
         self.oversold = float(params.get("oversold", 30))
         self.overbought = float(params.get("overbought", 70))
 
-    def analyze(self, candles: list[Candle], ticker: Optional[Ticker] = None) -> Optional[Signal]:
+    def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:
         df = self.candles_to_df(candles)
         if len(df) < self.period + 1:
             return None
@@ -35,18 +33,26 @@ class RSIStrategy(BaseStrategy):
 
         if current_rsi <= self.oversold:
             return Signal(
-                symbol=self.symbol, action=SignalAction.BUY,
+                symbol=self.symbol,
+                action=SignalAction.BUY,
                 strength=min(1.0, (self.oversold - current_rsi) / self.oversold),
-                strategy=self.name, reason=f"RSI oversold at {current_rsi:.1f}",
-                suggested_price=price, market_type=self.market_type, leverage=self.leverage,
+                strategy=self.name,
+                reason=f"RSI oversold at {current_rsi:.1f}",
+                suggested_price=price,
+                market_type=self.market_type,
+                leverage=self.leverage,
             )
 
         if current_rsi >= self.overbought:
             return Signal(
-                symbol=self.symbol, action=SignalAction.SELL,
+                symbol=self.symbol,
+                action=SignalAction.SELL,
                 strength=min(1.0, (current_rsi - self.overbought) / (100 - self.overbought)),
-                strategy=self.name, reason=f"RSI overbought at {current_rsi:.1f}",
-                suggested_price=price, market_type=self.market_type, leverage=self.leverage,
+                strategy=self.name,
+                reason=f"RSI overbought at {current_rsi:.1f}",
+                suggested_price=price,
+                market_type=self.market_type,
+                leverage=self.leverage,
             )
 
         return None

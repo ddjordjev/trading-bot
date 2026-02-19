@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -35,15 +34,15 @@ class Order(BaseModel):
     side: OrderSide
     order_type: OrderType
     amount: float
-    price: Optional[float] = None
-    stop_price: Optional[float] = None
+    price: float | None = None
+    stop_price: float | None = None
     status: OrderStatus = OrderStatus.PENDING
     filled: float = 0.0
     average_price: float = 0.0
     leverage: int = 1
     market_type: str = "spot"
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     strategy: str = ""
 
     @property
@@ -63,11 +62,11 @@ class Position(BaseModel):
     current_price: float = 0.0
     leverage: int = 1
     market_type: str = "spot"
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
+    stop_loss: float | None = None
+    take_profit: float | None = None
     unrealized_pnl: float = 0.0
     realized_pnl: float = 0.0
-    opened_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    opened_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     strategy: str = ""
 
     @property

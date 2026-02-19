@@ -4,7 +4,9 @@ Wrong scaling = wrong position sizes = either risking too much
 or under-allocating on good setups. The $50 initial / $100K cap
 logic must be exact.
 """
+
 import pytest
+
 from core.orders.scaler import PositionScaler, ScaleMode, ScalePhase
 
 
@@ -20,8 +22,11 @@ def scaler():
 class TestInitialEntry:
     def test_initial_amount_at_price(self, scaler: PositionScaler):
         sp = scaler.create(
-            symbol="BTC/USDT", side="long", strategy="test",
-            leverage=10, mode=ScaleMode.PYRAMID,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
         )
         amount = sp.get_initial_amount(50000.0)
         raw_cost = amount * 50000.0
@@ -31,14 +36,20 @@ class TestInitialEntry:
 
     def test_initial_phase(self, scaler: PositionScaler):
         sp = scaler.create(
-            symbol="ETH/USDT", side="long", strategy="test", leverage=10,
+            symbol="ETH/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
         )
         assert sp.phase == ScalePhase.INITIAL
 
     def test_pyramid_starts_low_leverage(self, scaler: PositionScaler):
         sp = scaler.create(
-            symbol="SOL/USDT", side="long", strategy="test",
-            leverage=50, mode=ScaleMode.PYRAMID,
+            symbol="SOL/USDT",
+            side="long",
+            strategy="test",
+            leverage=50,
+            mode=ScaleMode.PYRAMID,
         )
         assert sp.initial_leverage < 50
         assert sp.initial_leverage >= 1
@@ -47,8 +58,11 @@ class TestInitialEntry:
 class TestNotionalCap:
     def test_notional_tracks_correctly(self, scaler: PositionScaler):
         sp = scaler.create(
-            symbol="BTC/USDT", side="long", strategy="test",
-            leverage=10, mode=ScaleMode.PYRAMID,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
         )
         sp.current_size = 1.0
         sp.avg_entry_price = 50000.0
@@ -57,8 +71,11 @@ class TestNotionalCap:
 
     def test_has_room_to_add(self, scaler: PositionScaler):
         sp = scaler.create(
-            symbol="BTC/USDT", side="long", strategy="test",
-            leverage=10, mode=ScaleMode.PYRAMID,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
         )
         sp.current_size = 0.001
         sp.avg_entry_price = 50000.0
@@ -67,8 +84,11 @@ class TestNotionalCap:
 
     def test_no_room_when_capped(self, scaler: PositionScaler):
         sp = scaler.create(
-            symbol="BTC/USDT", side="long", strategy="test",
-            leverage=10, mode=ScaleMode.PYRAMID,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
         )
         sp.current_size = 200.0
         sp.avg_entry_price = 50000.0

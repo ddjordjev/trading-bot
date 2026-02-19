@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import aiohttp
 from loguru import logger
@@ -14,7 +13,7 @@ class TVLSnapshot(BaseModel):
     tvl_24h_change_pct: float = 0.0
     top_gaining_chains: list[str] = []
     top_losing_chains: list[str] = []
-    timestamp: datetime = datetime.now(timezone.utc)
+    timestamp: datetime = datetime.now(UTC)
 
 
 class DeFiLlamaClient:
@@ -38,10 +37,11 @@ class DeFiLlamaClient:
         self._data = TVLSnapshot()
         self._running = False
         self._prev_tvl: float = 0.0
+        self._background_tasks: list = []
 
     async def start(self) -> None:
         self._running = True
-        asyncio.create_task(self._poll_loop())
+        self._background_tasks.append(asyncio.create_task(self._poll_loop()))
         logger.info("DeFiLlama monitor started (poll={}s)", self.poll_interval)
 
     async def stop(self) -> None:
@@ -94,17 +94,15 @@ class DeFiLlamaClient:
                     change_pct = ((total - self._prev_tvl) / self._prev_tvl) * 100
                 self._prev_tvl = total
 
-                gainers = [c["name"] for c in sorted_chains[:5]
-                           if (c.get("change_1d") or 0) > 0]
-                losers = [c["name"] for c in sorted_chains[-5:]
-                          if (c.get("change_1d") or 0) < 0]
+                gainers = [c["name"] for c in sorted_chains[:5] if (c.get("change_1d") or 0) > 0]
+                losers = [c["name"] for c in sorted_chains[-5:] if (c.get("change_1d") or 0) < 0]
 
                 self._data = TVLSnapshot(
                     total_tvl=total,
                     tvl_24h_change_pct=change_pct,
                     top_gaining_chains=gainers,
                     top_losing_chains=losers,
-                    timestamp=datetime.now(timezone.utc),
+                    timestamp=datetime.now(UTC),
                 )
 
     async def _fetch_chains(self, session: aiohttp.ClientSession) -> list[dict]:
@@ -121,7 +119,7 @@ class DeFiLlamaClient:
         if d.total_tvl == 0:
             return "DeFiLlama: no data"
         parts = [
-            f"TVL: ${d.total_tvl/1e9:.1f}B ({d.tvl_24h_change_pct:+.1f}%)",
+            f"TVL: ${d.total_tvl / 1e9:.1f}B ({d.tvl_24h_change_pct:+.1f}%)",
             f"trend={self.tvl_trend}",
         ]
         if d.top_gaining_chains:

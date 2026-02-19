@@ -1,66 +1,74 @@
 """Tests for core/orders/hedge.py."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from core.models import Candle, OrderSide, Position
 from core.orders.hedge import (
-    HedgePair, HedgeState, ReversalDetector, HedgeManager,
+    HedgeManager,
+    HedgePair,
+    HedgeState,
+    ReversalDetector,
 )
-
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
+
 def _make_candle(close: float, volume: float = 1000, high_off=2, low_off=2) -> Candle:
-    return Candle(timestamp=datetime.now(timezone.utc), open=close,
-                  high=close + high_off, low=close - low_off,
-                  close=close, volume=volume)
+    return Candle(
+        timestamp=datetime.now(UTC), open=close, high=close + high_off, low=close - low_off, close=close, volume=volume
+    )
 
 
-def _pos(symbol="BTC/USDT", side=OrderSide.BUY, amount=1.0,
-         entry=100, current=110, leverage=10) -> Position:
-    return Position(symbol=symbol, side=side, amount=amount,
-                    entry_price=entry, current_price=current, leverage=leverage)
+def _pos(symbol="BTC/USDT", side=OrderSide.BUY, amount=1.0, entry=100, current=110, leverage=10) -> Position:
+    return Position(
+        symbol=symbol, side=side, amount=amount, entry_price=entry, current_price=current, leverage=leverage
+    )
 
 
 # ── HedgePair ───────────────────────────────────────────────────────
 
+
 class TestHedgePair:
     def test_hedge_notional(self):
-        hp = HedgePair(symbol="BTC/USDT", main_side="long",
-                       main_entry=100, main_size=10000, hedge_ratio=0.2)
+        hp = HedgePair(symbol="BTC/USDT", main_side="long", main_entry=100, main_size=10000, hedge_ratio=0.2)
         assert hp.hedge_notional == pytest.approx(2000.0)
 
     def test_should_hedge_watching_profitable_reversal(self):
-        hp = HedgePair(symbol="BTC/USDT", main_side="long",
-                       main_entry=100, main_size=10000,
-                       main_pnl_pct=5.0, reversal_score=0.6)
+        hp = HedgePair(
+            symbol="BTC/USDT", main_side="long", main_entry=100, main_size=10000, main_pnl_pct=5.0, reversal_score=0.6
+        )
         assert hp.should_hedge() is True
 
     def test_should_not_hedge_low_profit(self):
-        hp = HedgePair(symbol="BTC/USDT", main_side="long",
-                       main_entry=100, main_size=10000,
-                       main_pnl_pct=1.0, reversal_score=0.6)
+        hp = HedgePair(
+            symbol="BTC/USDT", main_side="long", main_entry=100, main_size=10000, main_pnl_pct=1.0, reversal_score=0.6
+        )
         assert hp.should_hedge() is False
 
     def test_should_not_hedge_low_reversal_score(self):
-        hp = HedgePair(symbol="BTC/USDT", main_side="long",
-                       main_entry=100, main_size=10000,
-                       main_pnl_pct=5.0, reversal_score=0.3)
+        hp = HedgePair(
+            symbol="BTC/USDT", main_side="long", main_entry=100, main_size=10000, main_pnl_pct=5.0, reversal_score=0.3
+        )
         assert hp.should_hedge() is False
 
     def test_should_not_hedge_already_active(self):
-        hp = HedgePair(symbol="BTC/USDT", main_side="long",
-                       main_entry=100, main_size=10000,
-                       main_pnl_pct=5.0, reversal_score=0.6,
-                       state=HedgeState.ACTIVE)
+        hp = HedgePair(
+            symbol="BTC/USDT",
+            main_side="long",
+            main_entry=100,
+            main_size=10000,
+            main_pnl_pct=5.0,
+            reversal_score=0.6,
+            state=HedgeState.ACTIVE,
+        )
         assert hp.should_hedge() is False
 
     def test_activate_hedge_long_main(self):
-        hp = HedgePair(symbol="BTC/USDT", main_side="long",
-                       main_entry=100, main_size=10000)
+        hp = HedgePair(symbol="BTC/USDT", main_side="long", main_entry=100, main_size=10000)
         hp.activate_hedge(entry_price=110, amount=0.5, order_id="ABC")
         assert hp.hedge_side == "short"
         assert hp.state == HedgeState.ACTIVE
@@ -68,32 +76,36 @@ class TestHedgePair:
         assert hp.hedged_at is not None
 
     def test_activate_hedge_short_main(self):
-        hp = HedgePair(symbol="BTC/USDT", main_side="short",
-                       main_entry=100, main_size=10000)
+        hp = HedgePair(symbol="BTC/USDT", main_side="short", main_entry=100, main_size=10000)
         hp.activate_hedge(entry_price=90, amount=0.5, order_id="ABC")
         assert hp.hedge_side == "long"
 
     def test_close_hedge(self):
-        hp = HedgePair(symbol="BTC/USDT", main_side="long",
-                       main_entry=100, main_size=10000, state=HedgeState.ACTIVE)
+        hp = HedgePair(symbol="BTC/USDT", main_side="long", main_entry=100, main_size=10000, state=HedgeState.ACTIVE)
         hp.close_hedge()
         assert hp.state == HedgeState.CLOSED
 
     def test_status_line_watching(self):
-        hp = HedgePair(symbol="BTC/USDT", main_side="long",
-                       main_entry=100, main_size=10000)
+        hp = HedgePair(symbol="BTC/USDT", main_side="long", main_entry=100, main_size=10000)
         line = hp.status_line()
         assert "WATCHING" in line
 
     def test_status_line_active(self):
-        hp = HedgePair(symbol="BTC/USDT", main_side="long",
-                       main_entry=100, main_size=10000, state=HedgeState.ACTIVE,
-                       hedge_side="short", hedge_size=2000)
+        hp = HedgePair(
+            symbol="BTC/USDT",
+            main_side="long",
+            main_entry=100,
+            main_size=10000,
+            state=HedgeState.ACTIVE,
+            hedge_side="short",
+            hedge_size=2000,
+        )
         line = hp.status_line()
         assert "active" in line
 
 
 # ── ReversalDetector ────────────────────────────────────────────────
+
 
 class TestReversalDetector:
     @pytest.fixture()
@@ -108,7 +120,7 @@ class TestReversalDetector:
 
     def test_rsi_overextended_long(self, detector):
         candles = [_make_candle(100 + i * 0.5, volume=1000) for i in range(40)]
-        score, reasons = detector.assess(candles, "long")
+        score, _reasons = detector.assess(candles, "long")
         assert score >= 0.0
 
     def test_simple_rsi_all_gains(self, detector):
@@ -134,23 +146,20 @@ class TestReversalDetector:
 
     def test_wick_rejection_long_upper_wicks(self, detector):
         candles = [
-            Candle(timestamp=datetime.now(timezone.utc), open=100, high=120,
-                   low=99, close=101, volume=1000),
-            Candle(timestamp=datetime.now(timezone.utc), open=100, high=120,
-                   low=99, close=101, volume=1000),
-            Candle(timestamp=datetime.now(timezone.utc), open=100, high=120,
-                   low=99, close=101, volume=1000),
+            Candle(timestamp=datetime.now(UTC), open=100, high=120, low=99, close=101, volume=1000),
+            Candle(timestamp=datetime.now(UTC), open=100, high=120, low=99, close=101, volume=1000),
+            Candle(timestamp=datetime.now(UTC), open=100, high=120, low=99, close=101, volume=1000),
         ]
         assert detector._wick_rejection(candles, "long") is True
 
 
 # ── HedgeManager ────────────────────────────────────────────────────
 
+
 class TestHedgeManager:
     @pytest.fixture()
     def mgr(self):
-        return HedgeManager(hedge_ratio=0.2, min_main_profit_pct=3.0,
-                            hedge_stop_pct=1.0, max_hedges=2)
+        return HedgeManager(hedge_ratio=0.2, min_main_profit_pct=3.0, hedge_stop_pct=1.0, max_hedges=2)
 
     def test_track_position(self, mgr):
         pos = _pos()

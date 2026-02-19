@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import ccxt.async_support as ccxt
 from loguru import logger
 
 from core.exchange.base import BaseExchange, parse_order_status, ts_to_dt
 from core.models import (
-    Candle, Ticker, OrderBook, Order, OrderSide, OrderType, OrderStatus,
-    Position, MarketType,
+    Candle,
+    MarketType,
+    Order,
+    OrderBook,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Position,
+    Ticker,
 )
 
 
@@ -25,12 +33,14 @@ class MexcExchange(BaseExchange):
 
     def __init__(self, api_key: str = "", api_secret: str = "", sandbox: bool = True):
         super().__init__(api_key, api_secret, sandbox)
-        self._spot = ccxt.mexc({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "options": {"defaultType": "spot"},
-            "enableRateLimit": True,
-        })
+        self._spot = ccxt.mexc(
+            {
+                "apiKey": api_key,
+                "secret": api_secret,
+                "options": {"defaultType": "spot"},
+                "enableRateLimit": True,
+            }
+        )
         if sandbox:
             self._spot.set_sandbox_mode(True)
 
@@ -65,24 +75,24 @@ class MexcExchange(BaseExchange):
             timestamp=ts_to_dt(data.get("timestamp")),
         )
 
-    async def fetch_tickers(self, symbols: Optional[list[str]] = None) -> list[Ticker]:
+    async def fetch_tickers(self, symbols: list[str] | None = None) -> list[Ticker]:
         raw = await self._spot.fetch_tickers(symbols)
         tickers = []
         for sym, data in raw.items():
-            tickers.append(Ticker(
-                symbol=sym,
-                bid=data.get("bid", 0) or 0,
-                ask=data.get("ask", 0) or 0,
-                last=data.get("last", 0) or 0,
-                volume_24h=data.get("quoteVolume", 0) or 0,
-                change_pct_24h=data.get("percentage", 0) or 0,
-                timestamp=ts_to_dt(data.get("timestamp")),
-            ))
+            tickers.append(
+                Ticker(
+                    symbol=sym,
+                    bid=data.get("bid", 0) or 0,
+                    ask=data.get("ask", 0) or 0,
+                    last=data.get("last", 0) or 0,
+                    volume_24h=data.get("quoteVolume", 0) or 0,
+                    change_pct_24h=data.get("percentage", 0) or 0,
+                    timestamp=ts_to_dt(data.get("timestamp")),
+                )
+            )
         return tickers
 
-    async def fetch_candles(
-        self, symbol: str, timeframe: str = "1m", limit: int = 100
-    ) -> list[Candle]:
+    async def fetch_candles(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list[Candle]:
         data = await self._spot.fetch_ohlcv(symbol, timeframe, limit=limit)
         return [
             Candle(
@@ -115,7 +125,7 @@ class MexcExchange(BaseExchange):
                 result[asset] = float(info["free"])
         return result
 
-    async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
+    async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
         return []
 
     # -- Trading --
@@ -126,16 +136,21 @@ class MexcExchange(BaseExchange):
         side: OrderSide,
         order_type: OrderType,
         amount: float,
-        price: Optional[float] = None,
-        stop_price: Optional[float] = None,
+        price: float | None = None,
+        stop_price: float | None = None,
         leverage: int = 1,
         market_type: MarketType = MarketType.SPOT,
     ) -> Order:
         if market_type == MarketType.FUTURES:
             logger.error("MEXC does not support futures for retail accounts")
             return Order(
-                id="", symbol=symbol, side=side, order_type=order_type,
-                amount=amount, price=price, status=OrderStatus.FAILED,
+                id="",
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                amount=amount,
+                price=price,
+                status=OrderStatus.FAILED,
                 market_type="spot",
             )
 
@@ -144,8 +159,7 @@ class MexcExchange(BaseExchange):
         if stop_price is not None:
             params["stopPrice"] = stop_price
 
-        logger.info("Placing spot {} {} {} @ {}",
-                     side.value, ccxt_type, symbol, price or "market")
+        logger.info("Placing spot {} {} {} @ {}", side.value, ccxt_type, symbol, price or "market")
 
         data = await self._spot.create_order(
             symbol=symbol,
@@ -195,19 +209,21 @@ class MexcExchange(BaseExchange):
             average_price=float(data.get("average", 0) or 0),
         )
 
-    async def fetch_open_orders(self, symbol: Optional[str] = None) -> list[Order]:
+    async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:
         raw = await self._spot.fetch_open_orders(symbol)
         orders = []
         for data in raw:
-            orders.append(Order(
-                id=str(data.get("id", "")),
-                symbol=data.get("symbol", ""),
-                side=OrderSide.BUY if data.get("side") == "buy" else OrderSide.SELL,
-                order_type=OrderType.MARKET if data.get("type") == "market" else OrderType.LIMIT,
-                amount=float(data.get("amount", 0) or 0),
-                status=parse_order_status(data.get("status", "")),
-                filled=float(data.get("filled", 0) or 0),
-            ))
+            orders.append(
+                Order(
+                    id=str(data.get("id", "")),
+                    symbol=data.get("symbol", ""),
+                    side=OrderSide.BUY if data.get("side") == "buy" else OrderSide.SELL,
+                    order_type=OrderType.MARKET if data.get("type") == "market" else OrderType.LIMIT,
+                    amount=float(data.get("amount", 0) or 0),
+                    status=parse_order_status(data.get("status", "")),
+                    filled=float(data.get("filled", 0) or 0),
+                )
+            )
         return orders
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
@@ -254,7 +270,11 @@ class MexcExchange(BaseExchange):
                     for c in data:
                         candle = Candle(
                             timestamp=ts_to_dt(c[0]),
-                            open=c[1], high=c[2], low=c[3], close=c[4], volume=c[5],
+                            open=c[1],
+                            high=c[2],
+                            low=c[3],
+                            close=c[4],
+                            volume=c[5],
                         )
                         await callback(candle)
                 except asyncio.CancelledError:

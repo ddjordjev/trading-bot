@@ -1,15 +1,14 @@
 """Tests for db/ (models, store)."""
-from __future__ import annotations
 
-from pathlib import Path
+from __future__ import annotations
 
 import pytest
 
-from db.models import TradeRecord, StrategyScore, PatternInsight, ModificationSuggestion
+from db.models import ModificationSuggestion, PatternInsight, StrategyScore, TradeRecord
 from db.store import TradeDB
 
-
 # ── DB Models ───────────────────────────────────────────────────────
+
 
 class TestTradeRecord:
     def test_defaults(self):
@@ -20,9 +19,16 @@ class TestTradeRecord:
 
     def test_full_record(self):
         tr = TradeRecord(
-            symbol="ETH/USDT", side="sell", strategy="macd", action="close",
-            pnl_usd=50, pnl_pct=2.5, is_winner=True, leverage=10,
-            market_regime="risk_on", hour_utc=14,
+            symbol="ETH/USDT",
+            side="sell",
+            strategy="macd",
+            action="close",
+            pnl_usd=50,
+            pnl_pct=2.5,
+            is_winner=True,
+            leverage=10,
+            market_regime="risk_on",
+            hour_utc=14,
         )
         assert tr.is_winner is True
         assert tr.leverage == 10
@@ -41,21 +47,23 @@ class TestStrategyScore:
 
 class TestPatternInsight:
     def test_creation(self):
-        pi = PatternInsight(pattern_type="time_of_day", description="Bad at 3am",
-                            severity="warning")
+        pi = PatternInsight(pattern_type="time_of_day", description="Bad at 3am", severity="warning")
         assert pi.severity == "warning"
 
 
 class TestModificationSuggestion:
     def test_creation(self):
         ms = ModificationSuggestion(
-            strategy="rsi", suggestion_type="change_param",
+            strategy="rsi",
+            suggestion_type="change_param",
             title="Raise oversold threshold",
-            description="RSI 25 instead of 30")
+            description="RSI 25 instead of 30",
+        )
         assert ms.suggestion_type == "change_param"
 
 
 # ── TradeDB ─────────────────────────────────────────────────────────
+
 
 class TestTradeDB:
     @pytest.fixture()
@@ -65,12 +73,17 @@ class TestTradeDB:
         yield db
         db.close()
 
-    def _log_trade(self, db, symbol="BTC/USDT", strategy="rsi",
-                   is_winner=True, pnl_usd=10, pnl_pct=2.0, hour=14):
+    def _log_trade(self, db, symbol="BTC/USDT", strategy="rsi", is_winner=True, pnl_usd=10, pnl_pct=2.0, hour=14):
         tr = TradeRecord(
-            symbol=symbol, side="buy", strategy=strategy, action="close",
-            pnl_usd=pnl_usd, pnl_pct=pnl_pct, is_winner=is_winner,
-            hour_utc=hour, market_regime="normal",
+            symbol=symbol,
+            side="buy",
+            strategy=strategy,
+            action="close",
+            pnl_usd=pnl_usd,
+            pnl_pct=pnl_pct,
+            is_winner=is_winner,
+            hour_utc=hour,
+            market_regime="normal",
         )
         return db.log_trade(tr)
 

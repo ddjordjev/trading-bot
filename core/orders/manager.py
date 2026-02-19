@@ -1,20 +1,27 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from loguru import logger
 
 from config.settings import Settings
 from core.exchange.base import BaseExchange
 from core.models import (
-    Signal, SignalAction, Order, OrderSide, OrderType, OrderStatus,
-    Position, MarketType,
+    Candle,
+    MarketType,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Position,
+    Signal,
+    SignalAction,
 )
-from core.risk.manager import RiskManager
+from core.orders.hedge import HedgeManager
+from core.orders.scaler import PositionScaler, ScaleMode
 from core.orders.trailing import TrailingStopManager
-from core.orders.scaler import PositionScaler, ScalePhase, ScaleMode
-from core.orders.hedge import HedgeManager, HedgeState
 from core.orders.wick_scalp import WickScalpDetector
+from core.risk.manager import RiskManager
 
 
 class OrderManager:
@@ -54,8 +61,7 @@ class OrderManager:
     #  Signal execution
     # ------------------------------------------------------------------ #
 
-    async def execute_signal(self, signal: Signal, low_liquidity: bool = False,
-                             pyramid: bool = False) -> Order | None:
+    async def execute_signal(self, signal: Signal, low_liquidity: bool = False, pyramid: bool = False) -> Order | None:
         balance_map = await self.exchange.fetch_balance()
         balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
         positions = await self.exchange.fetch_positions()
@@ -72,9 +78,9 @@ class OrderManager:
 
         return await self._open_position(signal, balance, low_liquidity, pyramid)
 
-    async def _open_position(self, signal: Signal, balance: float,
-                             low_liquidity: bool = False,
-                             pyramid: bool = False) -> Order | None:
+    async def _open_position(
+        self, signal: Signal, balance: float, low_liquidity: bool = False, pyramid: bool = False
+    ) -> Order | None:
         price = signal.suggested_price or 0
         if price <= 0:
             logger.warning("No price for {}, skipping", signal.symbol)
@@ -89,59 +95,85 @@ class OrderManager:
         if low_liquidity:
             amount = self.scaler.gambling_size(balance, price, target_leverage)
             sp = self.scaler.create(
-                symbol=signal.symbol, side=side_str,
+                symbol=signal.symbol,
+                side=side_str,
                 strategy=signal.strategy,
                 market_type=signal.market_type or "futures",
-                leverage=target_leverage, low_liquidity=True,
+                leverage=target_leverage,
+                low_liquidity=True,
             )
             actual_leverage = target_leverage
-            logger.info("LOW-LIQ gambling bet on {} | ${:.0f} | size: {:.6f}",
-                        signal.symbol, amount * price, amount)
+            logger.info("LOW-LIQ gambling bet on {} | ${:.0f} | size: {:.6f}", signal.symbol, amount * price, amount)
 
         elif pyramid:
             sp = self.scaler.create(
-                symbol=signal.symbol, side=side_str,
+                symbol=signal.symbol,
+                side=side_str,
                 strategy=signal.strategy,
                 market_type=signal.market_type or "futures",
-                leverage=target_leverage, mode=ScaleMode.PYRAMID,
+                leverage=target_leverage,
+                mode=ScaleMode.PYRAMID,
             )
             amount = sp.get_initial_amount(price)
             actual_leverage = sp.initial_leverage
-            logger.info("PYRAMID entry on {} | ${:.0f} initial (cap: ${:.0f}K) | lev: {}x (target: {}x)",
-                        signal.symbol, amount * price, sp.max_notional / 1000,
-                        actual_leverage, target_leverage)
+            logger.info(
+                "PYRAMID entry on {} | ${:.0f} initial (cap: ${:.0f}K) | lev: {}x (target: {}x)",
+                signal.symbol,
+                amount * price,
+                sp.max_notional / 1000,
+                actual_leverage,
+                target_leverage,
+            )
         else:
             sp = self.scaler.create(
-                symbol=signal.symbol, side=side_str,
+                symbol=signal.symbol,
+                side=side_str,
                 strategy=signal.strategy,
                 market_type=signal.market_type or "futures",
                 leverage=target_leverage,
             )
             amount = sp.get_initial_amount(price)
             actual_leverage = target_leverage
-            logger.info("Scaled entry on {} | ${:.0f} initial (cap: ${:.0f}K notional)",
-                        signal.symbol, amount * price, sp.max_notional / 1000)
+            logger.info(
+                "Scaled entry on {} | ${:.0f} initial (cap: ${:.0f}K notional)",
+                signal.symbol,
+                amount * price,
+                sp.max_notional / 1000,
+            )
 
         if amount <= 0:
             return None
 
         order = await self.exchange.place_order(
-            symbol=signal.symbol, side=side,
-            order_type=OrderType.MARKET, amount=amount,
-            leverage=actual_leverage, market_type=market_type,
+            symbol=signal.symbol,
+            side=side,
+            order_type=OrderType.MARKET,
+            amount=amount,
+            leverage=actual_leverage,
+            market_type=market_type,
         )
 
         if order.status == OrderStatus.FILLED:
             sp.record_add(order.filled, order.average_price)
             self._log_trade(signal, order, "open")
-            logger.info("Opened {} {} {} @ {:.6f} (phase: {}, mode: {})",
-                        signal.market_type, side.value, signal.symbol,
-                        order.average_price, sp.phase.value, sp.mode.value)
+            logger.info(
+                "Opened {} {} {} @ {:.6f} (phase: {}, mode: {})",
+                signal.market_type,
+                side.value,
+                signal.symbol,
+                order.average_price,
+                sp.phase.value,
+                sp.mode.value,
+            )
 
             pos = Position(
-                symbol=signal.symbol, side=side, amount=amount,
-                entry_price=order.average_price, current_price=order.average_price,
-                leverage=actual_leverage, market_type=market_type.value,
+                symbol=signal.symbol,
+                side=side,
+                amount=amount,
+                entry_price=order.average_price,
+                current_price=order.average_price,
+                leverage=actual_leverage,
+                market_type=market_type.value,
             )
             # PYRAMID: ultra-wide initial stop. Market makers wick through
             # expected support to grab stop-loss liquidity, then reverse.
@@ -152,10 +184,11 @@ class OrderManager:
             if pyramid:
                 pyramid_stop = max(sp.dca_interval_pct * 8, 15.0)
                 self.trailing.register(
-                    pos, initial_stop_pct=pyramid_stop, low_liquidity=low_liquidity,
+                    pos,
+                    initial_stop_pct=pyramid_stop,
+                    low_liquidity=low_liquidity,
                 )
-                logger.info("PYRAMID wide stop for {}: {:.1f}% (survive wicks, DCA zone)",
-                            signal.symbol, pyramid_stop)
+                logger.info("PYRAMID wide stop for {}: {:.1f}% (survive wicks, DCA zone)", signal.symbol, pyramid_stop)
             else:
                 self.trailing.register(pos, low_liquidity=low_liquidity)
 
@@ -186,23 +219,37 @@ class OrderManager:
             market_type = MarketType(sp.market_type) if sp.market_type else MarketType.FUTURES
 
             tag = "DCA DOWN" if sp.mode == ScaleMode.PYRAMID else "SCALE UP"
-            logger.info("{} into {} | add #{} | amount: {:.6f} | profit: {:.2f}% | avg: {:.6f}",
-                        tag, symbol, sp.adds + 1, amount, pos.pnl_pct, sp.avg_entry_price)
+            logger.info(
+                "{} into {} | add #{} | amount: {:.6f} | profit: {:.2f}% | avg: {:.6f}",
+                tag,
+                symbol,
+                sp.adds + 1,
+                amount,
+                pos.pnl_pct,
+                sp.avg_entry_price,
+            )
 
             order = await self.exchange.place_order(
-                symbol=symbol, side=side, order_type=OrderType.MARKET,
-                amount=amount, leverage=sp.current_leverage,
+                symbol=symbol,
+                side=side,
+                order_type=OrderType.MARKET,
+                amount=amount,
+                leverage=sp.current_leverage,
                 market_type=market_type,
             )
 
             if order.status == OrderStatus.FILLED:
                 sp.record_add(order.filled, order.average_price)
                 self._log_trade(
-                    Signal(symbol=symbol,
-                           action=SignalAction.BUY if side == OrderSide.BUY else SignalAction.SELL,
-                           strategy=sp.strategy, reason=f"{sp.mode.value}_add_#{sp.adds}",
-                           market_type=sp.market_type),
-                    order, "scale_in",
+                    Signal(
+                        symbol=symbol,
+                        action=SignalAction.BUY if side == OrderSide.BUY else SignalAction.SELL,
+                        strategy=sp.strategy,
+                        reason=f"{sp.mode.value}_add_#{sp.adds}",
+                        market_type=sp.market_type,
+                    ),
+                    order,
+                    "scale_in",
                 )
 
                 ts = self.trailing.get(symbol)
@@ -235,9 +282,14 @@ class OrderManager:
                 continue
 
             new_lev = sp.target_leverage
-            logger.info("LEVER UP {} | {}x -> {}x | avg entry: {:.6f} | current: {:.6f}",
-                        symbol, sp.current_leverage, new_lev,
-                        sp.avg_entry_price, prices.get(symbol, 0))
+            logger.info(
+                "LEVER UP {} | {}x -> {}x | avg entry: {:.6f} | current: {:.6f}",
+                symbol,
+                sp.current_leverage,
+                new_lev,
+                sp.avg_entry_price,
+                prices.get(symbol, 0),
+            )
 
             try:
                 await self.exchange.set_leverage(symbol, new_lev)
@@ -248,8 +300,9 @@ class OrderManager:
                 if ts and sp.breakeven_after_lever:
                     ts.breakeven_locked = True
                     ts.current_stop = sp.avg_entry_price
-                    logger.info("BREAK-EVEN locked for {} after leverage raise (stop -> {:.6f})",
-                                symbol, sp.avg_entry_price)
+                    logger.info(
+                        "BREAK-EVEN locked for {} after leverage raise (stop -> {:.6f})", symbol, sp.avg_entry_price
+                    )
 
                 levered.append(symbol)
             except Exception as e:
@@ -284,13 +337,21 @@ class OrderManager:
             close_side = OrderSide.SELL if sp.side == "long" else OrderSide.BUY
             market_type = MarketType(sp.market_type) if sp.market_type else MarketType.FUTURES
 
-            logger.info("PARTIAL TAKE on {} | closing {:.4f} ({:.0f}%) | profit: {:.2f}%",
-                        symbol, amount, sp.partial_take_pct, pos.pnl_pct)
+            logger.info(
+                "PARTIAL TAKE on {} | closing {:.4f} ({:.0f}%) | profit: {:.2f}%",
+                symbol,
+                amount,
+                sp.partial_take_pct,
+                pos.pnl_pct,
+            )
 
             order = await self.exchange.place_order(
-                symbol=symbol, side=close_side,
-                order_type=OrderType.MARKET, amount=amount,
-                leverage=sp.current_leverage, market_type=market_type,
+                symbol=symbol,
+                side=close_side,
+                order_type=OrderType.MARKET,
+                amount=amount,
+                leverage=sp.current_leverage,
+                market_type=market_type,
             )
 
             if order.status == OrderStatus.FILLED:
@@ -298,10 +359,16 @@ class OrderManager:
                 self.risk.record_pnl(pnl_portion)
                 sp.record_partial_close(order.filled)
                 self._log_trade(
-                    Signal(symbol=symbol, action=SignalAction.CLOSE,
-                           strategy=sp.strategy, reason="partial_take_profit",
-                           market_type=sp.market_type),
-                    order, "partial_close", pnl_portion,
+                    Signal(
+                        symbol=symbol,
+                        action=SignalAction.CLOSE,
+                        strategy=sp.strategy,
+                        reason="partial_take_profit",
+                        market_type=sp.market_type,
+                    ),
+                    order,
+                    "partial_close",
+                    pnl_portion,
                 )
                 taken.append(order)
 
@@ -311,7 +378,7 @@ class OrderManager:
     #  Hedging: counter-positions on reversal signals
     # ------------------------------------------------------------------ #
 
-    async def try_hedge(self, candles_map: dict[str, list["Candle"]]) -> list[Order]:
+    async def try_hedge(self, candles_map: dict[str, list[Candle]]) -> list[Order]:
         """Check profitable positions for reversal signals and open hedges.
 
         Example: Long $2500 BTC at +5%. RSI overextended, volume fading.
@@ -320,7 +387,6 @@ class OrderManager:
         -> If reversal: short prints, long stopped at profit
         -> If no reversal: short stopped for tiny loss, long keeps running
         """
-        from core.models import Candle  # avoid circular import at module level
 
         opened: list[Order] = []
         positions = await self.exchange.fetch_positions()
@@ -342,18 +408,25 @@ class OrderManager:
                 continue
 
             params = self.hedger.get_hedge_params(
-                symbol, pos.current_price, pos.leverage,
+                symbol,
+                pos.current_price,
+                pos.leverage,
             )
             if not params:
                 continue
 
             reasons_str = ", ".join(params["reasons"])
-            logger.info("HEDGE OPENING on {} | reversal: {:.0f}% ({}) | "
-                        "main: {} ${:.0f} +{:.1f}% | hedge: {} ${:.0f}",
-                        symbol, params["reversal_score"] * 100, reasons_str,
-                        "long" if pos.side == OrderSide.BUY else "short",
-                        pos.notional_value, pos.pnl_pct,
-                        params["side"].value, pos.notional_value * self.hedger.hedge_ratio)
+            logger.info(
+                "HEDGE OPENING on {} | reversal: {:.0f}% ({}) | main: {} ${:.0f} +{:.1f}% | hedge: {} ${:.0f}",
+                symbol,
+                params["reversal_score"] * 100,
+                reasons_str,
+                "long" if pos.side == OrderSide.BUY else "short",
+                pos.notional_value,
+                pos.pnl_pct,
+                params["side"].value,
+                pos.notional_value * self.hedger.hedge_ratio,
+            )
 
             # Tighten the main position's trailing stop before hedging
             ts = self.trailing.get(symbol)
@@ -367,8 +440,9 @@ class OrderManager:
                     tight_stop = pos.current_price * (1 + 1.5 / 100)
                     if tight_stop < ts.current_stop:
                         ts.current_stop = tight_stop
-                logger.info("Tightened main stop for {} before hedge: {:.6f} -> {:.6f}",
-                            symbol, old_stop, ts.current_stop)
+                logger.info(
+                    "Tightened main stop for {} before hedge: {:.6f} -> {:.6f}", symbol, old_stop, ts.current_stop
+                )
 
             market_type = MarketType(pos.market_type) if pos.market_type else MarketType.FUTURES
 
@@ -387,14 +461,15 @@ class OrderManager:
                 # Register a tight trailing stop for the hedge
                 hedge_side = params["side"]
                 hedge_pos = Position(
-                    symbol=symbol, side=hedge_side,
+                    symbol=symbol,
+                    side=hedge_side,
                     amount=params["amount"],
                     entry_price=order.average_price,
                     current_price=order.average_price,
                     leverage=params["leverage"],
                     market_type=market_type.value,
                 )
-                hedge_sym = f"{symbol}:hedge"
+                _hedge_sym = f"{symbol}:hedge"
                 self.trailing.register(
                     hedge_pos,
                     initial_stop_pct=self.hedger.hedge_stop_pct,
@@ -402,11 +477,15 @@ class OrderManager:
                 )
 
                 self._log_trade(
-                    Signal(symbol=symbol,
-                           action=SignalAction.SELL if hedge_side == OrderSide.SELL else SignalAction.BUY,
-                           strategy="hedge", reason=reasons_str,
-                           market_type=pos.market_type),
-                    order, "hedge_open",
+                    Signal(
+                        symbol=symbol,
+                        action=SignalAction.SELL if hedge_side == OrderSide.SELL else SignalAction.BUY,
+                        strategy="hedge",
+                        reason=reasons_str,
+                        market_type=pos.market_type,
+                    ),
+                    order,
+                    "hedge_open",
                 )
                 opened.append(order)
 
@@ -457,8 +536,14 @@ class OrderManager:
                 continue
             scalp_amount = (scalp_dollars * scalp_leverage) / pos.current_price
 
-            logger.info("WICK SCALP on {} | main={} pyramid | scalp={} ${:.0f} @ {}x",
-                        pos.symbol, sp.side, scalp.scalp_side, scalp_dollars, scalp_leverage)
+            logger.info(
+                "WICK SCALP on {} | main={} pyramid | scalp={} ${:.0f} @ {}x",
+                pos.symbol,
+                sp.side,
+                scalp.scalp_side,
+                scalp_dollars,
+                scalp_leverage,
+            )
 
             order = await self.exchange.place_order(
                 symbol=pos.symbol,
@@ -471,16 +556,23 @@ class OrderManager:
 
             if order.status == OrderStatus.FILLED:
                 self.wick_scalper.activate(
-                    pos.symbol, scalp, order.average_price, order.filled, order.id,
+                    pos.symbol,
+                    scalp,
+                    order.average_price,
+                    order.filled,
+                    order.id,
                 )
 
                 scalp_pos = Position(
-                    symbol=pos.symbol, side=scalp_side_order,
-                    amount=scalp_amount, entry_price=order.average_price,
+                    symbol=pos.symbol,
+                    side=scalp_side_order,
+                    amount=scalp_amount,
+                    entry_price=order.average_price,
                     current_price=order.average_price,
-                    leverage=scalp_leverage, market_type=market_type.value,
+                    leverage=scalp_leverage,
+                    market_type=market_type.value,
                 )
-                wick_sym = f"{pos.symbol}:wick"
+                _wick_sym = f"{pos.symbol}:wick"
                 self.trailing.register(
                     scalp_pos,
                     initial_stop_pct=scalp.stop_pct,
@@ -488,12 +580,15 @@ class OrderManager:
                 )
 
                 self._log_trade(
-                    Signal(symbol=pos.symbol,
-                           action=SignalAction.SELL if scalp.scalp_side == "short" else SignalAction.BUY,
-                           strategy="wick_scalp",
-                           reason=f"wick on {sp.side} pyramid",
-                           market_type=sp.market_type),
-                    order, "wick_scalp_open",
+                    Signal(
+                        symbol=pos.symbol,
+                        action=SignalAction.SELL if scalp.scalp_side == "short" else SignalAction.BUY,
+                        strategy="wick_scalp",
+                        reason=f"wick on {sp.side} pyramid",
+                        market_type=sp.market_type,
+                    ),
+                    order,
+                    "wick_scalp_open",
                 )
                 opened.append(order)
 
@@ -502,10 +597,12 @@ class OrderManager:
             scalp = self.wick_scalper.get(sym)
             if not scalp:
                 continue
-            close_side = OrderSide.BUY if scalp.scalp_side == "short" else OrderSide.SELL
+            _close_side = OrderSide.BUY if scalp.scalp_side == "short" else OrderSide.SELL
             close_signal = Signal(
-                symbol=sym, action=SignalAction.CLOSE,
-                strategy="wick_scalp", reason="wick_scalp_expired",
+                symbol=sym,
+                action=SignalAction.CLOSE,
+                strategy="wick_scalp",
+                reason="wick_scalp_expired",
                 market_type="futures",
             )
             order = await self.execute_signal(close_signal)
@@ -531,9 +628,12 @@ class OrderManager:
         market_type = MarketType(pos.market_type) if pos.market_type else MarketType.SPOT
 
         order = await self.exchange.place_order(
-            symbol=signal.symbol, side=close_side,
-            order_type=OrderType.MARKET, amount=pos.amount,
-            leverage=pos.leverage, market_type=market_type,
+            symbol=signal.symbol,
+            side=close_side,
+            order_type=OrderType.MARKET,
+            amount=pos.amount,
+            leverage=pos.leverage,
+            market_type=market_type,
         )
 
         if order.status == OrderStatus.FILLED:
@@ -568,12 +668,13 @@ class OrderManager:
             else:
                 reason = "initial_stop"
 
-            logger.info("Stop triggered for {}{}{} (reason: {})",
-                        symbol, pnl_info, liq_tag, reason)
+            logger.info("Stop triggered for {}{}{} (reason: {})", symbol, pnl_info, liq_tag, reason)
 
             signal = Signal(
-                symbol=symbol, action=SignalAction.CLOSE,
-                strategy="trailing_stop", reason=reason,
+                symbol=symbol,
+                action=SignalAction.CLOSE,
+                strategy="trailing_stop",
+                reason=reason,
                 market_type="futures",
             )
             order = await self.execute_signal(signal)
@@ -588,8 +689,10 @@ class OrderManager:
             if self.risk.check_liquidation(pos, balance):
                 logger.critical("LIQUIDATION RISK for {} - closing immediately!", pos.symbol)
                 signal = Signal(
-                    symbol=pos.symbol, action=SignalAction.CLOSE,
-                    strategy="risk_manager", reason="liquidation_risk",
+                    symbol=pos.symbol,
+                    action=SignalAction.CLOSE,
+                    strategy="risk_manager",
+                    reason="liquidation_risk",
                     market_type=pos.market_type,
                 )
                 order = await self.execute_signal(signal)
@@ -613,7 +716,7 @@ class OrderManager:
         winners that are still running.
         """
         closed: list[Order] = []
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         positions = await self.exchange.fetch_positions()
         pos_map = {p.symbol: p for p in positions}
 
@@ -627,13 +730,16 @@ class OrderManager:
             pos = pos_map.get(signal.symbol)
             if pos and pos.pnl_pct > 1.0:
                 # In meaningful profit -- let the trailing stop ride it
-                logger.info("Quick trade {} expired but in profit ({:+.1f}%) -- letting trail ride",
-                            signal.symbol, pos.pnl_pct)
+                logger.info(
+                    "Quick trade {} expired but in profit ({:+.1f}%) -- letting trail ride", signal.symbol, pos.pnl_pct
+                )
                 continue
 
             close_signal = Signal(
-                symbol=signal.symbol, action=SignalAction.CLOSE,
-                strategy=signal.strategy, reason="max_hold_time_exceeded",
+                symbol=signal.symbol,
+                action=SignalAction.CLOSE,
+                strategy=signal.strategy,
+                reason="max_hold_time_exceeded",
                 market_type=signal.market_type,
             )
             order = await self.execute_signal(close_signal)
@@ -650,21 +756,23 @@ class OrderManager:
 
     def _log_trade(self, signal: Signal, order: Order, action: str, pnl: float = 0.0) -> None:
         sp = self.scaler.get(signal.symbol)
-        self._trade_log.append({
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "symbol": signal.symbol,
-            "action": action,
-            "side": order.side.value,
-            "amount": order.filled,
-            "price": order.average_price,
-            "strategy": signal.strategy,
-            "reason": signal.reason,
-            "pnl": pnl,
-            "scale_phase": sp.phase.value if sp else "n/a",
-            "scale_mode": sp.mode.value if sp else "n/a",
-            "scale_fill_pct": sp.fill_pct if sp else 0,
-            "leverage": sp.current_leverage if sp else 0,
-        })
+        self._trade_log.append(
+            {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "symbol": signal.symbol,
+                "action": action,
+                "side": order.side.value,
+                "amount": order.filled,
+                "price": order.average_price,
+                "strategy": signal.strategy,
+                "reason": signal.reason,
+                "pnl": pnl,
+                "scale_phase": sp.phase.value if sp else "n/a",
+                "scale_mode": sp.mode.value if sp else "n/a",
+                "scale_fill_pct": sp.fill_pct if sp else 0,
+                "leverage": sp.current_leverage if sp else 0,
+            }
+        )
 
     @property
     def trade_history(self) -> list[dict]:

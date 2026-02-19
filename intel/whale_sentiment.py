@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import aiohttp
 from loguru import logger
@@ -11,12 +10,13 @@ from pydantic import BaseModel
 
 class OISnapshot(BaseModel):
     """Historical open interest data point."""
+
     total_oi_usd: float = 0.0
     oi_change_1h_pct: float = 0.0
     oi_change_24h_pct: float = 0.0
     oi_weighted_funding: float = 0.0  # OI-weighted avg funding across exchanges
     top_trader_long_ratio: float = 0.5  # Binance top trader L/S
-    timestamp: datetime = datetime.now(timezone.utc)
+    timestamp: datetime = datetime.now(UTC)
 
     @property
     def oi_surging(self) -> bool:
@@ -30,9 +30,9 @@ class OISnapshot(BaseModel):
 class WhaleSentimentData(BaseModel):
     long_short_ratio: float = 1.0  # >1 = more longs, <1 = more shorts
     open_interest_24h_change_pct: float = 0.0
-    funding_rate: float = 0.0      # positive = longs pay shorts
-    oi_snapshot: Optional[OISnapshot] = None
-    timestamp: datetime = datetime.now(timezone.utc)
+    funding_rate: float = 0.0  # positive = longs pay shorts
+    oi_snapshot: OISnapshot | None = None
+    timestamp: datetime = datetime.now(UTC)
 
     @property
     def is_overleveraged_longs(self) -> bool:
@@ -78,24 +78,23 @@ class WhaleSentiment:
     COINGLASS_OI_HISTORY_URL = "https://fapi.coinglass.com/api/futures/openInterest/ohlc-history"
     COINGLASS_TOP_TRADERS_URL = "https://fapi.coinglass.com/api/futures/topLongShortAccountRatio"
 
-    def __init__(self, symbols: list[str] = None, poll_interval: int = 300,
-                 coinglass_key: str = ""):
+    def __init__(self, symbols: list[str] | None = None, poll_interval: int = 300, coinglass_key: str = ""):
         self.symbols = symbols or ["BTC", "ETH"]
         self.poll_interval = poll_interval
         self.coinglass_key = coinglass_key
         self._data: dict[str, WhaleSentimentData] = {}
         self._running = False
+        self._background_tasks: list = []
 
     async def start(self) -> None:
         self._running = True
-        asyncio.create_task(self._poll_loop())
-        logger.info("Whale sentiment monitor started (symbols={}, poll={}s)",
-                     self.symbols, self.poll_interval)
+        self._background_tasks.append(asyncio.create_task(self._poll_loop()))
+        logger.info("Whale sentiment monitor started (symbols={}, poll={}s)", self.symbols, self.poll_interval)
 
     async def stop(self) -> None:
         self._running = False
 
-    def get(self, symbol: str) -> Optional[WhaleSentimentData]:
+    def get(self, symbol: str) -> WhaleSentimentData | None:
         clean = symbol.upper().replace("/USDT", "").replace("USDT", "")
         return self._data.get(clean)
 
@@ -146,15 +145,15 @@ class WhaleSentiment:
         if self.coinglass_key:
             headers["coinglassSecret"] = self.coinglass_key
 
-        data = WhaleSentimentData(timestamp=datetime.now(timezone.utc))
+        data = WhaleSentimentData(timestamp=datetime.now(UTC))
 
         async with aiohttp.ClientSession() as session:
             # Long/Short ratio
             try:
                 params = {"symbol": symbol, "timeType": 2}
-                async with session.get(self.COINGLASS_LS_URL, params=params,
-                                       headers=headers,
-                                       timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(
+                    self.COINGLASS_LS_URL, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
                     if resp.status == 200:
                         json_data = await resp.json()
                         ls_data = json_data.get("data", [])
@@ -162,16 +161,17 @@ class WhaleSentiment:
                             latest = ls_data[-1] if ls_data else {}
                             if isinstance(latest, dict):
                                 data.long_short_ratio = float(latest.get("longRate", 50)) / max(
-                                    float(latest.get("shortRate", 50)), 0.01)
+                                    float(latest.get("shortRate", 50)), 0.01
+                                )
             except Exception:
                 pass
 
             # Funding rate
             try:
                 params = {"symbol": symbol}
-                async with session.get(self.COINGLASS_FUNDING_URL, params=params,
-                                       headers=headers,
-                                       timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(
+                    self.COINGLASS_FUNDING_URL, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
                     if resp.status == 200:
                         json_data = await resp.json()
                         funding_data = json_data.get("data", [])
@@ -185,12 +185,12 @@ class WhaleSentiment:
                 pass
 
             # Open interest details
-            oi_snap = OISnapshot(timestamp=datetime.now(timezone.utc))
+            oi_snap = OISnapshot(timestamp=datetime.now(UTC))
             try:
                 params = {"symbol": symbol, "timeType": 2}
-                async with session.get(self.COINGLASS_OI_URL, params=params,
-                                       headers=headers,
-                                       timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(
+                    self.COINGLASS_OI_URL, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
                     if resp.status == 200:
                         json_data = await resp.json()
                         oi_data = json_data.get("data", [])
@@ -209,16 +209,18 @@ class WhaleSentiment:
             # Top trader positions (Binance top trader L/S)
             try:
                 params = {"symbol": symbol, "timeType": 2}
-                async with session.get(self.COINGLASS_TOP_TRADERS_URL, params=params,
-                                       headers=headers,
-                                       timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(
+                    self.COINGLASS_TOP_TRADERS_URL,
+                    params=params,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
                     if resp.status == 200:
                         json_data = await resp.json()
                         tt_data = json_data.get("data", [])
                         if tt_data and isinstance(tt_data, list):
                             latest = tt_data[-1] if isinstance(tt_data[-1], dict) else {}
-                            oi_snap.top_trader_long_ratio = float(
-                                latest.get("longRate", 50)) / 100.0
+                            oi_snap.top_trader_long_ratio = float(latest.get("longRate", 50)) / 100.0
             except Exception:
                 pass
 
@@ -227,11 +229,19 @@ class WhaleSentiment:
         self._data[symbol] = data
 
         if data.is_overleveraged_longs:
-            logger.warning("WHALE ALERT {}: overleveraged longs (funding={:.4f}%, L/S={:.2f})",
-                           symbol, data.funding_rate * 100, data.long_short_ratio)
+            logger.warning(
+                "WHALE ALERT {}: overleveraged longs (funding={:.4f}%, L/S={:.2f})",
+                symbol,
+                data.funding_rate * 100,
+                data.long_short_ratio,
+            )
         elif data.is_overleveraged_shorts:
-            logger.warning("WHALE ALERT {}: overleveraged shorts (funding={:.4f}%, L/S={:.2f})",
-                           symbol, data.funding_rate * 100, data.long_short_ratio)
+            logger.warning(
+                "WHALE ALERT {}: overleveraged shorts (funding={:.4f}%, L/S={:.2f})",
+                symbol,
+                data.funding_rate * 100,
+                data.long_short_ratio,
+            )
 
     def summary(self) -> str:
         parts = []
@@ -241,6 +251,5 @@ class WhaleSentiment:
                 tag = " ** OVER-LONG **"
             elif d.is_overleveraged_shorts:
                 tag = " ** OVER-SHORT **"
-            parts.append(f"{sym}: L/S={d.long_short_ratio:.2f} "
-                         f"fund={d.funding_rate*100:.4f}%{tag}")
+            parts.append(f"{sym}: L/S={d.long_short_ratio:.2f} fund={d.funding_rate * 100:.4f}%{tag}")
         return "Whale: " + " | ".join(parts) if parts else "Whale: no data"

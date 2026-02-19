@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import os
-from datetime import datetime, timezone
+import contextlib
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class DailyRecord(BaseModel):
@@ -23,12 +22,13 @@ class DailyRecord(BaseModel):
 
 class DailyTier(str, Enum):
     """Behavior tiers based on daily PnL percentage."""
-    LOSING = "losing"         # in the red — capital preservation mode
-    BUILDING = "building"     # 0-10% — working toward base target
-    STRONG = "strong"         # 10-20% — base target hit, still room to grow
-    EXCELLENT = "excellent"   # 20-50% — exceptional day, start tightening
-    MONSTER = "monster"       # 50-100% — protect hard, only ride existing
-    LEGENDARY = "legendary"   # 100%+ — close all if reversal risk, or email + ride
+
+    LOSING = "losing"  # in the red — capital preservation mode
+    BUILDING = "building"  # 0-10% — working toward base target
+    STRONG = "strong"  # 10-20% — base target hit, still room to grow
+    EXCELLENT = "excellent"  # 20-50% — exceptional day, start tightening
+    MONSTER = "monster"  # 50-100% — protect hard, only ride existing
+    LEGENDARY = "legendary"  # 100%+ — close all if reversal risk, or email + ride
 
 
 class DailyTargetTracker:
@@ -58,7 +58,7 @@ class DailyTargetTracker:
         self._current_balance: float = 0.0
         self._day_number: int = 0
         self._initial_capital: float = 0.0
-        self._last_reset: Optional[datetime] = None
+        self._last_reset: datetime | None = None
         self._history: list[DailyRecord] = []
         self._todays_trades: int = 0
         self._legendary_email_sent: bool = False
@@ -68,17 +68,20 @@ class DailyTargetTracker:
 
     def reset_day(self, balance: float) -> None:
         if self._day_number > 0:
-            self._history.append(DailyRecord(
-                day=self._day_number,
-                date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                start_balance=self._day_start_balance,
-                end_balance=balance,
-                pnl=balance - self._day_start_balance,
-                pnl_pct=(balance - self._day_start_balance) / self._day_start_balance * 100
-                if self._day_start_balance else 0,
-                target_hit=self.target_reached,
-                trades=self._todays_trades,
-            ))
+            self._history.append(
+                DailyRecord(
+                    day=self._day_number,
+                    date=datetime.now(UTC).strftime("%Y-%m-%d"),
+                    start_balance=self._day_start_balance,
+                    end_balance=balance,
+                    pnl=balance - self._day_start_balance,
+                    pnl_pct=(balance - self._day_start_balance) / self._day_start_balance * 100
+                    if self._day_start_balance
+                    else 0,
+                    target_hit=self.target_reached,
+                    trades=self._todays_trades,
+                )
+            )
 
         if self._initial_capital == 0:
             self._initial_capital = balance
@@ -87,12 +90,16 @@ class DailyTargetTracker:
         self._current_balance = balance
         self._day_number += 1
         self._todays_trades = 0
-        self._last_reset = datetime.now(timezone.utc)
+        self._last_reset = datetime.now(UTC)
 
-        logger.info("Day {} started | Balance: {:.2f} | Target: {:.2f} (+{:.1f}%) | "
-                     "Total growth: {:.1f}%",
-                     self._day_number, balance, self.todays_target_balance,
-                     self.daily_target_pct, self.total_growth_pct)
+        logger.info(
+            "Day {} started | Balance: {:.2f} | Target: {:.2f} (+{:.1f}%) | Total growth: {:.1f}%",
+            self._day_number,
+            balance,
+            self.todays_target_balance,
+            self.daily_target_pct,
+            self.total_growth_pct,
+        )
 
     def update_balance(self, balance: float) -> None:
         self._current_balance = balance
@@ -134,9 +141,9 @@ class DailyTargetTracker:
         b = self._current_balance or self._initial_capital
         mult = 1 + self.daily_target_pct / 100
         return {
-            "1_week": b * (mult ** 7),
-            "1_month": b * (mult ** 30),
-            "3_months": b * (mult ** 90),
+            "1_week": b * (mult**7),
+            "1_month": b * (mult**30),
+            "3_months": b * (mult**90),
         }
 
     @property
@@ -166,10 +173,8 @@ class DailyTargetTracker:
 
     def clear_close_all(self) -> None:
         """Remove the CLOSE_ALL file after positions are closed."""
-        try:
+        with contextlib.suppress(OSError):
             self.CLOSE_ALL_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
 
     def aggression_multiplier(self) -> float:
         """Position sizing multiplier based on tier. NEVER above 1.0.
@@ -216,23 +221,19 @@ class DailyTargetTracker:
         t = self.tier
 
         if t == DailyTier.LEGENDARY:
-            logger.info("LEGENDARY day ({:+.1f}%) -- no new trades, riding existing",
-                        self.todays_pnl_pct)
+            logger.info("LEGENDARY day ({:+.1f}%) -- no new trades, riding existing", self.todays_pnl_pct)
             return False
 
         if t == DailyTier.MONSTER:
-            logger.info("MONSTER day ({:+.1f}%) -- only ultra-high conviction",
-                        self.todays_pnl_pct)
+            logger.info("MONSTER day ({:+.1f}%) -- only ultra-high conviction", self.todays_pnl_pct)
             return True  # but aggression is 0.15x so almost nothing will pass
 
         if t == DailyTier.EXCELLENT:
-            logger.info("EXCELLENT day ({:+.1f}%) -- reducing entries, protecting gains",
-                        self.todays_pnl_pct)
+            logger.info("EXCELLENT day ({:+.1f}%) -- reducing entries, protecting gains", self.todays_pnl_pct)
             return True  # aggression 0.3x
 
         if t == DailyTier.LOSING and self.todays_pnl_pct < -self.daily_target_pct * 0.3:
-            logger.warning("Down {:.1f}% today -- sitting out to preserve capital",
-                           self.todays_pnl_pct)
+            logger.warning("Down {:.1f}% today -- sitting out to preserve capital", self.todays_pnl_pct)
             return False
 
         return True
@@ -251,8 +252,9 @@ class DailyTargetTracker:
             return False, ""
 
         if reversal_risk:
-            return True, (f"LEGENDARY day ({self.todays_pnl_pct:+.1f}%) with reversal risk "
-                          f"-- closing all to lock in gains")
+            return True, (
+                f"LEGENDARY day ({self.todays_pnl_pct:+.1f}%) with reversal risk -- closing all to lock in gains"
+            )
 
         return False, ""
 
@@ -306,11 +308,11 @@ class DailyTargetTracker:
         return sum(d.pnl_pct for d in self._history) / len(self._history)
 
     @property
-    def best_day(self) -> Optional[DailyRecord]:
+    def best_day(self) -> DailyRecord | None:
         return max(self._history, key=lambda d: d.pnl_pct) if self._history else None
 
     @property
-    def worst_day(self) -> Optional[DailyRecord]:
+    def worst_day(self) -> DailyRecord | None:
         return min(self._history, key=lambda d: d.pnl_pct) if self._history else None
 
     def status_report(self) -> str:

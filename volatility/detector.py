@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -18,7 +17,7 @@ class SpikeEvent(BaseModel):
     price: float
     volume_24h: float
     window_seconds: int
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     confirmed_by_news: bool = False
     news_headline: str = ""
 
@@ -40,7 +39,7 @@ class VolatilityDetector:
         self._cooldown: dict[str, datetime] = {}
         self._cooldown_seconds = 60
 
-    def update(self, ticker: Ticker) -> Optional[SpikeEvent]:
+    def update(self, ticker: Ticker) -> SpikeEvent | None:
         """Feed a ticker update. Returns a SpikeEvent if a spike is detected."""
         symbol = ticker.symbol
 
@@ -79,10 +78,16 @@ class VolatilityDetector:
             )
 
             self._recent_spikes.append(event)
-            self._cooldown[symbol] = datetime.now(timezone.utc)
+            self._cooldown[symbol] = datetime.now(UTC)
 
-            logger.warning("SPIKE DETECTED: {} {:.2f}% {} in {}s (price: {:.6f})",
-                           symbol, change_pct, direction, int(elapsed), ticker.last)
+            logger.warning(
+                "SPIKE DETECTED: {} {:.2f}% {} in {}s (price: {:.6f})",
+                symbol,
+                change_pct,
+                direction,
+                int(elapsed),
+                ticker.last,
+            )
             return event
 
         return None
@@ -90,7 +95,7 @@ class VolatilityDetector:
     def get_recent_spikes(self, last_n: int = 20) -> list[SpikeEvent]:
         return self._recent_spikes[-last_n:]
 
-    def is_volatile(self, symbol: str, threshold_pct: Optional[float] = None) -> bool:
+    def is_volatile(self, symbol: str, threshold_pct: float | None = None) -> bool:
         """Check if a symbol is currently in a volatile state."""
         threshold = threshold_pct or self.spike_threshold_pct / 2
         buf = self._price_buffers.get(symbol)
@@ -105,7 +110,7 @@ class VolatilityDetector:
         return (max_p - min_p) / min_p * 100 >= threshold
 
     def _trim_buffer(self, buf: deque[_PriceSnapshot]) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         while buf and (now - buf[0].timestamp).total_seconds() > self.lookback_seconds:
             buf.popleft()
 
@@ -113,4 +118,4 @@ class VolatilityDetector:
         last = self._cooldown.get(symbol)
         if not last:
             return False
-        return (datetime.now(timezone.utc) - last).total_seconds() < self._cooldown_seconds
+        return (datetime.now(UTC) - last).total_seconds() < self._cooldown_seconds

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from loguru import logger
 
@@ -18,7 +16,7 @@ class TradeDB:
     def __init__(self, path: Path = DB_PATH):
         self._path = path
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn: Optional[sqlite3.Connection] = None
+        self._conn: sqlite3.Connection | None = None
 
     def connect(self) -> None:
         self._conn = sqlite3.connect(str(self._path))
@@ -74,7 +72,8 @@ class TradeDB:
 
     def log_trade(self, trade: TradeRecord) -> int:
         assert self._conn
-        cursor = self._conn.execute("""
+        cursor = self._conn.execute(
+            """
             INSERT INTO trades (
                 symbol, side, strategy, action, scale_mode,
                 entry_price, exit_price, amount, leverage,
@@ -84,24 +83,43 @@ class TradeDB:
                 signal_strength, hour_utc, day_of_week, volatility_pct,
                 opened_at, closed_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            trade.symbol, trade.side, trade.strategy, trade.action, trade.scale_mode,
-            trade.entry_price, trade.exit_price, trade.amount, trade.leverage,
-            trade.pnl_usd, trade.pnl_pct, int(trade.is_winner), trade.hold_minutes,
-            int(trade.was_quick_trade), int(trade.was_low_liquidity), trade.dca_count,
-            trade.max_drawdown_pct,
-            trade.market_regime, trade.fear_greed, trade.daily_tier, trade.daily_pnl_at_entry,
-            trade.signal_strength, trade.hour_utc, trade.day_of_week, trade.volatility_pct,
-            trade.opened_at, trade.closed_at,
-        ))
+        """,
+            (
+                trade.symbol,
+                trade.side,
+                trade.strategy,
+                trade.action,
+                trade.scale_mode,
+                trade.entry_price,
+                trade.exit_price,
+                trade.amount,
+                trade.leverage,
+                trade.pnl_usd,
+                trade.pnl_pct,
+                int(trade.is_winner),
+                trade.hold_minutes,
+                int(trade.was_quick_trade),
+                int(trade.was_low_liquidity),
+                trade.dca_count,
+                trade.max_drawdown_pct,
+                trade.market_regime,
+                trade.fear_greed,
+                trade.daily_tier,
+                trade.daily_pnl_at_entry,
+                trade.signal_strength,
+                trade.hour_utc,
+                trade.day_of_week,
+                trade.volatility_pct,
+                trade.opened_at,
+                trade.closed_at,
+            ),
+        )
         self._conn.commit()
         return cursor.lastrowid or 0
 
     def get_all_trades(self, limit: int = 500) -> list[TradeRecord]:
         assert self._conn
-        rows = self._conn.execute(
-            "SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
+        rows = self._conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [self._row_to_trade(r) for r in rows]
 
     def get_trades_by_strategy(self, strategy: str, limit: int = 200) -> list[TradeRecord]:
@@ -130,9 +148,7 @@ class TradeDB:
 
     def get_strategy_names(self) -> list[str]:
         assert self._conn
-        rows = self._conn.execute(
-            "SELECT DISTINCT strategy FROM trades ORDER BY strategy"
-        ).fetchall()
+        rows = self._conn.execute("SELECT DISTINCT strategy FROM trades ORDER BY strategy").fetchall()
         return [r["strategy"] for r in rows]
 
     def get_strategy_stats(self, strategy: str, symbol: str = "") -> dict:
@@ -143,7 +159,8 @@ class TradeDB:
             where += " AND symbol = ?"
             params.append(symbol)
 
-        row = self._conn.execute(f"""
+        row = self._conn.execute(
+            f"""
             SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN is_winner = 1 THEN 1 ELSE 0 END) as winners,
@@ -155,7 +172,9 @@ class TradeDB:
                 SUM(CASE WHEN is_winner = 0 THEN ABS(pnl_usd) ELSE 0 END) as gross_loss,
                 AVG(hold_minutes) as avg_hold
             FROM trades WHERE {where}
-        """, params).fetchone()
+        """,
+            params,
+        ).fetchone()
 
         return dict(row) if row else {}
 
@@ -163,7 +182,8 @@ class TradeDB:
         assert self._conn
         where = "WHERE strategy = ?" if strategy else ""
         params = [strategy] if strategy else []
-        rows = self._conn.execute(f"""
+        rows = self._conn.execute(
+            f"""
             SELECT
                 hour_utc,
                 COUNT(*) as trades,
@@ -172,14 +192,17 @@ class TradeDB:
                 SUM(pnl_usd) as total_pnl
             FROM trades {where}
             GROUP BY hour_utc ORDER BY hour_utc
-        """, params).fetchall()
+        """,
+            params,
+        ).fetchall()
         return [dict(r) for r in rows]
 
     def get_regime_performance(self, strategy: str = "") -> list[dict]:
         assert self._conn
         where = "WHERE strategy = ? AND market_regime != ''" if strategy else "WHERE market_regime != ''"
         params = [strategy] if strategy else []
-        rows = self._conn.execute(f"""
+        rows = self._conn.execute(
+            f"""
             SELECT
                 market_regime,
                 COUNT(*) as trades,
@@ -188,7 +211,9 @@ class TradeDB:
                 SUM(pnl_usd) as total_pnl
             FROM trades {where}
             GROUP BY market_regime ORDER BY total_pnl DESC
-        """, params).fetchall()
+        """,
+            params,
+        ).fetchall()
         return [dict(r) for r in rows]
 
     def get_recent_streak(self, strategy: str) -> int:

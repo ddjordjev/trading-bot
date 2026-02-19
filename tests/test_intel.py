@@ -1,21 +1,21 @@
 """Tests for intel/ modules (mocked HTTP calls)."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime
 
 import pytest
 
+from intel.coingecko import CoinGeckoClient
+from intel.coinmarketcap import CoinMarketCapClient
 from intel.fear_greed import FearGreedClient
 from intel.liquidations import LiquidationMonitor
 from intel.macro_calendar import MacroCalendar
-from intel.whale_sentiment import WhaleSentiment
 from intel.tradingview import TradingViewClient
-from intel.coinmarketcap import CoinMarketCapClient
-from intel.coingecko import CoinGeckoClient
-
+from intel.whale_sentiment import WhaleSentiment
 
 # ── FearGreedClient ─────────────────────────────────────────────────
+
 
 class TestFearGreedClient:
     @pytest.fixture()
@@ -31,58 +31,52 @@ class TestFearGreedClient:
 
     def test_direction_bias_long_on_fear(self, client):
         from intel.fear_greed import FearGreedReading
-        client._latest = FearGreedReading(
-            value=15, classification="Extreme Fear",
-            timestamp=datetime.now(timezone.utc))
+
+        client._latest = FearGreedReading(value=15, classification="Extreme Fear", timestamp=datetime.now(UTC))
         assert client.trade_direction_bias() == "long"
         assert client.is_extreme_fear is True
 
     def test_direction_bias_short_on_greed(self, client):
         from intel.fear_greed import FearGreedReading
-        client._latest = FearGreedReading(
-            value=80, classification="Extreme Greed",
-            timestamp=datetime.now(timezone.utc))
+
+        client._latest = FearGreedReading(value=80, classification="Extreme Greed", timestamp=datetime.now(UTC))
         assert client.trade_direction_bias() == "short"
         assert client.is_extreme_greed is True
 
     def test_position_bias_extreme_fear(self, client):
         from intel.fear_greed import FearGreedReading
-        client._latest = FearGreedReading(
-            value=5, classification="Extreme Fear",
-            timestamp=datetime.now(timezone.utc))
+
+        client._latest = FearGreedReading(value=5, classification="Extreme Fear", timestamp=datetime.now(UTC))
         assert client.position_bias() == 1.4
 
     def test_position_bias_greed(self, client):
         from intel.fear_greed import FearGreedReading
-        client._latest = FearGreedReading(
-            value=65, classification="Greed",
-            timestamp=datetime.now(timezone.utc))
+
+        client._latest = FearGreedReading(value=65, classification="Greed", timestamp=datetime.now(UTC))
         assert client.position_bias() == 0.8
 
     def test_position_bias_extreme_greed(self, client):
         from intel.fear_greed import FearGreedReading
-        client._latest = FearGreedReading(
-            value=80, classification="Extreme Greed",
-            timestamp=datetime.now(timezone.utc))
+
+        client._latest = FearGreedReading(value=80, classification="Extreme Greed", timestamp=datetime.now(UTC))
         assert client.position_bias() == 0.6
 
     def test_is_fear(self, client):
         from intel.fear_greed import FearGreedReading
-        client._latest = FearGreedReading(
-            value=35, classification="Fear",
-            timestamp=datetime.now(timezone.utc))
+
+        client._latest = FearGreedReading(value=35, classification="Fear", timestamp=datetime.now(UTC))
         assert client.is_fear is True
         assert client.is_greed is False
 
     def test_is_greed(self, client):
         from intel.fear_greed import FearGreedReading
-        client._latest = FearGreedReading(
-            value=65, classification="Greed",
-            timestamp=datetime.now(timezone.utc))
+
+        client._latest = FearGreedReading(value=65, classification="Greed", timestamp=datetime.now(UTC))
         assert client.is_greed is True
 
 
 # ── LiquidationMonitor ─────────────────────────────────────────────
+
 
 class TestLiquidationMonitor:
     @pytest.fixture()
@@ -100,6 +94,7 @@ class TestLiquidationMonitor:
 
 
 # ── MacroCalendar ───────────────────────────────────────────────────
+
 
 class TestMacroCalendar:
     @pytest.fixture()
@@ -122,6 +117,7 @@ class TestMacroCalendar:
 
 # ── WhaleSentiment ──────────────────────────────────────────────────
 
+
 class TestWhaleSentiment:
     @pytest.fixture()
     def ws(self):
@@ -139,6 +135,7 @@ class TestWhaleSentiment:
 
 
 # ── TradingViewClient ──────────────────────────────────────────────
+
 
 class TestTradingViewClient:
     @pytest.fixture()
@@ -160,6 +157,7 @@ class TestTradingViewClient:
 
 # ── CoinMarketCapClient ────────────────────────────────────────────
 
+
 class TestCoinMarketCapClient:
     @pytest.fixture()
     def client(self):
@@ -174,6 +172,7 @@ class TestCoinMarketCapClient:
 
 
 # ── CoinGeckoClient ────────────────────────────────────────────────
+
 
 class TestCoinGeckoClient:
     @pytest.fixture()

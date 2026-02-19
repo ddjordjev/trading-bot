@@ -8,11 +8,10 @@ Your class must:
 Place the file in this directory (custom_strategies/) and it will be
 auto-discovered on bot startup.
 """
+
 from __future__ import annotations
 
-from typing import Optional
-
-from core.models import Candle, Ticker, Signal, SignalAction
+from core.models import Candle, Signal, Ticker
 from strategies.base import BaseStrategy
 
 
@@ -21,6 +20,6 @@ class ExampleStrategy(BaseStrategy):
     def name(self) -> str:
         return "my_custom_strategy"
 
-    def analyze(self, candles: list[Candle], ticker: Optional[Ticker] = None) -> Optional[Signal]:
+    def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:
         # Your logic here — return a Signal to trade, or None to skip
         return None

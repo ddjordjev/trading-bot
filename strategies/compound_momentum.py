@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import ta
 
-from core.models import Candle, Ticker, Signal, SignalAction
+from core.models import Candle, Signal, SignalAction, Ticker
 from strategies.base import BaseStrategy
 
 
@@ -57,10 +56,10 @@ class CompoundMomentumStrategy(BaseStrategy):
         self.exit_rsi_oversold = float(params.get("exit_rsi_oversold", 25))
 
         self._in_position = False
-        self._position_side: Optional[str] = None
-        self._entry_time: Optional[datetime] = None
+        self._position_side: str | None = None
+        self._entry_time: datetime | None = None
 
-    def analyze(self, candles: list[Candle], ticker: Optional[Ticker] = None) -> Optional[Signal]:
+    def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:
         df = self.candles_to_df(candles)
         if len(df) < max(self.consolidation_period, self.rsi_period) + 5:
             return None
@@ -87,15 +86,16 @@ class CompoundMomentumStrategy(BaseStrategy):
 
         return None
 
-    def _detect_spike(self, df: object, price: float) -> Optional[Signal]:
+    def _detect_spike(self, df: object, price: float) -> Signal | None:
         """Detect rapid price spikes for quick scalp trades."""
         import pandas as pd
+
         assert isinstance(df, pd.DataFrame)
 
         if len(df) < self.spike_candles + 1:
             return None
 
-        recent = df["close"].iloc[-(self.spike_candles + 1):]
+        recent = df["close"].iloc[-(self.spike_candles + 1) :]
         start_price = recent.iloc[0]
         if start_price == 0:
             return None
@@ -103,7 +103,7 @@ class CompoundMomentumStrategy(BaseStrategy):
         change_pct = (price - start_price) / start_price * 100
 
         avg_vol = df["volume"].iloc[-20:].mean()
-        recent_vol = df["volume"].iloc[-self.spike_candles:].mean()
+        recent_vol = df["volume"].iloc[-self.spike_candles :].mean()
         vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 0
 
         if abs(change_pct) < self.spike_pct:
@@ -117,7 +117,7 @@ class CompoundMomentumStrategy(BaseStrategy):
 
         self._in_position = True
         self._position_side = "long" if direction_up else "short"
-        self._entry_time = datetime.now(timezone.utc)
+        self._entry_time = datetime.now(UTC)
 
         return Signal(
             symbol=self.symbol,
@@ -132,13 +132,14 @@ class CompoundMomentumStrategy(BaseStrategy):
             max_hold_minutes=self.spike_max_hold,
         )
 
-    def _detect_breakout(self, df: object, price: float) -> Optional[Signal]:
+    def _detect_breakout(self, df: object, price: float) -> Signal | None:
         """Breakout detection -- still a quick trade, just slightly longer hold."""
         import pandas as pd
+
         assert isinstance(df, pd.DataFrame)
 
-        highs = df["high"].iloc[-self.consolidation_period:-1]
-        lows = df["low"].iloc[-self.consolidation_period:-1]
+        highs = df["high"].iloc[-self.consolidation_period : -1]
+        lows = df["low"].iloc[-self.consolidation_period : -1]
         resistance = highs.max()
         support = lows.min()
 
@@ -158,16 +159,21 @@ class CompoundMomentumStrategy(BaseStrategy):
         if breakout_up and current_rsi >= self.rsi_bull_min and volume_surge:
             self._in_position = True
             self._position_side = "long"
-            self._entry_time = datetime.now(timezone.utc)
+            self._entry_time = datetime.now(UTC)
             strength = min(1.0, (price - resistance) / resistance * 100 / self.breakout_threshold_pct)
 
             return Signal(
-                symbol=self.symbol, action=SignalAction.BUY, strength=strength,
+                symbol=self.symbol,
+                action=SignalAction.BUY,
+                strength=strength,
                 strategy=self.name,
-                reason=f"SCALP breakout above {resistance:.2f} (RSI={current_rsi:.0f}, vol={current_vol/avg_vol:.1f}x)",
-                suggested_price=price, suggested_stop_loss=support,
-                market_type=self.market_type, leverage=self.leverage,
-                quick_trade=True, max_hold_minutes=self.breakout_max_hold,
+                reason=f"SCALP breakout above {resistance:.2f} (RSI={current_rsi:.0f}, vol={current_vol / avg_vol:.1f}x)",
+                suggested_price=price,
+                suggested_stop_loss=support,
+                market_type=self.market_type,
+                leverage=self.leverage,
+                quick_trade=True,
+                max_hold_minutes=self.breakout_max_hold,
             )
 
         # Bearish breakout
@@ -175,21 +181,26 @@ class CompoundMomentumStrategy(BaseStrategy):
         if breakout_down and current_rsi <= self.rsi_bear_max and volume_surge:
             self._in_position = True
             self._position_side = "short"
-            self._entry_time = datetime.now(timezone.utc)
+            self._entry_time = datetime.now(UTC)
             strength = min(1.0, (support - price) / support * 100 / self.breakout_threshold_pct)
 
             return Signal(
-                symbol=self.symbol, action=SignalAction.SELL, strength=strength,
+                symbol=self.symbol,
+                action=SignalAction.SELL,
+                strength=strength,
                 strategy=self.name,
-                reason=f"SCALP breakout below {support:.2f} (RSI={current_rsi:.0f}, vol={current_vol/avg_vol:.1f}x)",
-                suggested_price=price, suggested_stop_loss=resistance,
-                market_type=self.market_type, leverage=self.leverage,
-                quick_trade=True, max_hold_minutes=self.breakout_max_hold,
+                reason=f"SCALP breakout below {support:.2f} (RSI={current_rsi:.0f}, vol={current_vol / avg_vol:.1f}x)",
+                suggested_price=price,
+                suggested_stop_loss=resistance,
+                market_type=self.market_type,
+                leverage=self.leverage,
+                quick_trade=True,
+                max_hold_minutes=self.breakout_max_hold,
             )
 
         return None
 
-    def _check_exit(self, df: object, price: float) -> Optional[Signal]:
+    def _check_exit(self, df: object, price: float) -> Signal | None:
         """Only close LOSING positions when momentum has died.
 
         RIDE THE WINNERS: if in profit, NEVER close from strategy.
@@ -200,6 +211,7 @@ class CompoundMomentumStrategy(BaseStrategy):
         volume is gone, close it. The trade thesis failed.
         """
         import pandas as pd
+
         assert isinstance(df, pd.DataFrame)
 
         if not self._entry_time:
@@ -218,10 +230,7 @@ class CompoundMomentumStrategy(BaseStrategy):
         if entry_area_price == 0:
             return None
 
-        if self._position_side == "long":
-            in_profit = price > entry_area_price
-        else:
-            in_profit = price < entry_area_price
+        in_profit = price > entry_area_price if self._position_side == "long" else price < entry_area_price
 
         # IN PROFIT -> ride it. Trailing stop will handle the exit.
         if in_profit:
@@ -230,14 +239,18 @@ class CompoundMomentumStrategy(BaseStrategy):
         # IN LOSS + momentum dead + volume gone -> cut the loser
         if self._position_side == "long" and current_rsi < 45 and volume_drying:
             return Signal(
-                symbol=self.symbol, action=SignalAction.CLOSE, strategy=self.name,
+                symbol=self.symbol,
+                action=SignalAction.CLOSE,
+                strategy=self.name,
                 reason=f"Cut loser - momentum dead (RSI={current_rsi:.0f}, vol drying)",
                 market_type=self.market_type,
             )
 
         if self._position_side == "short" and current_rsi > 55 and volume_drying:
             return Signal(
-                symbol=self.symbol, action=SignalAction.CLOSE, strategy=self.name,
+                symbol=self.symbol,
+                action=SignalAction.CLOSE,
+                strategy=self.name,
                 reason=f"Cut loser - momentum dead (RSI={current_rsi:.0f}, vol drying)",
                 market_type=self.market_type,
             )

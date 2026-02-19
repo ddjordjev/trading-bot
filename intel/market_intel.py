@@ -1,28 +1,27 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
 
 from loguru import logger
 from pydantic import BaseModel
 
+from intel.coingecko import CoinGeckoClient
+from intel.coinmarketcap import CoinMarketCapClient
+from intel.defillama import DeFiLlamaClient
 from intel.fear_greed import FearGreedClient
+from intel.glassnode import GlassnodeClient
 from intel.liquidations import LiquidationMonitor
 from intel.macro_calendar import MacroCalendar
-from intel.whale_sentiment import WhaleSentiment
-from intel.tradingview import TradingViewClient
-from intel.coinmarketcap import CoinMarketCapClient
-from intel.coingecko import CoinGeckoClient
-from intel.defillama import DeFiLlamaClient
 from intel.santiment import SantimentClient
-from intel.glassnode import GlassnodeClient
+from intel.tradingview import TradingViewClient
+from intel.whale_sentiment import WhaleSentiment
 
 
 class MarketRegime(str, Enum):
-    RISK_ON = "risk_on"       # fear + liquidations clearing + good conditions
-    NORMAL = "normal"         # nothing extreme
-    CAUTION = "caution"       # greed or pre-event or overleveraged
-    RISK_OFF = "risk_off"     # extreme greed + FOMC imminent + overleveraged
+    RISK_ON = "risk_on"  # fear + liquidations clearing + good conditions
+    NORMAL = "normal"  # nothing extreme
+    CAUTION = "caution"  # greed or pre-event or overleveraged
+    RISK_OFF = "risk_off"  # extreme greed + FOMC imminent + overleveraged
     CAPITULATION = "capitulation"  # extreme fear + mass liquidation = BUY opportunity
 
 
@@ -72,7 +71,7 @@ class MarketCondition(BaseModel):
         lines = [
             f"Regime: {self.regime.value}",
             f"F&G: {self.fear_greed} ({self.fear_greed_bias})",
-            f"Liq: ${self.liquidation_24h/1e6:.0f}M {'** MASS LIQ **' if self.mass_liquidation else ''}",
+            f"Liq: ${self.liquidation_24h / 1e6:.0f}M {'** MASS LIQ **' if self.mass_liquidation else ''}",
             f"Macro: {'IMMINENT' if self.macro_event_imminent else 'clear'} "
             f"(expo={self.macro_exposure_mult:.0%})"
             f"{' | ' + self.next_macro_event if self.next_macro_event else ''}",
@@ -105,14 +104,17 @@ class MarketIntel:
     - Whether it's a spike opportunity (macro event volatility)
     """
 
-    def __init__(self, coinglass_key: str = "",
-                 symbols: list[str] | None = None,
-                 tv_exchange: str = "MEXC",
-                 cmc_api_key: str = "",
-                 coingecko_api_key: str = "",
-                 santiment_api_key: str = "",
-                 glassnode_api_key: str = "",
-                 defillama_enabled: bool = True):
+    def __init__(
+        self,
+        coinglass_key: str = "",
+        symbols: list[str] | None = None,
+        tv_exchange: str = "MEXC",
+        cmc_api_key: str = "",
+        coingecko_api_key: str = "",
+        santiment_api_key: str = "",
+        glassnode_api_key: str = "",
+        defillama_enabled: bool = True,
+    ):
         self.fear_greed = FearGreedClient(poll_interval=3600)
         self.liquidations = LiquidationMonitor(poll_interval=300, api_key=coinglass_key)
         self.macro = MacroCalendar(poll_interval=1800)
@@ -152,8 +154,10 @@ class MarketIntel:
             await self.defillama.start()
         await self.santiment.start()
         await self.glassnode.start()
-        logger.info("MarketIntel started -- all external feeds active "
-                     "(F&G, Liq, Macro, Whales, TV, CMC, CoinGecko, DeFiLlama, Santiment, Glassnode)")
+        logger.info(
+            "MarketIntel started -- all external feeds active "
+            "(F&G, Liq, Macro, Whales, TV, CMC, CoinGecko, DeFiLlama, Santiment, Glassnode)"
+        )
 
     async def stop(self) -> None:
         await self.fear_greed.stop()
@@ -235,8 +239,14 @@ class MarketIntel:
         logger.debug(
             "Intel multipliers: F&G={:.2f} Liq={:.2f} Macro={:.2f} "
             "DeFi={:.2f} Santi={:.2f} Glass={:.2f} => raw={:.3f} capped={:.2f}",
-            fg_mult, liq_mult, macro_mult, defi_mult, santi_mult, glass_mult,
-            raw_mult, c.position_size_multiplier,
+            fg_mult,
+            liq_mult,
+            macro_mult,
+            defi_mult,
+            santi_mult,
+            glass_mult,
+            raw_mult,
+            c.position_size_multiplier,
         )
 
         # -- Should reduce exposure --
@@ -268,11 +278,15 @@ class MarketIntel:
             votes[c.on_chain_bias] += 1
 
         logger.debug(
-            "Intel direction votes: L={} S={} N={} | "
-            "sources: fg={} liq={} whale={} tv={} chain={}",
-            votes["long"], votes["short"], votes["neutral"],
-            c.fear_greed_bias, c.liquidation_bias, c.whale_bias,
-            tv_dir, c.on_chain_bias,
+            "Intel direction votes: L={} S={} N={} | sources: fg={} liq={} whale={} tv={} chain={}",
+            votes["long"],
+            votes["short"],
+            votes["neutral"],
+            c.fear_greed_bias,
+            c.liquidation_bias,
+            c.whale_bias,
+            tv_dir,
+            c.on_chain_bias,
         )
 
         if votes["long"] > votes["short"] and votes["long"] > votes["neutral"]:
@@ -285,8 +299,9 @@ class MarketIntel:
         # -- Market regime --
         if self.fear_greed.is_extreme_fear and c.mass_liquidation:
             c.regime = MarketRegime.CAPITULATION
-        elif (self.fear_greed.is_extreme_greed and c.macro_event_imminent) or \
-             (c.overleveraged_side == "longs" and self.fear_greed.is_greed):
+        elif (self.fear_greed.is_extreme_greed and c.macro_event_imminent) or (
+            c.overleveraged_side == "longs" and self.fear_greed.is_greed
+        ):
             c.regime = MarketRegime.RISK_OFF
         elif c.should_reduce_exposure:
             c.regime = MarketRegime.CAUTION
@@ -302,7 +317,7 @@ class MarketIntel:
     def condition(self) -> MarketCondition:
         return self._condition
 
-    async def analyze_symbol(self, symbol: str) -> Optional[float]:
+    async def analyze_symbol(self, symbol: str) -> float | None:
         """Run TradingView analysis for a symbol.
 
         Returns signal_boost multiplier (0.7-1.3) or None if no data.

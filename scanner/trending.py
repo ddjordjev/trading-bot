@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import datetime, timezone
-from typing import Callable, Optional
+from collections.abc import Callable
+from datetime import UTC, datetime
 
 import aiohttp
 from loguru import logger
@@ -20,7 +20,7 @@ class TrendingCoin(BaseModel):
     change_24h: float = 0.0
     change_7d: float = 0.0
     change_30d: float = 0.0
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @property
     def trading_pair(self) -> str:
@@ -76,6 +76,7 @@ class TrendingScanner:
         self._running = False
         self._latest_scan: list[TrendingCoin] = []
         self._hot_movers: list[TrendingCoin] = []
+        self._background_tasks: list = []
 
     def on_trending(self, callback: Callable) -> None:
         """Register callback for when interesting movers are found."""
@@ -83,10 +84,14 @@ class TrendingScanner:
 
     async def start(self) -> None:
         self._running = True
-        asyncio.create_task(self._scan_loop())
-        logger.info("Trending scanner started (interval={}s, min_vol={:.0f}, min_move={}%/1h, {}%/24h)",
-                     self.poll_interval, self.min_volume_24h,
-                     self.min_hourly_move_pct, self.min_daily_move_pct)
+        self._background_tasks.append(asyncio.create_task(self._scan_loop()))
+        logger.info(
+            "Trending scanner started (interval={}s, min_vol={:.0f}, min_move={}%/1h, {}%/24h)",
+            self.poll_interval,
+            self.min_volume_24h,
+            self.min_hourly_move_pct,
+            self.min_daily_move_pct,
+        )
 
     async def stop(self) -> None:
         self._running = False
@@ -126,9 +131,14 @@ class TrendingScanner:
                     if movers:
                         logger.info("Scanner found {} hot movers:", len(movers))
                         for coin in movers[:5]:
-                            logger.info("  {} | 1h: {:+.1f}% | 24h: {:+.1f}% | vol: {:.0f}M | score: {:+.1f}",
-                                        coin.trading_pair, coin.change_1h, coin.change_24h,
-                                        coin.volume_24h / 1e6, coin.momentum_score)
+                            logger.info(
+                                "  {} | 1h: {:+.1f}% | 24h: {:+.1f}% | vol: {:.0f}M | score: {:+.1f}",
+                                coin.trading_pair,
+                                coin.change_1h,
+                                coin.change_24h,
+                                coin.volume_24h / 1e6,
+                                coin.momentum_score,
+                            )
 
             except Exception as e:
                 logger.error("Scanner error: {}", e)
@@ -142,34 +152,35 @@ class TrendingScanner:
 
         coins: list[TrendingCoin] = []
         try:
-            from intel.coinmarketcap import CoinMarketCapClient
-            from intel.coingecko import CoinGeckoClient
-
             intel = self._intel
             if hasattr(intel, "coinmarketcap"):
                 for cmc in intel.coinmarketcap.all_interesting:
-                    coins.append(TrendingCoin(
-                        symbol=cmc.symbol,
-                        name=cmc.name,
-                        price=cmc.price,
-                        market_cap=cmc.market_cap,
-                        volume_24h=cmc.volume_24h,
-                        change_1h=cmc.change_1h,
-                        change_24h=cmc.change_24h,
-                        change_7d=cmc.change_7d,
-                    ))
+                    coins.append(
+                        TrendingCoin(
+                            symbol=cmc.symbol,
+                            name=cmc.name,
+                            price=cmc.price,
+                            market_cap=cmc.market_cap,
+                            volume_24h=cmc.volume_24h,
+                            change_1h=cmc.change_1h,
+                            change_24h=cmc.change_24h,
+                            change_7d=cmc.change_7d,
+                        )
+                    )
             if hasattr(intel, "coingecko"):
                 for gc in intel.coingecko.all_interesting:
-                    coins.append(TrendingCoin(
-                        symbol=gc.symbol,
-                        name=gc.name,
-                        price=gc.price,
-                        market_cap=gc.market_cap,
-                        volume_24h=gc.volume_24h,
-                        change_1h=gc.change_1h,
-                        change_24h=gc.change_24h,
-                        change_7d=gc.change_7d,
-                    ))
+                    coins.append(
+                        TrendingCoin(
+                            symbol=gc.symbol,
+                            name=gc.name,
+                            price=gc.price,
+                            market_cap=gc.market_cap,
+                            volume_24h=gc.volume_24h,
+                            change_1h=gc.change_1h,
+                            change_24h=gc.change_24h,
+                            change_7d=gc.change_7d,
+                        )
+                    )
         except Exception as e:
             logger.debug("External source merge error: {}", e)
 
@@ -181,12 +192,14 @@ class TrendingScanner:
         coins: list[TrendingCoin] = []
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status != 200:
-                        logger.warning("Cryptobubbles returned status {}", resp.status)
-                        return await self._fallback_fetch()
-                    data = await resp.json()
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp,
+            ):
+                if resp.status != 200:
+                    logger.warning("Cryptobubbles returned status {}", resp.status)
+                    return await self._fallback_fetch()
+                data = await resp.json()
         except Exception as e:
             logger.warning("Cryptobubbles fetch failed: {} -- using fallback", e)
             return await self._fallback_fetch()
@@ -199,17 +212,19 @@ class TrendingScanner:
 
                 perf = item.get("performance", {})
 
-                coins.append(TrendingCoin(
-                    symbol=symbol,
-                    name=item.get("name", ""),
-                    price=float(item.get("price", 0) or 0),
-                    market_cap=float(item.get("marketcap", 0) or 0),
-                    volume_24h=float(item.get("volume", 0) or 0),
-                    change_1h=float(perf.get("hour", 0) or 0),
-                    change_24h=float(perf.get("day", 0) or 0),
-                    change_7d=float(perf.get("week", 0) or 0),
-                    change_30d=float(perf.get("month", 0) or 0),
-                ))
+                coins.append(
+                    TrendingCoin(
+                        symbol=symbol,
+                        name=item.get("name", ""),
+                        price=float(item.get("price", 0) or 0),
+                        market_cap=float(item.get("marketcap", 0) or 0),
+                        volume_24h=float(item.get("volume", 0) or 0),
+                        change_1h=float(perf.get("hour", 0) or 0),
+                        change_24h=float(perf.get("day", 0) or 0),
+                        change_7d=float(perf.get("week", 0) or 0),
+                        change_30d=float(perf.get("month", 0) or 0),
+                    )
+                )
             except (ValueError, TypeError):
                 continue
 
@@ -219,26 +234,27 @@ class TrendingScanner:
         """Fallback: scrape the HTML page for basic data."""
         url = "https://cryptobubbles.net"
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    text = await resp.text()
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp,
+            ):
+                text = await resp.text()
         except Exception:
             return []
 
         coins: list[TrendingCoin] = []
-        rows = re.findall(
-            r'\|\s*(\d+)\s*\|.*?\$[\d,.]+.*?\|.*?\|.*?\|'
-            r'\s*([-+]?[\d.]+)%\s*\|'
-            r'\s*([-+]?[\d.]+)%\s*\|'
-            r'\s*([-+]?[\d.]+)%\s*\|',
+        _rows = re.findall(
+            r"\|\s*(\d+)\s*\|.*?\$[\d,.]+.*?\|.*?\|.*?\|"
+            r"\s*([-+]?[\d.]+)%\s*\|"
+            r"\s*([-+]?[\d.]+)%\s*\|"
+            r"\s*([-+]?[\d.]+)%\s*\|",
             text,
         )
         return coins
 
     def _filter_movers(self, coins: list[TrendingCoin]) -> list[TrendingCoin]:
         """Filter for tradeable, liquid coins that are actually moving."""
-        stablecoins = {"USDT", "USDC", "DAI", "TUSD", "BUSD", "FDUSD", "PYUSD", "USDP",
-                       "USDD", "EURC", "GHO", "RLUSD"}
+        stablecoins = {"USDT", "USDC", "DAI", "TUSD", "BUSD", "FDUSD", "PYUSD", "USDP", "USDD", "EURC", "GHO", "RLUSD"}
 
         filtered = []
         for coin in coins:
@@ -257,7 +273,7 @@ class TrendingScanner:
                 filtered.append(coin)
 
         filtered.sort(key=lambda c: abs(c.momentum_score), reverse=True)
-        return filtered[:self.top_movers_count]
+        return filtered[: self.top_movers_count]
 
     def get_strongest_bullish(self, n: int = 3) -> list[TrendingCoin]:
         """Top N strongest upward movers."""
@@ -292,6 +308,6 @@ class TrendingScanner:
                 f"  {direction} {coin.trading_pair:>12} | "
                 f"1h:{coin.change_1h:+5.1f}% | "
                 f"24h:{coin.change_24h:+6.1f}% | "
-                f"vol:{coin.volume_24h/1e6:6.0f}M"
+                f"vol:{coin.volume_24h / 1e6:6.0f}M"
             )
         return "\n".join(lines)

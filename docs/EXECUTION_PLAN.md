@@ -50,7 +50,7 @@ PaperExchange re-initializes with a fresh $100 on every startup.
 │ - Strategies     │    │ - Intel feeds│    │ - Strategy scores│
 │ - Order mgmt     │    │ - Trade queue│    │ - Patterns       │
 │ - Risk mgmt      │    │ - Scanning   │    │ - Suggestions    │
-│ - Dashboard:8080 │    │              │    │                  │
+│ - Dashboard:9035 │    │              │    │                  │
 └────────┬─────────┘    └──────┬───────┘    └────────┬─────────┘
          │                     │                     │
          └─────────── data/ (shared JSON + SQLite) ──┘
@@ -159,7 +159,7 @@ docker compose up -d
 ```
 
 ### Step 3: Verify
-- Dashboard loads at http://localhost:8080
+- Dashboard loads at http://localhost:9035
 - All 3 services healthy: `docker compose ps`
 - Bot connects to Binance testnet (check logs)
 - Balance shows ~$100 (capped from testnet's $5000)
@@ -264,7 +264,7 @@ docker compose build && docker compose up -d
 ```
 
 ### 5. Verify
-- Dashboard at http://localhost:8080
+- Dashboard at http://localhost:9035
 - Balance matches expectations
 - Positions on https://demo.binance.com/en/futures match bot state
 
@@ -361,5 +361,5 @@ NOTIFICATIONS_ENABLED=liquidation,stop_loss,spike_detected,daily_summary
 | Restart | `docker compose restart trading-bot` |
 | Preflight | `python scripts/preflight_check.py` |
 | Snapshot | `./scripts/run_session.sh snapshot` |
-| Dashboard | http://localhost:8080 |
+| Dashboard | http://localhost:9035 |
 | Exchange | https://demo.binance.com/en/futures |

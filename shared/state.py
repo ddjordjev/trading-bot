@@ -1,25 +1,26 @@
 from __future__ import annotations
 
-import json
+import contextlib
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional, TypeVar, Type
+from typing import TypeVar
 
 from loguru import logger
 from pydantic import BaseModel
 
 from shared.models import (
+    AnalyticsSnapshot,
     BotDeploymentStatus,
     IntelSnapshot,
-    AnalyticsSnapshot,
     TradeQueue,
 )
 
 T = TypeVar("T", bound=BaseModel)
 
 DATA_DIR = Path("data")
+
 
 class SharedState:
     """Atomic read/write of JSON state files for inter-process communication.
@@ -48,17 +49,13 @@ class SharedState:
             os.replace(tmp, str(path))
         except Exception:
             if not closed:
-                try:
+                with contextlib.suppress(OSError):
                     os.close(fd)
-                except OSError:
-                    pass
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp)
-            except OSError:
-                pass
             raise
 
-    def _read(self, path: Path, model_cls: Type[T]) -> Optional[T]:
+    def _read(self, path: Path, model_cls: type[T]) -> T | None:
         try:
             raw = path.read_text()
             return model_cls.model_validate_json(raw)
@@ -71,7 +68,7 @@ class SharedState:
     # ---- Bot status (written by bot, read by monitor) ---- #
 
     def write_bot_status(self, status: BotDeploymentStatus) -> None:
-        status.updated_at = datetime.now(timezone.utc).isoformat()
+        status.updated_at = datetime.now(UTC).isoformat()
         self._write(self._data_dir / "bot_status.json", status)
 
     def read_bot_status(self) -> BotDeploymentStatus:
@@ -81,7 +78,7 @@ class SharedState:
     # ---- Intel state (written by monitor, read by bot) ---- #
 
     def write_intel(self, intel: IntelSnapshot) -> None:
-        intel.updated_at = datetime.now(timezone.utc).isoformat()
+        intel.updated_at = datetime.now(UTC).isoformat()
         self._write(self._data_dir / "intel_state.json", intel)
 
     def read_intel(self) -> IntelSnapshot:
@@ -90,19 +87,22 @@ class SharedState:
 
     def intel_age_seconds(self) -> float:
         """How stale the intel data is."""
+        path = self._data_dir / "intel_state.json"
+        if not path.exists():
+            return 999999
         intel = self.read_intel()
         if not intel.updated_at:
             return 999999
         try:
             updated = datetime.fromisoformat(intel.updated_at)
-            return (datetime.now(timezone.utc) - updated).total_seconds()
+            return (datetime.now(UTC) - updated).total_seconds()
         except Exception:
             return 999999
 
     # ---- Analytics state (written by analytics service, read by bot) ---- #
 
     def write_analytics(self, analytics: AnalyticsSnapshot) -> None:
-        analytics.updated_at = datetime.now(timezone.utc).isoformat()
+        analytics.updated_at = datetime.now(UTC).isoformat()
         self._write(self._data_dir / "analytics_state.json", analytics)
 
     def read_analytics(self) -> AnalyticsSnapshot:
@@ -112,7 +112,7 @@ class SharedState:
     # ---- Trade queue (written by monitor, read+updated by bot) ---- #
 
     def write_trade_queue(self, queue: TradeQueue) -> None:
-        queue.updated_at = datetime.now(timezone.utc).isoformat()
+        queue.updated_at = datetime.now(UTC).isoformat()
         self._write(self._data_dir / "trade_queue.json", queue)
 
     def read_trade_queue(self) -> TradeQueue:

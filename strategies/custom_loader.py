@@ -38,9 +38,7 @@ def load_custom_strategies() -> dict[str, type[BaseStrategy]]:
 
             for attr_name in dir(module):
                 attr = getattr(module, attr_name)
-                if (isinstance(attr, type)
-                        and issubclass(attr, BaseStrategy)
-                        and attr is not BaseStrategy):
+                if isinstance(attr, type) and issubclass(attr, BaseStrategy) and attr is not BaseStrategy:
                     instance = attr.__new__(attr)
                     try:
                         name = attr.name.fget(instance)  # type: ignore[union-attr]

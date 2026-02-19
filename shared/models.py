@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -11,20 +10,21 @@ from pydantic import BaseModel, Field
 class DeploymentLevel(str, Enum):
     """How busy the bot is -- controls monitoring intensity."""
 
-    HUNTING = "hunting"      # no/few positions, looking for entries → max monitoring
-    ACTIVE = "active"        # some positions, still has capacity → normal monitoring
-    DEPLOYED = "deployed"    # fully deployed, positions running well → low monitoring
-    STRESSED = "stressed"    # positions losing, need exit/hedge intel → high monitoring
+    HUNTING = "hunting"  # no/few positions, looking for entries → max monitoring
+    ACTIVE = "active"  # some positions, still has capacity → normal monitoring
+    DEPLOYED = "deployed"  # fully deployed, positions running well → low monitoring
+    STRESSED = "stressed"  # positions losing, need exit/hedge intel → high monitoring
 
 
 # ---------------------------------------------------------------------------
 # Trade Priority Queue — monitor/intel proposes trades, bot consumes them
 # ---------------------------------------------------------------------------
 
+
 class SignalPriority(str, Enum):
-    CRITICAL = "critical"   # act within seconds — spikes, liq cascades, wick scalps
-    DAILY = "daily"         # valid hours — momentum entries, trending setups
-    SWING = "swing"         # limit order plan — valid days, with full entry/exit plan
+    CRITICAL = "critical"  # act within seconds — spikes, liq cascades, wick scalps
+    DAILY = "daily"  # valid hours — momentum entries, trending setups
+    SWING = "swing"  # limit order plan — valid days, with full entry/exit plan
 
 
 class EntryPlan(BaseModel):
@@ -61,13 +61,11 @@ class TradeProposal(BaseModel):
     quick_trade: bool = False
     max_hold_minutes: int = 0
 
-    created_at: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     valid_until: str = ""
     max_age_seconds: int = 0
 
-    entry_plan: Optional[EntryPlan] = None
+    entry_plan: EntryPlan | None = None
 
     consumed: bool = False
     consumed_at: str = ""
@@ -78,7 +76,7 @@ class TradeProposal(BaseModel):
 
     @property
     def is_expired(self) -> bool:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if self.valid_until:
             try:
                 deadline = datetime.fromisoformat(self.valid_until)
@@ -99,7 +97,7 @@ class TradeProposal(BaseModel):
     def age_seconds(self) -> float:
         try:
             created = datetime.fromisoformat(self.created_at)
-            return (datetime.now(timezone.utc) - created).total_seconds()
+            return (datetime.now(UTC) - created).total_seconds()
         except ValueError:
             return 0.0
 
@@ -114,9 +112,7 @@ class TradeQueue(BaseModel):
     critical: list[TradeProposal] = []
     daily: list[TradeProposal] = []
     swing: list[TradeProposal] = []
-    updated_at: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     @property
     def total(self) -> int:
@@ -125,8 +121,7 @@ class TradeQueue(BaseModel):
     @property
     def pending_count(self) -> int:
         return sum(
-            1 for p in self.critical + self.daily + self.swing
-            if not p.consumed and not p.rejected and not p.is_expired
+            1 for p in self.critical + self.daily + self.swing if not p.consumed and not p.rejected and not p.is_expired
         )
 
     def add(self, proposal: TradeProposal) -> None:
@@ -136,16 +131,13 @@ class TradeQueue(BaseModel):
         bucket.append(proposal)
 
     def get_actionable(self, priority: SignalPriority) -> list[TradeProposal]:
-        return [
-            p for p in self._bucket(priority)
-            if not p.consumed and not p.rejected and not p.is_expired
-        ]
+        return [p for p in self._bucket(priority) if not p.consumed and not p.rejected and not p.is_expired]
 
     def mark_consumed(self, proposal_id: str) -> None:
         for p in self.critical + self.daily + self.swing:
             if p.id == proposal_id:
                 p.consumed = True
-                p.consumed_at = datetime.now(timezone.utc).isoformat()
+                p.consumed_at = datetime.now(UTC).isoformat()
                 return
 
     def mark_rejected(self, proposal_id: str, reason: str = "") -> None:
@@ -158,15 +150,13 @@ class TradeQueue(BaseModel):
     def purge_stale(self, max_consumed_age: int = 3600, max_expired_age: int = 600) -> int:
         """Remove consumed/expired proposals older than thresholds."""
         removed = 0
-        now = datetime.now(timezone.utc)
+        _now = datetime.now(UTC)
         for attr in ("critical", "daily", "swing"):
             bucket: list[TradeProposal] = getattr(self, attr)
             keep = []
             for p in bucket:
                 age = p.age_seconds
-                if p.consumed and age > max_consumed_age:
-                    removed += 1
-                elif p.is_expired and age > max_expired_age:
+                if (p.consumed and age > max_consumed_age) or (p.is_expired and age > max_expired_age):
                     removed += 1
                 else:
                     keep.append(p)
@@ -186,13 +176,11 @@ class BotDeploymentStatus(BaseModel):
     capacity_pct: float = 100.0
     daily_pnl_pct: float = 0.0
     daily_tier: str = "building"
-    avg_position_health: float = 0.0   # avg unrealized PnL %
+    avg_position_health: float = 0.0  # avg unrealized PnL %
     worst_position_pnl: float = 0.0
     should_trade: bool = True
     manual_stop: bool = False
-    updated_at: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     @property
     def has_capacity(self) -> bool:
@@ -270,9 +258,7 @@ class IntelSnapshot(BaseModel):
     # Monitoring metadata
     monitor_intensity: str = "normal"
     poll_multiplier: float = 1.0
-    updated_at: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     sources_active: list[str] = []
 
 
@@ -292,6 +278,4 @@ class AnalyticsSnapshot(BaseModel):
     patterns: list[dict] = []
     suggestions: list[dict] = []
     total_trades_logged: int = 0
-    updated_at: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())

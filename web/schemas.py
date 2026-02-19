@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Optional
-
 from pydantic import BaseModel
 
 
@@ -35,7 +32,7 @@ class PositionInfo(BaseModel):
     leverage: int = 1
     market_type: str = "spot"
     strategy: str = ""
-    stop_loss: Optional[float] = None
+    stop_loss: float | None = None
     notional_value: float = 0.0
     age_minutes: float = 0.0
     breakeven_locked: bool = False
@@ -110,8 +107,8 @@ class DailyReportData(BaseModel):
     losing_days: int = 0
     target_hit_days: int = 0
     avg_daily_pnl_pct: float = 0.0
-    best_day: Optional[dict] = None
-    worst_day: Optional[dict] = None
+    best_day: dict | None = None
+    worst_day: dict | None = None
     projected: dict = {}
 
 
@@ -134,7 +131,7 @@ class LogEntry(BaseModel):
 class FullSnapshot(BaseModel):
     status: BotStatus
     positions: list[PositionInfo] = []
-    intel: Optional[IntelSnapshot] = None
+    intel: IntelSnapshot | None = None
     wick_scalps: list[WickScalpInfo] = []
     logs: list[LogEntry] = []
 

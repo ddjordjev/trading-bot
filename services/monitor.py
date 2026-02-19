@@ -15,38 +15,40 @@ Adaptive intensity:
 When the bot is fully deployed and positions are profitable,
 there's no need to hammer APIs for new opportunities.
 """
+
 from __future__ import annotations
 
 import asyncio
-import sys
-from datetime import datetime, timezone
 
 from loguru import logger
 
 from config.settings import Settings, get_settings
+from intel.coingecko import CoinGeckoClient
+from intel.coinmarketcap import CoinMarketCapClient
 from intel.fear_greed import FearGreedClient
 from intel.liquidations import LiquidationMonitor
 from intel.macro_calendar import MacroCalendar
-from intel.whale_sentiment import WhaleSentiment
 from intel.tradingview import TradingViewClient
-from intel.coinmarketcap import CoinMarketCapClient
-from intel.coingecko import CoinGeckoClient
-from scanner.trending import TrendingScanner, TrendingCoin
-from shared.state import SharedState
+from intel.whale_sentiment import WhaleSentiment
+from scanner.trending import TrendingScanner
 from services.signal_generator import SignalGenerator
 from shared.models import (
-    BotDeploymentStatus, DeploymentLevel,
-    IntelSnapshot, SignalPriority, TrendingSnapshot, TVSymbolSnapshot,
+    BotDeploymentStatus,
+    DeploymentLevel,
+    IntelSnapshot,
+    SignalPriority,
+    TrendingSnapshot,
+    TVSymbolSnapshot,
 )
-
+from shared.state import SharedState
 
 # Poll interval multipliers by deployment level
 INTENSITY_TABLE: dict[DeploymentLevel, dict[str, float]] = {
     #                         base_mult  tv_mult  scanner_mult  intel_mult
-    DeploymentLevel.HUNTING:  {"base": 1.0,  "tv": 1.0,  "scanner": 1.0,  "intel": 1.0},
-    DeploymentLevel.ACTIVE:   {"base": 1.0,  "tv": 1.0,  "scanner": 1.5,  "intel": 1.0},
-    DeploymentLevel.DEPLOYED: {"base": 3.0,  "tv": 5.0,  "scanner": 5.0,  "intel": 2.0},
-    DeploymentLevel.STRESSED: {"base": 0.7,  "tv": 0.5,  "scanner": 2.0,  "intel": 0.5},
+    DeploymentLevel.HUNTING: {"base": 1.0, "tv": 1.0, "scanner": 1.0, "intel": 1.0},
+    DeploymentLevel.ACTIVE: {"base": 1.0, "tv": 1.0, "scanner": 1.5, "intel": 1.0},
+    DeploymentLevel.DEPLOYED: {"base": 3.0, "tv": 5.0, "scanner": 5.0, "intel": 2.0},
+    DeploymentLevel.STRESSED: {"base": 0.7, "tv": 0.5, "scanner": 2.0, "intel": 0.5},
 }
 
 
@@ -60,7 +62,8 @@ class MonitorService:
         # Clients
         self.fear_greed = FearGreedClient(poll_interval=3600)
         self.liquidations = LiquidationMonitor(
-            poll_interval=300, api_key=self.settings.coinglass_api_key,
+            poll_interval=300,
+            api_key=self.settings.coinglass_api_key,
         )
         self.macro = MacroCalendar(poll_interval=1800)
         self.whales = WhaleSentiment(
@@ -166,8 +169,7 @@ class MonitorService:
                 if tick_count % 10 == 0:
                     tq = self.state.read_trade_queue()
                     logger.info(
-                        "Monitor [{}] | mult={:.1f}x | sources={} | movers={} | "
-                        "tv={} | queue: C={} D={} S={}",
+                        "Monitor [{}] | mult={:.1f}x | sources={} | movers={} | tv={} | queue: C={} D={} S={}",
                         self._current_level.value,
                         multipliers["base"],
                         len(snapshot.sources_active),
@@ -194,8 +196,7 @@ class MonitorService:
 
         if old != self._current_level:
             mult = INTENSITY_TABLE[self._current_level]["base"]
-            logger.info("Monitor intensity: {} -> {} (poll mult: {:.1f}x)",
-                        old.value, self._current_level.value, mult)
+            logger.info("Monitor intensity: {} -> {} (poll mult: {:.1f}x)", old.value, self._current_level.value, mult)
 
     async def _refresh_tv(self, bot_status: BotDeploymentStatus) -> None:
         """Refresh TradingView analysis, adapting to deployment state."""
@@ -277,59 +278,75 @@ class MonitorService:
         tv_snapshots = []
         for sym, analyses in self.tv._cache.items():
             for interval, analysis in analyses.items():
-                tv_snapshots.append(TVSymbolSnapshot(
-                    symbol=sym,
-                    interval=interval,
-                    rating=analysis.summary_rating.value,
-                    oscillators=analysis.oscillators_rating.value,
-                    moving_averages=analysis.moving_averages_rating.value,
-                    confidence=analysis.confidence,
-                    rsi_14=analysis.rsi_14,
-                    consensus=self.tv.consensus(sym),
-                    signal_boost_long=self.tv.signal_boost(sym, "long"),
-                    signal_boost_short=self.tv.signal_boost(sym, "short"),
-                    updated_at=analysis.fetched_at.isoformat(),
-                ))
+                tv_snapshots.append(
+                    TVSymbolSnapshot(
+                        symbol=sym,
+                        interval=interval,
+                        rating=analysis.summary_rating.value,
+                        oscillators=analysis.oscillators_rating.value,
+                        moving_averages=analysis.moving_averages_rating.value,
+                        confidence=analysis.confidence,
+                        rsi_14=analysis.rsi_14,
+                        consensus=self.tv.consensus(sym),
+                        signal_boost_long=self.tv.signal_boost(sym, "long"),
+                        signal_boost_short=self.tv.signal_boost(sym, "short"),
+                        updated_at=analysis.fetched_at.isoformat(),
+                    )
+                )
         snap.tv_analyses = tv_snapshots
 
         # Market regime
         snap.regime = self._derive_regime(snap)
         snap.position_size_multiplier = self._compute_size_mult(snap)
         snap.should_reduce_exposure = (
-            snap.macro_event_imminent or
-            self.fear_greed.is_extreme_greed or
-            snap.overleveraged_side == "longs"
+            snap.macro_event_imminent or self.fear_greed.is_extreme_greed or snap.overleveraged_side == "longs"
         )
         snap.preferred_direction = self._compute_direction(snap)
 
         # Trending
         snap.hot_movers = [
             TrendingSnapshot(
-                symbol=c.symbol, name=c.name, price=c.price,
-                market_cap=c.market_cap, volume_24h=c.volume_24h,
-                change_1h=c.change_1h, change_24h=c.change_24h,
-                change_7d=c.change_7d, momentum_score=c.momentum_score,
-                is_low_liquidity=c.is_low_liquidity, source="cryptobubbles",
+                symbol=c.symbol,
+                name=c.name,
+                price=c.price,
+                market_cap=c.market_cap,
+                volume_24h=c.volume_24h,
+                change_1h=c.change_1h,
+                change_24h=c.change_24h,
+                change_7d=c.change_7d,
+                momentum_score=c.momentum_score,
+                is_low_liquidity=c.is_low_liquidity,
+                source="cryptobubbles",
             )
             for c in self.scanner.hot_movers
         ]
 
         snap.cmc_trending = [
             TrendingSnapshot(
-                symbol=c.symbol, name=c.name, price=c.price,
-                market_cap=c.market_cap, volume_24h=c.volume_24h,
-                change_1h=c.change_1h, change_24h=c.change_24h,
-                change_7d=c.change_7d, source="coinmarketcap",
+                symbol=c.symbol,
+                name=c.name,
+                price=c.price,
+                market_cap=c.market_cap,
+                volume_24h=c.volume_24h,
+                change_1h=c.change_1h,
+                change_24h=c.change_24h,
+                change_7d=c.change_7d,
+                source="coinmarketcap",
             )
             for c in self.cmc.all_interesting[:15]
         ]
 
         snap.coingecko_trending = [
             TrendingSnapshot(
-                symbol=c.symbol, name=c.name, price=c.price,
-                market_cap=c.market_cap, volume_24h=c.volume_24h,
-                change_1h=c.change_1h, change_24h=c.change_24h,
-                change_7d=c.change_7d, source="coingecko",
+                symbol=c.symbol,
+                name=c.name,
+                price=c.price,
+                market_cap=c.market_cap,
+                volume_24h=c.volume_24h,
+                change_1h=c.change_1h,
+                change_24h=c.change_24h,
+                change_7d=c.change_7d,
+                source="coingecko",
             )
             for c in self.gecko.all_interesting[:15]
         ]
@@ -359,8 +376,9 @@ class MonitorService:
     def _derive_regime(self, snap: IntelSnapshot) -> str:
         if self.fear_greed.is_extreme_fear and snap.mass_liquidation:
             return "capitulation"
-        if (self.fear_greed.is_extreme_greed and snap.macro_event_imminent) or \
-           (snap.overleveraged_side == "longs" and self.fear_greed.is_greed):
+        if (self.fear_greed.is_extreme_greed and snap.macro_event_imminent) or (
+            snap.overleveraged_side == "longs" and self.fear_greed.is_greed
+        ):
             return "risk_off"
         if snap.should_reduce_exposure:
             return "caution"

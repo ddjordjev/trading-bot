@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import aiohttp
 from loguru import logger
@@ -10,13 +9,13 @@ from pydantic import BaseModel
 
 
 class LiquidationSnapshot(BaseModel):
-    total_24h: float = 0.0       # total liquidations in USD (24h)
+    total_24h: float = 0.0  # total liquidations in USD (24h)
     long_24h: float = 0.0
     short_24h: float = 0.0
     total_1h: float = 0.0
     long_1h: float = 0.0
     short_1h: float = 0.0
-    timestamp: datetime = datetime.now(timezone.utc)
+    timestamp: datetime = datetime.now(UTC)
 
     @property
     def long_ratio_24h(self) -> float:
@@ -61,20 +60,21 @@ class LiquidationMonitor:
     def __init__(self, poll_interval: int = 300, api_key: str = ""):
         self.poll_interval = poll_interval
         self.api_key = api_key
-        self._latest: Optional[LiquidationSnapshot] = None
+        self._latest: LiquidationSnapshot | None = None
         self._running = False
         self._history: list[LiquidationSnapshot] = []
+        self._background_tasks: list = []
 
     async def start(self) -> None:
         self._running = True
-        asyncio.create_task(self._poll_loop())
+        self._background_tasks.append(asyncio.create_task(self._poll_loop()))
         logger.info("Liquidation monitor started (poll={}s)", self.poll_interval)
 
     async def stop(self) -> None:
         self._running = False
 
     @property
-    def latest(self) -> Optional[LiquidationSnapshot]:
+    def latest(self) -> LiquidationSnapshot | None:
         return self._latest
 
     def is_reversal_zone(self) -> bool:
@@ -88,7 +88,7 @@ class LiquidationMonitor:
             return "neutral"
         dom = self._latest.dominant_side
         if dom == "longs":
-            return "long"   # longs got liquidated = potential bottom
+            return "long"  # longs got liquidated = potential bottom
         if dom == "shorts":
             return "short"  # shorts got liquidated = potential top
         return "neutral"
@@ -116,13 +116,12 @@ class LiquidationMonitor:
         if self.api_key:
             headers["coinglassSecret"] = self.api_key
 
-        snap = LiquidationSnapshot(timestamp=datetime.now(timezone.utc))
+        snap = LiquidationSnapshot(timestamp=datetime.now(UTC))
 
         try:
             async with aiohttp.ClientSession() as session:
                 url = self.API_URL if self.api_key else self.FALLBACK_URL
-                async with session.get(url, headers=headers,
-                                       timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status != 200:
                         logger.warning("CoinGlass returned {}", resp.status)
                         return
@@ -132,10 +131,7 @@ class LiquidationMonitor:
             return
 
         try:
-            if self.api_key:
-                info = data.get("data", {})
-            else:
-                info = data.get("data", {})
+            info = data.get("data", {})
 
             if isinstance(info, list):
                 for item in info:
@@ -143,12 +139,9 @@ class LiquidationMonitor:
                     snap.long_24h += float(item.get("longVolUsd", 0) or 0)
                     snap.short_24h += float(item.get("shortVolUsd", 0) or 0)
             elif isinstance(info, dict):
-                snap.total_24h = float(info.get("totalVolUsd", 0) or
-                                       info.get("vol24hUsd", 0) or 0)
-                snap.long_24h = float(info.get("longVolUsd", 0) or
-                                      info.get("longVol24hUsd", 0) or 0)
-                snap.short_24h = float(info.get("shortVolUsd", 0) or
-                                       info.get("shortVol24hUsd", 0) or 0)
+                snap.total_24h = float(info.get("totalVolUsd", 0) or info.get("vol24hUsd", 0) or 0)
+                snap.long_24h = float(info.get("longVolUsd", 0) or info.get("longVol24hUsd", 0) or 0)
+                snap.short_24h = float(info.get("shortVolUsd", 0) or info.get("shortVol24hUsd", 0) or 0)
         except (ValueError, TypeError, KeyError) as e:
             logger.warning("CoinGlass parse error: {}", e)
             return
@@ -159,19 +152,28 @@ class LiquidationMonitor:
             self._history = self._history[-288:]
 
         if snap.is_mass_liquidation:
-            logger.warning("MASS LIQUIDATION: ${:.0f}B in 24h | longs: {:.0f}% | shorts: {:.0f}%",
-                           snap.total_24h / 1e9, snap.long_ratio_24h * 100,
-                           (1 - snap.long_ratio_24h) * 100)
+            logger.warning(
+                "MASS LIQUIDATION: ${:.0f}B in 24h | longs: {:.0f}% | shorts: {:.0f}%",
+                snap.total_24h / 1e9,
+                snap.long_ratio_24h * 100,
+                (1 - snap.long_ratio_24h) * 100,
+            )
         else:
-            logger.info("Liquidations 24h: ${:.0f}M | L:{:.0f}% S:{:.0f}% | dom: {}",
-                        snap.total_24h / 1e6, snap.long_ratio_24h * 100,
-                        (1 - snap.long_ratio_24h) * 100, snap.dominant_side)
+            logger.info(
+                "Liquidations 24h: ${:.0f}M | L:{:.0f}% S:{:.0f}% | dom: {}",
+                snap.total_24h / 1e6,
+                snap.long_ratio_24h * 100,
+                (1 - snap.long_ratio_24h) * 100,
+                snap.dominant_side,
+            )
 
     def summary(self) -> str:
         if not self._latest:
             return "Liquidations: no data"
         s = self._latest
         tag = " ** MASS LIQ **" if s.is_mass_liquidation else ""
-        return (f"Liq 24h: ${s.total_24h/1e6:.0f}M | "
-                f"L:{s.long_ratio_24h:.0%} S:{1-s.long_ratio_24h:.0%} | "
-                f"dom: {s.dominant_side}{tag}")
+        return (
+            f"Liq 24h: ${s.total_24h / 1e6:.0f}M | "
+            f"L:{s.long_ratio_24h:.0%} S:{1 - s.long_ratio_24h:.0%} | "
+            f"dom: {s.dominant_side}{tag}"
+        )

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -20,11 +19,11 @@ class Signal(BaseModel):
     strength: float = 0.0  # 0.0 to 1.0
     strategy: str = ""
     reason: str = ""
-    suggested_price: Optional[float] = None
-    suggested_stop_loss: Optional[float] = None
-    suggested_take_profit: Optional[float] = None
+    suggested_price: float | None = None
+    suggested_stop_loss: float | None = None
+    suggested_take_profit: float | None = None
     market_type: str = "spot"
     leverage: int = 1
     quick_trade: bool = False  # for spike/volatility in-and-out trades
-    max_hold_minutes: Optional[int] = None  # auto-close after N minutes
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    max_hold_minutes: int | None = None  # auto-close after N minutes
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))

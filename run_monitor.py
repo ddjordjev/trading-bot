@@ -13,13 +13,17 @@ status from data/bot_status.json to adjust polling intensity:
     DEPLOYED → background (fully deployed, positions running well)
     STRESSED → elevated (positions losing, need exit/hedge intel)
 """
+
 import asyncio
 import signal
 import sys
 
 from loguru import logger
+
 from config.settings import get_settings
 from services.monitor import MonitorService
+
+_background_tasks: list = []
 
 
 def main() -> None:
@@ -34,7 +38,7 @@ def main() -> None:
 
     def _shutdown(sig_num: int, frame: object) -> None:
         logger.info("Received signal {}, shutting down monitor...", sig_num)
-        loop.create_task(service.stop())
+        _background_tasks.append(loop.create_task(service.stop()))
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)

@@ -1,25 +1,33 @@
 """Tests for core/risk/market_filter.py."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from core.models import Candle, Ticker
 from core.risk.market_filter import (
-    LiquidityProfile, LiquidityTier, MarketQualityFilter,
+    LiquidityProfile,
+    LiquidityTier,
+    MarketQualityFilter,
 )
 
 
 def _make_candle(open_=100, high=110, low=90, close=105, volume=1000) -> Candle:
-    return Candle(timestamp=datetime.now(timezone.utc), open=open_,
-                  high=high, low=low, close=close, volume=volume)
+    return Candle(timestamp=datetime.now(UTC), open=open_, high=high, low=low, close=close, volume=volume)
 
 
 def _make_ticker(bid=100, ask=100.1, volume=1e7) -> Ticker:
-    return Ticker(symbol="BTC/USDT", bid=bid, ask=ask, last=100.05,
-                  volume_24h=volume, change_pct_24h=1.0,
-                  timestamp=datetime.now(timezone.utc))
+    return Ticker(
+        symbol="BTC/USDT",
+        bid=bid,
+        ask=ask,
+        last=100.05,
+        volume_24h=volume,
+        change_pct_24h=1.0,
+        timestamp=datetime.now(UTC),
+    )
 
 
 class TestLiquidityProfile:
@@ -81,11 +89,18 @@ class TestMarketQualityFilter:
         assert "dead" in reason
 
     def test_is_tradeable_good_market(self, filt):
-        candles = [_make_candle(open_=100+i*0.1, close=100+i*0.1+0.5,
-                                high=100+i*0.1+1, low=100+i*0.1-1,
-                                volume=10000) for i in range(50)]
+        candles = [
+            _make_candle(
+                open_=100 + i * 0.1,
+                close=100 + i * 0.1 + 0.8,
+                high=100 + i * 0.1 + 1,
+                low=100 + i * 0.1 - 0.1,
+                volume=10000,
+            )
+            for i in range(50)
+        ]
         ticker = _make_ticker(bid=125, ask=125.02, volume=5e7)
-        ok, reason = filt.is_tradeable(candles, ticker)
+        ok, _reason = filt.is_tradeable(candles, ticker)
         assert ok is True
 
     def test_is_low_liquidity(self, filt):
@@ -94,8 +109,7 @@ class TestMarketQualityFilter:
         assert filt.is_low_liquidity(candles, ticker) is True
 
     def test_choppiness_flat(self):
-        candles = [Candle(timestamp=datetime.now(timezone.utc),
-                          open=100, high=100, low=100, close=100, volume=1)]
+        candles = [Candle(timestamp=datetime.now(UTC), open=100, high=100, low=100, close=100, volume=1)]
         assert MarketQualityFilter._choppiness(candles) == 1.0
 
     def test_choppiness_empty(self):
@@ -106,7 +120,7 @@ class TestMarketQualityFilter:
         assert MarketQualityFilter._atr_ratio(candles) == 1.0
 
     def test_atr_ratio_zero(self):
-        candles = [Candle(timestamp=datetime.now(timezone.utc),
-                          open=100, high=100, low=100, close=100, volume=1)
-                   for _ in range(25)]
+        candles = [
+            Candle(timestamp=datetime.now(UTC), open=100, high=100, low=100, close=100, volume=1) for _ in range(25)
+        ]
         assert MarketQualityFilter._atr_ratio(candles) == 0.0

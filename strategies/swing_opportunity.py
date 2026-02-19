@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import ta
 
-from core.models import Candle, Ticker, Signal, SignalAction
+from core.models import Candle, Signal, SignalAction, Ticker
 from strategies.base import BaseStrategy
 
 
@@ -53,7 +51,7 @@ class SwingOpportunityStrategy(BaseStrategy):
         self._last_signal_price: float = 0
         self._cooldown_candles: int = 0
 
-    def analyze(self, candles: list[Candle], ticker: Optional[Ticker] = None) -> Optional[Signal]:
+    def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:
         df = self.candles_to_df(candles)
         if len(df) < self.ma_period:
             return None
@@ -76,9 +74,10 @@ class SwingOpportunityStrategy(BaseStrategy):
 
         return None
 
-    def _detect_crash_buy(self, df: object, price: float) -> Optional[Signal]:
+    def _detect_crash_buy(self, df: object, price: float) -> Signal | None:
         """Detect a major crash where buying the dip is justified."""
         import pandas as pd
+
         assert isinstance(df, pd.DataFrame)
 
         # How much has price dropped from recent high?
@@ -134,9 +133,10 @@ class SwingOpportunityStrategy(BaseStrategy):
             max_hold_minutes=self.swing_max_hold_hours * 60,
         )
 
-    def _detect_blow_off_top(self, df: object, price: float) -> Optional[Signal]:
+    def _detect_blow_off_top(self, df: object, price: float) -> Signal | None:
         """Detect a blow-off top / parabolic spike to short."""
         import pandas as pd
+
         assert isinstance(df, pd.DataFrame)
 
         recent_low = df["low"].iloc[-60:].min()

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Optional
 
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -11,9 +10,9 @@ from core.models import Candle, OrderSide, Position
 
 
 class HedgeState(str, Enum):
-    WATCHING = "watching"     # monitoring main position for reversal signals
-    ACTIVE = "active"         # hedge is open
-    CLOSED = "closed"         # hedge was closed (profit or stop)
+    WATCHING = "watching"  # monitoring main position for reversal signals
+    ACTIVE = "active"  # hedge is open
+    CLOSED = "closed"  # hedge was closed (profit or stop)
 
 
 class HedgePair(BaseModel):
@@ -27,27 +26,27 @@ class HedgePair(BaseModel):
     """
 
     symbol: str
-    main_side: str              # "long" or "short"
+    main_side: str  # "long" or "short"
     main_entry: float
-    main_size: float            # notional value of main position
+    main_size: float  # notional value of main position
     main_pnl_pct: float = 0.0
 
-    hedge_side: str = ""        # opposite of main
-    hedge_size: float = 0.0     # notional value of hedge (always smaller)
+    hedge_side: str = ""  # opposite of main
+    hedge_size: float = 0.0  # notional value of hedge (always smaller)
     hedge_entry: float = 0.0
     hedge_pnl_pct: float = 0.0
     hedge_order_id: str = ""
 
     state: HedgeState = HedgeState.WATCHING
-    hedge_ratio: float = 0.20   # hedge is 20% of main position size
+    hedge_ratio: float = 0.20  # hedge is 20% of main position size
     min_main_profit_pct: float = 3.0  # main must be +3% before hedging
     hedge_stop_pct: float = 1.0  # tight stop on the hedge
 
     reversal_score: float = 0.0  # 0-1, how likely a reversal is
     reversal_reasons: list[str] = Field(default_factory=list)
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    hedged_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    hedged_at: datetime | None = None
 
     @property
     def hedge_notional(self) -> float:
@@ -58,9 +57,7 @@ class HedgePair(BaseModel):
             return False
         if self.main_pnl_pct < self.min_main_profit_pct:
             return False
-        if self.reversal_score < 0.5:
-            return False
-        return True
+        return self.reversal_score >= 0.5
 
     def activate_hedge(self, entry_price: float, amount: float, order_id: str) -> None:
         self.hedge_side = "short" if self.main_side == "long" else "long"
@@ -68,22 +65,32 @@ class HedgePair(BaseModel):
         self.hedge_size = entry_price * amount
         self.hedge_order_id = order_id
         self.state = HedgeState.ACTIVE
-        self.hedged_at = datetime.now(timezone.utc)
-        logger.info("HEDGE ACTIVATED on {} | main: {} ${:.0f} | hedge: {} ${:.0f} | reversal: {:.0f}%",
-                     self.symbol, self.main_side, self.main_size,
-                     self.hedge_side, self.hedge_size, self.reversal_score * 100)
+        self.hedged_at = datetime.now(UTC)
+        logger.info(
+            "HEDGE ACTIVATED on {} | main: {} ${:.0f} | hedge: {} ${:.0f} | reversal: {:.0f}%",
+            self.symbol,
+            self.main_side,
+            self.main_size,
+            self.hedge_side,
+            self.hedge_size,
+            self.reversal_score * 100,
+        )
 
     def close_hedge(self) -> None:
         self.state = HedgeState.CLOSED
 
     def status_line(self) -> str:
         if self.state == HedgeState.WATCHING:
-            return (f"Hedge {self.symbol}: WATCHING main={self.main_side} "
-                    f"pnl={self.main_pnl_pct:+.1f}% reversal={self.reversal_score:.0%}")
-        return (f"Hedge {self.symbol}: {self.state.value} "
-                f"main={self.main_side} ${self.main_size:.0f} "
-                f"hedge={self.hedge_side} ${self.hedge_size:.0f} "
-                f"hedge_pnl={self.hedge_pnl_pct:+.1f}%")
+            return (
+                f"Hedge {self.symbol}: WATCHING main={self.main_side} "
+                f"pnl={self.main_pnl_pct:+.1f}% reversal={self.reversal_score:.0%}"
+            )
+        return (
+            f"Hedge {self.symbol}: {self.state.value} "
+            f"main={self.main_side} ${self.main_size:.0f} "
+            f"hedge={self.hedge_side} ${self.hedge_size:.0f} "
+            f"hedge_pnl={self.hedge_pnl_pct:+.1f}%"
+        )
 
 
 class ReversalDetector:
@@ -151,7 +158,7 @@ class ReversalDetector:
     def _simple_rsi(self, candles: list[Candle], period: int = 14) -> float:
         if len(candles) < period + 1:
             return 50.0
-        closes = [c.close for c in candles[-(period + 1):]]
+        closes = [c.close for c in candles[-(period + 1) :]]
         gains, losses = [], []
         for i in range(1, len(closes)):
             diff = closes[i] - closes[i - 1]
@@ -171,7 +178,7 @@ class ReversalDetector:
             return False
 
         recent = candles[-n:]
-        prev = candles[-n * 2:-n]
+        prev = candles[-n * 2 : -n]
 
         recent_avg_vol = sum(c.volume for c in recent) / n
         prev_avg_vol = sum(c.volume for c in prev) / n
@@ -295,8 +302,7 @@ class HedgeManager:
 
         return ready
 
-    def get_hedge_params(self, symbol: str, current_price: float,
-                         leverage: int = 10) -> Optional[dict]:
+    def get_hedge_params(self, symbol: str, current_price: float, leverage: int = 10) -> dict | None:
         """Get parameters for opening a hedge position."""
         pair = self._pairs.get(symbol)
         if not pair:
@@ -337,7 +343,7 @@ class HedgeManager:
     def remove(self, symbol: str) -> None:
         self._pairs.pop(symbol, None)
 
-    def get(self, symbol: str) -> Optional[HedgePair]:
+    def get(self, symbol: str) -> HedgePair | None:
         return self._pairs.get(symbol)
 
     def has_active_hedge(self, symbol: str) -> bool:

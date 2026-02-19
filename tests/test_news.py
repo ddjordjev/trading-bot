@@ -1,9 +1,10 @@
 """Tests for news/monitor.py."""
+
 from __future__ import annotations
 
 import pytest
 
-from news.monitor import NewsItem, NewsMonitor, _SYMBOL_PATTERNS
+from news.monitor import NewsItem, NewsMonitor
 
 
 @pytest.fixture()
@@ -13,6 +14,7 @@ def settings(monkeypatch):
     monkeypatch.setenv("NEWS_ENABLED", "true")
     monkeypatch.setenv("NEWS_SOURCES", "coindesk,cointelegraph")
     from config.settings import Settings
+
     return Settings()
 
 
@@ -35,6 +37,7 @@ class TestNewsMonitor:
         monkeypatch.setenv("EXCHANGE", "mexc")
         monkeypatch.setenv("NEWS_ENABLED", "false")
         from config.settings import Settings
+
         nm = NewsMonitor(Settings())
         assert nm.enabled is False
 
@@ -99,6 +102,7 @@ class TestNewsMonitor:
         monkeypatch.setenv("EXCHANGE", "mexc")
         monkeypatch.setenv("NEWS_ENABLED", "false")
         from config.settings import Settings
+
         nm = NewsMonitor(Settings())
         await nm.start()
         assert nm._running is False

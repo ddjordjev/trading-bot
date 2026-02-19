@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from loguru import logger
 
 from config.settings import Settings
-from core.models import Signal, SignalAction, Order, Position
+from core.models import Position, Signal, SignalAction
 
 
 class RiskManager:
@@ -28,7 +27,7 @@ class RiskManager:
 
         self._daily_pnl: float = 0.0
         self._day_start_balance: float = 0.0
-        self._last_reset: Optional[datetime] = None
+        self._last_reset: datetime | None = None
         self._consecutive_losses: int = 0
         self._in_cooldown = False
         self._total_trades_today: int = 0
@@ -38,7 +37,7 @@ class RiskManager:
     def reset_daily(self, balance: float) -> None:
         self._daily_pnl = 0.0
         self._day_start_balance = balance
-        self._last_reset = datetime.now(timezone.utc)
+        self._last_reset = datetime.now(UTC)
         self._consecutive_losses = 0
         self._in_cooldown = False
         self._total_trades_today = 0
@@ -61,8 +60,9 @@ class RiskManager:
             self._losing_trades_today += 1
             if self._consecutive_losses >= self.loss_cooldown_threshold:
                 self._in_cooldown = True
-                logger.warning("COOLDOWN ACTIVATED: {} consecutive losses - pausing new entries",
-                               self._consecutive_losses)
+                logger.warning(
+                    "COOLDOWN ACTIVATED: {} consecutive losses - pausing new entries", self._consecutive_losses
+                )
 
     @property
     def daily_loss_pct(self) -> float:
@@ -85,8 +85,11 @@ class RiskManager:
     def is_daily_loss_exceeded(self) -> bool:
         exceeded = self.daily_loss_pct >= self.max_daily_loss_pct
         if exceeded:
-            logger.warning("DAILY LOSS LIMIT HIT: {:.2f}% >= {:.2f}% -- NO MORE TRADES TODAY",
-                           self.daily_loss_pct, self.max_daily_loss_pct)
+            logger.warning(
+                "DAILY LOSS LIMIT HIT: {:.2f}% >= {:.2f}% -- NO MORE TRADES TODAY",
+                self.daily_loss_pct,
+                self.max_daily_loss_pct,
+            )
         return exceeded
 
     def check_signal(self, signal: Signal, balance: float, positions: list[Position]) -> bool:
@@ -101,10 +104,17 @@ class RiskManager:
         logger.debug(
             "Risk check: {} {} str={:.2f} | bal=${:.0f} | positions={}/{} | "
             "exposure=${:.0f} | daily_loss={:.1f}%/{:.1f}% | streak={}{}",
-            signal.action.value, signal.symbol, signal.strength,
-            balance, len(active_positions), self.max_concurrent,
-            total_exposure, self.daily_loss_pct, self.max_daily_loss_pct,
-            self._consecutive_losses, " COOLDOWN" if self._in_cooldown else "",
+            signal.action.value,
+            signal.symbol,
+            signal.strength,
+            balance,
+            len(active_positions),
+            self.max_concurrent,
+            total_exposure,
+            self.daily_loss_pct,
+            self.max_daily_loss_pct,
+            self._consecutive_losses,
+            " COOLDOWN" if self._in_cooldown else "",
         )
 
         if self.is_daily_loss_exceeded():
@@ -112,38 +122,38 @@ class RiskManager:
             return False
 
         if self._in_cooldown:
-            logger.info("Risk REJECT {}: cooldown after {} consecutive losses",
-                        signal.symbol, self._consecutive_losses)
+            logger.info("Risk REJECT {}: cooldown after {} consecutive losses", signal.symbol, self._consecutive_losses)
             return False
 
         if signal.strength < self.min_strength:
-            logger.debug("Risk REJECT {}: strength {:.2f} < min {:.2f}",
-                         signal.symbol, signal.strength, self.min_strength)
+            logger.debug(
+                "Risk REJECT {}: strength {:.2f} < min {:.2f}", signal.symbol, signal.strength, self.min_strength
+            )
             return False
 
         if len(active_positions) >= self.max_concurrent:
-            logger.debug("Risk REJECT {}: max positions {}/{}",
-                         signal.symbol, len(active_positions), self.max_concurrent)
+            logger.debug(
+                "Risk REJECT {}: max positions {}/{}", signal.symbol, len(active_positions), self.max_concurrent
+            )
             return False
 
         if signal.suggested_price and signal.suggested_price > 0:
             position_value = signal.suggested_price * self._estimate_amount(signal, balance)
             max_allowed = balance * (self.max_position_pct / 100)
             if position_value > max_allowed:
-                logger.warning("Risk REJECT {}: size ${:.0f} > max ${:.0f}",
-                               signal.symbol, position_value, max_allowed)
+                logger.warning("Risk REJECT {}: size ${:.0f} > max ${:.0f}", signal.symbol, position_value, max_allowed)
                 return False
 
         if total_exposure > balance * 1.5:
-            logger.warning("Risk REJECT {}: exposure ${:.0f} > 1.5x balance ${:.0f}",
-                           signal.symbol, total_exposure, balance)
+            logger.warning(
+                "Risk REJECT {}: exposure ${:.0f} > 1.5x balance ${:.0f}", signal.symbol, total_exposure, balance
+            )
             return False
 
         if self.daily_loss_pct > self.max_daily_loss_pct * 0.5:
             logger.debug("Risk: drawdown zone ({:.1f}%) — high conviction only", self.daily_loss_pct)
             if signal.strength < 0.7:
-                logger.info("Risk REJECT {}: strength {:.2f} < 0.7 during drawdown",
-                            signal.symbol, signal.strength)
+                logger.info("Risk REJECT {}: strength {:.2f} < 0.7 during drawdown", signal.symbol, signal.strength)
                 return False
 
         logger.debug("Risk PASS {}: all gates clear", signal.symbol)
@@ -178,7 +188,7 @@ class RiskManager:
         return 0.0
 
     def calculate_position_size(
-        self, balance: float, price: float, leverage: int = 1, risk_pct: Optional[float] = None
+        self, balance: float, price: float, leverage: int = 1, risk_pct: float | None = None
     ) -> float:
         """Calculate position size. Scales down as daily losses accumulate."""
         pct = risk_pct or self.max_position_pct
@@ -188,18 +198,28 @@ class RiskManager:
             loss_ratio = self.daily_loss_pct / self.max_daily_loss_pct
             scale = max(0.3, 1.0 - loss_ratio * 0.7)
             pct *= scale
-            logger.debug("Position sizing: drawdown scale {:.2f} (loss {:.1f}%) — "
-                         "risk {:.1f}% -> {:.1f}%", scale, self.daily_loss_pct,
-                         original_pct, pct)
+            logger.debug(
+                "Position sizing: drawdown scale {:.2f} (loss {:.1f}%) — risk {:.1f}% -> {:.1f}%",
+                scale,
+                self.daily_loss_pct,
+                original_pct,
+                pct,
+            )
 
         capital_at_risk = balance * (pct / 100)
         notional = capital_at_risk * leverage
         if price == 0:
             return 0.0
         qty = notional / price
-        logger.debug("Position size: ${:.0f} * {:.1f}% = ${:.0f} capital, "
-                     "{}x lev = ${:.0f} notional = {:.6f} qty",
-                     balance, pct, capital_at_risk, leverage, notional, qty)
+        logger.debug(
+            "Position size: ${:.0f} * {:.1f}% = ${:.0f} capital, {}x lev = ${:.0f} notional = {:.6f} qty",
+            balance,
+            pct,
+            capital_at_risk,
+            leverage,
+            notional,
+            qty,
+        )
         return qty
 
     def check_liquidation(self, position: Position, balance: float) -> bool:

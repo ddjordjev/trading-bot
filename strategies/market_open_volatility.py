@@ -1,20 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Optional
-
 import ta
 
-from config.settings import get_settings
-from core.models import Candle, Ticker, Signal, SignalAction
+from core.market_schedule import get_market_schedule
+from core.models import Candle, Signal, SignalAction, Ticker
 from strategies.base import BaseStrategy
 
 
 class MarketOpenVolatilityStrategy(BaseStrategy):
     """Exploits volatility during US and Asia market open windows.
 
-    Only active during configurable market open hours. Looks for directional
-    momentum using ATR spikes and volume surge. Generates quick in-and-out signals.
+    Uses the global MarketSchedule for DST-aware, holiday-aware market hours.
+    Looks for directional momentum using ATR spikes and volume surge during
+    the first N minutes after market open. Generates quick in-and-out signals.
     """
 
     @property
@@ -23,25 +21,21 @@ class MarketOpenVolatilityStrategy(BaseStrategy):
 
     def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: object):
         super().__init__(symbol, market_type, leverage, **params)
-        settings = get_settings()
-        self.us_open = int(params.get("us_open", settings.us_market_open_utc))
-        self.us_close = int(params.get("us_close", settings.us_market_close_utc))
-        self.asia_open = int(params.get("asia_open", settings.asia_market_open_utc))
-        self.asia_close = int(params.get("asia_close", settings.asia_market_close_utc))
+        self.open_window_minutes = int(params.get("open_window_minutes", 120))
         self.atr_period = int(params.get("atr_period", 14))
         self.atr_multiplier = float(params.get("atr_multiplier", 1.5))
         self.volume_surge_multiplier = float(params.get("volume_surge_multiplier", 2.0))
         self.max_hold_minutes = int(params.get("max_hold_minutes", 30))
+        self._schedule = get_market_schedule()
 
     def _is_market_open_window(self) -> str | None:
-        hour = datetime.now(timezone.utc).hour
-        if self.us_open <= hour < min(self.us_open + 2, self.us_close):
-            return "US"
-        if self.asia_open <= hour < min(self.asia_open + 2, self.asia_close):
-            return "ASIA"
+        """Check if any tracked market is in its open window (DST + holiday aware)."""
+        for market in ("US", "ASIA", "EUROPE"):
+            if self._schedule.is_in_open_window(market, self.open_window_minutes):
+                return market
         return None
 
-    def analyze(self, candles: list[Candle], ticker: Optional[Ticker] = None) -> Optional[Signal]:
+    def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:
         market = self._is_market_open_window()
         if not market:
             return None
@@ -50,10 +44,11 @@ class MarketOpenVolatilityStrategy(BaseStrategy):
         if len(df) < self.atr_period + 5:
             return None
 
-        atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"],
-                                               window=self.atr_period).average_true_range()
+        atr = ta.volatility.AverageTrueRange(
+            df["high"], df["low"], df["close"], window=self.atr_period
+        ).average_true_range()
         current_atr = atr.iloc[-1]
-        avg_atr = atr.iloc[-self.atr_period:].mean()
+        avg_atr = atr.iloc[-self.atr_period :].mean()
 
         avg_volume = df["volume"].iloc[-20:].mean()
         current_volume = df["volume"].iloc[-1]

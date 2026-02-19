@@ -4,10 +4,12 @@ This module gates every single trade. If it's broken, the bot either
 takes trades it shouldn't (catastrophic) or misses everything (annoying
 but safe). We test both directions.
 """
+
 import pytest
-from core.models import Signal, SignalAction, Position, OrderSide
-from core.risk.manager import RiskManager
+
 from config.settings import Settings
+from core.models import OrderSide, Position, Signal, SignalAction
+from core.risk.manager import RiskManager
 
 
 @pytest.fixture
@@ -33,8 +35,11 @@ def risk(settings: Settings) -> RiskManager:
 
 def _signal(action=SignalAction.BUY, strength=0.7, price=100.0) -> Signal:
     return Signal(
-        symbol="BTC/USDT", action=action, strategy="test",
-        strength=strength, suggested_price=price,
+        symbol="BTC/USDT",
+        action=action,
+        strategy="test",
+        strength=strength,
+        suggested_price=price,
     )
 
 
@@ -80,18 +85,14 @@ class TestSignalStrength:
 class TestConcurrentPositions:
     def test_blocks_at_max_positions(self, risk: RiskManager):
         positions = [
-            Position(symbol=f"COIN{i}/USDT", side=OrderSide.BUY,
-                     amount=1.0, entry_price=10.0, current_price=10.0)
+            Position(symbol=f"COIN{i}/USDT", side=OrderSide.BUY, amount=1.0, entry_price=10.0, current_price=10.0)
             for i in range(5)
         ]
         sig = _signal()
         assert risk.check_signal(sig, 10000.0, positions) is False
 
     def test_allows_below_max(self, risk: RiskManager):
-        positions = [
-            Position(symbol="ETH/USDT", side=OrderSide.BUY,
-                     amount=1.0, entry_price=10.0, current_price=10.0)
-        ]
+        positions = [Position(symbol="ETH/USDT", side=OrderSide.BUY, amount=1.0, entry_price=10.0, current_price=10.0)]
         sig = _signal()
         assert risk.check_signal(sig, 10000.0, positions) is True
 
@@ -124,8 +125,11 @@ class TestLiquidationCheck:
         # 10x leverage: liq threshold = -100/10 * 0.9 = -9%
         # pnl_pct at entry=50000, current=45400, 10x = (45400-50000)/50000*100*10 = -9.2%
         pos = Position(
-            symbol="BTC/USDT", side=OrderSide.BUY,
-            amount=1.0, entry_price=50000.0, current_price=45400.0,
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=1.0,
+            entry_price=50000.0,
+            current_price=45400.0,
             leverage=10,
         )
         assert risk.check_liquidation(pos, 10000.0) is True
@@ -133,8 +137,11 @@ class TestLiquidationCheck:
     def test_no_liquidation_at_1x(self, risk: RiskManager):
         # 1x leverage: liq threshold = -100/1 * 0.9 = -90%, so -50% is fine
         pos = Position(
-            symbol="BTC/USDT", side=OrderSide.BUY,
-            amount=1.0, entry_price=50000.0, current_price=25000.0,
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=1.0,
+            entry_price=50000.0,
+            current_price=25000.0,
             leverage=1,
         )
         assert risk.check_liquidation(pos, 10000.0) is False

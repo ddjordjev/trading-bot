@@ -1,4 +1,5 @@
 """Tests for config/settings.py."""
+
 from __future__ import annotations
 
 import pytest
@@ -16,6 +17,7 @@ class TestSettings:
         monkeypatch.setenv("NEWS_SOURCES", "coindesk,cointelegraph")
         monkeypatch.setenv("TV_INTERVALS", "1h,4h,1D")
         from config.settings import Settings
+
         return Settings()
 
     def test_is_paper(self, settings):
@@ -45,5 +47,6 @@ class TestSettings:
         monkeypatch.setenv("TRADING_MODE", "live")
         monkeypatch.setenv("EXCHANGE", "mexc")
         from config.settings import Settings
+
         s = Settings()
         assert s.is_paper() is False

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
-
-from core.models import Candle, Ticker, Signal, SignalAction
+from core.models import Candle, Signal, SignalAction, Ticker
 from strategies.base import BaseStrategy
 
 
@@ -21,10 +19,10 @@ class GridStrategy(BaseStrategy):
         super().__init__(symbol, market_type, leverage, **params)
         self.grid_size_pct = float(params.get("grid_size_pct", 1.0))
         self.num_grids = int(params.get("num_grids", 5))
-        self._center_price: Optional[float] = None
+        self._center_price: float | None = None
         self._last_grid_level: int = 0
 
-    def analyze(self, candles: list[Candle], ticker: Optional[Ticker] = None) -> Optional[Signal]:
+    def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:
         df = self.candles_to_df(candles)
         if len(df) < 2:
             return None
@@ -49,17 +47,23 @@ class GridStrategy(BaseStrategy):
 
         if moved_down:
             return Signal(
-                symbol=self.symbol, action=SignalAction.BUY,
+                symbol=self.symbol,
+                action=SignalAction.BUY,
                 strength=min(1.0, abs(current_level) / self.num_grids),
                 strategy=self.name,
                 reason=f"Grid buy at level {current_level} (price={price:.2f})",
-                suggested_price=price, market_type=self.market_type, leverage=self.leverage,
+                suggested_price=price,
+                market_type=self.market_type,
+                leverage=self.leverage,
             )
 
         return Signal(
-            symbol=self.symbol, action=SignalAction.SELL,
+            symbol=self.symbol,
+            action=SignalAction.SELL,
             strength=min(1.0, abs(current_level) / self.num_grids),
             strategy=self.name,
             reason=f"Grid sell at level {current_level} (price={price:.2f})",
-            suggested_price=price, market_type=self.market_type, leverage=self.leverage,
+            suggested_price=price,
+            market_type=self.market_type,
+            leverage=self.leverage,
         )

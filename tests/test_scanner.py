@@ -1,12 +1,13 @@
 """Tests for scanner/trending.py."""
+
 from __future__ import annotations
 
 import pytest
 
 from scanner.trending import TrendingCoin, TrendingScanner
 
-
 # ── TrendingCoin ────────────────────────────────────────────────────
+
 
 class TestTrendingCoin:
     def test_trading_pair_plain(self):
@@ -41,6 +42,7 @@ class TestTrendingCoin:
 
 
 # ── TrendingScanner ─────────────────────────────────────────────────
+
 
 class TestTrendingScanner:
     @pytest.fixture()
@@ -88,26 +90,22 @@ class TestTrendingScanner:
 
     def test_filter_movers_includes_hourly_hot(self, scanner):
         coins = [
-            TrendingCoin(symbol="SOL", volume_24h=1e8, market_cap=1e10,
-                         change_1h=3.0, change_24h=1.0),
+            TrendingCoin(symbol="SOL", volume_24h=1e8, market_cap=1e10, change_1h=3.0, change_24h=1.0),
         ]
         movers = scanner._filter_movers(coins)
         assert len(movers) == 1
 
     def test_filter_movers_includes_daily_hot(self, scanner):
         coins = [
-            TrendingCoin(symbol="ETH", volume_24h=1e9, market_cap=1e11,
-                         change_1h=0.5, change_24h=8.0),
+            TrendingCoin(symbol="ETH", volume_24h=1e9, market_cap=1e11, change_1h=0.5, change_24h=8.0),
         ]
         movers = scanner._filter_movers(coins)
         assert len(movers) == 1
 
     def test_filter_movers_sorts_by_momentum(self, scanner):
         coins = [
-            TrendingCoin(symbol="A", volume_24h=1e8, market_cap=1e10,
-                         change_1h=3.0, change_24h=2.0),
-            TrendingCoin(symbol="B", volume_24h=1e8, market_cap=1e10,
-                         change_1h=10.0, change_24h=15.0),
+            TrendingCoin(symbol="A", volume_24h=1e8, market_cap=1e10, change_1h=3.0, change_24h=2.0),
+            TrendingCoin(symbol="B", volume_24h=1e8, market_cap=1e10, change_1h=10.0, change_24h=15.0),
         ]
         movers = scanner._filter_movers(coins)
         assert movers[0].symbol == "B"
@@ -137,8 +135,7 @@ class TestTrendingScanner:
 
     def test_scan_summary_with_movers(self, scanner):
         scanner._hot_movers = [
-            TrendingCoin(symbol="BTC", change_1h=5.0, change_24h=10.0,
-                         volume_24h=1e9, market_cap=1e12),
+            TrendingCoin(symbol="BTC", change_1h=5.0, change_24h=10.0, volume_24h=1e9, market_cap=1e12),
         ]
         summary = scanner.scan_summary()
         assert "1 hot movers" in summary

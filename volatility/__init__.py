@@ -1,3 +1,3 @@
-from volatility.detector import VolatilityDetector, SpikeEvent
+from volatility.detector import SpikeEvent, VolatilityDetector
 
-__all__ = ["VolatilityDetector", "SpikeEvent"]
+__all__ = ["SpikeEvent", "VolatilityDetector"]

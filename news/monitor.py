@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import datetime, timezone
-from typing import Callable, Optional
+from collections.abc import Callable
+from datetime import UTC, datetime
 
 import aiohttp
 import feedparser
@@ -11,7 +11,6 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from config.settings import Settings
-
 
 # Common crypto symbols to scan for in headlines
 _SYMBOL_PATTERNS = [
@@ -30,10 +29,43 @@ _SYMBOL_PATTERNS = [
 ]
 
 # Sentiment keywords
-_BULLISH = {"surge", "soar", "rally", "pump", "bull", "gain", "rise", "jump", "spike", "breakout",
-            "adoption", "approval", "partnership", "launch", "upgrade", "ath", "high"}
-_BEARISH = {"crash", "dump", "plunge", "drop", "bear", "loss", "fall", "decline", "hack",
-            "exploit", "ban", "regulation", "lawsuit", "sec", "fraud", "liquidat"}
+_BULLISH = {
+    "surge",
+    "soar",
+    "rally",
+    "pump",
+    "bull",
+    "gain",
+    "rise",
+    "jump",
+    "spike",
+    "breakout",
+    "adoption",
+    "approval",
+    "partnership",
+    "launch",
+    "upgrade",
+    "ath",
+    "high",
+}
+_BEARISH = {
+    "crash",
+    "dump",
+    "plunge",
+    "drop",
+    "bear",
+    "loss",
+    "fall",
+    "decline",
+    "hack",
+    "exploit",
+    "ban",
+    "regulation",
+    "lawsuit",
+    "sec",
+    "fraud",
+    "liquidat",
+}
 
 
 RSS_FEEDS = {
@@ -47,7 +79,7 @@ class NewsItem(BaseModel):
     headline: str
     source: str
     url: str = ""
-    published: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    published: datetime = Field(default_factory=lambda: datetime.now(UTC))
     matched_symbols: list[str] = []
     sentiment: str = "neutral"  # "bullish", "bearish", "neutral"
     sentiment_score: float = 0.0  # -1.0 to 1.0
@@ -63,6 +95,7 @@ class NewsMonitor:
         self._callbacks: list[Callable] = []
         self._poll_interval = 60
         self._running = False
+        self._background_tasks: list = []
 
     def on_news(self, callback: Callable) -> None:
         self._callbacks.append(callback)
@@ -72,7 +105,7 @@ class NewsMonitor:
             logger.info("News monitoring disabled")
             return
         self._running = True
-        asyncio.create_task(self._poll_loop())
+        self._background_tasks.append(asyncio.create_task(self._poll_loop()))
         logger.info("News monitoring started (sources: {})", ", ".join(self.sources))
 
     async def stop(self) -> None:
@@ -132,14 +165,16 @@ class NewsMonitor:
             sentiment, score = self._analyze_sentiment(headline)
 
             if symbols or abs(score) > 0.3:
-                items.append(NewsItem(
-                    headline=headline,
-                    source=source,
-                    url=link,
-                    matched_symbols=symbols,
-                    sentiment=sentiment,
-                    sentiment_score=score,
-                ))
+                items.append(
+                    NewsItem(
+                        headline=headline,
+                        source=source,
+                        url=link,
+                        matched_symbols=symbols,
+                        sentiment=sentiment,
+                        sentiment_score=score,
+                    )
+                )
 
         return items
 
@@ -168,7 +203,7 @@ class NewsMonitor:
             return "bearish", score
         return "neutral", score
 
-    def correlate_spike(self, symbol: str, recent_news: list[NewsItem]) -> Optional[NewsItem]:
+    def correlate_spike(self, symbol: str, recent_news: list[NewsItem]) -> NewsItem | None:
         """Check if any recent news item matches a spiking symbol."""
         for item in reversed(recent_news):
             if symbol in item.matched_symbols:

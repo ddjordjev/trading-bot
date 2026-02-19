@@ -1,3 +1,3 @@
-from news.monitor import NewsMonitor, NewsItem
+from news.monitor import NewsItem, NewsMonitor
 
-__all__ = ["NewsMonitor", "NewsItem"]
+__all__ = ["NewsItem", "NewsMonitor"]

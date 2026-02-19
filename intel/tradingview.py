@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Optional
 
 import aiohttp
 from loguru import logger
@@ -44,7 +43,7 @@ class TVAnalysis(BaseModel):
     bb_upper: float = 0.0
     bb_lower: float = 0.0
 
-    fetched_at: datetime = datetime.now(timezone.utc)
+    fetched_at: datetime = datetime.now(UTC)
 
     @property
     def is_strong_signal(self) -> bool:
@@ -69,8 +68,9 @@ class TVAnalysis(BaseModel):
     @property
     def trend_aligned(self) -> bool:
         """MA and oscillators agree on direction."""
-        return self.oscillators_rating.value.replace("STRONG_", "") == \
-            self.moving_averages_rating.value.replace("STRONG_", "")
+        return self.oscillators_rating.value.replace("STRONG_", "") == self.moving_averages_rating.value.replace(
+            "STRONG_", ""
+        )
 
 
 class TradingViewClient:
@@ -87,12 +87,27 @@ class TradingViewClient:
     SCANNER_URL = "https://scanner.tradingview.com/crypto/scan"
 
     INDICATOR_COLUMNS = [
-        "Recommend.All", "Recommend.Other", "Recommend.MA",
-        "RSI", "RSI[1]", "MACD.macd", "MACD.signal",
-        "ADX", "ATR", "EMA20", "SMA50", "SMA200",
-        "BB.upper", "BB.lower",
-        "Rec.Stoch.RSI", "Rec.WR", "Rec.BBPower", "Rec.UO",
-        "Rec.Ichimoku", "Rec.VWMA", "Rec.HullMA9",
+        "Recommend.All",
+        "Recommend.Other",
+        "Recommend.MA",
+        "RSI",
+        "RSI[1]",
+        "MACD.macd",
+        "MACD.signal",
+        "ADX",
+        "ATR",
+        "EMA20",
+        "SMA50",
+        "SMA200",
+        "BB.upper",
+        "BB.lower",
+        "Rec.Stoch.RSI",
+        "Rec.WR",
+        "Rec.BBPower",
+        "Rec.UO",
+        "Rec.Ichimoku",
+        "Rec.VWMA",
+        "Rec.HullMA9",
     ]
 
     INTERVAL_MAP = {
@@ -106,9 +121,7 @@ class TradingViewClient:
         "1M": "|1M",
     }
 
-    def __init__(self, exchange: str = "MEXC",
-                 intervals: list[str] | None = None,
-                 poll_interval: int = 120):
+    def __init__(self, exchange: str = "MEXC", intervals: list[str] | None = None, poll_interval: int = 120):
         self.exchange = exchange.upper()
         self.intervals = intervals or ["1h", "4h", "1D"]
         self.poll_interval = poll_interval
@@ -117,20 +130,23 @@ class TradingViewClient:
 
     async def start(self) -> None:
         self._running = True
-        logger.info("TradingView client started (exchange={}, intervals={}, poll={}s)",
-                     self.exchange, self.intervals, self.poll_interval)
+        logger.info(
+            "TradingView client started (exchange={}, intervals={}, poll={}s)",
+            self.exchange,
+            self.intervals,
+            self.poll_interval,
+        )
 
     async def stop(self) -> None:
         self._running = False
 
-    async def analyze(self, symbol: str, interval: str = "1h") -> Optional[TVAnalysis]:
+    async def analyze(self, symbol: str, interval: str = "1h") -> TVAnalysis | None:
         """Get TV analysis for a single symbol at a given interval."""
         clean = symbol.upper().replace("/", "").replace("-", "")
         tv_symbol = f"{self.exchange}:{clean}"
         suffix = self.INTERVAL_MAP.get(interval, "|60")
 
-        columns = [f"{col}{suffix}" if suffix and "|" not in col else col
-                   for col in self.INDICATOR_COLUMNS]
+        columns = [f"{col}{suffix}" if suffix and "|" not in col else col for col in self.INDICATOR_COLUMNS]
 
         payload = {
             "symbols": {"tickers": [tv_symbol]},
@@ -138,16 +154,18 @@ class TradingViewClient:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
                     self.SCANNER_URL,
                     json=payload,
                     timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status != 200:
-                        logger.debug("TV scanner {} returned {}", tv_symbol, resp.status)
-                        return None
-                    data = await resp.json()
+                ) as resp,
+            ):
+                if resp.status != 200:
+                    logger.debug("TV scanner {} returned {}", tv_symbol, resp.status)
+                    return None
+                data = await resp.json()
         except Exception as e:
             logger.debug("TV fetch error for {}: {}", symbol, e)
             return None
@@ -184,27 +202,23 @@ class TradingViewClient:
             sma_200=_safe(11),
             bb_upper=_safe(12),
             bb_lower=_safe(13),
-            fetched_at=datetime.now(timezone.utc),
+            fetched_at=datetime.now(UTC),
         )
 
-        analysis.buy_count = sum(1 for i in range(14, len(vals))
-                                 if vals[i] is not None and vals[i] > 0)
-        analysis.sell_count = sum(1 for i in range(14, len(vals))
-                                  if vals[i] is not None and vals[i] < 0)
-        analysis.neutral_count = sum(1 for i in range(14, len(vals))
-                                      if vals[i] is not None and vals[i] == 0)
+        analysis.buy_count = sum(1 for i in range(14, len(vals)) if vals[i] is not None and vals[i] > 0)
+        analysis.sell_count = sum(1 for i in range(14, len(vals)) if vals[i] is not None and vals[i] < 0)
+        analysis.neutral_count = sum(1 for i in range(14, len(vals)) if vals[i] is not None and vals[i] == 0)
         analysis.total_signals = analysis.buy_count + analysis.sell_count + analysis.neutral_count
 
         self._cache.setdefault(symbol, {})[interval] = analysis
         return analysis
 
-    async def analyze_multi(self, symbols: list[str],
-                            interval: str = "1h") -> dict[str, TVAnalysis]:
+    async def analyze_multi(self, symbols: list[str], interval: str = "1h") -> dict[str, TVAnalysis]:
         """Batch analyze multiple symbols."""
         results: dict[str, TVAnalysis] = {}
         tasks = [self.analyze(sym, interval) for sym in symbols]
         analyses = await asyncio.gather(*tasks, return_exceptions=True)
-        for sym, result in zip(symbols, analyses):
+        for sym, result in zip(symbols, analyses, strict=False):
             if isinstance(result, TVAnalysis):
                 results[sym] = result
         return results
@@ -218,7 +232,7 @@ class TradingViewClient:
                 results[interval] = a
         return results
 
-    def get_cached(self, symbol: str, interval: str = "1h") -> Optional[TVAnalysis]:
+    def get_cached(self, symbol: str, interval: str = "1h") -> TVAnalysis | None:
         return self._cache.get(symbol, {}).get(interval)
 
     def consensus(self, symbol: str) -> str:
@@ -227,10 +241,8 @@ class TradingViewClient:
         if not cached:
             return "no_data"
 
-        long_votes = sum(1 for a in cached.values()
-                         if a.signal_direction == "long")
-        short_votes = sum(1 for a in cached.values()
-                          if a.signal_direction == "short")
+        long_votes = sum(1 for a in cached.values() if a.signal_direction == "long")
+        short_votes = sum(1 for a in cached.values() if a.signal_direction == "short")
         total = len(cached)
 
         if long_votes > total * 0.6:
@@ -283,8 +295,7 @@ class TradingViewClient:
             cached = self._cache.get(symbol, {})
             if not cached:
                 return f"TV ({symbol}): no data"
-            parts = [f"{itv}: {a.summary_rating.value} ({a.confidence:.0%})"
-                     for itv, a in cached.items()]
+            parts = [f"{itv}: {a.summary_rating.value} ({a.confidence:.0%})" for itv, a in cached.items()]
             return f"TV ({symbol}): {' | '.join(parts)} => {self.consensus(symbol)}"
 
         if not self._cache:

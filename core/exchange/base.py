@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
 
-from core.models import Candle, Ticker, OrderBook, Order, OrderSide, OrderType, OrderStatus, Position, MarketType
+from core.models import Candle, MarketType, Order, OrderBook, OrderSide, OrderStatus, OrderType, Position, Ticker
 
 
 def parse_order_status(status: str) -> OrderStatus:
@@ -23,8 +24,8 @@ def parse_order_status(status: str) -> OrderStatus:
 def ts_to_dt(ts: Any) -> datetime:
     """Convert a millisecond timestamp (from ccxt) to a timezone-aware datetime."""
     if ts is None:
-        return datetime.now(timezone.utc)
-    return datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        return datetime.now(UTC)
+    return datetime.fromtimestamp(ts / 1000, tz=UTC)
 
 
 class BaseExchange(ABC):
@@ -40,8 +41,7 @@ class BaseExchange(ABC):
 
     @property
     @abstractmethod
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
 
     def supports(self, market_type: str) -> bool:
         return market_type.lower() in self.SUPPORTED_MARKET_TYPES
@@ -59,22 +59,16 @@ class BaseExchange(ABC):
     # -- Market Data --
 
     @abstractmethod
-    async def fetch_ticker(self, symbol: str) -> Ticker:
-        ...
+    async def fetch_ticker(self, symbol: str) -> Ticker: ...
 
     @abstractmethod
-    async def fetch_tickers(self, symbols: Optional[list[str]] = None) -> list[Ticker]:
-        ...
+    async def fetch_tickers(self, symbols: list[str] | None = None) -> list[Ticker]: ...
 
     @abstractmethod
-    async def fetch_candles(
-        self, symbol: str, timeframe: str = "1m", limit: int = 100
-    ) -> list[Candle]:
-        ...
+    async def fetch_candles(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list[Candle]: ...
 
     @abstractmethod
-    async def fetch_order_book(self, symbol: str, limit: int = 20) -> OrderBook:
-        ...
+    async def fetch_order_book(self, symbol: str, limit: int = 20) -> OrderBook: ...
 
     # -- Account --
 
@@ -84,8 +78,7 @@ class BaseExchange(ABC):
         ...
 
     @abstractmethod
-    async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
-        ...
+    async def fetch_positions(self, symbol: str | None = None) -> list[Position]: ...
 
     # -- Trading --
 
@@ -96,36 +89,30 @@ class BaseExchange(ABC):
         side: OrderSide,
         order_type: OrderType,
         amount: float,
-        price: Optional[float] = None,
-        stop_price: Optional[float] = None,
+        price: float | None = None,
+        stop_price: float | None = None,
         leverage: int = 1,
         market_type: MarketType = MarketType.SPOT,
-    ) -> Order:
-        ...
+    ) -> Order: ...
 
     @abstractmethod
-    async def cancel_order(self, order_id: str, symbol: str) -> Order:
-        ...
+    async def cancel_order(self, order_id: str, symbol: str) -> Order: ...
 
     @abstractmethod
-    async def fetch_order(self, order_id: str, symbol: str) -> Order:
-        ...
+    async def fetch_order(self, order_id: str, symbol: str) -> Order: ...
 
     @abstractmethod
-    async def fetch_open_orders(self, symbol: Optional[str] = None) -> list[Order]:
-        ...
+    async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]: ...
 
     # -- Futures specific --
 
     @abstractmethod
-    async def set_leverage(self, symbol: str, leverage: int) -> None:
-        ...
+    async def set_leverage(self, symbol: str, leverage: int) -> None: ...
 
     # -- Symbols --
 
     @abstractmethod
-    async def get_available_symbols(self, market_type: MarketType = MarketType.SPOT) -> list[str]:
-        ...
+    async def get_available_symbols(self, market_type: MarketType = MarketType.SPOT) -> list[str]: ...
 
     # -- Stream --
 

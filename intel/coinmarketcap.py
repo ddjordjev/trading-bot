@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import aiohttp
 from loguru import logger
@@ -24,7 +23,7 @@ class CMCCoin(BaseModel):
     change_7d: float = 0.0
     cmc_rank: int = 0
     circulating_supply: float = 0.0
-    fetched_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @property
     def trading_pair(self) -> str:
@@ -56,10 +55,11 @@ class CoinMarketCapClient:
         self._losers: list[CMCCoin] = []
         self._recently_added: list[CMCCoin] = []
         self._running = False
+        self._background_tasks: list = []
 
     async def start(self) -> None:
         self._running = True
-        asyncio.create_task(self._poll_loop())
+        self._background_tasks.append(asyncio.create_task(self._poll_loop()))
         mode = "API key" if self.api_key else "public endpoints"
         logger.info("CoinMarketCap client started (mode={}, poll={}s)", mode, self.poll_interval)
 
@@ -118,16 +118,18 @@ class CoinMarketCapClient:
         """Fetch trending coins from CMC."""
         url = f"{self.WEB_API}/topsearch/rank"
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
                     url,
                     headers=self._headers(),
                     timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    if resp.status != 200:
-                        logger.debug("CMC trending returned {}", resp.status)
-                        return
-                    data = await resp.json()
+                ) as resp,
+            ):
+                if resp.status != 200:
+                    logger.debug("CMC trending returned {}", resp.status)
+                    return
+                data = await resp.json()
         except Exception as e:
             logger.debug("CMC trending error: {}", e)
             return
@@ -135,23 +137,24 @@ class CoinMarketCapClient:
         coins: list[CMCCoin] = []
         for item in data.get("data", {}).get("cryptoTopSearchRanks", [])[:30]:
             try:
-                coins.append(CMCCoin(
-                    id=item.get("id", 0),
-                    symbol=item.get("symbol", ""),
-                    name=item.get("name", ""),
-                    slug=item.get("slug", ""),
-                    price=float(item.get("priceChange", {}).get("price", 0) or 0),
-                    change_24h=float(item.get("priceChange", {}).get("priceChange24h", 0) or 0),
-                    volume_24h=float(item.get("priceChange", {}).get("volume24h", 0) or 0),
-                    market_cap=float(item.get("priceChange", {}).get("marketCap", 0) or 0),
-                ))
+                coins.append(
+                    CMCCoin(
+                        id=item.get("id", 0),
+                        symbol=item.get("symbol", ""),
+                        name=item.get("name", ""),
+                        slug=item.get("slug", ""),
+                        price=float(item.get("priceChange", {}).get("price", 0) or 0),
+                        change_24h=float(item.get("priceChange", {}).get("priceChange24h", 0) or 0),
+                        volume_24h=float(item.get("priceChange", {}).get("volume24h", 0) or 0),
+                        market_cap=float(item.get("priceChange", {}).get("marketCap", 0) or 0),
+                    )
+                )
             except (ValueError, TypeError, KeyError):
                 continue
 
         self._trending = coins
         if coins:
-            logger.debug("CMC trending: {} coins (top: {})",
-                         len(coins), ", ".join(c.symbol for c in coins[:5]))
+            logger.debug("CMC trending: {} coins (top: {})", len(coins), ", ".join(c.symbol for c in coins[:5]))
 
     async def _fetch_gainers_losers(self) -> None:
         """Fetch top gainers and losers from CMC."""
@@ -162,15 +165,18 @@ class CoinMarketCapClient:
         url = f"{self.WEB_API}/cryptocurrency/spotlight"
         params = {"dataType": "2", "limit": "30"}
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url, params=params,
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    url,
+                    params=params,
                     headers=self._headers(),
                     timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    if resp.status != 200:
-                        return
-                    data = await resp.json()
+                ) as resp,
+            ):
+                if resp.status != 200:
+                    return
+                data = await resp.json()
         except Exception:
             return
 
@@ -194,15 +200,18 @@ class CoinMarketCapClient:
         url = f"{self.API_BASE}/cryptocurrency/trending/gainers-losers"
         params = {"limit": "20", "time_period": "24h", "convert": "USD"}
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url, params=params,
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    url,
+                    params=params,
                     headers=self._headers(),
                     timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    if resp.status != 200:
-                        return
-                    data = await resp.json()
+                ) as resp,
+            ):
+                if resp.status != 200:
+                    return
+                data = await resp.json()
         except Exception:
             return
 
@@ -224,15 +233,18 @@ class CoinMarketCapClient:
         url = f"{self.WEB_API}/cryptocurrency/listing"
         params = {"start": "1", "limit": "20", "sortBy": "date_added", "sortType": "desc"}
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url, params=params,
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    url,
+                    params=params,
                     headers=self._headers(),
                     timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    if resp.status != 200:
-                        return
-                    data = await resp.json()
+                ) as resp,
+            ):
+                if resp.status != 200:
+                    return
+                data = await resp.json()
         except Exception:
             return
 
@@ -241,26 +253,28 @@ class CoinMarketCapClient:
             try:
                 quotes = item.get("quotes", [{}])
                 q = quotes[0] if quotes else {}
-                coins.append(CMCCoin(
-                    id=item.get("id", 0),
-                    symbol=item.get("symbol", ""),
-                    name=item.get("name", ""),
-                    slug=item.get("slug", ""),
-                    price=float(q.get("price", 0) or 0),
-                    volume_24h=float(q.get("volume24h", 0) or 0),
-                    market_cap=float(q.get("marketCap", 0) or 0),
-                    change_24h=float(q.get("percentChange24h", 0) or 0),
-                    change_1h=float(q.get("percentChange1h", 0) or 0),
-                    change_7d=float(q.get("percentChange7d", 0) or 0),
-                    cmc_rank=item.get("cmcRank", 0),
-                ))
+                coins.append(
+                    CMCCoin(
+                        id=item.get("id", 0),
+                        symbol=item.get("symbol", ""),
+                        name=item.get("name", ""),
+                        slug=item.get("slug", ""),
+                        price=float(q.get("price", 0) or 0),
+                        volume_24h=float(q.get("volume24h", 0) or 0),
+                        market_cap=float(q.get("marketCap", 0) or 0),
+                        change_24h=float(q.get("percentChange24h", 0) or 0),
+                        change_1h=float(q.get("percentChange1h", 0) or 0),
+                        change_7d=float(q.get("percentChange7d", 0) or 0),
+                        cmc_rank=item.get("cmcRank", 0),
+                    )
+                )
             except (ValueError, TypeError, KeyError):
                 continue
 
         self._recently_added = coins
 
     @staticmethod
-    def _parse_spotlight_coin(item: dict) -> Optional[CMCCoin]:
+    def _parse_spotlight_coin(item: dict) -> CMCCoin | None:
         try:
             return CMCCoin(
                 id=item.get("id", 0),
@@ -277,7 +291,7 @@ class CoinMarketCapClient:
             return None
 
     @staticmethod
-    def _parse_api_coin(item: dict) -> Optional[CMCCoin]:
+    def _parse_api_coin(item: dict) -> CMCCoin | None:
         try:
             quote = item.get("quote", {}).get("USD", {})
             return CMCCoin(

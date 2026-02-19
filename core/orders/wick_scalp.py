@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -19,8 +18,8 @@ class WickScalp(BaseModel):
     """
 
     symbol: str
-    main_side: str                # the PYRAMID direction ("long" or "short")
-    scalp_side: str               # opposite of main_side
+    main_side: str  # the PYRAMID direction ("long" or "short")
+    scalp_side: str  # opposite of main_side
     entry_price: float = 0.0
     amount: float = 0.0
     leverage: int = 10
@@ -28,14 +27,14 @@ class WickScalp(BaseModel):
     active: bool = False
     closed: bool = False
     pnl: float = 0.0
-    max_hold_minutes: int = 5     # very short -- just ride the wick
-    trail_pct: float = 0.3        # tight trail to lock wick profit fast
-    stop_pct: float = 1.0         # hard stop if wick doesn't materialize
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    max_hold_minutes: int = 5  # very short -- just ride the wick
+    trail_pct: float = 0.3  # tight trail to lock wick profit fast
+    stop_pct: float = 1.0  # hard stop if wick doesn't materialize
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @property
     def age_minutes(self) -> float:
-        return (datetime.now(timezone.utc) - self.created_at).total_seconds() / 60
+        return (datetime.now(UTC) - self.created_at).total_seconds() / 60
 
     @property
     def expired(self) -> bool:
@@ -54,11 +53,14 @@ class WickScalpDetector:
     counter-scalp. The scalp has a very tight trail and short max hold.
     """
 
-    def __init__(self, wick_threshold_pct: float = 1.5,
-                 velocity_candles: int = 3,
-                 min_wick_velocity: float = 0.5,
-                 scalp_budget_pct: float = 100.0,
-                 max_concurrent_scalps: int = 2):
+    def __init__(
+        self,
+        wick_threshold_pct: float = 1.5,
+        velocity_candles: int = 3,
+        min_wick_velocity: float = 0.5,
+        scalp_budget_pct: float = 100.0,
+        max_concurrent_scalps: int = 2,
+    ):
         self.wick_threshold_pct = wick_threshold_pct
         self.velocity_candles = velocity_candles
         self.min_wick_velocity = min_wick_velocity
@@ -76,8 +78,7 @@ class WickScalpDetector:
         if len(self._recent_prices[symbol]) > 20:
             self._recent_prices[symbol] = self._recent_prices[symbol][-20:]
 
-    def check_for_wick(self, symbol: str, main_side: str,
-                       current_price: float, entry_price: float) -> Optional[WickScalp]:
+    def check_for_wick(self, symbol: str, main_side: str, current_price: float, entry_price: float) -> WickScalp | None:
         """Check if a wick is happening that we can scalp.
 
         Returns a WickScalp if we should open one, None otherwise.
@@ -93,7 +94,7 @@ class WickScalpDetector:
         if len(prices) < self.velocity_candles + 1:
             return None
 
-        recent = prices[-(self.velocity_candles + 1):]
+        recent = prices[-(self.velocity_candles + 1) :]
         velocity = self._calculate_velocity(recent, main_side)
 
         if velocity < self.min_wick_velocity:
@@ -116,21 +117,30 @@ class WickScalpDetector:
             scalp_side=scalp_side,
         )
 
-        logger.info("WICK DETECTED on {} | main={} | velocity={:.2f}%/candle | "
-                     "opening {} scalp to ride the wick",
-                     symbol, main_side, velocity, scalp_side)
+        logger.info(
+            "WICK DETECTED on {} | main={} | velocity={:.2f}%/candle | opening {} scalp to ride the wick",
+            symbol,
+            main_side,
+            velocity,
+            scalp_side,
+        )
 
         return scalp
 
-    def activate(self, symbol: str, scalp: WickScalp, entry_price: float,
-                 amount: float, order_id: str) -> None:
+    def activate(self, symbol: str, scalp: WickScalp, entry_price: float, amount: float, order_id: str) -> None:
         scalp.entry_price = entry_price
         scalp.amount = amount
         scalp.order_id = order_id
         scalp.active = True
         self._active_scalps[symbol] = scalp
-        logger.info("Wick scalp ACTIVE on {} | {} @ {:.6f} | trail={:.1f}% | max_hold={}m",
-                     symbol, scalp.scalp_side, entry_price, scalp.trail_pct, scalp.max_hold_minutes)
+        logger.info(
+            "Wick scalp ACTIVE on {} | {} @ {:.6f} | trail={:.1f}% | max_hold={}m",
+            symbol,
+            scalp.scalp_side,
+            entry_price,
+            scalp.trail_pct,
+            scalp.max_hold_minutes,
+        )
 
     def close(self, symbol: str, pnl: float = 0.0) -> None:
         scalp = self._active_scalps.get(symbol)
@@ -148,7 +158,7 @@ class WickScalpDetector:
                 expired.append(sym)
         return expired
 
-    def get(self, symbol: str) -> Optional[WickScalp]:
+    def get(self, symbol: str) -> WickScalp | None:
         return self._active_scalps.get(symbol)
 
     def has_active(self, symbol: str) -> bool:
@@ -157,10 +167,7 @@ class WickScalpDetector:
 
     def cleanup(self) -> None:
         """Remove closed scalps older than 10 minutes."""
-        to_remove = [
-            sym for sym, s in self._active_scalps.items()
-            if s.closed and s.age_minutes > 10
-        ]
+        to_remove = [sym for sym, s in self._active_scalps.items() if s.closed and s.age_minutes > 10]
         for sym in to_remove:
             del self._active_scalps[sym]
 
@@ -179,7 +186,7 @@ class WickScalpDetector:
             if main_side == "long":
                 moves.append(-pct)  # negative price move = against long
             else:
-                moves.append(pct)   # positive price move = against short
+                moves.append(pct)  # positive price move = against short
 
         against_moves = [m for m in moves if m > 0]
         if not against_moves:

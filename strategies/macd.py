@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import ta
 
-from core.models import Candle, Ticker, Signal, SignalAction
+from core.models import Candle, Signal, SignalAction, Ticker
 from strategies.base import BaseStrategy
 
 
@@ -25,15 +23,16 @@ class MACDStrategy(BaseStrategy):
         self.slow = int(params.get("slow", 26))
         self.signal_period = int(params.get("signal_period", 9))
 
-    def analyze(self, candles: list[Candle], ticker: Optional[Ticker] = None) -> Optional[Signal]:
+    def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:
         df = self.candles_to_df(candles)
         if len(df) < self.slow + self.signal_period:
             return None
 
-        macd_ind = ta.trend.MACD(df["close"], window_slow=self.slow,
-                                  window_fast=self.fast, window_sign=self.signal_period)
-        macd_line = macd_ind.macd()
-        signal_line = macd_ind.macd_signal()
+        macd_ind = ta.trend.MACD(
+            df["close"], window_slow=self.slow, window_fast=self.fast, window_sign=self.signal_period
+        )
+        _macd_line = macd_ind.macd()
+        _signal_line = macd_ind.macd_signal()
         histogram = macd_ind.macd_diff()
 
         curr_hist = histogram.iloc[-1]
@@ -42,18 +41,26 @@ class MACDStrategy(BaseStrategy):
 
         if prev_hist <= 0 < curr_hist:
             return Signal(
-                symbol=self.symbol, action=SignalAction.BUY,
+                symbol=self.symbol,
+                action=SignalAction.BUY,
                 strength=min(1.0, abs(curr_hist) / price * 1000),
-                strategy=self.name, reason="MACD bullish crossover",
-                suggested_price=price, market_type=self.market_type, leverage=self.leverage,
+                strategy=self.name,
+                reason="MACD bullish crossover",
+                suggested_price=price,
+                market_type=self.market_type,
+                leverage=self.leverage,
             )
 
         if prev_hist >= 0 > curr_hist:
             return Signal(
-                symbol=self.symbol, action=SignalAction.SELL,
+                symbol=self.symbol,
+                action=SignalAction.SELL,
                 strength=min(1.0, abs(curr_hist) / price * 1000),
-                strategy=self.name, reason="MACD bearish crossover",
-                suggested_price=price, market_type=self.market_type, leverage=self.leverage,
+                strategy=self.name,
+                reason="MACD bearish crossover",
+                suggested_price=price,
+                market_type=self.market_type,
+                leverage=self.leverage,
             )
 
         return None

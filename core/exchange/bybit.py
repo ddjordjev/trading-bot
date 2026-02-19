@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import ccxt.async_support as ccxt
 from loguru import logger
 
 from core.exchange.base import BaseExchange, parse_order_status, ts_to_dt
 from core.models import (
-    Candle, Ticker, OrderBook, Order, OrderSide, OrderType, OrderStatus,
-    Position, MarketType,
+    Candle,
+    MarketType,
+    Order,
+    OrderBook,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Position,
+    Ticker,
 )
 
 
@@ -21,18 +29,22 @@ class BybitExchange(BaseExchange):
 
     def __init__(self, api_key: str = "", api_secret: str = "", sandbox: bool = True):
         super().__init__(api_key, api_secret, sandbox)
-        self._spot = ccxt.bybit({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "options": {"defaultType": "spot"},
-            "enableRateLimit": True,
-        })
-        self._futures = ccxt.bybit({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "options": {"defaultType": "linear"},
-            "enableRateLimit": True,
-        })
+        self._spot = ccxt.bybit(
+            {
+                "apiKey": api_key,
+                "secret": api_secret,
+                "options": {"defaultType": "spot"},
+                "enableRateLimit": True,
+            }
+        )
+        self._futures = ccxt.bybit(
+            {
+                "apiKey": api_key,
+                "secret": api_secret,
+                "options": {"defaultType": "linear"},
+                "enableRateLimit": True,
+            }
+        )
         if sandbox:
             self._spot.set_sandbox_mode(True)
             self._futures.set_sandbox_mode(True)
@@ -50,8 +62,7 @@ class BybitExchange(BaseExchange):
         logger.info("Connecting to Bybit (sandbox={})", self.sandbox)
         await self._spot.load_markets()
         await self._futures.load_markets()
-        logger.info("Bybit markets loaded: {} spot, {} futures",
-                     len(self._spot.markets), len(self._futures.markets))
+        logger.info("Bybit markets loaded: {} spot, {} futures", len(self._spot.markets), len(self._futures.markets))
 
     async def disconnect(self) -> None:
         for task in self._watchers:
@@ -72,12 +83,14 @@ class BybitExchange(BaseExchange):
             timestamp=ts_to_dt(data.get("timestamp")),
         )
 
-    async def fetch_tickers(self, symbols: Optional[list[str]] = None) -> list[Ticker]:
+    async def fetch_tickers(self, symbols: list[str] | None = None) -> list[Ticker]:
         raw = await self._spot.fetch_tickers(symbols)
         return [
             Ticker(
-                symbol=sym, bid=d.get("bid", 0) or 0,
-                ask=d.get("ask", 0) or 0, last=d.get("last", 0) or 0,
+                symbol=sym,
+                bid=d.get("bid", 0) or 0,
+                ask=d.get("ask", 0) or 0,
+                last=d.get("last", 0) or 0,
                 volume_24h=d.get("quoteVolume", 0) or 0,
                 change_pct_24h=d.get("percentage", 0) or 0,
                 timestamp=ts_to_dt(d.get("timestamp")),
@@ -85,15 +98,9 @@ class BybitExchange(BaseExchange):
             for sym, d in raw.items()
         ]
 
-    async def fetch_candles(
-        self, symbol: str, timeframe: str = "1m", limit: int = 100
-    ) -> list[Candle]:
+    async def fetch_candles(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list[Candle]:
         data = await self._spot.fetch_ohlcv(symbol, timeframe, limit=limit)
-        return [
-            Candle(timestamp=ts_to_dt(c[0]), open=c[1], high=c[2],
-                   low=c[3], close=c[4], volume=c[5])
-            for c in data
-        ]
+        return [Candle(timestamp=ts_to_dt(c[0]), open=c[1], high=c[2], low=c[3], close=c[4], volume=c[5]) for c in data]
 
     async def fetch_order_book(self, symbol: str, limit: int = 20) -> OrderBook:
         data = await self._spot.fetch_order_book(symbol, limit)
@@ -112,10 +119,9 @@ class BybitExchange(BaseExchange):
                 result[asset] = float(info["free"])
         return result
 
-    async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
+    async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
         try:
-            raw = await self._futures.fetch_positions(
-                symbols=[symbol] if symbol else None)
+            raw = await self._futures.fetch_positions(symbols=[symbol] if symbol else None)
         except Exception:
             return []
 
@@ -125,22 +131,29 @@ class BybitExchange(BaseExchange):
             if amt == 0:
                 continue
             side_str = p.get("side", "long")
-            positions.append(Position(
-                symbol=p.get("symbol", symbol or ""),
-                side=OrderSide.BUY if side_str == "long" else OrderSide.SELL,
-                amount=amt,
-                entry_price=float(p.get("entryPrice", 0) or 0),
-                current_price=float(p.get("markPrice", 0) or 0),
-                leverage=int(p.get("leverage", 1) or 1),
-                market_type="futures",
-                unrealized_pnl=float(p.get("unrealizedPnl", 0) or 0),
-            ))
+            positions.append(
+                Position(
+                    symbol=p.get("symbol", symbol or ""),
+                    side=OrderSide.BUY if side_str == "long" else OrderSide.SELL,
+                    amount=amt,
+                    entry_price=float(p.get("entryPrice", 0) or 0),
+                    current_price=float(p.get("markPrice", 0) or 0),
+                    leverage=int(p.get("leverage", 1) or 1),
+                    market_type="futures",
+                    unrealized_pnl=float(p.get("unrealizedPnl", 0) or 0),
+                )
+            )
         return positions
 
     async def place_order(
-        self, symbol: str, side: OrderSide, order_type: OrderType,
-        amount: float, price: Optional[float] = None,
-        stop_price: Optional[float] = None, leverage: int = 1,
+        self,
+        symbol: str,
+        side: OrderSide,
+        order_type: OrderType,
+        amount: float,
+        price: float | None = None,
+        stop_price: float | None = None,
+        leverage: int = 1,
         market_type: MarketType = MarketType.SPOT,
     ) -> Order:
         client = self._client(market_type)
@@ -151,28 +164,45 @@ class BybitExchange(BaseExchange):
         if market_type == MarketType.FUTURES:
             await self.set_leverage(symbol, leverage)
 
-        logger.info("Placing {} {} {} {} @ {} (leverage={})",
-                     market_type.value, side.value, ccxt_type, symbol,
-                     price or "market", leverage)
+        logger.info(
+            "Placing {} {} {} {} @ {} (leverage={})",
+            market_type.value,
+            side.value,
+            ccxt_type,
+            symbol,
+            price or "market",
+            leverage,
+        )
 
         data = await client.create_order(
-            symbol=symbol, type=ccxt_type, side=side.value,
-            amount=amount, price=price, params=params,
+            symbol=symbol,
+            type=ccxt_type,
+            side=side.value,
+            amount=amount,
+            price=price,
+            params=params,
         )
         return Order(
-            id=str(data.get("id", "")), symbol=symbol, side=side,
-            order_type=order_type, amount=amount, price=price,
+            id=str(data.get("id", "")),
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            amount=amount,
+            price=price,
             stop_price=stop_price,
             status=parse_order_status(data.get("status", "open")),
             filled=float(data.get("filled", 0) or 0),
             average_price=float(data.get("average", 0) or 0),
-            leverage=leverage, market_type=market_type.value,
+            leverage=leverage,
+            market_type=market_type.value,
         )
 
     async def cancel_order(self, order_id: str, symbol: str) -> Order:
         data = await self._spot.cancel_order(order_id, symbol)
         return Order(
-            id=order_id, symbol=symbol, side=OrderSide.BUY,
+            id=order_id,
+            symbol=symbol,
+            side=OrderSide.BUY,
             order_type=OrderType.LIMIT,
             amount=float(data.get("amount", 0) or 0),
             status=OrderStatus.CANCELLED,
@@ -181,7 +211,8 @@ class BybitExchange(BaseExchange):
     async def fetch_order(self, order_id: str, symbol: str) -> Order:
         data = await self._spot.fetch_order(order_id, symbol)
         return Order(
-            id=order_id, symbol=symbol,
+            id=order_id,
+            symbol=symbol,
             side=OrderSide.BUY if data.get("side") == "buy" else OrderSide.SELL,
             order_type=OrderType.MARKET if data.get("type") == "market" else OrderType.LIMIT,
             amount=float(data.get("amount", 0) or 0),
@@ -190,11 +221,12 @@ class BybitExchange(BaseExchange):
             average_price=float(data.get("average", 0) or 0),
         )
 
-    async def fetch_open_orders(self, symbol: Optional[str] = None) -> list[Order]:
+    async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:
         raw = await self._spot.fetch_open_orders(symbol)
         return [
             Order(
-                id=str(d.get("id", "")), symbol=d.get("symbol", ""),
+                id=str(d.get("id", "")),
+                symbol=d.get("symbol", ""),
                 side=OrderSide.BUY if d.get("side") == "buy" else OrderSide.SELL,
                 order_type=OrderType.MARKET if d.get("type") == "market" else OrderType.LIMIT,
                 amount=float(d.get("amount", 0) or 0),
@@ -221,8 +253,10 @@ class BybitExchange(BaseExchange):
                 try:
                     data = await self._spot.watch_ticker(symbol)
                     ticker = Ticker(
-                        symbol=symbol, bid=data.get("bid", 0) or 0,
-                        ask=data.get("ask", 0) or 0, last=data.get("last", 0) or 0,
+                        symbol=symbol,
+                        bid=data.get("bid", 0) or 0,
+                        ask=data.get("ask", 0) or 0,
+                        last=data.get("last", 0) or 0,
                         volume_24h=data.get("quoteVolume", 0) or 0,
                         change_pct_24h=data.get("percentage", 0) or 0,
                         timestamp=ts_to_dt(data.get("timestamp")),
@@ -233,6 +267,7 @@ class BybitExchange(BaseExchange):
                 except Exception as e:
                     logger.error("Ticker watch error for {}: {}", symbol, e)
                     await asyncio.sleep(5)
+
         task = asyncio.create_task(_loop())
         self._watchers.append(task)
 
@@ -243,8 +278,12 @@ class BybitExchange(BaseExchange):
                     data = await self._spot.watch_ohlcv(symbol, timeframe)
                     for c in data:
                         candle = Candle(
-                            timestamp=ts_to_dt(c[0]), open=c[1], high=c[2],
-                            low=c[3], close=c[4], volume=c[5],
+                            timestamp=ts_to_dt(c[0]),
+                            open=c[1],
+                            high=c[2],
+                            low=c[3],
+                            close=c[4],
+                            volume=c[5],
                         )
                         await callback(candle)
                 except asyncio.CancelledError:
@@ -252,5 +291,6 @@ class BybitExchange(BaseExchange):
                 except Exception as e:
                     logger.error("Candle watch error for {}: {}", symbol, e)
                     await asyncio.sleep(5)
+
         task = asyncio.create_task(_loop())
         self._watchers.append(task)

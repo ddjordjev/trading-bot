@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import aiohttp
 from loguru import logger
@@ -11,10 +10,10 @@ from pydantic import BaseModel
 
 class OnChainData(BaseModel):
     exchange_netflow_btc: float = 0.0  # positive = inflows (selling pressure)
-    nupl: float = 0.5                   # Net Unrealized Profit/Loss
-    sopr: float = 1.0                   # Spent Output Profit Ratio
+    nupl: float = 0.5  # Net Unrealized Profit/Loss
+    sopr: float = 1.0  # Spent Output Profit Ratio
     active_addresses_24h: int = 0
-    timestamp: datetime = datetime.now(timezone.utc)
+    timestamp: datetime = datetime.now(UTC)
 
     @property
     def is_distribution(self) -> bool:
@@ -62,20 +61,20 @@ class GlassnodeClient:
         self.poll_interval = poll_interval
         self._data: dict[str, OnChainData] = {}
         self._running = False
+        self._background_tasks: list = []
 
     async def start(self) -> None:
         if not self.api_key:
-            logger.warning("Glassnode: no API key set, on-chain metrics disabled. "
-                           "Get a free key at glassnode.com")
+            logger.warning("Glassnode: no API key set, on-chain metrics disabled. Get a free key at glassnode.com")
             return
         self._running = True
-        asyncio.create_task(self._poll_loop())
+        self._background_tasks.append(asyncio.create_task(self._poll_loop()))
         logger.info("Glassnode monitor started (poll={}s)", self.poll_interval)
 
     async def stop(self) -> None:
         self._running = False
 
-    def get(self, symbol: str = "BTC") -> Optional[OnChainData]:
+    def get(self, symbol: str = "BTC") -> OnChainData | None:
         clean = symbol.upper().replace("/USDT", "").replace("USDT", "")
         return self._data.get(clean)
 
@@ -110,7 +109,7 @@ class GlassnodeClient:
 
     async def _fetch_asset(self, asset: str) -> None:
         params_base = {"a": asset, "api_key": self.api_key}
-        data = OnChainData(timestamp=datetime.now(timezone.utc))
+        data = OnChainData(timestamp=datetime.now(UTC))
         timeout = aiohttp.ClientTimeout(total=15)
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -169,11 +168,19 @@ class GlassnodeClient:
         self._data[asset] = data
 
         if data.is_distribution:
-            logger.warning("GLASSNODE {}: distribution phase (netflow={:.0f}, NUPL={:.2f})",
-                           asset, data.exchange_netflow_btc, data.nupl)
+            logger.warning(
+                "GLASSNODE {}: distribution phase (netflow={:.0f}, NUPL={:.2f})",
+                asset,
+                data.exchange_netflow_btc,
+                data.nupl,
+            )
         elif data.is_accumulation:
-            logger.info("GLASSNODE {}: accumulation phase (netflow={:.0f}, NUPL={:.2f})",
-                        asset, data.exchange_netflow_btc, data.nupl)
+            logger.info(
+                "GLASSNODE {}: accumulation phase (netflow={:.0f}, NUPL={:.2f})",
+                asset,
+                data.exchange_netflow_btc,
+                data.nupl,
+            )
 
     def summary(self) -> str:
         parts = []
@@ -183,6 +190,5 @@ class GlassnodeClient:
                 tag = " ** DISTRIBUTION **"
             elif d.is_accumulation:
                 tag = " ** ACCUMULATION **"
-            parts.append(f"{sym}: NUPL={d.nupl:.2f} SOPR={d.sopr:.3f} "
-                         f"netflow={d.exchange_netflow_btc:+.0f}{tag}")
+            parts.append(f"{sym}: NUPL={d.nupl:.2f} SOPR={d.sopr:.3f} netflow={d.exchange_netflow_btc:+.0f}{tag}")
         return "Glassnode: " + " | ".join(parts) if parts else "Glassnode: no data (set GLASSNODE_API_KEY)"

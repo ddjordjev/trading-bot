@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Optional
 
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -17,8 +16,8 @@ class ScalePhase(str, Enum):
 
 
 class ScaleMode(str, Enum):
-    WINNERS = "winners"     # add to winning positions only (rare, ultra-short scalps)
-    PYRAMID = "pyramid"     # DCA down: buy dips, average down, lever up on recovery (DEFAULT)
+    WINNERS = "winners"  # add to winning positions only (rare, ultra-short scalps)
+    PYRAMID = "pyramid"  # DCA down: buy dips, average down, lever up on recovery (DEFAULT)
 
 
 class ScaledPosition(BaseModel):
@@ -46,15 +45,15 @@ class ScaledPosition(BaseModel):
     mode: ScaleMode = ScaleMode.WINNERS
 
     # Leverage management for PYRAMID mode
-    initial_leverage: int = 1      # start low/no leverage
-    target_leverage: int = 10      # ramp up to this when in profit
+    initial_leverage: int = 1  # start low/no leverage
+    target_leverage: int = 10  # ramp up to this when in profit
     current_leverage: int = 1
     leverage_raised: bool = False
 
     # Position sizing: fixed dollar amounts, not percentages
-    initial_risk_amount: float = 50.0     # $50 first entry
-    max_notional: float = 100_000.0       # stop adding at $100K leveraged value
-    current_size: float = 0.0             # quantity of asset held
+    initial_risk_amount: float = 50.0  # $50 first entry
+    max_notional: float = 100_000.0  # stop adding at $100K leveraged value
+    current_size: float = 0.0  # quantity of asset held
     avg_entry_price: float = 0.0
     phase: ScalePhase = ScalePhase.INITIAL
     adds: int = 0
@@ -65,8 +64,8 @@ class ScaledPosition(BaseModel):
     pullback_tolerance_pct: float = 0.5
 
     # PYRAMID mode conditions
-    dca_interval_pct: float = 2.0   # add every 2% the price drops
-    dca_multiplier: float = 1.5     # each DCA add is 1.5x the previous
+    dca_interval_pct: float = 2.0  # add every 2% the price drops
+    dca_multiplier: float = 1.5  # each DCA add is 1.5x the previous
     profit_to_lever_up_pct: float = 1.0
     partial_take_pct: float = 30.0
     breakeven_after_lever: bool = True
@@ -75,7 +74,7 @@ class ScaledPosition(BaseModel):
     peak_since_entry: float = 0.0
     trough_since_entry: float = 0.0
     partial_taken: bool = False
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @property
     def notional_value(self) -> float:
@@ -118,7 +117,7 @@ class ScaledPosition(BaseModel):
 
         if self.mode == ScaleMode.PYRAMID:
             base_dollars = self.initial_risk_amount
-            add_dollars = base_dollars * (self.dca_multiplier ** self.adds)
+            add_dollars = base_dollars * (self.dca_multiplier**self.adds)
         else:
             add_dollars = self.initial_risk_amount * (1 + self.adds * 0.5)
 
@@ -133,8 +132,7 @@ class ScaledPosition(BaseModel):
         if not self.has_room_to_add:
             if self.phase != ScalePhase.FULL:
                 self.phase = ScalePhase.FULL
-                logger.info("{} hit notional cap ${:.0f} -- no more adds",
-                            self.symbol, self.max_notional)
+                logger.info("{} hit notional cap ${:.0f} -- no more adds", self.symbol, self.max_notional)
             return False
 
         if self.mode == ScaleMode.PYRAMID:
@@ -144,26 +142,29 @@ class ScaledPosition(BaseModel):
     def _should_add_winners(self, current_price: float) -> bool:
         profit_pct = self._current_profit_pct(current_price)
         if profit_pct < self.min_profit_to_add_pct:
-            logger.debug("Scale {}: WINNERS no add — profit {:.2f}% < min {:.1f}%",
-                         self.symbol, profit_pct, self.min_profit_to_add_pct)
+            logger.debug(
+                "Scale {}: WINNERS no add — profit {:.2f}% < min {:.1f}%",
+                self.symbol,
+                profit_pct,
+                self.min_profit_to_add_pct,
+            )
             return False
 
         if self.peak_since_entry > 0:
             peak_profit = self._profit_at_price(self.peak_since_entry)
             if peak_profit - profit_pct > self.pullback_tolerance_pct:
-                logger.debug("Scale {}: WINNERS no add — pullback {:.2f}% from peak",
-                             self.symbol, peak_profit - profit_pct)
+                logger.debug(
+                    "Scale {}: WINNERS no add — pullback {:.2f}% from peak", self.symbol, peak_profit - profit_pct
+                )
                 return False
 
         if self.last_add_price > 0:
             dist = abs(current_price - self.last_add_price) / self.last_add_price * 100
             if dist < self.min_profit_to_add_pct * 0.5:
-                logger.debug("Scale {}: WINNERS no add — too close to last add ({:.2f}%)",
-                             self.symbol, dist)
+                logger.debug("Scale {}: WINNERS no add — too close to last add ({:.2f}%)", self.symbol, dist)
                 return False
 
-        logger.debug("Scale {}: WINNERS add OK — profit {:.2f}%, adds={}",
-                     self.symbol, profit_pct, self.adds)
+        logger.debug("Scale {}: WINNERS add OK — profit {:.2f}%, adds={}", self.symbol, profit_pct, self.adds)
         return True
 
     def _should_add_pyramid(self, current_price: float) -> bool:
@@ -179,24 +180,41 @@ class ScaledPosition(BaseModel):
 
         if self.side == "long":
             drop_pct = (self.last_add_price - current_price) / self.last_add_price * 100
-            trough_drop = (self.last_add_price - self.trough_since_entry) / self.last_add_price * 100 if self.trough_since_entry > 0 else 0
+            trough_drop = (
+                (self.last_add_price - self.trough_since_entry) / self.last_add_price * 100
+                if self.trough_since_entry > 0
+                else 0
+            )
             bounced_from_wick = trough_drop >= self.dca_interval_pct and drop_pct < trough_drop * 0.7
         else:
             drop_pct = (current_price - self.last_add_price) / self.last_add_price * 100
-            trough_drop = (self.trough_since_entry - self.last_add_price) / self.last_add_price * 100 if self.trough_since_entry > 0 else 0
+            trough_drop = (
+                (self.trough_since_entry - self.last_add_price) / self.last_add_price * 100
+                if self.trough_since_entry > 0
+                else 0
+            )
             bounced_from_wick = trough_drop >= self.dca_interval_pct and drop_pct < trough_drop * 0.7
 
         if bounced_from_wick:
-            logger.info("Wick-through detected on {} | wicked {:.1f}% but now only {:.1f}% down -- "
-                        "liquidity grab done, good DCA point", self.symbol, trough_drop, drop_pct)
+            logger.info(
+                "Wick-through detected on {} | wicked {:.1f}% but now only {:.1f}% down -- "
+                "liquidity grab done, good DCA point",
+                self.symbol,
+                trough_drop,
+                drop_pct,
+            )
             return True
 
         should = drop_pct >= self.dca_interval_pct
         logger.debug(
-            "Scale {}: PYRAMID check — drop={:.2f}% interval={:.1f}% trough={:.2f}% "
-            "price={:.6f} last_add={:.6f} => {}",
-            self.symbol, drop_pct, self.dca_interval_pct, trough_drop,
-            current_price, self.last_add_price, "ADD" if should else "wait",
+            "Scale {}: PYRAMID check — drop={:.2f}% interval={:.1f}% trough={:.2f}% price={:.6f} last_add={:.6f} => {}",
+            self.symbol,
+            drop_pct,
+            self.dca_interval_pct,
+            trough_drop,
+            current_price,
+            self.last_add_price,
+            "ADD" if should else "wait",
         )
         return should
 
@@ -211,10 +229,14 @@ class ScaledPosition(BaseModel):
         profit_pct = self._current_profit_pct(current_price)
         should = profit_pct >= self.profit_to_lever_up_pct
         if should:
-            logger.debug("Scale {}: lever-up ready — profit {:.2f}% >= {:.1f}%, "
-                         "lev {}x -> {}x",
-                         self.symbol, profit_pct, self.profit_to_lever_up_pct,
-                         self.current_leverage, self.target_leverage)
+            logger.debug(
+                "Scale {}: lever-up ready — profit {:.2f}% >= {:.1f}%, lev {}x -> {}x",
+                self.symbol,
+                profit_pct,
+                self.profit_to_lever_up_pct,
+                self.current_leverage,
+                self.target_leverage,
+            )
         return should
 
     def should_take_partial(self, current_price: float) -> bool:
@@ -229,9 +251,13 @@ class ScaledPosition(BaseModel):
         threshold = self.profit_to_lever_up_pct * 2
         should = profit_pct >= threshold
         if should:
-            logger.debug("Scale {}: partial take ready — profit {:.2f}% >= {:.1f}%, "
-                         "taking {:.0f}% off",
-                         self.symbol, profit_pct, threshold, self.partial_take_pct)
+            logger.debug(
+                "Scale {}: partial take ready — profit {:.2f}% >= {:.1f}%, taking {:.0f}% off",
+                self.symbol,
+                profit_pct,
+                threshold,
+                self.partial_take_pct,
+            )
         return should
 
     def get_partial_take_amount(self) -> float:
@@ -250,23 +276,39 @@ class ScaledPosition(BaseModel):
             self.phase = ScalePhase.ADDING
 
         mode_tag = f" [{self.mode.value}]"
-        logger.info("Scaled into {} - add #{} | size: {:.4f} | notional: ${:.0f}/${:.0f}K "
-                     "({:.0f}%) | avg: {:.6f}{}",
-                     self.symbol, self.adds, self.current_size,
-                     self.notional_value, self.max_notional / 1000,
-                     self.fill_pct, self.avg_entry_price, mode_tag)
+        logger.info(
+            "Scaled into {} - add #{} | size: {:.4f} | notional: ${:.0f}/${:.0f}K ({:.0f}%) | avg: {:.6f}{}",
+            self.symbol,
+            self.adds,
+            self.current_size,
+            self.notional_value,
+            self.max_notional / 1000,
+            self.fill_pct,
+            self.avg_entry_price,
+            mode_tag,
+        )
 
     def record_partial_close(self, amount: float) -> None:
         self.current_size = max(0, self.current_size - amount)
         self.partial_taken = True
-        logger.info("Partial close on {} | removed {:.4f} | remaining: {:.4f} | notional: ${:.0f}",
-                     self.symbol, amount, self.current_size, self.notional_value)
+        logger.info(
+            "Partial close on {} | removed {:.4f} | remaining: {:.4f} | notional: ${:.0f}",
+            self.symbol,
+            amount,
+            self.current_size,
+            self.notional_value,
+        )
 
     def record_lever_up(self, new_leverage: int) -> None:
         self.current_leverage = new_leverage
         self.leverage_raised = True
-        logger.info("LEVERAGE RAISED on {} | {} -> {}x | notional now: ${:.0f}",
-                     self.symbol, self.initial_leverage, new_leverage, self.notional_value)
+        logger.info(
+            "LEVERAGE RAISED on {} | {} -> {}x | notional now: ${:.0f}",
+            self.symbol,
+            self.initial_leverage,
+            new_leverage,
+            self.notional_value,
+        )
 
     def update_peak(self, current_price: float) -> None:
         if self.side == "long":
@@ -292,7 +334,7 @@ class ScaledPosition(BaseModel):
     def status_line(self) -> str:
         return (
             f"{self.symbol} [{self.mode.value}] phase={self.phase.value} "
-            f"adds={self.adds} notional=${self.notional_value:.0f}/${self.max_notional/1000:.0f}K "
+            f"adds={self.adds} notional=${self.notional_value:.0f}/${self.max_notional / 1000:.0f}K "
             f"({self.fill_pct:.0f}%) avg={self.avg_entry_price:.6f} lev={self.current_leverage}x "
             f"lev_raised={self.leverage_raised} partial={self.partial_taken} "
             f"low_liq={self.low_liquidity}"
@@ -306,25 +348,33 @@ class PositionScaler:
     as the position grows, stop when leveraged notional hits the cap ($100K).
     """
 
-    def __init__(self, initial_risk_amount: float = 50.0,
-                 max_notional: float = 100_000.0,
-                 gambling_budget_pct: float = 2.0):
+    def __init__(
+        self, initial_risk_amount: float = 50.0, max_notional: float = 100_000.0, gambling_budget_pct: float = 2.0
+    ):
         self.initial_risk_amount = initial_risk_amount
         self.max_notional = max_notional
         self.gambling_budget_pct = gambling_budget_pct
         self._positions: dict[str, ScaledPosition] = {}
 
-    def create(self, symbol: str, side: str, strategy: str,
-               market_type: str = "futures", leverage: int = 10,
-               low_liquidity: bool = False,
-               mode: ScaleMode = ScaleMode.WINNERS,
-               dca_interval_pct: float = 2.0,
-               dca_multiplier: float = 1.5) -> ScaledPosition:
+    def create(
+        self,
+        symbol: str,
+        side: str,
+        strategy: str,
+        market_type: str = "futures",
+        leverage: int = 10,
+        low_liquidity: bool = False,
+        mode: ScaleMode = ScaleMode.WINNERS,
+        dca_interval_pct: float = 2.0,
+        dca_multiplier: float = 1.5,
+    ) -> ScaledPosition:
 
         if mode == ScaleMode.PYRAMID:
             init_lev = max(1, leverage // 5)
             sp = ScaledPosition(
-                symbol=symbol, side=side, strategy=strategy,
+                symbol=symbol,
+                side=side,
+                strategy=strategy,
                 market_type=market_type,
                 mode=ScaleMode.PYRAMID,
                 initial_leverage=init_lev,
@@ -338,9 +388,13 @@ class PositionScaler:
             )
         else:
             sp = ScaledPosition(
-                symbol=symbol, side=side, strategy=strategy,
-                market_type=market_type, mode=ScaleMode.WINNERS,
-                initial_leverage=leverage, target_leverage=leverage,
+                symbol=symbol,
+                side=side,
+                strategy=strategy,
+                market_type=market_type,
+                mode=ScaleMode.WINNERS,
+                initial_leverage=leverage,
+                target_leverage=leverage,
                 current_leverage=leverage,
                 initial_risk_amount=self.initial_risk_amount,
                 max_notional=self.max_notional,
@@ -351,7 +405,7 @@ class PositionScaler:
         self._positions[symbol] = sp
         return sp
 
-    def get(self, symbol: str) -> Optional[ScaledPosition]:
+    def get(self, symbol: str) -> ScaledPosition | None:
         return self._positions.get(symbol)
 
     def remove(self, symbol: str) -> None:

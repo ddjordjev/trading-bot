@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import aiohttp
 from loguru import logger
@@ -25,7 +24,7 @@ class GeckoCoin(BaseModel):
     ath: float = 0.0
     ath_change_pct: float = 0.0
     sparkline_7d: list[float] = []
-    fetched_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @property
     def trading_pair(self) -> str:
@@ -75,6 +74,7 @@ class CoinGeckoClient:
         self._top_by_volume: list[GeckoCoin] = []
         self._top_gainers: list[GeckoCoin] = []
         self._running = False
+        self._background_tasks: list = []
 
     @property
     def _base_url(self) -> str:
@@ -90,7 +90,7 @@ class CoinGeckoClient:
 
     async def start(self) -> None:
         self._running = True
-        asyncio.create_task(self._poll_loop())
+        self._background_tasks.append(asyncio.create_task(self._poll_loop()))
         mode = "Pro API" if self.api_key else "free API"
         logger.info("CoinGecko client started (mode={}, poll={}s)", mode, self.poll_interval)
 
@@ -136,16 +136,18 @@ class CoinGeckoClient:
         """Fetch trending search coins from CoinGecko."""
         url = f"{self._base_url}/search/trending"
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
                     url,
                     params=self._params(),
                     timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    if resp.status != 200:
-                        logger.debug("CoinGecko trending returned {}", resp.status)
-                        return
-                    data = await resp.json()
+                ) as resp,
+            ):
+                if resp.status != 200:
+                    logger.debug("CoinGecko trending returned {}", resp.status)
+                    return
+                data = await resp.json()
         except Exception as e:
             logger.debug("CoinGecko trending error: {}", e)
             return
@@ -154,53 +156,63 @@ class CoinGeckoClient:
         for item in data.get("coins", []):
             coin_data = item.get("item", {})
             try:
-                coins.append(GeckoCoin(
-                    id=coin_data.get("id", ""),
-                    symbol=coin_data.get("symbol", ""),
-                    name=coin_data.get("name", ""),
-                    price=float(coin_data.get("data", {}).get("price", 0) or 0),
-                    market_cap=float(coin_data.get("data", {}).get("market_cap", "0").replace(",", "").replace("$", "") or 0)
-                    if isinstance(coin_data.get("data", {}).get("market_cap"), str)
-                    else float(coin_data.get("data", {}).get("market_cap", 0) or 0),
-                    change_24h=float(
-                        coin_data.get("data", {}).get("price_change_percentage_24h", {}).get("usd", 0) or 0
-                    ),
-                    volume_24h=float(coin_data.get("data", {}).get("total_volume", "0").replace(",", "").replace("$", "") or 0)
-                    if isinstance(coin_data.get("data", {}).get("total_volume"), str)
-                    else float(coin_data.get("data", {}).get("total_volume", 0) or 0),
-                    market_cap_rank=coin_data.get("market_cap_rank", 0) or 0,
-                    sparkline_7d=coin_data.get("data", {}).get("sparkline", []),
-                ))
+                coins.append(
+                    GeckoCoin(
+                        id=coin_data.get("id", ""),
+                        symbol=coin_data.get("symbol", ""),
+                        name=coin_data.get("name", ""),
+                        price=float(coin_data.get("data", {}).get("price", 0) or 0),
+                        market_cap=float(
+                            coin_data.get("data", {}).get("market_cap", "0").replace(",", "").replace("$", "") or 0
+                        )
+                        if isinstance(coin_data.get("data", {}).get("market_cap"), str)
+                        else float(coin_data.get("data", {}).get("market_cap", 0) or 0),
+                        change_24h=float(
+                            coin_data.get("data", {}).get("price_change_percentage_24h", {}).get("usd", 0) or 0
+                        ),
+                        volume_24h=float(
+                            coin_data.get("data", {}).get("total_volume", "0").replace(",", "").replace("$", "") or 0
+                        )
+                        if isinstance(coin_data.get("data", {}).get("total_volume"), str)
+                        else float(coin_data.get("data", {}).get("total_volume", 0) or 0),
+                        market_cap_rank=coin_data.get("market_cap_rank", 0) or 0,
+                        sparkline_7d=coin_data.get("data", {}).get("sparkline", []),
+                    )
+                )
             except (ValueError, TypeError, KeyError):
                 continue
 
         self._trending = coins
         if coins:
-            logger.debug("CoinGecko trending: {} coins (top: {})",
-                         len(coins), ", ".join(c.symbol for c in coins[:5]))
+            logger.debug("CoinGecko trending: {} coins (top: {})", len(coins), ", ".join(c.symbol for c in coins[:5]))
 
     async def _fetch_market_data(self) -> None:
         """Fetch top coins by market cap with full data."""
         url = f"{self._base_url}/coins/markets"
-        params = self._params({
-            "vs_currency": "usd",
-            "order": "volume_desc",
-            "per_page": "100",
-            "page": "1",
-            "sparkline": "true",
-            "price_change_percentage": "1h,24h,7d",
-        })
+        params = self._params(
+            {
+                "vs_currency": "usd",
+                "order": "volume_desc",
+                "per_page": "100",
+                "page": "1",
+                "sparkline": "true",
+                "price_change_percentage": "1h,24h,7d",
+            }
+        )
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url, params=params,
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    url,
+                    params=params,
                     timeout=aiohttp.ClientTimeout(total=20),
-                ) as resp:
-                    if resp.status != 200:
-                        logger.debug("CoinGecko markets returned {}", resp.status)
-                        return
-                    data = await resp.json()
+                ) as resp,
+            ):
+                if resp.status != 200:
+                    logger.debug("CoinGecko markets returned {}", resp.status)
+                    return
+                data = await resp.json()
         except Exception as e:
             logger.debug("CoinGecko markets error: {}", e)
             return
@@ -216,21 +228,23 @@ class CoinGeckoClient:
 
                 sparkline = item.get("sparkline_in_7d", {}).get("price", [])
 
-                coins.append(GeckoCoin(
-                    id=item.get("id", ""),
-                    symbol=item.get("symbol", ""),
-                    name=item.get("name", ""),
-                    price=float(item.get("current_price", 0) or 0),
-                    market_cap=float(item.get("market_cap", 0) or 0),
-                    market_cap_rank=item.get("market_cap_rank", 0) or 0,
-                    volume_24h=float(item.get("total_volume", 0) or 0),
-                    change_1h=float(item.get("price_change_percentage_1h_in_currency", 0) or 0),
-                    change_24h=float(item.get("price_change_percentage_24h", 0) or 0),
-                    change_7d=float(item.get("price_change_percentage_7d_in_currency", 0) or 0),
-                    ath=float(item.get("ath", 0) or 0),
-                    ath_change_pct=float(item.get("ath_change_percentage", 0) or 0),
-                    sparkline_7d=sparkline[-168:] if sparkline else [],
-                ))
+                coins.append(
+                    GeckoCoin(
+                        id=item.get("id", ""),
+                        symbol=item.get("symbol", ""),
+                        name=item.get("name", ""),
+                        price=float(item.get("current_price", 0) or 0),
+                        market_cap=float(item.get("market_cap", 0) or 0),
+                        market_cap_rank=item.get("market_cap_rank", 0) or 0,
+                        volume_24h=float(item.get("total_volume", 0) or 0),
+                        change_1h=float(item.get("price_change_percentage_1h_in_currency", 0) or 0),
+                        change_24h=float(item.get("price_change_percentage_24h", 0) or 0),
+                        change_7d=float(item.get("price_change_percentage_7d_in_currency", 0) or 0),
+                        ath=float(item.get("ath", 0) or 0),
+                        ath_change_pct=float(item.get("ath_change_percentage", 0) or 0),
+                        sparkline_7d=sparkline[-168:] if sparkline else [],
+                    )
+                )
             except (ValueError, TypeError):
                 continue
 
@@ -243,12 +257,13 @@ class CoinGeckoClient:
         )[:20]
 
         if self._top_gainers:
-            logger.debug("CoinGecko: {} movers >5% (top: {})",
-                         len(self._top_gainers),
-                         ", ".join(f"{c.symbol}({c.change_24h:+.1f}%)"
-                                   for c in self._top_gainers[:5]))
+            logger.debug(
+                "CoinGecko: {} movers >5% (top: {})",
+                len(self._top_gainers),
+                ", ".join(f"{c.symbol}({c.change_24h:+.1f}%)" for c in self._top_gainers[:5]),
+            )
 
-    def find_by_symbol(self, symbol: str) -> Optional[GeckoCoin]:
+    def find_by_symbol(self, symbol: str) -> GeckoCoin | None:
         sym = symbol.lower().replace("/usdt", "")
         for coin in self._top_by_volume + self._trending:
             if coin.symbol.lower() == sym:
@@ -261,8 +276,7 @@ class CoinGeckoClient:
             top = ", ".join(c.symbol.upper() for c in self._trending[:5])
             parts.append(f"trending: {top}")
         if self._top_gainers:
-            top = ", ".join(f"{c.symbol.upper()}({c.change_24h:+.1f}%)"
-                           for c in self._top_gainers[:3])
+            top = ", ".join(f"{c.symbol.upper()}({c.change_24h:+.1f}%)" for c in self._top_gainers[:3])
             parts.append(f"movers: {top}")
         if self._top_by_volume:
             parts.append(f"tracked: {len(self._top_by_volume)} coins by volume")

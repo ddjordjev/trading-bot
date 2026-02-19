@@ -7,18 +7,17 @@ and writes results to data/analytics_state.json.
 The bot reads analytics_state.json to get strategy weights without
 needing to run the analytics engine itself.
 """
+
 from __future__ import annotations
 
 import asyncio
-import sys
-from datetime import datetime, timezone
 
 from loguru import logger
 
-from db.store import TradeDB
 from analytics.engine import AnalyticsEngine
-from shared.state import SharedState
+from db.store import TradeDB
 from shared.models import AnalyticsSnapshot, StrategyWeightEntry
+from shared.state import SharedState
 
 
 class AnalyticsService:
@@ -48,8 +47,7 @@ class AnalyticsService:
         self._running = True
 
         self._do_refresh()
-        logger.info("Initial refresh: {} trades, {} strategies scored",
-                     self._last_trade_count, len(self.engine.scores))
+        logger.info("Initial refresh: {} trades, {} strategies scored", self._last_trade_count, len(self.engine.scores))
 
         await self._run_loop()
 
@@ -65,8 +63,7 @@ class AnalyticsService:
                 new_trades = current_count - self._last_trade_count
 
                 if new_trades > 0:
-                    logger.info("Detected {} new trade(s) (total: {}), refreshing...",
-                                new_trades, current_count)
+                    logger.info("Detected {} new trade(s) (total: {}), refreshing...", new_trades, current_count)
                     self._do_refresh()
                     self._last_trade_count = current_count
                 else:
@@ -87,14 +84,16 @@ class AnalyticsService:
 
         weights = []
         for name, score in self.engine.scores.items():
-            weights.append(StrategyWeightEntry(
-                strategy=name,
-                weight=score.weight,
-                win_rate=score.win_rate,
-                total_trades=score.total_trades,
-                total_pnl=score.total_pnl,
-                streak=score.streak_current,
-            ))
+            weights.append(
+                StrategyWeightEntry(
+                    strategy=name,
+                    weight=score.weight,
+                    win_rate=score.win_rate,
+                    total_trades=score.total_trades,
+                    total_pnl=score.total_pnl,
+                    streak=score.streak_current,
+                )
+            )
 
         patterns = [p.model_dump() for p in self.engine.patterns]
         suggestions = [s.model_dump() for s in self.engine.suggestions]
@@ -108,5 +107,9 @@ class AnalyticsService:
         self.state.write_analytics(snapshot)
 
         if weights:
-            logger.debug("Analytics written: {} strategies, {} patterns, {} suggestions",
-                         len(weights), len(patterns), len(suggestions))
+            logger.debug(
+                "Analytics written: {} strategies, {} patterns, {} suggestions",
+                len(weights),
+                len(patterns),
+                len(suggestions),
+            )

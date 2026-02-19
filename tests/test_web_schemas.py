@@ -1,11 +1,23 @@
 """Tests for web/schemas.py."""
+
 from __future__ import annotations
 
 from web.schemas import (
-    BotStatus, PositionInfo, TradeRecord, IntelSnapshot, TrendingCoinInfo,
-    StrategyInfo, ModuleStatus, DailyReportData, WickScalpInfo, FullSnapshot,
-    StrategyScoreInfo, PatternInsightInfo, ModificationSuggestionInfo,
-    AnalyticsSnapshot, ActionResponse,
+    ActionResponse,
+    AnalyticsSnapshot,
+    BotStatus,
+    DailyReportData,
+    FullSnapshot,
+    IntelSnapshot,
+    ModificationSuggestionInfo,
+    ModuleStatus,
+    PatternInsightInfo,
+    PositionInfo,
+    StrategyInfo,
+    StrategyScoreInfo,
+    TradeRecord,
+    TrendingCoinInfo,
+    WickScalpInfo,
 )
 
 
@@ -24,17 +36,18 @@ class TestBotStatus:
 
 class TestPositionInfo:
     def test_creation(self):
-        p = PositionInfo(symbol="BTC/USDT", side="buy", amount=1.0,
-                         entry_price=100, current_price=110, pnl_pct=10,
-                         pnl_usd=100)
+        p = PositionInfo(
+            symbol="BTC/USDT", side="buy", amount=1.0, entry_price=100, current_price=110, pnl_pct=10, pnl_usd=100
+        )
         assert p.symbol == "BTC/USDT"
         assert p.pnl_pct == 10
 
 
 class TestTradeRecord:
     def test_creation(self):
-        t = TradeRecord(timestamp="2024-01-01", symbol="BTC/USDT", side="buy",
-                        action="close", amount=1.0, price=100, strategy="rsi")
+        t = TradeRecord(
+            timestamp="2024-01-01", symbol="BTC/USDT", side="buy", action="close", amount=1.0, price=100, strategy="rsi"
+        )
         assert t.pnl == 0.0
 
 
@@ -53,8 +66,7 @@ class TestTrendingCoinInfo:
 
 class TestStrategyInfo:
     def test_creation(self):
-        s = StrategyInfo(name="rsi", symbol="BTC/USDT", market_type="futures",
-                         leverage=10)
+        s = StrategyInfo(name="rsi", symbol="BTC/USDT", market_type="futures", leverage=10)
         assert s.mode == "pyramid"
 
 
@@ -73,8 +85,7 @@ class TestDailyReportData:
 
 class TestWickScalpInfo:
     def test_creation(self):
-        w = WickScalpInfo(symbol="BTC/USDT", scalp_side="short",
-                          entry_price=100, amount=0.5, age_minutes=2.0)
+        w = WickScalpInfo(symbol="BTC/USDT", scalp_side="short", entry_price=100, amount=0.5, age_minutes=2.0)
         assert w.max_hold_minutes == 5
 
 
@@ -99,8 +110,7 @@ class TestPatternInsightInfo:
 
 class TestModificationSuggestionInfo:
     def test_creation(self):
-        m = ModificationSuggestionInfo(strategy="rsi", suggestion_type="change_param",
-                                       title="Test", description="desc")
+        m = ModificationSuggestionInfo(strategy="rsi", suggestion_type="change_param", title="Test", description="desc")
         assert m.confidence == 0.0
 
 
