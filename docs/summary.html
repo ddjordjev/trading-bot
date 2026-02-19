@@ -35,7 +35,7 @@
 <body>
 
 <h1>Trading Bot — Requirements &amp; Implementation Summary</h1>
-<p class="meta">Last updated: 2026-02-18 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: MEXC, Binance, Bybit</p>
+<p class="meta">Last updated: 2026-02-19 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: MEXC, Binance, Bybit &nbsp;|&nbsp; Tests: 1044 (80%+ coverage) &nbsp;|&nbsp; CI: GitHub Actions (green)</p>
 
 <!-- ============================================================ -->
 <h2>1. Core Philosophy &amp; Trading Principles</h2>
@@ -323,7 +323,7 @@
 <h3>2.21 Web Dashboard</h3>
 
 <div class="principle">
-  <strong>Full control via browser.</strong> React + FastAPI dashboard running on port 8080 alongside the bot. Real-time WebSocket updates every 2 seconds. Token-based auth for remote access.
+  <strong>Full control via browser.</strong> React + FastAPI dashboard running on port 9035 alongside the bot. Real-time WebSocket updates every 2 seconds. Token-based auth for remote access.
 </div>
 
 <table>
@@ -365,6 +365,64 @@
   </tr>
   <tr><td>Docker Compose: 3 services (bot, monitor, analytics) with shared volume</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml (multi-service), docker-compose.single.yml (all-in-one)</td></tr>
   <tr><td>Backwards compatible: bot still works in single-process mode</td><td><span class="badge done">Done</span></td><td class="file">bot.py falls back to in-process intel/analytics if shared state stale</td></tr>
+</table>
+
+<h3>2.23 Market Hours &amp; Holiday System</h3>
+
+<div class="principle">
+  <strong>Know when the market is open.</strong> The bot must account for DST transitions, weekends, and exchange holidays. Market hours data is fetched in real time from Financial Modeling Prep and stored globally, refreshed daily.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>DST-aware market open/close using IANA timezones (via <code>zoneinfo</code>)</td><td><span class="badge done">Done</span></td><td class="file">core/market_schedule.py → MarketSession</td></tr>
+  <tr><td>Pre-defined sessions: NYSE, NASDAQ, LSE, TSE, HKEX, ASX, SSE, crypto (24/7)</td><td><span class="badge done">Done</span></td><td class="file">core/market_schedule.py → _build_sessions()</td></tr>
+  <tr><td>Weekend detection per exchange (crypto excluded)</td><td><span class="badge done">Done</span></td><td class="file">core/market_schedule.py → is_weekend()</td></tr>
+  <tr><td>Holiday calendar fetched from Financial Modeling Prep (free tier, refreshed daily)</td><td><span class="badge done">Done</span></td><td class="file">core/market_schedule.py → _fetch_holidays()</td></tr>
+  <tr><td>Global singleton accessible from any module</td><td><span class="badge done">Done</span></td><td class="file">core/market_schedule.py → MarketSchedule (global instance)</td></tr>
+  <tr><td>Test coverage for DST transitions, open/close, holidays, weekends</td><td><span class="badge done">Done</span></td><td class="file">tests/test_market_schedule.py</td></tr>
+</table>
+
+<h3>2.24 MEXC Futures Restriction</h3>
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td><code>ALLOWED_MARKET_TYPES</code> setting: spot, futures, or both</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → allowed_market_types</td></tr>
+  <tr><td>MEXC defaults to spot-only (futures unreliable on low-liq coins)</td><td><span class="badge done">Done</span></td><td class="file">.env.example → ALLOWED_MARKET_TYPES=spot</td></tr>
+  <tr><td>Bot falls back strategies to spot when futures disallowed</td><td><span class="badge done">Done</span></td><td class="file">bot.py → market type filter</td></tr>
+  <tr><td>Rejects disallowed trade queue proposals</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _process_trade_queue()</td></tr>
+  <tr><td>Preflight check skips futures tests when not enabled</td><td><span class="badge done">Done</span></td><td class="file">scripts/preflight_check.py</td></tr>
+</table>
+
+<h3>2.25 CI/CD Pipeline (GitHub Actions)</h3>
+
+<div class="principle">
+  <strong>Every push is verified.</strong> GitHub Actions runs lint, type checking, tests with 80%+ coverage enforcement, and Docker build on every push and PR. Branches: <code>develop</code> for active development, <code>master</code> for stable releases.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Ruff linting (pycodestyle, pyflakes, bugbear, isort, pyupgrade, simplify)</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml, pyproject.toml</td></tr>
+  <tr><td>Mypy type checking (strict mode on critical modules)</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml → mypy --ignore-missing-imports</td></tr>
+  <tr><td>Pytest with coverage enforcement (80%+ required)</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml, pyproject.toml → fail_under=80</td></tr>
+  <tr><td>1044 tests across 15+ test files, covering all modules</td><td><span class="badge done">Done</span></td><td class="file">tests/ directory</td></tr>
+  <tr><td>Frontend build check (React/Vite)</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml</td></tr>
+  <tr><td>Docker build verification</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml</td></tr>
+  <tr><td>Git branching: develop → master (fast-forward merge when CI green)</td><td><span class="badge done">Done</span></td><td class="file">git workflow</td></tr>
+</table>
+
+<h3>2.26 10-Day Execution Plan (Testnet Run)</h3>
+
+<div class="principle">
+  <strong>Prove it works before going live.</strong> A detailed execution plan documents how to run the bot on Binance testnet for 10 continuous days with $100 paper capital. Includes crash recovery, daily reporting, and strategy experimentation guidelines.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Execution plan document with architecture, startup, crash recovery</td><td><span class="badge done">Done</span></td><td class="file">docs/EXECUTION_PLAN.md</td></tr>
+  <tr><td>Session budget tracking ($100 starting, $60 halt threshold)</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → SESSION_BUDGET, PaperExchange</td></tr>
+  <tr><td>Run session helper script (start/stop/status/snapshot/logs)</td><td><span class="badge done">Done</span></td><td class="file">scripts/run_session.sh</td></tr>
+  <tr><td>Daily reporting template + final report structure</td><td><span class="badge done">Done</span></td><td class="file">docs/reports/ (per-attempt and daily logs)</td></tr>
+  <tr><td>Strategy change procedure documented</td><td><span class="badge done">Done</span></td><td class="file">docs/EXECUTION_PLAN.md → Strategy Change Procedure</td></tr>
 </table>
 
 <!-- ============================================================ -->
@@ -463,11 +521,17 @@
   <tr><td><code>web/auth.py</code></td><td>Token-based authentication for dashboard</td></tr>
   <tr><td><code>web/schemas.py</code></td><td>Pydantic response models for API endpoints</td></tr>
   <tr><td><code>web/frontend/</code></td><td>React + Vite + TypeScript dashboard SPA</td></tr>
+  <tr><td><code>core/market_schedule.py</code></td><td>DST-aware market hours, weekends, holidays (FMP API), global singleton</td></tr>
   <tr><td><code>docs/summary.html</code></td><td>This document — requirements &amp; implementation summary</td></tr>
+  <tr><td><code>docs/EXECUTION_PLAN.md</code></td><td>10-day testnet execution plan with crash recovery and reporting</td></tr>
   <tr><td><code>scripts/run-local.sh</code></td><td>Local setup + run script</td></tr>
   <tr><td><code>scripts/deploy-digitalocean.sh</code></td><td>DigitalOcean Docker deployment</td></tr>
   <tr><td><code>scripts/build-dashboard.sh</code></td><td>Build the React frontend for production</td></tr>
   <tr><td><code>scripts/preflight_check.py</code></td><td>Pre-live sanity check: API keys, balance, futures, leverage, risk</td></tr>
+  <tr><td><code>scripts/run_session.sh</code></td><td>10-day session helper: start/stop/status/snapshot/logs</td></tr>
+  <tr><td><code>.github/workflows/ci.yml</code></td><td>CI pipeline: lint, type-check, test (80%+), frontend build, Docker build</td></tr>
+  <tr><td><code>pyproject.toml</code></td><td>Ruff, mypy, pytest-cov configuration</td></tr>
+  <tr><td><code>tests/</code></td><td>1044 tests across 15+ files covering all modules (80%+ coverage)</td></tr>
 </table>
 
 <!-- ============================================================ -->
@@ -498,7 +562,9 @@
   <tr><td><code>BYBIT_API_KEY/SECRET</code></td><td>(empty)</td><td>Bybit API credentials (if using Bybit exchange)</td></tr>
   <tr><td><code>DASHBOARD_ENABLED</code></td><td>true</td><td>Enable web dashboard on port 8080</td></tr>
   <tr><td><code>DASHBOARD_TOKEN</code></td><td>(empty)</td><td>Secret token for remote access; empty = no auth</td></tr>
-  <tr><td><code>DASHBOARD_PORT</code></td><td>8080</td><td>Dashboard HTTP port</td></tr>
+  <tr><td><code>DASHBOARD_PORT</code></td><td>9035</td><td>Dashboard HTTP port</td></tr>
+  <tr><td><code>ALLOWED_MARKET_TYPES</code></td><td>spot,futures</td><td>Which market types are enabled (spot, futures, or both)</td></tr>
+  <tr><td><code>FMP_API_KEY</code></td><td>(empty)</td><td>Financial Modeling Prep API key for market holiday data</td></tr>
 </table>
 
 <!-- ============================================================ -->
