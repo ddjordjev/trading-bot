@@ -1260,7 +1260,7 @@ class TestSubPositionClose:
         risk.apply_stops.side_effect = lambda s: s
         risk.check_liquidation.return_value = False
         settings = Settings(
-            trading_mode="paper",
+            trading_mode="paper_local",
             exchange="binance",
             binance_test_api_key="k",
             binance_test_api_secret="s",

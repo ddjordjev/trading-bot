@@ -14,7 +14,7 @@ from core.risk.manager import RiskManager
 
 @pytest.fixture
 def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
-    monkeypatch.setenv("TRADING_MODE", "paper")
+    monkeypatch.setenv("TRADING_MODE", "paper_local")
     monkeypatch.setenv("EXCHANGE", "mexc")
     monkeypatch.setenv("MAX_POSITION_SIZE_PCT", "5.0")
     monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")

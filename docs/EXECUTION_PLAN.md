@@ -24,19 +24,29 @@ Everything else — which strategies to run, when to change them, leverage,
 risk params, symbols — is at the agent's discretion. Use the analytics
 engine, trade DB, and logs to make data-driven decisions.
 
-### Testnet Balance vs Session Budget
+### Trading Modes
 
-Binance testnet pre-funds accounts with $5,000–$10,000 USDT that you
-cannot remove. **This does not matter.** In paper mode, `PaperExchange`
-manages its own simulated balance starting at exactly $100 (SESSION_BUDGET).
-The testnet's $5,000 is only used for live market data (prices, candles).
-The bot's `fetch_balance()` returns the simulated balance, not the
-exchange's. So if the dashboard shows $40, you really lost $60 of your
-$100. If it shows $170, you really made $70. The testnet balance is
-invisible to the bot.
+| Mode | What happens | Use when |
+|------|-------------|----------|
+| `paper_local` | PaperExchange simulates trades locally. Nothing hits the exchange. | Pre-launch testing, or exchanges without testnet (MEXC) |
+| `paper_live` | Real orders on exchange testnet (demo.binance.com). Fake money, real execution. | 10-day run (Binance/Bybit only — they have testnets) |
+| `live` | Real orders on production exchange. Real money. | After 10-day run proves the bot works |
 
-To reset after a blown account: restart the Docker containers. The
-PaperExchange re-initializes with a fresh $100 on every startup.
+**Note:** MEXC has no testnet. If you set `paper_live` with MEXC, the bot
+automatically falls back to `paper_local` to prevent real-money trades.
+
+**Pre-launch** uses `paper_local` (TRADING_MODE=paper_local). This validates
+the code without touching the exchange. Once all checks pass, switch to
+`paper_live` for Day 1.
+
+**The 10-day run** uses `paper_live` (TRADING_MODE=paper_live). Orders are
+placed on Binance testnet — you can see them on demo.binance.com. The
+testnet pre-funds accounts with $5,000–$10,000 USDT. SESSION_BUDGET=100
+caps the bot's usable balance to $100 (it won't use the full $5K+).
+Trade PnL is tracked per-trade in `trades.db` and the daily target tracker.
+
+To reset after a blown account: update the .env to change the SESSION_BUDGET
+or restart to re-read config.
 
 ---
 
@@ -142,6 +152,9 @@ fail and under what conditions is just as important as finding winners.
 
 ## Pre-Launch: Running & Testing
 
+**Mode: `paper_local`** — all pre-launch testing uses local simulation.
+No orders hit the exchange. This validates the code only.
+
 Before Day 1 starts, every component must be verified in isolation and then
 end-to-end. This phase has **no timer** — take as long as needed to get a
 clean bill of health. The 10-day clock starts only after everything below
@@ -170,18 +183,7 @@ At minimum, review:
 Look for: mismatched ports, broken imports, stale references, logic bugs,
 anything that would prevent a clean startup. Fix issues before proceeding.
 
-### 2. Run the Test Suite
-
-```bash
-cd /Users/damirdjordjev/workspace/trading-bot
-python -m pytest tests/ -v --tb=short
-```
-
-- All tests must pass.
-- Check for flaky async tests (re-run if needed).
-- Note: `test_config.py` is currently empty — add basic config tests if time allows.
-
-### 3. Preflight Check
+### 2. Preflight Check
 
 ```bash
 python scripts/preflight_check.py
@@ -191,7 +193,7 @@ This validates: API keys (Binance testnet), exchange connectivity, USDT balance,
 BTC/USDT ticker, futures support, leverage, risk limits, trading mode, email.
 Fix any failures before proceeding.
 
-### 4. Docker Build & Smoke Test
+### 3. Docker Build & Smoke Test
 
 ```bash
 docker compose build
@@ -210,7 +212,7 @@ Verify:
 - Monitor is writing `data/intel_state.json` (intel feeds polling)
 - Analytics is writing `data/analytics_state.json`
 
-### 5. End-to-End Signal Flow
+### 4. End-to-End Signal Flow
 
 Watch logs for ~10–15 minutes and confirm the full pipeline:
 
@@ -226,23 +228,28 @@ If no trades fire naturally (market is quiet), verify the signal path is at leas
 being evaluated by checking log lines like "Strategy X: no signal" or
 "Risk check: passed/rejected".
 
-### 6. Teardown & Clean Slate
+### 5. Teardown & Clean Slate
 
 ```bash
 docker compose down -v      # -v removes volumes for a fresh start
 ```
 
-Once all 6 steps pass, proceed to Day 1 with confidence.
+Once all 5 steps pass, proceed to Day 1 with confidence.
 
 ---
 
 ## Day 1: Bootstrap
 
+**Switch to `paper_live` now.** Change `TRADING_MODE=paper_live` in `.env`.
+From this point, all orders go to Binance testnet (demo.binance.com).
+You can see trades, positions, and balance on the exchange dashboard.
+
 This is the critical first day. The priority is: **make sure everything works.**
 
-### Step 1: Preflight
+### Step 1: Switch mode & preflight
 ```bash
 cd /Users/damirdjordjev/workspace/trading-bot
+# Ensure .env has TRADING_MODE=paper_live
 python scripts/preflight_check.py
 ```
 
@@ -258,14 +265,15 @@ docker compose up -d
 - Dashboard loads at http://localhost:9035
 - All 3 services healthy: `docker compose ps`
 - Bot connects to Binance testnet (check logs)
-- Balance shows ~$100 (capped from testnet's $5000)
+- Balance shows ~$100 (capped from testnet's $5000+)
 - Strategies are registered (check Strategies tab)
+- Check demo.binance.com — trades should appear there
 
 ### Step 4: Watch
 Monitor logs for the first 30–60 minutes. Look for:
 - Successful exchange connection
 - Strategy signals being generated
-- Orders being placed (even if simulated via PaperExchange)
+- Orders being placed on testnet (check demo.binance.com)
 - No repeating errors or crashes
 
 ### Step 5: First report
@@ -417,7 +425,10 @@ Written at the end of the 10-day run:
 ## Key Config (.env)
 
 ```ini
-TRADING_MODE=paper
+# Pre-launch testing:
+TRADING_MODE=paper_local
+# 10-day run (switch when pre-launch passes):
+# TRADING_MODE=paper_live
 EXCHANGE=binance
 ALLOWED_MARKET_TYPES=spot,futures
 SESSION_BUDGET=100

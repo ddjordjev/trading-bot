@@ -9,7 +9,7 @@ from news.monitor import NewsItem, NewsMonitor
 
 @pytest.fixture()
 def settings(monkeypatch):
-    monkeypatch.setenv("TRADING_MODE", "paper")
+    monkeypatch.setenv("TRADING_MODE", "paper_local")
     monkeypatch.setenv("EXCHANGE", "mexc")
     monkeypatch.setenv("NEWS_ENABLED", "true")
     monkeypatch.setenv("NEWS_SOURCES", "coindesk,cointelegraph")
@@ -33,7 +33,7 @@ class TestNewsMonitor:
         assert "coindesk" in nm.sources
 
     def test_disabled(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper")
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "mexc")
         monkeypatch.setenv("NEWS_ENABLED", "false")
         from config.settings import Settings
@@ -98,7 +98,7 @@ class TestNewsMonitor:
 
     @pytest.mark.asyncio
     async def test_start_disabled(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper")
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "mexc")
         monkeypatch.setenv("NEWS_ENABLED", "false")
         from config.settings import Settings

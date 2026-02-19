@@ -1,0 +1,25 @@
+---
+description: Python environment — stop recreating the venv every session
+alwaysApply: true
+---
+
+# Python Environment
+
+The project uses Python 3.11. A virtual environment already exists at `.venv/`.
+
+## Rules
+
+1. **NEVER recreate the venv.** It's already set up with all dependencies.
+2. **NEVER run `pip install -r requirements.txt`** unless you've added a new
+   dependency to `requirements.txt` that didn't exist before.
+3. Use `.venv/bin/python` (not `python` or `python3`) for all commands:
+   - `.venv/bin/python scripts/preflight_check.py`
+   - `.venv/bin/python -m pytest tests/ -v`
+   - `.venv/bin/python bot.py`
+4. If `.venv/` doesn't exist (first clone), create it ONCE:
+   ```bash
+   /usr/local/bin/python3.11 -m venv .venv
+   .venv/bin/pip install -r requirements.txt
+   ```
+5. Docker uses its own Python (Dockerfile handles deps). The local `.venv/`
+   is only for running scripts outside Docker (preflight, tests, debugging).

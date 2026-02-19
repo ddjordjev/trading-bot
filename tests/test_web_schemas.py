@@ -25,7 +25,7 @@ class TestBotStatus:
     def test_defaults(self):
         s = BotStatus()
         assert s.running is False
-        assert s.trading_mode == "paper"
+        assert s.trading_mode == "paper_local"
         assert s.balance == 0.0
 
     def test_custom(self):

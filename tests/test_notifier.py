@@ -9,7 +9,7 @@ from notifications.notifier import NotificationType, Notifier
 
 @pytest.fixture()
 def settings(monkeypatch):
-    monkeypatch.setenv("TRADING_MODE", "paper")
+    monkeypatch.setenv("TRADING_MODE", "paper_local")
     monkeypatch.setenv("EXCHANGE", "mexc")
     monkeypatch.setenv("NOTIFICATIONS_ENABLED", "stop_loss,daily_summary")
     monkeypatch.setenv("SMTP_USER", "")
@@ -55,7 +55,7 @@ class TestNotifier:
 
     @pytest.mark.asyncio
     async def test_send_queues_when_smtp_configured(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper")
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "mexc")
         monkeypatch.setenv("SMTP_USER", "user@test.com")
         monkeypatch.setenv("NOTIFY_EMAIL", "admin@test.com")

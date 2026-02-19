@@ -256,7 +256,7 @@ class TestPaperExchange:
 
 class TestExchangeFactory:
     def test_paper_mode(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper")
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "mexc")
         monkeypatch.setenv("MEXC_API_KEY", "k")
         monkeypatch.setenv("MEXC_API_SECRET", "s")
@@ -267,7 +267,7 @@ class TestExchangeFactory:
         assert isinstance(exchange, PaperExchange)
 
     def test_unsupported_exchange(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper")
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "kraken")
         from config.settings import Settings
         from core.exchange.factory import create_exchange

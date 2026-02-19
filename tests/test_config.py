@@ -8,7 +8,7 @@ import pytest
 class TestSettings:
     @pytest.fixture()
     def settings(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper")
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "mexc")
         monkeypatch.setenv("MEXC_API_KEY", "test-key")
         monkeypatch.setenv("MEXC_API_SECRET", "test-secret")

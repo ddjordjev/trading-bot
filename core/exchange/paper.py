@@ -112,42 +112,27 @@ class PaperExchange(BaseExchange):
                 market_type=market_type.value,
             )
 
-        cost = fill_price * amount
-
-        if market_type == MarketType.FUTURES:
-            cost = cost / leverage
-
-        if side == OrderSide.BUY:
-            if self._balances.get("USDT", 0) < cost:
-                logger.warning("[PAPER] Insufficient balance for {} {} {}", side.value, amount, symbol)
-                return Order(
-                    id=order_id,
-                    symbol=symbol,
-                    side=side,
-                    order_type=order_type,
-                    amount=amount,
-                    price=fill_price,
-                    status=OrderStatus.FAILED,
-                    market_type=market_type.value,
-                )
-            self._balances["USDT"] -= cost
-            if market_type == MarketType.SPOT:
+        if market_type == MarketType.SPOT:
+            if side == OrderSide.BUY:
+                cost = fill_price * amount
+                if self._balances.get("USDT", 0) < cost:
+                    logger.warning("[PAPER] Insufficient USDT for BUY {} {}", amount, symbol)
+                    return Order(
+                        id=order_id, symbol=symbol, side=side, order_type=order_type,
+                        amount=amount, price=fill_price, status=OrderStatus.FAILED,
+                        market_type=market_type.value,
+                    )
+                self._balances["USDT"] -= cost
                 base = self._parse_base_asset(symbol)
                 self._balances[base] = self._balances.get(base, 0) + amount
-        else:
-            if market_type == MarketType.SPOT:
+            else:
                 base = self._parse_base_asset(symbol)
                 held = self._balances.get(base, 0)
                 if held < amount:
                     logger.warning("[PAPER] Insufficient {} for SELL ({:.6f} held, {:.6f} needed)", base, held, amount)
                     return Order(
-                        id=order_id,
-                        symbol=symbol,
-                        side=side,
-                        order_type=order_type,
-                        amount=amount,
-                        price=fill_price,
-                        status=OrderStatus.FAILED,
+                        id=order_id, symbol=symbol, side=side, order_type=order_type,
+                        amount=amount, price=fill_price, status=OrderStatus.FAILED,
                         market_type=market_type.value,
                     )
                 self._balances[base] -= amount
@@ -169,7 +154,9 @@ class PaperExchange(BaseExchange):
         self._orders[order_id] = order
 
         if market_type == MarketType.FUTURES:
-            self._update_position(order, fill_price)
+            if not self._update_position(order, fill_price):
+                order.status = OrderStatus.FAILED
+                return order
 
         logger.info(
             "[PAPER] {} {} {} {} @ {:.6f} (leverage={}x)",
@@ -182,20 +169,54 @@ class PaperExchange(BaseExchange):
         )
         return order
 
-    def _update_position(self, order: Order, fill_price: float) -> None:
+    def _update_position(self, order: Order, fill_price: float) -> bool:
+        """Update futures positions and adjust margin.
+
+        All futures balance changes (margin deduction/credit) happen here,
+        not in place_order, so close orders don't incorrectly consume margin.
+
+        Returns False if insufficient margin to open/add to a position.
+        """
         existing = next((p for p in self._positions if p.symbol == order.symbol), None)
 
         if existing and existing.side != order.side:
-            pnl = (fill_price - existing.entry_price) * existing.amount
-            if existing.side == OrderSide.SELL:
-                pnl = -pnl
-            pnl *= existing.leverage
-            self._balances["USDT"] += (existing.entry_price * existing.amount / existing.leverage) + pnl
-            self._positions.remove(existing)
-            logger.info("[PAPER] Closed position {} PnL: {:.2f}", order.symbol, pnl)
-            return
+            close_amount = min(order.amount, existing.amount)
+            if existing.side == OrderSide.BUY:
+                pnl = (fill_price - existing.entry_price) * close_amount * existing.leverage
+            else:
+                pnl = (existing.entry_price - fill_price) * close_amount * existing.leverage
+            margin_returned = existing.entry_price * close_amount / existing.leverage
+            self._balances["USDT"] += margin_returned + pnl
+
+            if close_amount >= existing.amount:
+                self._positions.remove(existing)
+            else:
+                existing.amount -= close_amount
+
+            logger.info("[PAPER] Closed {:.6f} of {} PnL: {:.2f}", close_amount, order.symbol, pnl)
+
+            remainder = order.amount - close_amount
+            if remainder > 0:
+                margin_needed = fill_price * remainder / order.leverage
+                if self._balances.get("USDT", 0) < margin_needed:
+                    logger.warning("[PAPER] Insufficient margin for remainder {} {}", remainder, order.symbol)
+                    return True
+                self._balances["USDT"] -= margin_needed
+                self._positions.append(
+                    Position(
+                        symbol=order.symbol, side=order.side, amount=remainder,
+                        entry_price=fill_price, current_price=fill_price,
+                        leverage=order.leverage, market_type=order.market_type,
+                    )
+                )
+            return True
 
         if existing and existing.side == order.side:
+            margin_needed = fill_price * order.amount / order.leverage
+            if self._balances.get("USDT", 0) < margin_needed:
+                logger.warning("[PAPER] Insufficient margin for DCA {} {}", order.amount, order.symbol)
+                return False
+            self._balances["USDT"] -= margin_needed
             total_amount = existing.amount + order.amount
             avg_entry = (existing.entry_price * existing.amount + fill_price * order.amount) / total_amount
             existing.amount = total_amount
@@ -204,23 +225,23 @@ class PaperExchange(BaseExchange):
             existing.leverage = max(existing.leverage, order.leverage)
             logger.info(
                 "[PAPER] DCA into {} — avg entry: {:.6f}, total: {:.6f}",
-                order.symbol,
-                avg_entry,
-                total_amount,
+                order.symbol, avg_entry, total_amount,
             )
-            return
+            return True
 
+        margin_needed = fill_price * order.amount / order.leverage
+        if self._balances.get("USDT", 0) < margin_needed:
+            logger.warning("[PAPER] Insufficient margin for {} {}", order.amount, order.symbol)
+            return False
+        self._balances["USDT"] -= margin_needed
         self._positions.append(
             Position(
-                symbol=order.symbol,
-                side=order.side,
-                amount=order.amount,
-                entry_price=fill_price,
-                current_price=fill_price,
-                leverage=order.leverage,
-                market_type=order.market_type,
+                symbol=order.symbol, side=order.side, amount=order.amount,
+                entry_price=fill_price, current_price=fill_price,
+                leverage=order.leverage, market_type=order.market_type,
             )
         )
+        return True
 
     async def cancel_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
         if order_id in self._orders:

@@ -32,10 +32,11 @@ class RSIStrategy(BaseStrategy):
         price = df["close"].iloc[-1]
 
         if current_rsi <= self.oversold:
+            raw = (self.oversold - current_rsi) / self.oversold if self.oversold else 0
             return Signal(
                 symbol=self.symbol,
                 action=SignalAction.BUY,
-                strength=min(1.0, (self.oversold - current_rsi) / self.oversold),
+                strength=max(0.4, min(1.0, raw + 0.4)),
                 strategy=self.name,
                 reason=f"RSI oversold at {current_rsi:.1f}",
                 suggested_price=price,
@@ -44,10 +45,12 @@ class RSIStrategy(BaseStrategy):
             )
 
         if current_rsi >= self.overbought:
+            denom = 100 - self.overbought
+            raw = (current_rsi - self.overbought) / denom if denom else 0
             return Signal(
                 symbol=self.symbol,
                 action=SignalAction.SELL,
-                strength=min(1.0, (current_rsi - self.overbought) / (100 - self.overbought)),
+                strength=max(0.4, min(1.0, raw + 0.4)),
                 strategy=self.name,
                 reason=f"RSI overbought at {current_rsi:.1f}",
                 suggested_price=price,

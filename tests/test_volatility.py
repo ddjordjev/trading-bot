@@ -12,7 +12,7 @@ from volatility.detector import SpikeEvent, VolatilityDetector
 
 @pytest.fixture()
 def settings(monkeypatch):
-    monkeypatch.setenv("TRADING_MODE", "paper")
+    monkeypatch.setenv("TRADING_MODE", "paper_local")
     monkeypatch.setenv("EXCHANGE", "mexc")
     monkeypatch.setenv("SPIKE_THRESHOLD_PCT", "3.0")
     monkeypatch.setenv("VOLATILITY_LOOKBACK_MINUTES", "5")

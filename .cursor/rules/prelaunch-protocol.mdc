@@ -1,0 +1,65 @@
+---
+description: Pre-launch audit protocol — every new session runs this automatically
+alwaysApply: true
+---
+
+# Pre-Launch Audit Protocol
+
+**This rule runs automatically on every new session.** No user prompt needed.
+
+The project is preparing for a 10-day paper trading run. Until the bot is
+launched and running cleanly for 10 consecutive days, every fresh agent must
+audit the codebase before anything else.
+
+## On Session Start
+
+After reading chat history (per the chat-history rule), immediately:
+
+1. **Read `docs/EXECUTION_PLAN.md`** — understand the full plan.
+2. **Read the latest chat history archive** — know what the last session found.
+3. **Run the Pre-Launch steps** from the execution plan (analysis, preflight,
+   Docker build, smoke test, signal flow, teardown).
+4. **Fix everything you find** — bugs, suspicious code, stale references,
+   logic errors, misconfigurations. Even if it "looks fine", dig deeper.
+   Previous agents have missed things.
+5. **After fixing, tear down** (`docker compose down -v`) and report what
+   you found and fixed. The user will then open a fresh session to repeat.
+
+## What to Analyze (minimum)
+
+- `bot.py` — entry point, strategy registration, tick loop
+- `core/exchange/paper.py` — PaperExchange (this has had repeated bugs)
+- `core/exchange/factory.py` — exchange creation, paper mode
+- `core/risk/` — risk manager, daily target tracker
+- `core/orders/` — order manager, scaler, trailing, hedge, wick scalp
+- `strategies/` — all 8 strategy implementations
+- `services/` — monitor, analytics, signal generator
+- `config/settings.py` — all configuration
+- `web/server.py` + `web/auth.py` — dashboard (health check has been failing)
+- `docker-compose.yml` + `Dockerfile` — container setup
+
+## Known Recurring Issues (check these specifically)
+
+- **Dashboard `/api/status` hangs** — Not yet fixed. The curl health check
+  times out. Investigate uvicorn startup, auth middleware, FastAPI app mounting.
+- **Paper balance drops 67% in minutes** — Trade queue processes too many
+  proposals on first boot. Risk params or queue throttling may need tightening.
+- **PaperExchange margin logic** — Has been fixed multiple times. Verify
+  futures BUY/SELL both reserve margin, partial close works, DCA works.
+
+## Trading Modes
+
+- **Pre-launch testing** uses `TRADING_MODE=paper_local` (PaperExchange,
+  local simulation, nothing hits the exchange).
+- **10-day run** uses `TRADING_MODE=paper_live` (real orders on Binance
+  testnet at demo.binance.com). Switch only after pre-launch passes clean.
+- **Never** use `live` without explicit user approval.
+- **Health checks** — Monitor/analytics use file freshness checks. Verify
+  they tolerate startup delay.
+
+## Important
+
+- Use `.venv/bin/python` for local commands (see python-env rule).
+- Docker handles its own Python — don't conflate the two.
+- Commit fixes to `develop` branch. Never push to `master`.
+- After teardown, tell the user what you found so they can open a fresh chat.

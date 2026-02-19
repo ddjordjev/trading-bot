@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    trading_mode: Literal["paper", "live"] = "paper"
+    trading_mode: Literal["paper_local", "paper_live", "live"] = "paper_local"
 
     exchange: str = "mexc"
 
@@ -165,7 +165,17 @@ class Settings(BaseSettings):
         return market_type.lower() in self.allowed_market_type_list
 
     def is_paper(self) -> bool:
-        return self.trading_mode == "paper"
+        """True for both paper modes (local sim and testnet). Used for API key
+        selection (test keys) and safety checks."""
+        return self.trading_mode in ("paper_local", "paper_live")
+
+    def is_paper_local(self) -> bool:
+        """Local simulation via PaperExchange — no orders hit any exchange."""
+        return self.trading_mode == "paper_local"
+
+    def is_paper_live(self) -> bool:
+        """Real orders on exchange testnet (e.g. demo.binance.com)."""
+        return self.trading_mode == "paper_live"
 
     def cap_balance(self, raw_balance: float) -> float:
         """Apply session_budget cap. Returns raw_balance if no cap is set."""

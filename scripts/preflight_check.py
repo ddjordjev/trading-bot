@@ -130,8 +130,12 @@ async def run_checks() -> bool:
     check("Max notional cap", settings.max_notional_position >= 1000, f"${settings.max_notional_position:,.0f}")
 
     # 9. Trading mode
-    is_paper = settings.is_paper()
-    check("Trading mode", True, f"{'PAPER (safe)' if is_paper else 'LIVE (real money!)'}")
+    mode_label = {
+        "paper_local": "PAPER LOCAL (simulated, safe)",
+        "paper_live": "PAPER LIVE (testnet orders, fake money)",
+        "live": "LIVE (real money!)",
+    }.get(settings.trading_mode, settings.trading_mode)
+    check("Trading mode", True, mode_label)
 
     if not is_paper:
         print("\n  ⚠  WARNING: You are about to trade with REAL MONEY.")

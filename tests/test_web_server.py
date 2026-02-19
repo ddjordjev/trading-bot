@@ -20,7 +20,7 @@ def mock_bot():
     bot = MagicMock()
     bot._running = False
     bot.settings = MagicMock()
-    bot.settings.trading_mode = "paper"
+    bot.settings.trading_mode = "paper_local"
     bot.settings.exchange = "mexc"
     bot.settings.platform_url = "https://www.mexc.com"
     bot.settings.symbol_platform_url = MagicMock(return_value="https://www.mexc.com/trade/BTC_USDT")
@@ -115,7 +115,7 @@ class TestGetStatus:
         r = await client.get("/api/status")
         assert r.status_code == 200
         data = r.json()
-        assert data["trading_mode"] == "paper"
+        assert data["trading_mode"] == "paper_local"
         assert data["exchange_name"] == "MEXC"
         assert data["balance"] == 10_000.0
         assert data["daily_pnl"] == 500.0

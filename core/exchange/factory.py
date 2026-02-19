@@ -13,14 +13,13 @@ from core.exchange.paper import PaperExchange
 def create_exchange(settings: Settings) -> BaseExchange:
     """Factory that builds the right exchange client based on config.
 
-    - Validates ALLOWED_MARKET_TYPES against exchange capabilities.
-    - Enables testnet/sandbox automatically when in paper mode on
-      exchanges that have a testnet (Binance, Bybit).
-    - MEXC has no testnet; paper mode uses real market data with
-      simulated order execution via PaperExchange.
-    """
+    Trading modes:
+      paper_local  — PaperExchange wrapper (local simulation, no orders hit exchange)
+      paper_live   — Real orders on exchange testnet (e.g. demo.binance.com)
+      live         — Real orders on production exchange
 
-    use_paper = settings.is_paper()
+    Both paper modes use testnet API keys. Live uses production keys.
+    """
 
     exchange_map: dict[str, tuple[type[BaseExchange], dict[str, str]]] = {
         "mexc": (
@@ -51,11 +50,12 @@ def create_exchange(settings: Settings) -> BaseExchange:
         raise ValueError(f"Unsupported exchange: {settings.exchange}. Supported: {', '.join(exchange_map)}")
 
     cls, kwargs = entry
-    sandbox = use_paper and cls.HAS_TESTNET
+    sandbox = settings.is_paper() and cls.HAS_TESTNET
     real_exchange = cls(**kwargs, sandbox=sandbox)
 
     if sandbox:
-        logger.info("Testnet mode enabled for {} (paper trading with testnet keys)", settings.exchange.upper())
+        label = "local simulation" if settings.is_paper_local() else "testnet orders"
+        logger.info("Testnet mode enabled for {} ({})", settings.exchange.upper(), label)
 
     wanted = set(settings.allowed_market_type_list)
     supported = set(real_exchange.SUPPORTED_MARKET_TYPES)
@@ -71,16 +71,29 @@ def create_exchange(settings: Settings) -> BaseExchange:
         settings.allowed_market_types = ",".join(effective)
 
     logger.info(
-        "Exchange: {} | Supported: {} | Allowed: {} | Testnet: {}",
+        "Exchange: {} | Mode: {} | Supported: {} | Allowed: {} | Testnet: {}",
         settings.exchange.upper(),
+        settings.trading_mode,
         ", ".join(real_exchange.SUPPORTED_MARKET_TYPES),
         settings.allowed_market_types,
         sandbox,
     )
 
-    if use_paper:
+    if settings.is_paper_live() and not cls.HAS_TESTNET:
+        logger.warning(
+            "{} has no testnet — paper_live would trade real money. Falling back to paper_local.",
+            settings.exchange.upper(),
+        )
+        settings.trading_mode = "paper_local"
+
+    if settings.is_paper_local():
         budget = settings.session_budget if settings.session_budget > 0 else 10_000.0
-        logger.info("Paper session budget: ${:.2f}", budget)
+        logger.info("Paper LOCAL: simulated balance ${:.2f} (no orders hit exchange)", budget)
         return PaperExchange(real_exchange, starting_balance=budget)
+
+    if settings.is_paper_live():
+        logger.info("Paper LIVE: real orders on testnet (visible on exchange demo)")
+        if settings.session_budget > 0:
+            logger.info("Session budget cap: ${:.2f} (bot won't use more than this)", settings.session_budget)
 
     return real_exchange

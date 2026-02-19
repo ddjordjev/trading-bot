@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 class BotStatus(BaseModel):
     running: bool = False
-    trading_mode: str = "paper"
+    trading_mode: str = "paper_local"
     exchange_name: str = ""
     exchange_url: str = ""
     balance: float = 0.0

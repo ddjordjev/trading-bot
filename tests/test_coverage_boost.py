@@ -67,7 +67,7 @@ class TestBollingerSignals:
 
 @pytest.fixture
 def _settings(monkeypatch):
-    monkeypatch.setenv("TRADING_MODE", "paper")
+    monkeypatch.setenv("TRADING_MODE", "paper_local")
     monkeypatch.setenv("EXCHANGE", "mexc")
     monkeypatch.setenv("MAX_POSITION_SIZE_PCT", "5.0")
     monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")
@@ -289,7 +289,7 @@ class TestTradeProposal:
 class TestSettingsUrls:
     @pytest.fixture
     def settings(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper")
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "binance")
         return Settings(_env_file=None)
 
@@ -326,14 +326,14 @@ class TestSettingsUrls:
         assert settings.is_paper() is True
 
     def test_bybit_url(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper")
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "bybit")
         s = Settings(_env_file=None)
         url = s.symbol_platform_url("BTC/USDT")
         assert "bybit" in url.lower() or url == ""
 
     def test_mexc_url(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper")
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "mexc")
         s = Settings(_env_file=None)
         url = s.symbol_platform_url("BTC/USDT")
@@ -346,7 +346,7 @@ class TestSettingsUrls:
         assert settings.binance_api_secret == "test_secret"
 
     def test_bybit_api_keys_paper(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper")
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "bybit")
         s = Settings(_env_file=None)
         s.bybit_test_api_key = "bkey"
@@ -1466,7 +1466,7 @@ class TestNotifierExtended:
     async def test_process_queue_sends_email(self, monkeypatch):
         from notifications.notifier import Notifier
 
-        monkeypatch.setenv("TRADING_MODE", "paper")
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "mexc")
         monkeypatch.setenv("SMTP_USER", "u@test.com")
         monkeypatch.setenv("SMTP_PASSWORD", "pass")
@@ -1491,7 +1491,7 @@ class TestNotifierExtended:
     async def test_send_email_error_handling(self, monkeypatch):
         from notifications.notifier import Notifier
 
-        monkeypatch.setenv("TRADING_MODE", "paper")
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "mexc")
         monkeypatch.setenv("SMTP_USER", "u@test.com")
         monkeypatch.setenv("SMTP_PASSWORD", "pass")
