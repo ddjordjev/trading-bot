@@ -157,6 +157,21 @@ class PaperExchange(BaseExchange):
             logger.info("[PAPER] Closed position {} PnL: {:.2f}", order.symbol, pnl)
             return
 
+        if existing and existing.side == order.side:
+            total_amount = existing.amount + order.amount
+            avg_entry = (existing.entry_price * existing.amount + fill_price * order.amount) / total_amount
+            existing.amount = total_amount
+            existing.entry_price = avg_entry
+            existing.current_price = fill_price
+            existing.leverage = max(existing.leverage, order.leverage)
+            logger.info(
+                "[PAPER] DCA into {} — avg entry: {:.6f}, total: {:.6f}",
+                order.symbol,
+                avg_entry,
+                total_amount,
+            )
+            return
+
         self._positions.append(
             Position(
                 symbol=order.symbol,
@@ -169,7 +184,7 @@ class PaperExchange(BaseExchange):
             )
         )
 
-    async def cancel_order(self, order_id: str, symbol: str) -> Order:
+    async def cancel_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
         if order_id in self._orders:
             self._orders[order_id].status = OrderStatus.CANCELLED
             return self._orders[order_id]
@@ -182,7 +197,7 @@ class PaperExchange(BaseExchange):
             status=OrderStatus.CANCELLED,
         )
 
-    async def fetch_order(self, order_id: str, symbol: str) -> Order:
+    async def fetch_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
         if order_id in self._orders:
             return self._orders[order_id]
         return Order(
@@ -194,7 +209,9 @@ class PaperExchange(BaseExchange):
             status=OrderStatus.FAILED,
         )
 
-    async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:
+    async def fetch_open_orders(
+        self, symbol: str | None = None, market_type: MarketType = MarketType.SPOT
+    ) -> list[Order]:
         return [o for o in self._orders.values() if o.status == OrderStatus.OPEN and (not symbol or o.symbol == symbol)]
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:

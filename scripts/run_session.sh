@@ -32,7 +32,7 @@ cmd_start() {
     docker compose up -d
     sleep 3
     docker compose ps
-    log "Dashboard: http://localhost:${DASHBOARD_PORT:-8080}"
+    log "Dashboard: http://localhost:${DASHBOARD_PORT:-9035}"
     log "Exchange:  $(grep EXCHANGE_PLATFORM_URL .env | cut -d= -f2-)"
     if [ -z "$(grep EXCHANGE_PLATFORM_URL .env | cut -d= -f2-)" ]; then
         log "Exchange:  https://demo.binance.com/en/futures (auto-detected)"

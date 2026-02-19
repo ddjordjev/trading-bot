@@ -1078,7 +1078,7 @@ class TradingBot:
 
     async def _log_status(self) -> None:
         now = datetime.now(UTC)
-        if self._last_status_log and (now - self._last_status_log).seconds < self._status_interval:
+        if self._last_status_log and (now - self._last_status_log).total_seconds() < self._status_interval:
             return
         self._last_status_log = now
 

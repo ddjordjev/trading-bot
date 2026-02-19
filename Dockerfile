@@ -22,9 +22,9 @@ COPY --from=frontend /build/dist /app/web/frontend/dist
 RUN mkdir -p logs data
 
 ENV PYTHONUNBUFFERED=1
-EXPOSE 8080
+EXPOSE 9035
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -sf http://localhost:8080/api/status || exit 1
+    CMD curl -sf http://localhost:9035/api/status || exit 1
 
 CMD ["python", "bot.py"]

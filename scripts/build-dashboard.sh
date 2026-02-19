@@ -14,4 +14,4 @@ npm run build
 
 echo "==> Done! Built files in $FRONTEND_DIR/dist/"
 echo "    Start the bot with: python bot.py"
-echo "    Dashboard will be at http://localhost:8080"
+echo "    Dashboard will be at http://localhost:9035"

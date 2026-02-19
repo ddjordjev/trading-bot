@@ -197,8 +197,9 @@ class BinanceExchange(BaseExchange):
             market_type=market_type.value,
         )
 
-    async def cancel_order(self, order_id: str, symbol: str) -> Order:
-        data = await self._spot.cancel_order(order_id, symbol)
+    async def cancel_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
+        client = self._client(market_type)
+        data = await client.cancel_order(order_id, symbol)
         return Order(
             id=order_id,
             symbol=symbol,
@@ -208,8 +209,9 @@ class BinanceExchange(BaseExchange):
             status=OrderStatus.CANCELLED,
         )
 
-    async def fetch_order(self, order_id: str, symbol: str) -> Order:
-        data = await self._spot.fetch_order(order_id, symbol)
+    async def fetch_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
+        client = self._client(market_type)
+        data = await client.fetch_order(order_id, symbol)
         return Order(
             id=order_id,
             symbol=symbol,
@@ -221,8 +223,11 @@ class BinanceExchange(BaseExchange):
             average_price=float(data.get("average", 0) or 0),
         )
 
-    async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:
-        raw = await self._spot.fetch_open_orders(symbol)
+    async def fetch_open_orders(
+        self, symbol: str | None = None, market_type: MarketType = MarketType.SPOT
+    ) -> list[Order]:
+        client = self._client(market_type)
+        raw = await client.fetch_open_orders(symbol)
         return [
             Order(
                 id=str(d.get("id", "")),

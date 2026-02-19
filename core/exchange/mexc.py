@@ -185,7 +185,7 @@ class MexcExchange(BaseExchange):
             market_type="spot",
         )
 
-    async def cancel_order(self, order_id: str, symbol: str) -> Order:
+    async def cancel_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
         data = await self._spot.cancel_order(order_id, symbol)
         return Order(
             id=order_id,
@@ -196,7 +196,7 @@ class MexcExchange(BaseExchange):
             status=OrderStatus.CANCELLED,
         )
 
-    async def fetch_order(self, order_id: str, symbol: str) -> Order:
+    async def fetch_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
         data = await self._spot.fetch_order(order_id, symbol)
         return Order(
             id=order_id,
@@ -209,7 +209,9 @@ class MexcExchange(BaseExchange):
             average_price=float(data.get("average", 0) or 0),
         )
 
-    async def fetch_open_orders(self, symbol: str | None = None) -> list[Order]:
+    async def fetch_open_orders(
+        self, symbol: str | None = None, market_type: MarketType = MarketType.SPOT
+    ) -> list[Order]:
         raw = await self._spot.fetch_open_orders(symbol)
         orders = []
         for data in raw:

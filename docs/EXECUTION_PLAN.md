@@ -140,6 +140,102 @@ fail and under what conditions is just as important as finding winners.
 
 ---
 
+## Pre-Launch: Running & Testing
+
+Before Day 1 starts, every component must be verified in isolation and then
+end-to-end. This phase has **no timer** — take as long as needed to get a
+clean bill of health. The 10-day clock starts only after everything below
+passes.
+
+### 1. Codebase Analysis (new session checkpoint)
+
+If you are a new agent or starting a fresh chat session, **do a full code
+analysis before running anything.** Read the key modules, understand the
+architecture, and verify that nothing is obviously broken. This codebase is
+complex (80+ files, 3 services, 8 strategies, multiple intel feeds) and
+context from prior sessions may be stale.
+
+At minimum, review:
+- `bot.py` — main entry point, strategy registration, tick loop
+- `core/exchange/` — exchange adapters, PaperExchange (simulated trading)
+- `core/risk/` — risk manager, daily target tracker
+- `core/orders/` — order manager, scaler, trailing, hedge
+- `strategies/` — all strategy implementations
+- `services/` — monitor, analytics, signal generator
+- `config/settings.py` — all configuration knobs
+- `docker-compose.yml` and `Dockerfile` — container setup
+- `docs/EXECUTION_PLAN.md` — this file (you're reading it)
+- `.cursor/chat_history.md` — previous session context and decisions
+
+Look for: mismatched ports, broken imports, stale references, logic bugs,
+anything that would prevent a clean startup. Fix issues before proceeding.
+
+### 2. Run the Test Suite
+
+```bash
+cd /Users/damirdjordjev/workspace/trading-bot
+python -m pytest tests/ -v --tb=short
+```
+
+- All tests must pass.
+- Check for flaky async tests (re-run if needed).
+- Note: `test_config.py` is currently empty — add basic config tests if time allows.
+
+### 3. Preflight Check
+
+```bash
+python scripts/preflight_check.py
+```
+
+This validates: API keys (Binance testnet), exchange connectivity, USDT balance,
+BTC/USDT ticker, futures support, leverage, risk limits, trading mode, email.
+Fix any failures before proceeding.
+
+### 4. Docker Build & Smoke Test
+
+```bash
+docker compose build
+docker compose up -d
+docker compose ps          # all 3 services should be "healthy"
+docker compose logs --tail 20 trading-bot
+docker compose logs --tail 20 monitor
+docker compose logs --tail 20 analytics
+```
+
+Verify:
+- No crash loops or repeating errors
+- Dashboard loads at http://localhost:9035
+- Bot connects to Binance testnet (look for "Connected to binance" in logs)
+- Balance shows ~$100 (SESSION_BUDGET, not testnet's $5,000+)
+- Monitor is writing `data/intel_state.json` (intel feeds polling)
+- Analytics is writing `data/analytics_state.json`
+
+### 5. End-to-End Signal Flow
+
+Watch logs for ~10–15 minutes and confirm the full pipeline:
+
+```
+Strategy generates Signal → RiskManager.check_signal() → OrderManager.execute_signal()
+  → PaperExchange.place_order() → trade logged to trades.db
+Monitor polls intel → writes IntelSnapshot → SignalGenerator produces TradeProposals
+  → bot reads trade_queue.json → processes proposals
+Analytics reads trades.db → computes strategy weights → writes analytics_state.json
+```
+
+If no trades fire naturally (market is quiet), verify the signal path is at least
+being evaluated by checking log lines like "Strategy X: no signal" or
+"Risk check: passed/rejected".
+
+### 6. Teardown & Clean Slate
+
+```bash
+docker compose down -v      # -v removes volumes for a fresh start
+```
+
+Once all 6 steps pass, proceed to Day 1 with confidence.
+
+---
+
 ## Day 1: Bootstrap
 
 This is the critical first day. The priority is: **make sure everything works.**
