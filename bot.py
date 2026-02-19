@@ -400,6 +400,8 @@ class TradingBot:
                 for c in candles:
                     strategy.feed_candle(c)
 
+                await asyncio.sleep(0)  # yield so dashboard stays responsive
+
                 spike = self.volatility.update(ticker)
                 if spike:
                     await self._handle_spike(spike)
@@ -503,6 +505,8 @@ class TradingBot:
 
             except Exception as e:
                 logger.error("Strategy '{}' error for {}: {}", strategy.name, strategy.symbol, e)
+            finally:
+                await asyncio.sleep(0)  # yield after each strategy for dashboard
 
         # 13. Hedge check: open counter-positions on reversal signals
         if self.settings.hedge_enabled:

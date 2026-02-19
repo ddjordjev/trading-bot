@@ -69,9 +69,9 @@ class PaperExchange(BaseExchange):
                 pos.current_price = ticker.last
                 if pos.entry_price > 0:
                     if pos.side == OrderSide.BUY:
-                        pos.unrealized_pnl = (ticker.last - pos.entry_price) * pos.amount * pos.leverage
+                        pos.unrealized_pnl = (ticker.last - pos.entry_price) * pos.amount
                     else:
-                        pos.unrealized_pnl = (pos.entry_price - ticker.last) * pos.amount * pos.leverage
+                        pos.unrealized_pnl = (pos.entry_price - ticker.last) * pos.amount
             except Exception:
                 pass
         return targets
@@ -191,9 +191,9 @@ class PaperExchange(BaseExchange):
         if existing and existing.side != order.side:
             close_amount = min(order.amount, existing.amount)
             if existing.side == OrderSide.BUY:
-                pnl = (fill_price - existing.entry_price) * close_amount * existing.leverage
+                pnl = (fill_price - existing.entry_price) * close_amount
             else:
-                pnl = (existing.entry_price - fill_price) * close_amount * existing.leverage
+                pnl = (existing.entry_price - fill_price) * close_amount
             margin_returned = existing.entry_price * close_amount / existing.leverage
             self._balances["USDT"] += margin_returned + pnl
 

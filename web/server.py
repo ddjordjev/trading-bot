@@ -498,6 +498,9 @@ async def toggle_module(name: str, _: str = Depends(verify_token)):
             _bot.intel = MarketIntel(
                 coinglass_key=_bot.settings.coinglass_api_key,
                 symbols=_bot.settings.intel_symbol_list,
+                tv_exchange=_bot.settings.tv_exchange,
+                cmc_api_key=_bot.settings.cmc_api_key,
+                coingecko_api_key=_bot.settings.coingecko_api_key,
             )
             await _bot.intel.start()
             return ActionResponse(success=True, message="Intel enabled")

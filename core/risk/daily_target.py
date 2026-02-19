@@ -71,7 +71,7 @@ class DailyTargetTracker:
             self._history.append(
                 DailyRecord(
                     day=self._day_number,
-                    date=datetime.now(UTC).strftime("%Y-%m-%d"),
+                    date=(self._last_reset or datetime.now(UTC)).strftime("%Y-%m-%d"),
                     start_balance=self._day_start_balance,
                     end_balance=balance,
                     pnl=balance - self._day_start_balance,
