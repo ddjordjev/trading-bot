@@ -84,7 +84,7 @@ class WhaleSentiment:
         self.coinglass_key = coinglass_key
         self._data: dict[str, WhaleSentimentData] = {}
         self._running = False
-        self._background_tasks: list = []
+        self._background_tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
         self._running = True
@@ -150,7 +150,7 @@ class WhaleSentiment:
         async with aiohttp.ClientSession() as session:
             # Long/Short ratio
             try:
-                params = {"symbol": symbol, "timeType": 2}
+                params: dict[str, str | int] = {"symbol": symbol, "timeType": 2}
                 async with session.get(
                     self.COINGLASS_LS_URL, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
                 ) as resp:
@@ -168,7 +168,7 @@ class WhaleSentiment:
 
             # Funding rate
             try:
-                params = {"symbol": symbol}
+                params: dict[str, str | int] = {"symbol": symbol}
                 async with session.get(
                     self.COINGLASS_FUNDING_URL, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
                 ) as resp:
@@ -187,7 +187,7 @@ class WhaleSentiment:
             # Open interest details
             oi_snap = OISnapshot(timestamp=datetime.now(UTC))
             try:
-                params = {"symbol": symbol, "timeType": 2}
+                params: dict[str, str | int] = {"symbol": symbol, "timeType": 2}
                 async with session.get(
                     self.COINGLASS_OI_URL, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
                 ) as resp:
@@ -208,7 +208,7 @@ class WhaleSentiment:
 
             # Top trader positions (Binance top trader L/S)
             try:
-                params = {"symbol": symbol, "timeType": 2}
+                params: dict[str, str | int] = {"symbol": symbol, "timeType": 2}
                 async with session.get(
                     self.COINGLASS_TOP_TRADERS_URL,
                     params=params,

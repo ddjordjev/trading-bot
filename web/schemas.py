@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -97,19 +99,19 @@ class ModuleStatus(BaseModel):
     enabled: bool
     display_name: str
     description: str = ""
-    stats: dict = {}
+    stats: dict[str, Any] = {}
 
 
 class DailyReportData(BaseModel):
     compound_report: str = ""
-    history: list[dict] = []
+    history: list[dict[str, Any]] = []
     winning_days: int = 0
     losing_days: int = 0
     target_hit_days: int = 0
     avg_daily_pnl_pct: float = 0.0
-    best_day: dict | None = None
-    worst_day: dict | None = None
-    projected: dict = {}
+    best_day: dict[str, Any] | None = None
+    worst_day: dict[str, Any] | None = None
+    projected: dict[str, Any] = {}
 
 
 class WickScalpInfo(BaseModel):
@@ -186,8 +188,8 @@ class AnalyticsSnapshot(BaseModel):
     patterns: list[PatternInsightInfo] = []
     suggestions: list[ModificationSuggestionInfo] = []
     total_trades_logged: int = 0
-    hourly_performance: list[dict] = []
-    regime_performance: list[dict] = []
+    hourly_performance: list[dict[str, Any]] = []
+    regime_performance: list[dict[str, Any]] = []
 
 
 class ActionResponse(BaseModel):

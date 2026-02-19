@@ -35,7 +35,7 @@ class Notifier:
         self.enabled_types = set(settings.notification_list)
         self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=100)
         self._running = False
-        self._background_tasks: list = []
+        self._background_tasks: list[asyncio.Task[None]] = []
 
     ALWAYS_ON = {NotificationType.LIQUIDATION, NotificationType.WHALE_POSITION}
 

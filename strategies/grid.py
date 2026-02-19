@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from core.models import Candle, Signal, SignalAction, Ticker
 from strategies.base import BaseStrategy
 
@@ -15,7 +17,7 @@ class GridStrategy(BaseStrategy):
     def name(self) -> str:
         return "grid"
 
-    def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: object):
+    def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: Any):
         super().__init__(symbol, market_type, leverage, **params)
         self.grid_size_pct = float(params.get("grid_size_pct", 1.0))
         self.num_grids = int(params.get("num_grids", 5))
@@ -29,7 +31,7 @@ class GridStrategy(BaseStrategy):
             return False
         threshold = self.recenter_threshold or self.num_grids
         max_drift = self._center_price * (self.grid_size_pct / 100) * threshold
-        return abs(price - self._center_price) > max_drift
+        return bool(abs(price - self._center_price) > max_drift)
 
     def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:
         df = self.candles_to_df(candles)

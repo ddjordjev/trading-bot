@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import ta
 
 from core.market_schedule import get_market_schedule
@@ -19,7 +21,7 @@ class MarketOpenVolatilityStrategy(BaseStrategy):
     def name(self) -> str:
         return "market_open_volatility"
 
-    def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: object):
+    def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: Any):
         super().__init__(symbol, market_type, leverage, **params)
         self.open_window_minutes = int(params.get("open_window_minutes", 120))
         self.atr_period = int(params.get("atr_period", 14))

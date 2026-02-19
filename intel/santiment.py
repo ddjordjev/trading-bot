@@ -55,7 +55,7 @@ class SantimentClient:
         self.poll_interval = poll_interval
         self._data: dict[str, SocialData] = {}
         self._running = False
-        self._background_tasks: list = []
+        self._background_tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
         self._running = True

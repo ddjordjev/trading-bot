@@ -61,7 +61,7 @@ class GlassnodeClient:
         self.poll_interval = poll_interval
         self._data: dict[str, OnChainData] = {}
         self._running = False
-        self._background_tasks: list = []
+        self._background_tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
         if not self.api_key:

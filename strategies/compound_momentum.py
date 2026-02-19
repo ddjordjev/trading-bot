@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import ta
 
 from core.models import Candle, Signal, SignalAction, Ticker
@@ -24,7 +26,7 @@ class CompoundMomentumStrategy(BaseStrategy):
     def name(self) -> str:
         return "compound_momentum"
 
-    def __init__(self, symbol: str, market_type: str = "futures", leverage: int = 10, **params: object):
+    def __init__(self, symbol: str, market_type: str = "futures", leverage: int = 10, **params: Any):
         super().__init__(symbol, market_type, leverage, **params)
 
         # Breakout detection

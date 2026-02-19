@@ -336,13 +336,13 @@ class MarketIntel:
         """Aggregate interesting symbols from CMC and CoinGecko for the scanner."""
         symbols: set[str] = set()
 
-        for coin in self.coinmarketcap.all_interesting:
-            if coin.is_tradable_size:
-                symbols.add(coin.symbol.upper())
+        for cmc_coin in self.coinmarketcap.all_interesting:
+            if cmc_coin.is_tradable_size:
+                symbols.add(cmc_coin.symbol.upper())
 
-        for coin in self.coingecko.all_interesting:
-            if coin.volume_24h >= 1_000_000:
-                symbols.add(coin.symbol.upper())
+        for gecko_coin in self.coingecko.all_interesting:
+            if gecko_coin.volume_24h >= 1_000_000:
+                symbols.add(gecko_coin.symbol.upper())
 
         return sorted(symbols)
 

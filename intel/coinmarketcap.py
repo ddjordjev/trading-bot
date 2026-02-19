@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import Any
 
 import aiohttp
 from loguru import logger
@@ -55,7 +56,7 @@ class CoinMarketCapClient:
         self._losers: list[CMCCoin] = []
         self._recently_added: list[CMCCoin] = []
         self._running = False
-        self._background_tasks: list = []
+        self._background_tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
         self._running = True
@@ -274,7 +275,7 @@ class CoinMarketCapClient:
         self._recently_added = coins
 
     @staticmethod
-    def _parse_spotlight_coin(item: dict) -> CMCCoin | None:
+    def _parse_spotlight_coin(item: dict[str, Any]) -> CMCCoin | None:
         try:
             return CMCCoin(
                 id=item.get("id", 0),
@@ -291,7 +292,7 @@ class CoinMarketCapClient:
             return None
 
     @staticmethod
-    def _parse_api_coin(item: dict) -> CMCCoin | None:
+    def _parse_api_coin(item: dict[str, Any]) -> CMCCoin | None:
         try:
             quote = item.get("quote", {}).get("USD", {})
             return CMCCoin(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import ta
 
 from core.models import Candle, Signal, SignalAction, Ticker
@@ -16,7 +18,7 @@ class RSIStrategy(BaseStrategy):
     def name(self) -> str:
         return "rsi"
 
-    def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: object):
+    def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: Any):
         super().__init__(symbol, market_type, leverage, **params)
         self.period = int(params.get("period", 14))
         self.oversold = float(params.get("oversold", 30))

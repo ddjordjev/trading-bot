@@ -41,7 +41,7 @@ def load_custom_strategies() -> dict[str, type[BaseStrategy]]:
                 if isinstance(attr, type) and issubclass(attr, BaseStrategy) and attr is not BaseStrategy:
                     instance = attr.__new__(attr)
                     try:
-                        name = attr.name.fget(instance)  # type: ignore[union-attr]
+                        name = attr.name.fget(instance)  # type: ignore[attr-defined]
                     except Exception:
                         name = attr_name.lower()
                     strategies[name] = attr

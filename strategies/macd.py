@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import ta
 
 from core.models import Candle, Signal, SignalAction, Ticker
@@ -17,7 +19,7 @@ class MACDStrategy(BaseStrategy):
     def name(self) -> str:
         return "macd"
 
-    def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: object):
+    def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: Any):
         super().__init__(symbol, market_type, leverage, **params)
         self.fast = int(params.get("fast", 12))
         self.slow = int(params.get("slow", 26))

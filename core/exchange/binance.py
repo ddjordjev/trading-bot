@@ -8,7 +8,6 @@ import ccxt.async_support as ccxt
 from loguru import logger
 
 from core.exchange.base import BaseExchange, parse_order_status, ts_to_dt
-from web.metrics import timed
 from core.models import (
     Candle,
     MarketType,
@@ -20,6 +19,7 @@ from core.models import (
     Position,
     Ticker,
 )
+from web.metrics import timed
 
 
 class BinanceExchange(BaseExchange):

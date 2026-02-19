@@ -63,7 +63,7 @@ class LiquidationMonitor:
         self._latest: LiquidationSnapshot | None = None
         self._running = False
         self._history: list[LiquidationSnapshot] = []
-        self._background_tasks: list = []
+        self._background_tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
         self._running = True

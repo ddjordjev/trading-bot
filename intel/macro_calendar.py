@@ -93,7 +93,7 @@ class MacroCalendar:
         self.poll_interval = poll_interval
         self._events: list[MacroEvent] = []
         self._running = False
-        self._background_tasks: list = []
+        self._background_tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
         self._running = True
@@ -206,12 +206,12 @@ class MacroCalendar:
             except (ValueError, TypeError):
                 continue
 
-        self._events = sorted(events, key=lambda e: e.date)
-        high = [e for e in events if e.is_crypto_mover]
+        self._events = sorted(events, key=lambda ev: ev.date)
+        high = [ev for ev in events if ev.is_crypto_mover]
         if high:
             logger.info("Macro calendar: {} events this week, {} high-impact", len(events), len(high))
-            for e in high[:3]:
-                logger.info("  {} | {} | in {:.0f}h", e.title, e.impact.value, e.hours_until)
+            for ev in high[:3]:
+                logger.info("  {} | {} | in {:.0f}h", ev.title, ev.impact.value, ev.hours_until)
 
     @staticmethod
     def _classify_impact(title: str, raw_impact: str) -> EventImpact:

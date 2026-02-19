@@ -1,0 +1,18 @@
+---
+description: Never lower test coverage threshold — always add new tests instead
+alwaysApply: true
+---
+
+# Test Coverage Policy
+
+**NEVER lower `fail_under` in `pyproject.toml` or exclude files from coverage
+to pass the threshold.** If coverage drops because of new code, write new tests
+to bring it back up.
+
+## Rules
+
+1. The `fail_under` value in `[tool.coverage.report]` must never decrease.
+2. The `omit` list in `[tool.coverage.run]` must not grow to dodge coverage.
+3. When adding new modules or significant code, write tests in the same commit.
+4. If a CI run fails on coverage, the fix is always **more tests**, not a
+   lower bar.

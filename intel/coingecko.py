@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import Any
 
 import aiohttp
 from loguru import logger
@@ -74,13 +75,13 @@ class CoinGeckoClient:
         self._top_by_volume: list[GeckoCoin] = []
         self._top_gainers: list[GeckoCoin] = []
         self._running = False
-        self._background_tasks: list = []
+        self._background_tasks: list[asyncio.Task[None]] = []
 
     @property
     def _base_url(self) -> str:
         return self.PRO_URL if self.api_key else self.BASE_URL
 
-    def _params(self, extra: dict | None = None) -> dict:
+    def _params(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         p = {}
         if self.api_key:
             p["x_cg_pro_api_key"] = self.api_key

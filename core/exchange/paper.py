@@ -6,7 +6,6 @@ from collections.abc import Callable
 from loguru import logger
 
 from core.exchange.base import BaseExchange
-from web.metrics import timed
 from core.models import (
     Candle,
     MarketType,
@@ -18,6 +17,7 @@ from core.models import (
     Position,
     Ticker,
 )
+from web.metrics import timed
 
 
 class PaperExchange(BaseExchange):

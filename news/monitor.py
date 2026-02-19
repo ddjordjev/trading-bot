@@ -4,6 +4,7 @@ import asyncio
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 import aiohttp
 import feedparser
@@ -92,12 +93,12 @@ class NewsMonitor:
         self.enabled = settings.news_enabled
         self.sources = settings.news_source_list
         self._seen_urls: set[str] = set()
-        self._callbacks: list[Callable] = []
+        self._callbacks: list[Callable[..., Any]] = []
         self._poll_interval = 60
         self._running = False
-        self._background_tasks: list = []
+        self._background_tasks: list[asyncio.Task[None]] = []
 
-    def on_news(self, callback: Callable) -> None:
+    def on_news(self, callback: Callable[..., Any]) -> None:
         self._callbacks.append(callback)
 
     async def start(self) -> None:

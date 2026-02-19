@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from core.models import Candle, Signal, SignalAction, Ticker
 from strategies.base import BaseStrategy
 
@@ -15,7 +17,7 @@ class MeanReversionStrategy(BaseStrategy):
     def name(self) -> str:
         return "mean_reversion"
 
-    def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: object):
+    def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: Any):
         super().__init__(symbol, market_type, leverage, **params)
         self.ma_period = int(params.get("ma_period", 50))
         self.deviation_pct = float(params.get("deviation_pct", 2.0))

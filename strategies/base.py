@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 import pandas as pd
 
@@ -15,7 +16,7 @@ class BaseStrategy(ABC):
     returned Signal.
     """
 
-    def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: object):
+    def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: Any):
         self.symbol = symbol
         self.market_type = market_type
         self.leverage = leverage

@@ -7,7 +7,6 @@ from loguru import logger
 
 from config.settings import Settings
 from core.exchange.base import BaseExchange
-from web.metrics import timed
 from core.models import (
     Candle,
     MarketType,
@@ -24,6 +23,7 @@ from core.orders.scaler import PositionScaler, ScaledPosition, ScaleMode
 from core.orders.trailing import TrailingStopManager
 from core.orders.wick_scalp import WickScalpDetector
 from core.risk.manager import RiskManager
+from web.metrics import timed
 
 
 class OrderManager:

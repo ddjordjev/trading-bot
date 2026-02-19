@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -170,7 +171,8 @@ class TradeQueue(BaseModel):
         return removed
 
     def _bucket(self, priority: SignalPriority) -> list[TradeProposal]:
-        return getattr(self, priority.value)
+        result: list[TradeProposal] = getattr(self, priority.value)
+        return result
 
 
 class BotDeploymentStatus(BaseModel):
@@ -282,7 +284,7 @@ class AnalyticsSnapshot(BaseModel):
     """Written by the analytics service -- strategy scores and suggestions."""
 
     weights: list[StrategyWeightEntry] = []
-    patterns: list[dict] = []
-    suggestions: list[dict] = []
+    patterns: list[dict[str, Any]] = []
+    suggestions: list[dict[str, Any]] = []
     total_trades_logged: int = 0
     updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())

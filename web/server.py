@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import Depends, FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,12 +37,12 @@ if TYPE_CHECKING:
 
 _bot: TradingBot | None = None
 _start_time: float = 0.0
-_log_buffer: deque[dict] = deque(maxlen=200)
-_background_tasks: list = []
+_log_buffer: deque[dict[str, Any]] = deque(maxlen=200)
+_background_tasks: list[asyncio.Task[None]] = []
 
 
 def _log_sink(message: object) -> None:
-    record = message.record  # type: ignore[union-attr]
+    record = message.record  # type: ignore[attr-defined]
     _log_buffer.append(
         {
             "ts": record["time"].strftime("%H:%M:%S"),
@@ -186,19 +186,19 @@ def _recent_logs() -> list[LogEntry]:
 # --------------- health (no auth) ---------------
 
 
-@app.get("/health")
-async def health():
+@app.get("/health", response_model=None)
+async def health() -> dict[str, Any]:
     return {"status": "ok", "bot_running": _bot._running if _bot else False}
 
 
-@app.get("/api/grafana-url")
-async def grafana_url():
+@app.get("/api/grafana-url", response_model=None)
+async def grafana_url() -> dict[str, Any]:
     port = _bot.settings.grafana_port if _bot else 3001
     return {"port": port, "dashboard_uid": "trading-bot"}
 
 
-@app.get("/metrics")
-async def metrics():
+@app.get("/metrics", response_model=None)
+async def metrics() -> Response:
     from web.metrics import collect_metrics
 
     uptime = time.time() - _start_time if _start_time else 0
@@ -210,17 +210,17 @@ async def metrics():
 
 
 @app.get("/api/status", response_model=BotStatus)
-async def get_status(_: str = Depends(verify_token)):
+async def get_status(_: str = Depends(verify_token)) -> BotStatus:
     return _bot_status()
 
 
 @app.get("/api/positions", response_model=list[PositionInfo])
-async def get_positions(_: str = Depends(verify_token)):
+async def get_positions(_: str = Depends(verify_token)) -> list[PositionInfo]:
     return await _positions()
 
 
 @app.get("/api/trades", response_model=list[TradeRecord])
-async def get_trades(_: str = Depends(verify_token)):
+async def get_trades(_: str = Depends(verify_token)) -> list[TradeRecord]:
     if not _bot:
         return []
     records = []
@@ -241,12 +241,12 @@ async def get_trades(_: str = Depends(verify_token)):
 
 
 @app.get("/api/intel", response_model=IntelSnapshot | None)
-async def get_intel(_: str = Depends(verify_token)):
+async def get_intel(_: str = Depends(verify_token)) -> IntelSnapshot | None:
     return _intel_snapshot()
 
 
 @app.get("/api/trending", response_model=list[TrendingCoinInfo])
-async def get_trending(_: str = Depends(verify_token)):
+async def get_trending(_: str = Depends(verify_token)) -> list[TrendingCoinInfo]:
     if not _bot:
         return []
     coins = []
@@ -268,7 +268,7 @@ async def get_trending(_: str = Depends(verify_token)):
 
 
 @app.get("/api/strategies", response_model=list[StrategyInfo])
-async def get_strategies(_: str = Depends(verify_token)):
+async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
     if not _bot:
         return []
     result = []
@@ -300,7 +300,7 @@ async def get_strategies(_: str = Depends(verify_token)):
 
 
 @app.get("/api/modules", response_model=list[ModuleStatus])
-async def get_modules(_: str = Depends(verify_token)):
+async def get_modules(_: str = Depends(verify_token)) -> list[ModuleStatus]:
     if not _bot:
         return []
     return [
@@ -336,7 +336,7 @@ async def get_modules(_: str = Depends(verify_token)):
 
 
 @app.get("/api/daily-report", response_model=DailyReportData)
-async def get_daily_report(_: str = Depends(verify_token)):
+async def get_daily_report(_: str = Depends(verify_token)) -> DailyReportData:
     if not _bot:
         return DailyReportData()
     t = _bot.target
@@ -360,7 +360,7 @@ async def get_daily_report(_: str = Depends(verify_token)):
 
 
 @app.get("/api/analytics", response_model=AnalyticsSnapshot)
-async def get_analytics(_: str = Depends(verify_token)):
+async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
     if not _bot:
         return AnalyticsSnapshot()
     scores = [
@@ -382,7 +382,7 @@ async def get_analytics(_: str = Depends(verify_token)):
 
 
 @app.post("/api/analytics/refresh", response_model=ActionResponse)
-async def refresh_analytics(_: str = Depends(verify_token)):
+async def refresh_analytics(_: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     _bot.analytics.refresh()
@@ -393,7 +393,7 @@ async def refresh_analytics(_: str = Depends(verify_token)):
 
 
 @app.post("/api/bot/start", response_model=ActionResponse)
-async def bot_start(_: str = Depends(verify_token)):
+async def bot_start(_: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot instance not initialized")
     if _bot._running:
@@ -404,7 +404,7 @@ async def bot_start(_: str = Depends(verify_token)):
 
 
 @app.post("/api/bot/stop", response_model=ActionResponse)
-async def bot_stop(_: str = Depends(verify_token)):
+async def bot_stop(_: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot instance not initialized")
     if not _bot._running:
@@ -414,7 +414,7 @@ async def bot_stop(_: str = Depends(verify_token)):
 
 
 @app.post("/api/position/{symbol}/close", response_model=ActionResponse)
-async def close_position(symbol: str, _: str = Depends(verify_token)):
+async def close_position(symbol: str, _: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     from core.models import Signal, SignalAction
@@ -433,7 +433,9 @@ async def close_position(symbol: str, _: str = Depends(verify_token)):
 
 
 @app.post("/api/position/{symbol}/take-profit", response_model=ActionResponse)
-async def take_profit(symbol: str, pct: float = Query(default=50, ge=1, le=100), _: str = Depends(verify_token)):
+async def take_profit(
+    symbol: str, pct: float = Query(default=50, ge=1, le=100), _: str = Depends(verify_token)
+) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     try:
@@ -460,7 +462,9 @@ async def take_profit(symbol: str, pct: float = Query(default=50, ge=1, le=100),
 
 
 @app.post("/api/position/{symbol}/tighten-stop", response_model=ActionResponse)
-async def tighten_stop(symbol: str, pct: float = Query(default=2, ge=0.1, le=50), _: str = Depends(verify_token)):
+async def tighten_stop(
+    symbol: str, pct: float = Query(default=2, ge=0.1, le=50), _: str = Depends(verify_token)
+) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     ts = _bot.orders.trailing.active_stops.get(symbol)
@@ -476,7 +480,7 @@ async def tighten_stop(symbol: str, pct: float = Query(default=2, ge=0.1, le=50)
 
 
 @app.post("/api/close-all", response_model=ActionResponse)
-async def close_all(_: str = Depends(verify_token)):
+async def close_all(_: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     await _bot._close_all_positions("Dashboard: close all")
@@ -484,7 +488,7 @@ async def close_all(_: str = Depends(verify_token)):
 
 
 @app.post("/api/stop-trading", response_model=ActionResponse)
-async def stop_trading(_: str = Depends(verify_token)):
+async def stop_trading(_: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     _bot.target.STOP_FILE.touch()
@@ -492,7 +496,7 @@ async def stop_trading(_: str = Depends(verify_token)):
 
 
 @app.post("/api/resume-trading", response_model=ActionResponse)
-async def resume_trading(_: str = Depends(verify_token)):
+async def resume_trading(_: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     _bot.target.STOP_FILE.unlink(missing_ok=True)
@@ -500,7 +504,7 @@ async def resume_trading(_: str = Depends(verify_token)):
 
 
 @app.post("/api/module/{name}/toggle", response_model=ActionResponse)
-async def toggle_module(name: str, _: str = Depends(verify_token)):
+async def toggle_module(name: str, _: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     if name == "intel":
@@ -531,7 +535,7 @@ async def toggle_module(name: str, _: str = Depends(verify_token)):
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket) -> None:
     if not await verify_ws_token(websocket):
         return
     await websocket.accept()
@@ -555,8 +559,8 @@ async def websocket_endpoint(websocket: WebSocket):
 # --------------- static files ---------------
 
 
-@app.get("/docs/summary")
-async def serve_summary():
+@app.get("/docs/summary", response_model=None)
+async def serve_summary() -> FileResponse | HTMLResponse:
     summary_path = DOCS_DIR / "summary.html"
     if summary_path.exists():
         return FileResponse(summary_path, media_type="text/html")
@@ -566,8 +570,8 @@ async def serve_summary():
 if FRONTEND_DIR.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="assets")
 
-    @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str):
+    @app.get("/{full_path:path}", response_model=None)
+    async def serve_spa(full_path: str) -> FileResponse:
         file_path = FRONTEND_DIR / full_path
         if file_path.exists() and file_path.is_file():
             return FileResponse(file_path)

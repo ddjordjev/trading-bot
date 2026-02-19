@@ -4,6 +4,7 @@ import asyncio
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 import aiohttp
 from loguru import logger
@@ -72,13 +73,13 @@ class TrendingScanner:
         self.min_daily_move_pct = min_daily_move_pct
         self._intel = intel  # MarketIntel reference for CMC/CoinGecko data
 
-        self._callbacks: list[Callable] = []
+        self._callbacks: list[Callable[..., Any]] = []
         self._running = False
         self._latest_scan: list[TrendingCoin] = []
         self._hot_movers: list[TrendingCoin] = []
-        self._background_tasks: list = []
+        self._background_tasks: list[asyncio.Task[None]] = []
 
-    def on_trending(self, callback: Callable) -> None:
+    def on_trending(self, callback: Callable[..., Any]) -> None:
         """Register callback for when interesting movers are found."""
         self._callbacks.append(callback)
 

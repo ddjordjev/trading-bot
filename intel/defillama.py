@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import Any
 
 import aiohttp
 from loguru import logger
@@ -37,7 +38,7 @@ class DeFiLlamaClient:
         self._data = TVLSnapshot()
         self._running = False
         self._prev_tvl: float = 0.0
-        self._background_tasks: list = []
+        self._background_tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
         self._running = True
@@ -109,11 +110,12 @@ class DeFiLlamaClient:
                     timestamp=datetime.now(UTC),
                 )
 
-    async def _fetch_chains(self, session: aiohttp.ClientSession) -> list[dict]:
+    async def _fetch_chains(self, session: aiohttp.ClientSession) -> list[dict[str, Any]]:
         try:
             async with session.get(f"{self.BASE_URL}/v2/chains") as resp:
                 if resp.status == 200:
-                    return await resp.json()
+                    data: list[dict[str, Any]] = await resp.json()
+                    return data
         except Exception:
             pass
         return []

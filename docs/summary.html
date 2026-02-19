@@ -35,7 +35,7 @@
 <body>
 
 <h1>Trading Bot — Requirements &amp; Implementation Summary</h1>
-<p class="meta">Last updated: 2026-02-19 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: MEXC, Binance, Bybit &nbsp;|&nbsp; Tests: 1044 (80%+ coverage) &nbsp;|&nbsp; CI: GitHub Actions (green)</p>
+<p class="meta">Last updated: 2026-02-19 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: MEXC, Binance, Bybit &nbsp;|&nbsp; Tests: 1079 (80%+ coverage) &nbsp;|&nbsp; CI: GitHub Actions (green)</p>
 
 <!-- ============================================================ -->
 <h2>1. Core Philosophy &amp; Trading Principles</h2>
@@ -85,7 +85,7 @@
   <tr><td>Spot &amp; Futures trading</td><td><span class="badge done">Done</span></td><td class="file">core/models/market.py (MarketType enum)</td></tr>
   <tr><td>Crypto, tokenized stocks, and commodities</td><td><span class="badge done">Done</span></td><td class="file">Any symbol pair supported by MEXC</td></tr>
   <tr><td>Configurable leverage (10x default)</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → default_leverage</td></tr>
-  <tr><td>Paper trading vs. real trading config</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/paper.py, config → TRADING_MODE</td></tr>
+  <tr><td>Paper trading vs. real trading config (paper_local / paper_live / live)</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/paper.py, config → TRADING_MODE</td></tr>
   <tr><td>Honor exchange limits</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/mexc.py (via ccxt)</td></tr>
 </table>
 
@@ -244,7 +244,8 @@
   <tr><td>Email notifications, configurable types</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py</td></tr>
   <tr><td>"Liquidated and no more funds" always on by default</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py → NotificationType.LIQUIDATION</td></tr>
   <tr><td>Daily PnL email with compound growth report</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py → send_daily_summary()</td></tr>
-  <tr><td>Spike detected alerts</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py → alert_spike()</td></tr>
+  <tr><td>Spike detected alerts (disabled by default in NOTIFICATIONS_ENABLED)</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py → alert_spike()</td></tr>
+  <tr><td>Bounded notification queue (maxsize=100, drops with warning when full)</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py → self._queue</td></tr>
   <tr><td>LEGENDARY day email: explain why positions are riding</td><td><span class="badge done">Done</span></td><td class="file">daily_target.py → legendary_ride_reason()</td></tr>
   <tr><td>Whale position alert: $100K+ notional at 20%+ profit (always on, one-shot per position)</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py → alert_whale_position(), bot.py → _check_whale_positions()</td></tr>
 </table>
@@ -334,6 +335,7 @@
   <tr><td>Scanner tab: trending coins</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Scanner.tsx</td></tr>
   <tr><td>Strategies tab: static + dynamic</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Strategies.tsx</td></tr>
   <tr><td>Analytics tab: PnL history, compound report, projections</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Analytics.tsx</td></tr>
+  <tr><td>Monitoring tab: embedded Grafana dashboard (CPU, memory, disk, method perf)</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Monitoring.tsx</td></tr>
   <tr><td>Modules tab: toggle intel/scanner/news/volatility</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Modules.tsx</td></tr>
   <tr><td>Summary tab: embedded requirements HTML doc</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Summary.tsx</td></tr>
   <tr><td>Token-based auth for remote access</td><td><span class="badge done">Done</span></td><td class="file">web/auth.py, DASHBOARD_TOKEN env var</td></tr>
@@ -350,7 +352,7 @@
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
   <tr><td>Separate monitor process (TV, CMC, CoinGecko, F&amp;G, Liq, Macro, Whales, Scanner)</td><td><span class="badge done">Done</span></td><td class="file">services/monitor.py → run_monitor.py</td></tr>
   <tr><td>Separate analytics process (trade DB → scores, patterns, suggestions)</td><td><span class="badge done">Done</span></td><td class="file">services/analytics_service.py → run_analytics.py</td></tr>
-  <tr><td>Shared state via atomic JSON files in <code>data/</code></td><td><span class="badge done">Done</span></td><td class="file">shared/state.py (write-to-temp → fsync → rename)</td></tr>
+  <tr><td>Shared state via atomic JSON files in <code>data/</code> with fcntl file locking</td><td><span class="badge done">Done</span></td><td class="file">shared/state.py (write-to-temp → fsync → rename + fcntl.flock)</td></tr>
   <tr><td>Bot writes deployment status (level, positions, health, capacity)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _write_deployment_status()</td></tr>
   <tr><td>Bot reads intel from shared state; falls back to in-process if stale</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _read_shared_intel()</td></tr>
   <tr>
@@ -363,7 +365,7 @@
     <td><span class="badge done">Done</span></td>
     <td class="file">services/monitor.py → INTENSITY_TABLE</td>
   </tr>
-  <tr><td>Docker Compose: 3 services (bot, monitor, analytics) with shared volume</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml (multi-service), docker-compose.single.yml (all-in-one)</td></tr>
+  <tr><td>Docker Compose: 5 services (bot, monitor, analytics, prometheus, grafana) with shared volume</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml (multi-service), docker-compose.single.yml (all-in-one)</td></tr>
   <tr><td>Backwards compatible: bot still works in single-process mode</td><td><span class="badge done">Done</span></td><td class="file">bot.py falls back to in-process intel/analytics if shared state stale</td></tr>
 </table>
 
@@ -425,6 +427,76 @@
   <tr><td>Strategy change procedure documented</td><td><span class="badge done">Done</span></td><td class="file">docs/EXECUTION_PLAN.md → Strategy Change Procedure</td></tr>
 </table>
 
+<h3>2.27 Configurable Paper Risk Relaxation</h3>
+
+<div class="principle">
+  <strong>Paper mode should go wild.</strong> In <code>paper_local</code> mode the goal is to find bugs, not preserve fake capital. Risk limits are relaxed via env vars so the bot trades aggressively. Set <code>PAPER_RISK_RELAXED=false</code> to test with production risk params in paper mode.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Relaxed risk in paper_local: wider loss limit, more positions, lower signal threshold</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → PAPER_RISK_* env vars, effective_* properties</td></tr>
+  <tr><td>Configurable, not hardcoded — each override is an independent env var</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → paper_risk_relaxed, paper_max_daily_loss_pct, etc.</td></tr>
+  <tr><td>Disable relaxation with <code>PAPER_RISK_RELAXED=false</code> to test prod params</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → effective_* falls back to prod values</td></tr>
+  <tr><td>RiskManager reads from settings, no mode branching in constructor</td><td><span class="badge done">Done</span></td><td class="file">core/risk/manager.py → reads settings.effective_*</td></tr>
+  <tr><td>Tests verify both aggressive and conservative modes</td><td><span class="badge done">Done</span></td><td class="file">tests/test_risk_manager.py → TestPaperLocalAggressive, TestPaperRelaxedDisabled, TestConservativeMode</td></tr>
+</table>
+
+<h3>2.28 Prometheus &amp; Grafana Monitoring Stack</h3>
+
+<div class="principle">
+  <strong>Industry-standard observability.</strong> Prometheus scrapes a <code>/metrics</code> endpoint on the bot every 15 seconds. Grafana visualizes system resources, process health, and method-level performance in a pre-provisioned dashboard. Embedded in the web UI as the "Monitoring" tab via iframe.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr>
+    <td>System metrics: CPU%, memory (used/available/%), swap, disk (used/free/%), network I/O, load averages</td>
+    <td><span class="badge done">Done</span></td>
+    <td class="file">web/metrics.py → psutil-based gauges</td>
+  </tr>
+  <tr>
+    <td>Process metrics: CPU%, RSS/VMS, memory%, threads, open FDs, GC collections &amp; object count</td>
+    <td><span class="badge done">Done</span></td>
+    <td class="file">web/metrics.py → psutil.Process gauges</td>
+  </tr>
+  <tr>
+    <td>Application metrics: tick duration, event loop lag, method duration histograms (p50/p95/p99), error counters</td>
+    <td><span class="badge done">Done</span></td>
+    <td class="file">web/metrics.py → @timed decorator, Histogram, Counter</td>
+  </tr>
+  <tr>
+    <td>Instrumented methods: exchange (fetch_balance, fetch_positions, fetch_ticker, fetch_candles, place_order), orders (execute_signal, check_stops), strategy.analyze</td>
+    <td><span class="badge done">Done</span></td>
+    <td class="file">core/exchange/paper.py, binance.py, core/orders/manager.py, bot.py</td>
+  </tr>
+  <tr>
+    <td>Trading state gauges: balance, daily PnL, open positions, win rate, fear &amp; greed, strategies count</td>
+    <td><span class="badge done">Done</span></td>
+    <td class="file">web/metrics.py → collect_metrics()</td>
+  </tr>
+  <tr>
+    <td>Prometheus service in docker-compose (scrapes bot /metrics, 30-day retention)</td>
+    <td><span class="badge done">Done</span></td>
+    <td class="file">docker-compose.yml → prometheus service, prometheus/prometheus.yml</td>
+  </tr>
+  <tr>
+    <td>Grafana service with auto-provisioned datasource + dashboard (anonymous access, embedding enabled, dark theme)</td>
+    <td><span class="badge done">Done</span></td>
+    <td class="file">docker-compose.yml → grafana service, grafana/provisioning/, grafana/dashboards/trading-bot.json</td>
+  </tr>
+  <tr>
+    <td>Pre-built dashboard: 25+ panels in 4 sections (System Resources, Bot Process, Method Performance, Trading State)</td>
+    <td><span class="badge done">Done</span></td>
+    <td class="file">grafana/dashboards/trading-bot.json</td>
+  </tr>
+  <tr>
+    <td>"Monitoring" tab in web dashboard — Grafana iframe in kiosk mode</td>
+    <td><span class="badge done">Done</span></td>
+    <td class="file">web/frontend/src/pages/Monitoring.tsx, App.tsx</td>
+  </tr>
+</table>
+
 <!-- ============================================================ -->
 <h2>3. How It All Fits Together</h2>
 <!-- ============================================================ -->
@@ -455,6 +527,7 @@
   </li>
   <li><strong>Hedge check</strong> — profitable positions showing reversal? Open counter-position</li>
   <li><strong>Log status</strong> — PnL, positions, stops, intel summary</li>
+  <li><strong>Record metrics</strong> — tick duration, event loop lag, strategy/method timings → Prometheus</li>
   <li><strong>Daily reset</strong> — at midnight UTC: email report, reset counters, compound</li>
 </ol>
 </div>
@@ -506,21 +579,22 @@
   <tr><td><code>volatility/detector.py</code></td><td>Price spike detection engine</td></tr>
   <tr><td><code>news/monitor.py</code></td><td>RSS feed monitoring, sentiment analysis, spike correlation</td></tr>
   <tr><td><code>scanner/trending.py</code></td><td>Multi-source scanner: CryptoBubbles + CMC + CoinGecko</td></tr>
-  <tr><td><code>notifications/notifier.py</code></td><td>Email alerts (liquidation, stops, spikes, daily summary, legendary ride)</td></tr>
+  <tr><td><code>notifications/notifier.py</code></td><td>Email alerts with bounded queue (liquidation, stops, daily summary, legendary ride)</td></tr>
   <tr><td><code>db/store.py</code></td><td>SQLite trade database — logs every trade with full context</td></tr>
   <tr><td><code>db/models.py</code></td><td>TradeRecord, StrategyScore, PatternInsight, ModificationSuggestion</td></tr>
   <tr><td><code>analytics/engine.py</code></td><td>Pattern detection, strategy scoring, weight factors, modification suggestions</td></tr>
-  <tr><td><code>shared/state.py</code></td><td>Atomic JSON read/write for inter-process communication</td></tr>
+  <tr><td><code>shared/state.py</code></td><td>Atomic JSON read/write with fcntl file locking for inter-process communication</td></tr>
   <tr><td><code>shared/models.py</code></td><td>BotDeploymentStatus, IntelSnapshot, AnalyticsSnapshot, TradeQueue, TradeProposal</td></tr>
   <tr><td><code>services/monitor.py</code></td><td>Standalone monitoring service with adaptive intensity + signal generation</td></tr>
   <tr><td><code>services/signal_generator.py</code></td><td>Converts intel snapshots into CRITICAL/DAILY/SWING trade proposals</td></tr>
   <tr><td><code>services/analytics_service.py</code></td><td>Standalone analytics service (reads trades.db, writes scores)</td></tr>
   <tr><td><code>run_monitor.py</code></td><td>Entry point for standalone monitor</td></tr>
   <tr><td><code>run_analytics.py</code></td><td>Entry point for standalone analytics</td></tr>
-  <tr><td><code>web/server.py</code></td><td>FastAPI dashboard — REST API + WebSocket + static file serving</td></tr>
+  <tr><td><code>web/server.py</code></td><td>FastAPI dashboard — REST API + WebSocket + /metrics + /health</td></tr>
   <tr><td><code>web/auth.py</code></td><td>Token-based authentication for dashboard</td></tr>
   <tr><td><code>web/schemas.py</code></td><td>Pydantic response models for API endpoints</td></tr>
-  <tr><td><code>web/frontend/</code></td><td>React + Vite + TypeScript dashboard SPA</td></tr>
+  <tr><td><code>web/metrics.py</code></td><td>Prometheus metrics: system (psutil), process, application (@timed decorator)</td></tr>
+  <tr><td><code>web/frontend/</code></td><td>React + Vite + TypeScript dashboard SPA (8 tabs)</td></tr>
   <tr><td><code>core/market_schedule.py</code></td><td>DST-aware market hours, weekends, holidays (FMP API), global singleton</td></tr>
   <tr><td><code>docs/summary.html</code></td><td>This document — requirements &amp; implementation summary</td></tr>
   <tr><td><code>docs/EXECUTION_PLAN.md</code></td><td>10-day testnet execution plan with crash recovery and reporting</td></tr>
@@ -531,7 +605,10 @@
   <tr><td><code>scripts/run_session.sh</code></td><td>10-day session helper: start/stop/status/snapshot/logs</td></tr>
   <tr><td><code>.github/workflows/ci.yml</code></td><td>CI pipeline: lint, type-check, test (80%+), frontend build, Docker build</td></tr>
   <tr><td><code>pyproject.toml</code></td><td>Ruff, mypy, pytest-cov configuration</td></tr>
-  <tr><td><code>tests/</code></td><td>1044 tests across 15+ files covering all modules (80%+ coverage)</td></tr>
+  <tr><td><code>prometheus/prometheus.yml</code></td><td>Prometheus scrape config — targets bot /metrics every 15s</td></tr>
+  <tr><td><code>grafana/provisioning/</code></td><td>Grafana auto-provisioning: datasource (Prometheus) + dashboard provider</td></tr>
+  <tr><td><code>grafana/dashboards/trading-bot.json</code></td><td>Pre-built Grafana dashboard: 25+ panels (system, process, methods, trading)</td></tr>
+  <tr><td><code>tests/</code></td><td>1079 tests across 15+ files covering all modules (80%+ coverage)</td></tr>
 </table>
 
 <!-- ============================================================ -->
@@ -540,7 +617,7 @@
 
 <table>
   <tr><th>Setting</th><th>Default</th><th>What it does</th></tr>
-  <tr><td><code>TRADING_MODE</code></td><td>paper</td><td>Paper or live trading</td></tr>
+  <tr><td><code>TRADING_MODE</code></td><td>paper_local</td><td>paper_local (simulated), paper_live (testnet orders), live (real money)</td></tr>
   <tr><td><code>DEFAULT_LEVERAGE</code></td><td>10</td><td>Default futures leverage</td></tr>
   <tr><td><code>INITIAL_RISK_AMOUNT</code></td><td>50</td><td>Fixed $ for first entry</td></tr>
   <tr><td><code>MAX_NOTIONAL_POSITION</code></td><td>100,000</td><td>Stop adding at this leveraged value</td></tr>
@@ -560,11 +637,17 @@
   <tr><td><code>GLASSNODE_API_KEY</code></td><td>(empty)</td><td>Glassnode API key (required, free key at glassnode.com)</td></tr>
   <tr><td><code>BINANCE_API_KEY/SECRET</code></td><td>(empty)</td><td>Binance API credentials (if using Binance exchange)</td></tr>
   <tr><td><code>BYBIT_API_KEY/SECRET</code></td><td>(empty)</td><td>Bybit API credentials (if using Bybit exchange)</td></tr>
-  <tr><td><code>DASHBOARD_ENABLED</code></td><td>true</td><td>Enable web dashboard on port 8080</td></tr>
+  <tr><td><code>DASHBOARD_ENABLED</code></td><td>true</td><td>Enable web dashboard on port 9035</td></tr>
   <tr><td><code>DASHBOARD_TOKEN</code></td><td>(empty)</td><td>Secret token for remote access; empty = no auth</td></tr>
   <tr><td><code>DASHBOARD_PORT</code></td><td>9035</td><td>Dashboard HTTP port</td></tr>
   <tr><td><code>ALLOWED_MARKET_TYPES</code></td><td>spot,futures</td><td>Which market types are enabled (spot, futures, or both)</td></tr>
   <tr><td><code>FMP_API_KEY</code></td><td>(empty)</td><td>Financial Modeling Prep API key for market holiday data</td></tr>
+  <tr><td><code>PAPER_RISK_RELAXED</code></td><td>true</td><td>Relax risk limits in paper_local mode (set false for prod-like testing)</td></tr>
+  <tr><td><code>PAPER_MAX_DAILY_LOSS_PCT</code></td><td>100</td><td>Paper-local override: max daily loss %</td></tr>
+  <tr><td><code>PAPER_MAX_CONCURRENT_POSITIONS</code></td><td>10</td><td>Paper-local override: max open positions</td></tr>
+  <tr><td><code>PAPER_MIN_SIGNAL_STRENGTH</code></td><td>0.2</td><td>Paper-local override: accept weaker signals</td></tr>
+  <tr><td><code>PAPER_CONSECUTIVE_LOSS_COOLDOWN</code></td><td>999</td><td>Paper-local override: effectively disable cooldown</td></tr>
+  <tr><td><code>GRAFANA_PORT</code></td><td>3001</td><td>Grafana dashboard port (embedded in Monitoring tab)</td></tr>
 </table>
 
 <!-- ============================================================ -->

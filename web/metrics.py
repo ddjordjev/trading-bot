@@ -11,12 +11,14 @@ Application histograms are recorded in real time via `timed()`.
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import os
 import time
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from functools import wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import psutil
 from prometheus_client import (
@@ -29,6 +31,8 @@ from prometheus_client import (
 
 if TYPE_CHECKING:
     from bot import TradingBot
+
+F = TypeVar("F", bound=Callable[..., Any])
 
 registry = CollectorRegistry()
 _process = psutil.Process(os.getpid())
@@ -115,7 +119,7 @@ for _gen in ("0", "1", "2"):
 # ── Instrumentation helpers ───────────────────────────────────────────────────
 
 
-def timed(method_name: str | None = None):
+def timed(method_name: str | None = None) -> Callable[[F], F]:
     """Decorator that records execution time as a Prometheus histogram.
 
     Works on both sync and async functions.
@@ -124,13 +128,13 @@ def timed(method_name: str | None = None):
         async def fetch_balance(self): ...
     """
 
-    def decorator(fn):
+    def decorator(fn: F) -> F:
         label = method_name or f"{fn.__module__}.{fn.__qualname__}"
 
         if _is_coroutine_function(fn):
 
             @wraps(fn)
-            async def async_wrapper(*args, **kwargs):
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 start = time.perf_counter()
                 try:
                     return await fn(*args, **kwargs)
@@ -140,11 +144,11 @@ def timed(method_name: str | None = None):
                 finally:
                     method_duration.labels(method=label).observe(time.perf_counter() - start)
 
-            return async_wrapper
+            return async_wrapper  # type: ignore[return-value]
         else:
 
             @wraps(fn)
-            def sync_wrapper(*args, **kwargs):
+            def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
                 start = time.perf_counter()
                 try:
                     return fn(*args, **kwargs)
@@ -154,13 +158,13 @@ def timed(method_name: str | None = None):
                 finally:
                     method_duration.labels(method=label).observe(time.perf_counter() - start)
 
-            return sync_wrapper
+            return sync_wrapper  # type: ignore[return-value]
 
     return decorator
 
 
 @contextmanager
-def timed_block(name: str):
+def timed_block(name: str) -> Generator[None, None, None]:
     """Context manager for timing arbitrary blocks of code."""
     start = time.perf_counter()
     try:
@@ -182,7 +186,7 @@ def record_event_loop_lag(lag: float) -> None:
     _event_loop_lag.set(lag)
 
 
-def _is_coroutine_function(fn) -> bool:
+def _is_coroutine_function(fn: Callable[..., Any]) -> bool:
     import asyncio
     import inspect
 
@@ -234,10 +238,8 @@ def _collect_process() -> None:
         _proc_mem_pct.set(_process.memory_percent())
         _proc_threads.set(_process.num_threads())
 
-        try:
+        with contextlib.suppress(AttributeError):
             _proc_fds.set(_process.num_fds())
-        except AttributeError:
-            pass
 
         _proc_uptime.set(time.time() - _process.create_time())
 

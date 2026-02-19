@@ -170,10 +170,49 @@ Add to `Signal` model:
 
 1. **#3 — Don't Fight the Trend** — highest impact, reinforces existing
    philosophy, clean integration into current gate system
-2. **#1 — Volatility Straddle** — new strategy, needs fee/whipsaw logic,
+2. **#4 — AI Background Agent** — high value for debugging and optimization,
+   read-only so low risk, useful during the 10-day paper run
+3. **#1 — Volatility Straddle** — new strategy, needs fee/whipsaw logic,
    pairs with market-open windows
-3. **#2 — Super Scalp** — most architectural work (tick loop speed, fee
+4. **#2 — Super Scalp** — most architectural work (tick loop speed, fee
    tracking, order throughput)
+
+---
+
+## Idea 4: AI Background Agent (Log & Trade Data Analysis)
+
+### User's Request
+
+Add an AI agent that runs in the background and analyzes the available logs and trading data.
+
+### What Exists Already
+
+- `analytics/engine.py` — rule-based pattern detection, strategy scoring, modification suggestions. Runs as a separate service (`services/analytics_service.py`). Reads `trades.db`, writes scores to `analytics_state.json`.
+- `db/store.py` — SQLite trade database with full trade context (entry/exit, PnL, strategy, market conditions).
+- Bot logs — structured logging with trade events, risk decisions, intel snapshots, strategy signals.
+- Grafana dashboards — method performance, system metrics, trading state (Prometheus-backed).
+
+### Assessment
+
+The current analytics engine is deterministic and rule-based. An AI agent could go beyond fixed patterns to find non-obvious correlations, adapt to changing market conditions, and generate natural-language insights.
+
+### Potential Capabilities
+
+- **Trade pattern analysis** — identify winning/losing patterns across strategies, timeframes, market conditions that rule-based scoring misses
+- **Log anomaly detection** — scan bot logs for unusual sequences (repeated failures, latency spikes, unexpected state transitions) and alert
+- **Strategy recommendations** — suggest parameter tweaks (stop-loss widths, signal thresholds, timing windows) based on recent performance
+- **Market regime detection** — classify current market conditions using historical trade outcomes, not just indicator thresholds
+- **Natural-language daily reports** — replace template emails with AI-generated summaries that highlight what matters
+- **Correlation discovery** — find relationships between intel sources, strategy performance, and time-of-day/week patterns
+
+### Implementation Notes
+
+- Could run as a 6th Docker service alongside bot, monitor, analytics, prometheus, grafana
+- Scheduled runs (e.g. every hour or after N trades) rather than continuous — LLM calls are expensive
+- Read-only access to `trades.db`, `data/*.json` state files, and log files
+- Output: write insights to a `data/ai_insights.json` or a new DB table, surface in dashboard
+- Use a cost-effective model (local LLM or API with batching) to keep running costs low
+- Start with trade analysis only, expand to log analysis once the data pipeline is proven
 
 ---
 

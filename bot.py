@@ -13,7 +13,7 @@ from analytics import AnalyticsEngine
 from config.settings import Settings, get_settings
 from core.exchange import BaseExchange, create_exchange
 from core.market_schedule import get_market_schedule
-from core.models import Signal, SignalAction
+from core.models import Candle, Signal, SignalAction
 from core.models.order import Order, OrderSide
 from core.orders import OrderManager
 from core.risk import RiskManager
@@ -22,6 +22,7 @@ from core.risk.market_filter import LiquidityTier, MarketQualityFilter
 from db import TradeDB
 from db.models import TradeRecord
 from intel import MarketCondition, MarketIntel
+from intel.market_intel import MarketRegime
 from news import NewsItem, NewsMonitor
 from notifications import NotificationType, Notifier
 from scanner import TrendingCoin, TrendingScanner
@@ -386,7 +387,7 @@ class TradingBot:
         await asyncio.sleep(0)
 
         # 12. Run all strategies (collect candles for hedge analysis)
-        candles_map: dict[str, list] = {}
+        candles_map: dict[str, list[Candle]] = {}
         all_strategies = list(self._strategies) + list(self._dynamic_strategies.values())
         positions = await self.exchange.fetch_positions()
         pos_map = {p.symbol: p for p in positions if p.amount > 0}
@@ -995,7 +996,7 @@ class TradingBot:
             return None
 
         return MarketCondition(
-            regime=snap.regime,
+            regime=MarketRegime(snap.regime),
             fear_greed=snap.fear_greed,
             fear_greed_bias=snap.fear_greed_bias,
             liquidation_24h=snap.liquidation_24h,
