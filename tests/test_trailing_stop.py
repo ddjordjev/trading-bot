@@ -9,8 +9,8 @@ These are the highest-stakes bugs in the entire bot.
 
 import pytest
 
-from core.models import OrderSide
-from core.orders.trailing import TrailingStop
+from core.models import OrderSide, Position
+from core.orders.trailing import TrailingStop, TrailingStopManager
 
 
 class TestLongStop:
@@ -137,3 +137,79 @@ class TestPnlFromStop:
             trail_pct=1.0,
         )
         assert ts.pnl_from_stop < 0  # initial stop is below entry
+
+
+class TestTrailingStopManagerKeys:
+    """Verify that keyed stops (hedge/wick) don't overwrite main stops."""
+
+    def _pos(self, symbol: str, side: OrderSide = OrderSide.BUY, price: float = 100.0) -> Position:
+        return Position(
+            symbol=symbol,
+            side=side,
+            amount=1.0,
+            entry_price=price,
+            current_price=price,
+            leverage=10,
+            market_type="futures",
+        )
+
+    def test_register_with_key(self):
+        mgr = TrailingStopManager()
+        pos = self._pos("BTC/USDT")
+        mgr.register(pos)
+        mgr.register(pos, initial_stop_pct=1.0, key="BTC/USDT:hedge")
+        assert mgr.get("BTC/USDT") is not None
+        assert mgr.get("BTC/USDT:hedge") is not None
+        assert mgr.get("BTC/USDT") is not mgr.get("BTC/USDT:hedge")
+
+    def test_keyed_stops_dont_overwrite_main(self):
+        mgr = TrailingStopManager()
+        pos = self._pos("BTC/USDT")
+        main_ts = mgr.register(pos, initial_stop_pct=5.0)
+        mgr.register(pos, initial_stop_pct=1.0, key="BTC/USDT:hedge")
+        assert mgr.get("BTC/USDT") is main_ts
+        assert mgr.get("BTC/USDT").initial_stop_pct == 5.0
+
+    def test_update_all_checks_all_keyed_stops(self):
+        mgr = TrailingStopManager()
+        pos = self._pos("BTC/USDT", price=100.0)
+        mgr.register(pos, initial_stop_pct=2.0)
+        mgr.register(pos, initial_stop_pct=0.5, key="BTC/USDT:hedge")
+
+        low_price_pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=1.0,
+            entry_price=100.0,
+            current_price=90.0,
+            leverage=10,
+            market_type="futures",
+        )
+        stopped = mgr.update_all([low_price_pos])
+        assert "BTC/USDT" in stopped
+        assert "BTC/USDT:hedge" in stopped
+
+    def test_remove_by_key(self):
+        mgr = TrailingStopManager()
+        pos = self._pos("BTC/USDT")
+        mgr.register(pos)
+        mgr.register(pos, key="BTC/USDT:hedge")
+        mgr.remove("BTC/USDT:hedge")
+        assert mgr.get("BTC/USDT") is not None
+        assert mgr.get("BTC/USDT:hedge") is None
+
+    def test_update_all_returns_keys_not_symbols(self):
+        mgr = TrailingStopManager()
+        pos = self._pos("BTC/USDT", price=100.0)
+        mgr.register(pos, initial_stop_pct=0.1, key="BTC/USDT:wick")
+        hit_pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=1.0,
+            entry_price=100.0,
+            current_price=99.0,
+            leverage=10,
+            market_type="futures",
+        )
+        stopped = mgr.update_all([hit_pos])
+        assert "BTC/USDT:wick" in stopped

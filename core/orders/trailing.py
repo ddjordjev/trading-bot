@@ -187,6 +187,7 @@ class TrailingStopManager:
         initial_stop_pct: float | None = None,
         trail_pct: float | None = None,
         low_liquidity: bool = False,
+        key: str | None = None,
     ) -> TrailingStop:
         ts = TrailingStop(
             symbol=position.symbol,
@@ -198,11 +199,12 @@ class TrailingStopManager:
             breakeven_trigger_pct=self.breakeven_pct,
             low_liquidity=low_liquidity,
         )
-        self._stops[position.symbol] = ts
+        stop_key = key or position.symbol
+        self._stops[stop_key] = ts
         liq_tag = " [LOW-LIQ]" if low_liquidity else ""
         logger.info(
             "Stop registered for {}{} - initial: {:.6f}, BE at +{:.0f}%, trail: {:.1f}%",
-            position.symbol,
+            stop_key,
             liq_tag,
             ts.current_stop,
             self.breakeven_pct,
@@ -211,14 +213,19 @@ class TrailingStopManager:
         return ts
 
     def update_all(self, positions: list[Position]) -> list[str]:
+        """Update all stops with latest prices. Returns keys of stopped positions.
+
+        Keys may be plain symbols ("BTC/USDT") or suffixed
+        ("BTC/USDT:hedge", "BTC/USDT:wick") for sub-position stops.
+        """
         stopped: list[str] = []
-        for pos in positions:
-            ts = self._stops.get(pos.symbol)
-            if not ts:
+        price_map = {p.symbol: p.current_price for p in positions}
+        for key, ts in list(self._stops.items()):
+            price = price_map.get(ts.symbol)
+            if price is None:
                 continue
-            hit = ts.update(pos.current_price)
-            if hit:
-                stopped.append(pos.symbol)
+            if ts.update(price):
+                stopped.append(key)
         return stopped
 
     def remove(self, symbol: str) -> None:

@@ -115,10 +115,18 @@ class TestPaperExchange:
 
     @pytest.mark.asyncio
     async def test_spot_sell(self, paper):
+        # Must own base asset before selling
+        await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0)
         bal_before = (await paper.fetch_balance())["USDT"]
-        await paper.place_order("BTC/USDT", OrderSide.SELL, OrderType.MARKET, 1.0)
+        order = await paper.place_order("BTC/USDT", OrderSide.SELL, OrderType.MARKET, 1.0)
+        assert order.status == OrderStatus.FILLED
         bal_after = (await paper.fetch_balance())["USDT"]
         assert bal_after > bal_before
+
+    @pytest.mark.asyncio
+    async def test_spot_sell_without_holdings(self, paper):
+        order = await paper.place_order("BTC/USDT", OrderSide.SELL, OrderType.MARKET, 1.0)
+        assert order.status == OrderStatus.FAILED
 
     @pytest.mark.asyncio
     async def test_cancel_order(self, paper):
@@ -175,6 +183,72 @@ class TestPaperExchange:
         paper._real.fetch_candles.assert_awaited_once()
         await paper.fetch_order_book("BTC/USDT")
         paper._real.fetch_order_book.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_spot_buy_tracks_base_asset(self, paper):
+        await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 0.5)
+        assert paper._balances.get("BTC", 0) == 0.5
+        assert paper._balances["USDT"] < 10000.0
+
+    @pytest.mark.asyncio
+    async def test_spot_sell_deducts_base_asset(self, paper):
+        await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 2.0)
+        btc_before = paper._balances["BTC"]
+        await paper.place_order("BTC/USDT", OrderSide.SELL, OrderType.MARKET, 1.0)
+        assert paper._balances["BTC"] == btc_before - 1.0
+
+    @pytest.mark.asyncio
+    async def test_parse_base_asset(self):
+        assert PaperExchange._parse_base_asset("BTC/USDT") == "BTC"
+        assert PaperExchange._parse_base_asset("ETH/USDT") == "ETH"
+        assert PaperExchange._parse_base_asset("DOGE") == "DOGE"
+
+    @pytest.mark.asyncio
+    async def test_place_order_ticker_failure(self):
+        real = _mock_real_exchange()
+        real.fetch_ticker = AsyncMock(side_effect=Exception("network error"))
+        paper = PaperExchange(real, starting_balance=1000.0)
+        order = await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0)
+        assert order.status == OrderStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_futures_sell_no_balance_deduction(self, paper):
+        bal_before = paper._balances["USDT"]
+        await paper.place_order(
+            "BTC/USDT", OrderSide.SELL, OrderType.MARKET, 1.0, leverage=10, market_type=MarketType.FUTURES
+        )
+        assert paper._balances["USDT"] == bal_before
+
+    @pytest.mark.asyncio
+    async def test_spot_buy_insufficient_balance(self):
+        real = _mock_real_exchange(50000.0)
+        paper = PaperExchange(real, starting_balance=10.0)
+        order = await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0)
+        assert order.status == OrderStatus.FAILED
+        assert paper._balances["USDT"] == 10.0
+
+    @pytest.mark.asyncio
+    async def test_spot_sell_partial_holdings(self):
+        real = _mock_real_exchange(100.0)
+        paper = PaperExchange(real, starting_balance=10000.0)
+        await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 3.0)
+        order = await paper.place_order("BTC/USDT", OrderSide.SELL, OrderType.MARKET, 5.0)
+        assert order.status == OrderStatus.FAILED
+        assert paper._balances.get("BTC", 0) == 3.0
+
+    @pytest.mark.asyncio
+    async def test_futures_dca_same_side(self):
+        real = _mock_real_exchange(100.0)
+        paper = PaperExchange(real, starting_balance=10000.0)
+        await paper.place_order(
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0, leverage=10, market_type=MarketType.FUTURES
+        )
+        await paper.place_order(
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0, leverage=10, market_type=MarketType.FUTURES
+        )
+        positions = await paper.fetch_positions()
+        assert len(positions) == 1
+        assert positions[0].amount == 2.0
 
 
 # ── Factory ─────────────────────────────────────────────────────────

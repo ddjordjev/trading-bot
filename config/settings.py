@@ -87,6 +87,7 @@ class Settings(BaseSettings):
 
     # Market Intelligence
     coinglass_api_key: str = ""  # optional, for CoinGlass premium endpoints
+    fmp_api_key: str = ""  # Financial Modeling Prep (market holidays)
     intel_enabled: bool = True  # master switch for all external feeds
     fear_greed_poll: int = 3600  # how often to poll Fear & Greed (seconds)
     liquidation_poll: int = 300  # CoinGlass liquidation poll interval

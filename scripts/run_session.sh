@@ -98,8 +98,8 @@ $(docker compose exec -T trading-bot python -c "
 from db import TradeDB
 db = TradeDB(); db.connect()
 print(f'Total trades: {db.trade_count()}')
-for t in db.get_recent(10):
-    print(f'  {t.timestamp} {t.symbol} {t.side} {t.action} PnL:{t.pnl:+.2f}')
+for t in db.get_all_trades(10):
+    print(f'  {t.closed_at} {t.symbol} {t.side} {t.action} PnL:{t.pnl_usd:+.2f}')
 " 2>/dev/null || echo "Could not read DB")
 \`\`\`
 SNAP
@@ -115,16 +115,34 @@ case "${1:-help}" in
     logs)      cmd_logs "${2:-}" ;;
     rebuild)   cmd_rebuild ;;
     snapshot)  cmd_snapshot ;;
+    sync-secrets)
+        if ! command -v gh &>/dev/null; then
+            echo "ERROR: gh CLI not installed"; exit 1
+        fi
+        count=0
+        while IFS='=' read -r key value; do
+            [[ -z "$key" || "$key" == \#* ]] && continue
+            case "$key" in
+                *_TEST_*|TRADING_MODE|EXCHANGE)
+                    gh secret set "$key" --body "$value"
+                    echo "  ✓ $key"
+                    ((count++))
+                    ;;
+            esac
+        done < "$ROOT/.env"
+        echo "Synced $count secrets from .env → GitHub"
+        ;;
     help|*)
-        echo "Usage: $0 {preflight|build|start|stop|status|logs|rebuild|snapshot}"
+        echo "Usage: $0 {preflight|build|start|stop|status|logs|rebuild|snapshot|sync-secrets}"
         echo ""
-        echo "  preflight  — Run pre-flight checks (API keys, connectivity)"
-        echo "  build      — Build Docker images"
-        echo "  start      — Start all services (docker compose up -d)"
-        echo "  stop       — Stop all services"
-        echo "  status     — Show service health, recent logs, trade count"
-        echo "  logs [svc] — Tail logs (default: trading-bot)"
-        echo "  rebuild    — Rebuild images and restart"
-        echo "  snapshot   — Save current state to docs/reports/"
+        echo "  preflight    — Run pre-flight checks (API keys, connectivity)"
+        echo "  build        — Build Docker images"
+        echo "  start        — Start all services (docker compose up -d)"
+        echo "  stop         — Stop all services"
+        echo "  status       — Show service health, recent logs, trade count"
+        echo "  logs [svc]   — Tail logs (default: trading-bot)"
+        echo "  rebuild      — Rebuild images and restart"
+        echo "  snapshot     — Save current state to docs/reports/"
+        echo "  sync-secrets — Sync test keys from .env to GitHub secrets"
         ;;
 esac

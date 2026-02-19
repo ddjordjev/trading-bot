@@ -1247,3 +1247,139 @@ class TestOrderManagerLogTradeNoScaler:
         assert len(order_manager.trade_history) == 1
         assert order_manager.trade_history[0]["scale_phase"] == "n/a"
         assert order_manager.trade_history[0]["scale_mode"] == "n/a"
+
+
+class TestSubPositionClose:
+    @pytest.fixture
+    def order_manager(self):
+        exchange = AsyncMock()
+        exchange.fetch_balance = AsyncMock(return_value={"USDT": 1000.0})
+        exchange.fetch_positions = AsyncMock(return_value=[])
+        risk = MagicMock()
+        risk.check_signal.return_value = True
+        risk.apply_stops.side_effect = lambda s: s
+        risk.check_liquidation.return_value = False
+        settings = Settings(
+            trading_mode="paper",
+            exchange="binance",
+            binance_test_api_key="k",
+            binance_test_api_secret="s",
+        )
+        return OrderManager(exchange, risk, settings)
+
+    @pytest.mark.asyncio
+    async def test_close_sub_position_no_hedge(self, order_manager):
+        result = await order_manager._close_sub_position("BTC/USDT", order_manager.hedger, "hedge")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_close_sub_position_wick_no_scalp(self, order_manager):
+        result = await order_manager._close_sub_position_wick("BTC/USDT")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_close_sub_position_wick_with_scalp(self, order_manager):
+        from core.orders.wick_scalp import WickScalp
+
+        order_manager.wick_scalper._active_scalps["BTC/USDT"] = WickScalp(
+            symbol="BTC/USDT",
+            main_side="long",
+            scalp_side="short",
+            entry_price=50000,
+            amount=0.01,
+            leverage=10,
+            active=True,
+        )
+        order_manager.exchange.place_order.return_value = Order(
+            id="w1",
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.01,
+            status=OrderStatus.FILLED,
+            filled=0.01,
+            average_price=49000,
+        )
+        result = await order_manager._close_sub_position_wick("BTC/USDT")
+        assert result is not None
+        assert result.id == "w1"
+
+    @pytest.mark.asyncio
+    async def test_close_sub_position_with_active_hedge(self, order_manager):
+        from core.orders.hedge import HedgePair, HedgeState
+
+        order_manager.hedger._pairs["ETH/USDT"] = HedgePair(
+            symbol="ETH/USDT",
+            main_side="long",
+            main_entry=3000,
+            main_size=3000,
+            hedge_side="short",
+            hedge_entry=3100,
+            hedge_size=600,
+            state=HedgeState.ACTIVE,
+        )
+        order_manager.exchange.place_order.return_value = Order(
+            id="hc1",
+            symbol="ETH/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.2,
+            status=OrderStatus.FILLED,
+            filled=0.2,
+            average_price=3050,
+        )
+        result = await order_manager._close_sub_position("ETH/USDT", order_manager.hedger, "hedge")
+        assert result is not None
+        assert result.id == "hc1"
+
+    @pytest.mark.asyncio
+    async def test_check_stops_routes_hedge_key(self, order_manager):
+        from core.orders.hedge import HedgePair, HedgeState
+
+        order_manager.hedger._pairs["BTC/USDT"] = HedgePair(
+            symbol="BTC/USDT",
+            main_side="long",
+            main_entry=50000,
+            main_size=5000,
+            hedge_side="short",
+            hedge_entry=51000,
+            hedge_size=1000,
+            state=HedgeState.ACTIVE,
+        )
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.1,
+            entry_price=50000,
+            current_price=50000,
+            leverage=10,
+            market_type="futures",
+        )
+        # Register main + hedge stop; set hedge stop to trigger immediately
+        order_manager.trailing.register(pos, initial_stop_pct=50.0)
+        order_manager.trailing.register(pos, initial_stop_pct=0.001, key="BTC/USDT:hedge")
+
+        order_manager.exchange.fetch_positions.return_value = [
+            Position(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                amount=0.1,
+                entry_price=50000,
+                current_price=40000,
+                leverage=10,
+                market_type="futures",
+            ),
+        ]
+        order_manager.exchange.place_order.return_value = Order(
+            id="h1",
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.02,
+            status=OrderStatus.FILLED,
+            filled=0.02,
+            average_price=40000,
+        )
+        closed = await order_manager.check_stops()
+        assert any(o.id == "h1" for o in closed)
+        assert order_manager.trailing.get("BTC/USDT") is not None  # main stop preserved

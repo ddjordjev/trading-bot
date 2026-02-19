@@ -59,6 +59,12 @@ class CompoundMomentumStrategy(BaseStrategy):
         self._position_side: str | None = None
         self._entry_time: datetime | None = None
 
+    def set_position_state(self, has_position: bool, side: str | None = None) -> None:
+        self._in_position = has_position
+        self._position_side = side
+        if not has_position:
+            self._entry_time = None
+
     def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:
         df = self.candles_to_df(candles)
         if len(df) < max(self.consolidation_period, self.rsi_period) + 5:

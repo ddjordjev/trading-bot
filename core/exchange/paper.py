@@ -78,6 +78,11 @@ class PaperExchange(BaseExchange):
 
     # -- Trading (simulated) --
 
+    @staticmethod
+    def _parse_base_asset(symbol: str) -> str:
+        """Extract the base asset from a trading pair (e.g. 'BTC/USDT' -> 'BTC')."""
+        return symbol.split("/")[0] if "/" in symbol else symbol
+
     async def place_order(
         self,
         symbol: str,
@@ -89,10 +94,24 @@ class PaperExchange(BaseExchange):
         leverage: int = 1,
         market_type: MarketType = MarketType.SPOT,
     ) -> Order:
-        ticker = await self.fetch_ticker(symbol)
-        fill_price = price if price and order_type != OrderType.MARKET else ticker.last
-
         order_id = str(uuid.uuid4())[:8]
+
+        try:
+            ticker = await self.fetch_ticker(symbol)
+            fill_price = price if price and order_type != OrderType.MARKET else ticker.last
+        except Exception as e:
+            logger.error("[PAPER] Failed to fetch price for {}: {}", symbol, e)
+            return Order(
+                id=order_id,
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                amount=amount,
+                price=0,
+                status=OrderStatus.FAILED,
+                market_type=market_type.value,
+            )
+
         cost = fill_price * amount
 
         if market_type == MarketType.FUTURES:
@@ -112,6 +131,27 @@ class PaperExchange(BaseExchange):
                     market_type=market_type.value,
                 )
             self._balances["USDT"] -= cost
+            if market_type == MarketType.SPOT:
+                base = self._parse_base_asset(symbol)
+                self._balances[base] = self._balances.get(base, 0) + amount
+        else:
+            if market_type == MarketType.SPOT:
+                base = self._parse_base_asset(symbol)
+                held = self._balances.get(base, 0)
+                if held < amount:
+                    logger.warning("[PAPER] Insufficient {} for SELL ({:.6f} held, {:.6f} needed)", base, held, amount)
+                    return Order(
+                        id=order_id,
+                        symbol=symbol,
+                        side=side,
+                        order_type=order_type,
+                        amount=amount,
+                        price=fill_price,
+                        status=OrderStatus.FAILED,
+                        market_type=market_type.value,
+                    )
+                self._balances[base] -= amount
+                self._balances["USDT"] += fill_price * amount
 
         order = Order(
             id=order_id,
@@ -130,8 +170,6 @@ class PaperExchange(BaseExchange):
 
         if market_type == MarketType.FUTURES:
             self._update_position(order, fill_price)
-        elif side == OrderSide.SELL:
-            self._balances["USDT"] += fill_price * amount
 
         logger.info(
             "[PAPER] {} {} {} {} @ {:.6f} (leverage={}x)",

@@ -378,3 +378,35 @@ class TestSwingOpportunityStrategy:
         candles = _make_candles_flat(250)
         assert s.analyze(candles) is None
         assert s._cooldown_candles == 9
+
+
+# ── Position State Sync ────────────────────────────────────────────
+
+
+class TestSetPositionState:
+    def test_base_strategy_set_position_state_is_noop(self):
+        from strategies.rsi import RSIStrategy
+
+        s = RSIStrategy("BTC/USDT")
+        s.set_position_state(True, "long")
+
+    def test_compound_momentum_sync(self):
+        from strategies.compound_momentum import CompoundMomentumStrategy
+
+        s = CompoundMomentumStrategy("BTC/USDT")
+        assert not s._in_position
+        s.set_position_state(True, "long")
+        assert s._in_position
+        assert s._position_side == "long"
+        s.set_position_state(False)
+        assert not s._in_position
+        assert s._position_side is None
+        assert s._entry_time is None
+
+    def test_compound_momentum_sync_short(self):
+        from strategies.compound_momentum import CompoundMomentumStrategy
+
+        s = CompoundMomentumStrategy("BTC/USDT")
+        s.set_position_state(True, "short")
+        assert s._in_position
+        assert s._position_side == "short"

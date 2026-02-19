@@ -18,7 +18,7 @@ from core.models import (
     Signal,
     SignalAction,
 )
-from core.orders.hedge import HedgeManager
+from core.orders.hedge import HedgeManager, HedgeState
 from core.orders.scaler import PositionScaler, ScaleMode
 from core.orders.trailing import TrailingStopManager
 from core.orders.wick_scalp import WickScalpDetector
@@ -404,14 +404,14 @@ class OrderManager:
             if self.hedger.has_active_hedge(symbol):
                 continue
 
-            hedge_pos = next((p for p in positions if p.symbol == symbol), None)
-            if not hedge_pos:
+            main_pos = next((p for p in positions if p.symbol == symbol), None)
+            if not main_pos:
                 continue
 
             params = self.hedger.get_hedge_params(
                 symbol,
-                hedge_pos.current_price,
-                hedge_pos.leverage,
+                main_pos.current_price,
+                main_pos.leverage,
             )
             if not params:
                 continue
@@ -422,30 +422,30 @@ class OrderManager:
                 symbol,
                 params["reversal_score"] * 100,
                 reasons_str,
-                "long" if pos.side == OrderSide.BUY else "short",
-                pos.notional_value,
-                pos.pnl_pct,
+                "long" if main_pos.side == OrderSide.BUY else "short",
+                main_pos.notional_value,
+                main_pos.pnl_pct,
                 params["side"].value,
-                pos.notional_value * self.hedger.hedge_ratio,
+                main_pos.notional_value * self.hedger.hedge_ratio,
             )
 
             # Tighten the main position's trailing stop before hedging
             ts = self.trailing.get(symbol)
-            if ts and not ts.breakeven_locked and pos.pnl_pct > 2.0:
+            if ts and not ts.breakeven_locked and main_pos.pnl_pct > 2.0:
                 old_stop = ts.current_stop
-                if pos.side == OrderSide.BUY:
-                    tight_stop = pos.current_price * (1 - 1.5 / 100)
+                if main_pos.side == OrderSide.BUY:
+                    tight_stop = main_pos.current_price * (1 - 1.5 / 100)
                     if tight_stop > ts.current_stop:
                         ts.current_stop = tight_stop
                 else:
-                    tight_stop = pos.current_price * (1 + 1.5 / 100)
+                    tight_stop = main_pos.current_price * (1 + 1.5 / 100)
                     if tight_stop < ts.current_stop:
                         ts.current_stop = tight_stop
                 logger.info(
                     "Tightened main stop for {} before hedge: {:.6f} -> {:.6f}", symbol, old_stop, ts.current_stop
                 )
 
-            market_type = MarketType(pos.market_type) if pos.market_type else MarketType.FUTURES
+            market_type = MarketType(main_pos.market_type) if main_pos.market_type else MarketType.FUTURES
 
             order = await self.exchange.place_order(
                 symbol=symbol,
@@ -459,7 +459,6 @@ class OrderManager:
             if order.status == OrderStatus.FILLED:
                 self.hedger.activate(symbol, order.average_price, order.filled, order.id)
 
-                # Register a tight trailing stop for the hedge
                 hedge_side = params["side"]
                 hedge_pos = Position(
                     symbol=symbol,
@@ -470,11 +469,11 @@ class OrderManager:
                     leverage=params["leverage"],
                     market_type=market_type.value,
                 )
-                _hedge_sym = f"{symbol}:hedge"
                 self.trailing.register(
                     hedge_pos,
                     initial_stop_pct=self.hedger.hedge_stop_pct,
                     trail_pct=self.hedger.hedge_stop_pct * 0.5,
+                    key=f"{symbol}:hedge",
                 )
 
                 self._log_trade(
@@ -483,7 +482,7 @@ class OrderManager:
                         action=SignalAction.SELL if hedge_side == OrderSide.SELL else SignalAction.BUY,
                         strategy="hedge",
                         reason=reasons_str,
-                        market_type=pos.market_type,
+                        market_type=main_pos.market_type,
                     ),
                     order,
                     "hedge_open",
@@ -573,11 +572,11 @@ class OrderManager:
                     leverage=scalp_leverage,
                     market_type=market_type.value,
                 )
-                _wick_sym = f"{pos.symbol}:wick"
                 self.trailing.register(
                     scalp_pos,
                     initial_stop_pct=scalp.stop_pct,
                     trail_pct=scalp.trail_pct,
+                    key=f"{pos.symbol}:wick",
                 )
 
                 self._log_trade(
@@ -593,22 +592,37 @@ class OrderManager:
                 )
                 opened.append(order)
 
-        # Close expired wick scalps
+        # Close expired wick scalps (partial close — only the scalp amount)
         for sym in self.wick_scalper.get_expired():
             scalp = self.wick_scalper.get(sym)
-            if not scalp:
+            if not scalp or scalp.amount <= 0:
                 continue
-            _close_side = OrderSide.BUY if scalp.scalp_side == "short" else OrderSide.SELL
-            close_signal = Signal(
+            close_side = OrderSide.BUY if scalp.scalp_side == "short" else OrderSide.SELL
+            sp = self.scaler.get(sym)
+            market_type = MarketType(sp.market_type) if sp and sp.market_type else MarketType.FUTURES
+
+            close_order = await self.exchange.place_order(
                 symbol=sym,
-                action=SignalAction.CLOSE,
-                strategy="wick_scalp",
-                reason="wick_scalp_expired",
-                market_type="futures",
+                side=close_side,
+                order_type=OrderType.MARKET,
+                amount=scalp.amount,
+                leverage=scalp.leverage,
+                market_type=market_type,
             )
-            close_order = await self.execute_signal(close_signal)
-            if close_order:
+            if close_order and close_order.status == OrderStatus.FILLED:
                 self.wick_scalper.close(sym)
+                self.trailing.remove(f"{sym}:wick")
+                self._log_trade(
+                    Signal(
+                        symbol=sym,
+                        action=SignalAction.CLOSE,
+                        strategy="wick_scalp",
+                        reason="wick_scalp_expired",
+                        market_type=market_type.value,
+                    ),
+                    close_order,
+                    "wick_scalp_close",
+                )
                 opened.append(close_order)
 
         self.wick_scalper.cleanup()
@@ -656,9 +670,11 @@ class OrderManager:
         balance_map = await self.exchange.fetch_balance()
         balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
 
-        stopped_symbols = self.trailing.update_all(positions)
-        for symbol in stopped_symbols:
-            ts = self.trailing.get(symbol)
+        stopped_keys = self.trailing.update_all(positions)
+        stopped_base_symbols: set[str] = set()
+
+        for key in stopped_keys:
+            ts = self.trailing.get(key)
             pnl_info = f" (locked PnL ~{ts.pnl_from_stop:+.1f}%)" if ts else ""
             liq_tag = " [LOW-LIQ]" if ts and ts.low_liquidity else ""
 
@@ -669,23 +685,36 @@ class OrderManager:
             else:
                 reason = "initial_stop"
 
-            logger.info("Stop triggered for {}{}{} (reason: {})", symbol, pnl_info, liq_tag, reason)
+            logger.info("Stop triggered for {}{}{} (reason: {})", key, pnl_info, liq_tag, reason)
 
-            signal = Signal(
-                symbol=symbol,
-                action=SignalAction.CLOSE,
-                strategy="trailing_stop",
-                reason=reason,
-                market_type="futures",
-            )
-            order = await self.execute_signal(signal)
+            order: Order | None = None
+
+            if key.endswith(":hedge"):
+                symbol = key.rsplit(":", 1)[0]
+                order = await self._close_sub_position(symbol, self.hedger, "hedge")
+            elif key.endswith(":wick"):
+                symbol = key.rsplit(":", 1)[0]
+                order = await self._close_sub_position_wick(symbol)
+            else:
+                symbol = key
+                signal = Signal(
+                    symbol=symbol,
+                    action=SignalAction.CLOSE,
+                    strategy="trailing_stop",
+                    reason=reason,
+                    market_type="futures",
+                )
+                order = await self.execute_signal(signal)
+                if order:
+                    self.scaler.remove(symbol)
+
             if order:
                 closed.append(order)
-                self.trailing.remove(symbol)
-                self.scaler.remove(symbol)
+                self.trailing.remove(key)
+                stopped_base_symbols.add(symbol)
 
         for pos in positions:
-            if pos.symbol in stopped_symbols:
+            if pos.symbol in stopped_base_symbols:
                 continue
             if self.risk.check_liquidation(pos, balance):
                 logger.critical("LIQUIDATION RISK for {} - closing immediately!", pos.symbol)
@@ -703,6 +732,63 @@ class OrderManager:
                     self.scaler.remove(pos.symbol)
 
         return closed
+
+    async def _close_sub_position(self, symbol: str, hedger: HedgeManager, tag: str) -> Order | None:
+        """Close a hedge sub-position by placing a counter-order for just the hedge amount."""
+        pair = hedger.get(symbol)
+        if not pair or pair.state != HedgeState.ACTIVE:
+            return None
+
+        close_side = OrderSide.BUY if pair.hedge_side == "short" else OrderSide.SELL
+        hedge_amount = pair.hedge_size / pair.hedge_entry if pair.hedge_entry > 0 else 0
+        if hedge_amount <= 0:
+            return None
+
+        order = await self.exchange.place_order(
+            symbol=symbol,
+            side=close_side,
+            order_type=OrderType.MARKET,
+            amount=hedge_amount,
+            leverage=self.settings.default_leverage,
+            market_type=MarketType.FUTURES,
+        )
+        if order and order.status == OrderStatus.FILLED:
+            hedger.close(symbol)
+            self._log_trade(
+                Signal(symbol=symbol, action=SignalAction.CLOSE, strategy=tag, reason=f"{tag}_stop_hit"),
+                order,
+                f"{tag}_close",
+            )
+            return order
+        return None
+
+    async def _close_sub_position_wick(self, symbol: str) -> Order | None:
+        """Close a wick scalp sub-position."""
+        scalp = self.wick_scalper.get(symbol)
+        if not scalp or scalp.amount <= 0:
+            return None
+
+        close_side = OrderSide.BUY if scalp.scalp_side == "short" else OrderSide.SELL
+        sp = self.scaler.get(symbol)
+        market_type = MarketType(sp.market_type) if sp and sp.market_type else MarketType.FUTURES
+
+        order = await self.exchange.place_order(
+            symbol=symbol,
+            side=close_side,
+            order_type=OrderType.MARKET,
+            amount=scalp.amount,
+            leverage=scalp.leverage,
+            market_type=market_type,
+        )
+        if order and order.status == OrderStatus.FILLED:
+            self.wick_scalper.close(symbol)
+            self._log_trade(
+                Signal(symbol=symbol, action=SignalAction.CLOSE, strategy="wick_scalp", reason="wick_stop_hit"),
+                order,
+                "wick_scalp_close",
+            )
+            return order
+        return None
 
     # ------------------------------------------------------------------ #
     #  Quick trade expiry

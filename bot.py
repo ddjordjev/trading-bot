@@ -13,7 +13,7 @@ from config.settings import Settings, get_settings
 from core.exchange import BaseExchange, create_exchange
 from core.market_schedule import get_market_schedule
 from core.models import Signal, SignalAction
-from core.models.order import Order
+from core.models.order import Order, OrderSide
 from core.orders import OrderManager
 from core.risk import RiskManager
 from core.risk.daily_target import DailyTargetTracker, DailyTier
@@ -178,7 +178,7 @@ class TradingBot:
             logger.info(self.analytics.summary())
 
         schedule = get_market_schedule()
-        schedule.configure(fmp_api_key=self.settings.coinglass_api_key)
+        schedule.configure(fmp_api_key=self.settings.fmp_api_key)
         await schedule.refresh_holidays()
         logger.info("Market schedule: {}", schedule.summary())
 
@@ -370,8 +370,18 @@ class TradingBot:
         # 12. Run all strategies (collect candles for hedge analysis)
         candles_map: dict[str, list] = {}
         all_strategies = list(self._strategies) + list(self._dynamic_strategies.values())
+        positions = await self.exchange.fetch_positions()
+        pos_map = {p.symbol: p for p in positions if p.amount > 0}
         for strategy in all_strategies:
             try:
+                # Sync position state so strategies survive restarts
+                pos = pos_map.get(strategy.symbol)
+                if pos:
+                    side = "long" if pos.side == OrderSide.BUY else "short"
+                    strategy.set_position_state(True, side)
+                else:
+                    strategy.set_position_state(False)
+
                 candles = await self.exchange.fetch_candles(strategy.symbol, "1m", limit=200)
                 ticker = await self.exchange.fetch_ticker(strategy.symbol)
                 candles_map[strategy.symbol] = candles

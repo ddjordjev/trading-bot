@@ -56,5 +56,12 @@ class BaseStrategy(ABC):
         df.set_index("timestamp", inplace=True)
         return df
 
+    def set_position_state(self, has_position: bool, side: str | None = None) -> None:  # noqa: B027
+        """Sync strategy's internal position state from exchange data.
+
+        Called by the bot each tick so strategies stay in sync after restarts.
+        Override in subclasses that track internal position state.
+        """
+
     def reset(self) -> None:
         self._candle_history.clear()

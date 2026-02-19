@@ -37,8 +37,11 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--cov=. --cov-report=term-missing --cov-report=html:htmlcov --cov-config=pyproject.toml"
+addopts = "--cov=. --cov-report=term-missing --cov-report=html:htmlcov --cov-config=pyproject.toml -m 'not integration'"
 asyncio_mode = "auto"
+markers = [
+    "integration: tests that hit real exchange APIs (Binance testnet) — skipped by default",
+]
 
 [tool.coverage.run]
 source = ["."]
