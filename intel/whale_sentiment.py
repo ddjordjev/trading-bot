@@ -168,7 +168,7 @@ class WhaleSentiment:
 
             # Funding rate
             try:
-                params: dict[str, str | int] = {"symbol": symbol}
+                params = {"symbol": symbol}
                 async with session.get(
                     self.COINGLASS_FUNDING_URL, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
                 ) as resp:
@@ -187,7 +187,7 @@ class WhaleSentiment:
             # Open interest details
             oi_snap = OISnapshot(timestamp=datetime.now(UTC))
             try:
-                params: dict[str, str | int] = {"symbol": symbol, "timeType": 2}
+                params = {"symbol": symbol, "timeType": 2}
                 async with session.get(
                     self.COINGLASS_OI_URL, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
                 ) as resp:
@@ -208,7 +208,7 @@ class WhaleSentiment:
 
             # Top trader positions (Binance top trader L/S)
             try:
-                params: dict[str, str | int] = {"symbol": symbol, "timeType": 2}
+                params = {"symbol": symbol, "timeType": 2}
                 async with session.get(
                     self.COINGLASS_TOP_TRADERS_URL,
                     params=params,

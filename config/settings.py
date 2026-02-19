@@ -86,6 +86,12 @@ class Settings(BaseSettings):
             return self.paper_consecutive_loss_cooldown
         return self.consecutive_loss_cooldown
 
+    # Tick intervals (seconds) — adaptive, fastest active tier wins
+    tick_interval_scalp: int = 5  # quick_trade / wick scalp positions
+    tick_interval_active: int = 60  # standard positions (DCA, pyramid)
+    tick_interval_swing: int = 300  # only swing positions open
+    tick_interval_idle: int = 60  # no open positions, just scanning
+
     # Liquidity-aware scaling
     breakeven_lock_pct: float = 5.0  # move stop to entry once at this profit %
     initial_risk_amount: float = 50.0  # fixed $ amount for the first entry

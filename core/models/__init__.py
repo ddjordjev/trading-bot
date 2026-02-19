@@ -1,6 +1,6 @@
 from core.models.market import Candle, MarketType, OrderBook, Ticker
 from core.models.order import Order, OrderSide, OrderStatus, OrderType, Position
-from core.models.signal import Signal, SignalAction
+from core.models.signal import Signal, SignalAction, TickUrgency
 
 __all__ = [
     "Candle",
@@ -13,5 +13,6 @@ __all__ = [
     "Position",
     "Signal",
     "SignalAction",
+    "TickUrgency",
     "Ticker",
 ]

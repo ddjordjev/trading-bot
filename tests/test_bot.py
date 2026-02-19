@@ -859,3 +859,111 @@ class TestProcessTradeQueueWithProposals:
         bot.shared.read_analytics = MagicMock(return_value=snap)
         w = bot._read_shared_analytics_weight("compound_momentum")
         assert w == 1.0
+
+
+# ── Adaptive tick interval ──────────────────────────────────────────────────
+
+
+class TestAdaptiveTickInterval:
+    def _make_signal(self, urgency: str = "active", **kwargs: object) -> Signal:
+        from core.models.signal import TickUrgency
+
+        return Signal(
+            symbol=kwargs.get("symbol", "BTC/USDT"),  # type: ignore[arg-type]
+            action=SignalAction.BUY,
+            strength=0.8,
+            strategy="test",
+            tick_urgency=TickUrgency(urgency),
+        )
+
+    def test_idle_when_no_positions(self, bot):
+        bot._active_signals = []
+        bot.orders.wick_scalper._active_scalps = {}
+        bot.orders.trailing._stops = {}
+        bot._tick_interval = 99
+        bot._update_tick_interval()
+        assert bot._tick_interval == bot.settings.tick_interval_idle
+
+    def test_swing_when_only_swing_signals(self, bot):
+        bot._active_signals = [self._make_signal("swing")]
+        bot.orders.wick_scalper._active_scalps = {}
+        bot.orders.trailing._stops = {}
+        bot._tick_interval = 99
+        bot._update_tick_interval()
+        assert bot._tick_interval == bot.settings.tick_interval_swing
+
+    def test_active_when_trailing_stops_exist(self, bot):
+        bot._active_signals = []
+        bot.orders.wick_scalper._active_scalps = {}
+        bot.orders.trailing._stops = {"BTC/USDT": MagicMock()}
+        bot._tick_interval = 99
+        bot._update_tick_interval()
+        assert bot._tick_interval == bot.settings.tick_interval_active
+
+    def test_active_when_active_signal(self, bot):
+        bot._active_signals = [self._make_signal("active")]
+        bot.orders.wick_scalper._active_scalps = {}
+        bot.orders.trailing._stops = {}
+        bot._tick_interval = 99
+        bot._update_tick_interval()
+        assert bot._tick_interval == bot.settings.tick_interval_active
+
+    def test_scalp_when_scalp_signal(self, bot):
+        bot._active_signals = [self._make_signal("scalp")]
+        bot.orders.wick_scalper._active_scalps = {}
+        bot.orders.trailing._stops = {}
+        bot._tick_interval = 99
+        bot._update_tick_interval()
+        assert bot._tick_interval == bot.settings.tick_interval_scalp
+
+    def test_scalp_when_wick_scalp_active(self, bot):
+        bot._active_signals = []
+        scalp = MagicMock(active=True, closed=False)
+        bot.orders.wick_scalper._active_scalps = {"ETH/USDT": scalp}
+        bot.orders.trailing._stops = {}
+        bot._tick_interval = 99
+        bot._update_tick_interval()
+        assert bot._tick_interval == bot.settings.tick_interval_scalp
+
+    def test_scalp_beats_active(self, bot):
+        bot._active_signals = [self._make_signal("scalp"), self._make_signal("active")]
+        bot.orders.trailing._stops = {"BTC/USDT": MagicMock()}
+        bot._tick_interval = 99
+        bot._update_tick_interval()
+        assert bot._tick_interval == bot.settings.tick_interval_scalp
+
+    def test_scalp_beats_swing(self, bot):
+        bot._active_signals = [self._make_signal("scalp"), self._make_signal("swing")]
+        bot.orders.wick_scalper._active_scalps = {}
+        bot.orders.trailing._stops = {}
+        bot._tick_interval = 99
+        bot._update_tick_interval()
+        assert bot._tick_interval == bot.settings.tick_interval_scalp
+
+    def test_active_beats_swing(self, bot):
+        bot._active_signals = [self._make_signal("active"), self._make_signal("swing")]
+        bot.orders.wick_scalper._active_scalps = {}
+        bot.orders.trailing._stops = {}
+        bot._tick_interval = 99
+        bot._update_tick_interval()
+        assert bot._tick_interval == bot.settings.tick_interval_active
+
+    def test_configurable_via_settings(self, bot):
+        bot.settings.tick_interval_idle = 120
+        bot.settings.tick_interval_active = 45
+        bot.settings.tick_interval_swing = 600
+        bot.settings.tick_interval_scalp = 2
+        bot._active_signals = [self._make_signal("swing")]
+        bot.orders.wick_scalper._active_scalps = {}
+        bot.orders.trailing._stops = {}
+        bot._tick_interval = 99
+        bot._update_tick_interval()
+        assert bot._tick_interval == 600
+
+    def test_no_log_when_interval_unchanged(self, bot, caplog):
+        bot._active_signals = []
+        bot.orders.wick_scalper._active_scalps = {}
+        bot.orders.trailing._stops = {}
+        bot._tick_interval = bot.settings.tick_interval_idle
+        bot._update_tick_interval()
+        assert "Tick interval" not in caplog.text

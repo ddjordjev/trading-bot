@@ -6,6 +6,7 @@ import ta
 
 from core.market_schedule import get_market_schedule
 from core.models import Candle, Signal, SignalAction, Ticker
+from core.models.signal import TickUrgency
 from strategies.base import BaseStrategy
 
 
@@ -84,4 +85,5 @@ class MarketOpenVolatilityStrategy(BaseStrategy):
             leverage=self.leverage,
             quick_trade=True,
             max_hold_minutes=self.max_hold_minutes,
+            tick_urgency=TickUrgency.SCALP,
         )

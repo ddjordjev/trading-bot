@@ -5,6 +5,7 @@ from typing import Any
 import ta
 
 from core.models import Candle, Signal, SignalAction, Ticker
+from core.models.signal import TickUrgency
 from strategies.base import BaseStrategy
 
 
@@ -129,6 +130,7 @@ class CompoundMomentumStrategy(BaseStrategy):
             leverage=self.leverage,
             quick_trade=True,
             max_hold_minutes=self.spike_max_hold,
+            tick_urgency=TickUrgency.SCALP,
         )
 
     def _detect_breakout(self, df: object, price: float) -> Signal | None:
@@ -170,6 +172,7 @@ class CompoundMomentumStrategy(BaseStrategy):
                 leverage=self.leverage,
                 quick_trade=True,
                 max_hold_minutes=self.breakout_max_hold,
+                tick_urgency=TickUrgency.SCALP,
             )
 
         # Bearish breakout
@@ -189,6 +192,7 @@ class CompoundMomentumStrategy(BaseStrategy):
                 leverage=self.leverage,
                 quick_trade=True,
                 max_hold_minutes=self.breakout_max_hold,
+                tick_urgency=TickUrgency.SCALP,
             )
 
         return None

@@ -61,6 +61,7 @@ class TradeProposal(BaseModel):
     leverage: int = 10
     quick_trade: bool = False
     max_hold_minutes: int = 0
+    tick_urgency: str = "active"  # scalp | active | swing
 
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     valid_until: str = ""

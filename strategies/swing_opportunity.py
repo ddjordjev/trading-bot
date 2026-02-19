@@ -5,6 +5,7 @@ from typing import Any
 import ta
 
 from core.models import Candle, Signal, SignalAction, Ticker
+from core.models.signal import TickUrgency
 from strategies.base import BaseStrategy
 
 
@@ -133,6 +134,7 @@ class SwingOpportunityStrategy(BaseStrategy):
             leverage=max(3, self.leverage // 2),  # lower leverage for swings
             quick_trade=False,
             max_hold_minutes=self.swing_max_hold_hours * 60,
+            tick_urgency=TickUrgency.SWING,
         )
 
     def _detect_blow_off_top(self, df: object, price: float) -> Signal | None:
@@ -187,4 +189,5 @@ class SwingOpportunityStrategy(BaseStrategy):
             leverage=max(3, self.leverage // 2),
             quick_trade=False,
             max_hold_minutes=self.swing_max_hold_hours * 60,
+            tick_urgency=TickUrgency.SWING,
         )

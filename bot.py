@@ -15,6 +15,7 @@ from core.exchange import BaseExchange, create_exchange
 from core.market_schedule import get_market_schedule
 from core.models import Candle, Signal, SignalAction
 from core.models.order import Order, OrderSide
+from core.models.signal import TickUrgency
 from core.orders import OrderManager
 from core.risk import RiskManager
 from core.risk.daily_target import DailyTargetTracker, DailyTier
@@ -107,7 +108,7 @@ class TradingBot:
         self._recent_news: list[NewsItem] = []
         self._whale_alerted: set[str] = set()  # symbols already alerted for whale position
         self._running = False
-        self._tick_interval = 60
+        self._tick_interval = self.settings.tick_interval_idle
         self._status_interval = 300
         self._last_status_log: datetime | None = None
         self._started_at: datetime | None = None
@@ -236,6 +237,7 @@ class TradingBot:
                 from web.metrics import record_event_loop_lag, record_tick
 
                 record_tick(time.perf_counter() - t0)
+                self._update_tick_interval()
                 loop_start = time.perf_counter()
                 await asyncio.sleep(self._tick_interval)
                 record_event_loop_lag(time.perf_counter() - loop_start - self._tick_interval)
@@ -244,6 +246,30 @@ class TradingBot:
             except Exception as e:
                 logger.exception("Error in main loop: {}", e)
                 await asyncio.sleep(10)
+
+    def _update_tick_interval(self) -> None:
+        """Adapt tick speed based on the most urgent open position.
+
+        Priority (fastest wins): scalp (5s) > active (60s) > swing (300s) > idle (60s).
+        """
+        urgencies: set[TickUrgency] = set()
+        for s in self._active_signals:
+            urgencies.add(s.tick_urgency)
+        if self.orders.wick_scalper.active_scalps:
+            urgencies.add(TickUrgency.SCALP)
+
+        if TickUrgency.SCALP in urgencies:
+            new_interval = self.settings.tick_interval_scalp
+        elif TickUrgency.ACTIVE in urgencies or self.orders.trailing.active_stops:
+            new_interval = self.settings.tick_interval_active
+        elif TickUrgency.SWING in urgencies:
+            new_interval = self.settings.tick_interval_swing
+        else:
+            new_interval = self.settings.tick_interval_idle
+
+        if new_interval != self._tick_interval:
+            logger.info("Tick interval: {}s → {}s", self._tick_interval, new_interval)
+            self._tick_interval = new_interval
 
     async def _tick(self) -> None:
 
@@ -478,6 +504,7 @@ class TradingBot:
                     sig = sig.model_copy()
                     sig.quick_trade = True
                     sig.max_hold_minutes = 15
+                    sig.tick_urgency = TickUrgency.SCALP
 
                 # TradingView alignment: boost/penalize based on TV technical analysis
                 side = "long" if sig.action == SignalAction.BUY else "short"
@@ -708,6 +735,7 @@ class TradingBot:
             leverage=proposal.leverage,
             quick_trade=proposal.quick_trade,
             max_hold_minutes=proposal.max_hold_minutes or None,
+            tick_urgency=TickUrgency(proposal.tick_urgency),
         )
 
         logger.info(

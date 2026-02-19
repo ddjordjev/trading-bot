@@ -13,6 +13,12 @@ class SignalAction(str, Enum):
     HOLD = "hold"
 
 
+class TickUrgency(str, Enum):
+    SCALP = "scalp"  # 5s — quick in-and-out, wick plays
+    ACTIVE = "active"  # 60s — standard positions, DCA/pyramid
+    SWING = "swing"  # 300s — long-term holds, checked infrequently
+
+
 class Signal(BaseModel):
     symbol: str
     action: SignalAction
@@ -26,4 +32,5 @@ class Signal(BaseModel):
     leverage: int = 1
     quick_trade: bool = False  # for spike/volatility in-and-out trades
     max_hold_minutes: int | None = None  # auto-close after N minutes
+    tick_urgency: TickUrgency = TickUrgency.ACTIVE
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
