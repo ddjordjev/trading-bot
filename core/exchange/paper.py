@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from typing import Any
 
 from loguru import logger
 
@@ -314,8 +315,8 @@ class PaperExchange(BaseExchange):
     async def get_available_symbols(self, market_type: MarketType = MarketType.SPOT) -> list[str]:
         return await self._real.get_available_symbols(market_type)
 
-    async def watch_ticker(self, symbol: str, callback: Callable) -> None:  # type: ignore[type-arg]
+    async def watch_ticker(self, symbol: str, callback: Callable[..., Any]) -> None:
         await self._real.watch_ticker(symbol, callback)
 
-    async def watch_candles(self, symbol: str, timeframe: str, callback: Callable) -> None:  # type: ignore[type-arg]
+    async def watch_candles(self, symbol: str, timeframe: str, callback: Callable[..., Any]) -> None:
         await self._real.watch_candles(symbol, timeframe, callback)

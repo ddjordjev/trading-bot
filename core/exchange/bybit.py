@@ -252,7 +252,7 @@ class BybitExchange(BaseExchange):
         client = self._client(market_type)
         return list(client.markets.keys())
 
-    async def watch_ticker(self, symbol: str, callback: Callable) -> None:  # type: ignore[type-arg]
+    async def watch_ticker(self, symbol: str, callback: Callable[..., Any]) -> None:
         async def _loop() -> None:
             while True:
                 try:
@@ -276,7 +276,7 @@ class BybitExchange(BaseExchange):
         task = asyncio.create_task(_loop())
         self._watchers.append(task)
 
-    async def watch_candles(self, symbol: str, timeframe: str, callback: Callable) -> None:  # type: ignore[type-arg]
+    async def watch_candles(self, symbol: str, timeframe: str, callback: Callable[..., Any]) -> None:
         async def _loop() -> None:
             while True:
                 try:
