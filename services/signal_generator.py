@@ -283,7 +283,7 @@ class SignalGenerator:
         btc_tv = self._get_tv_analysis(snap, "BTC/USDT")
         eth_tv = self._get_tv_analysis(snap, "ETH/USDT")
         if btc_tv and eth_tv:
-            btc_strong = btc_tv.consensus in ("long", "strong_buy")
+            btc_strong = btc_tv.consensus == "long"
             eth_weak = eth_tv.consensus in ("neutral", "short")
             if btc_strong and eth_weak and snap.fear_greed < 60:
                 self._propose(

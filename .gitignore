@@ -13,6 +13,7 @@ logs/
 *.log
 .cursor/chat_history.md
 .cursor/chat_history_archive/
+.cursor/last_audit.json
 .github/.commit_msg*
 .github/.commitmsg
 .idea/

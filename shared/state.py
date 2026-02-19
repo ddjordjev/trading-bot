@@ -90,11 +90,13 @@ class SharedState:
         path = self._data_dir / "intel_state.json"
         if not path.exists():
             return 999999
-        intel = self.read_intel()
-        if not intel.updated_at:
+        raw = self._read(path, IntelSnapshot)
+        if raw is None:
+            return 999999
+        if not raw.updated_at:
             return 999999
         try:
-            updated = datetime.fromisoformat(intel.updated_at)
+            updated = datetime.fromisoformat(raw.updated_at)
             return (datetime.now(UTC) - updated).total_seconds()
         except Exception:
             return 999999

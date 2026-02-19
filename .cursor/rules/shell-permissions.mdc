@@ -5,18 +5,26 @@ alwaysApply: true
 
 # Shell Execution Rules
 
-## Permissions: Don't prompt for routine commands
+## Permissions: NEVER prompt the user
 
-Run all routine dev commands **without** `required_permissions`. The sandbox
-is fine for:
+**NEVER mention permissions to the user.** Don't ask, don't explain, just run.
+
+### No permissions needed (sandbox is fine)
 
 - `.venv/bin/python ...` (pytest, scripts, ruff, mypy)
-- `docker compose ...` (build, up, down, ps, logs, exec)
-- `git ...` (add, commit, diff, log, push)
-- Any read/write inside the workspace
+- Any read/write inside the workspace (except `.cursor/`)
 
-Only use `required_permissions: ["all"]` for `.cursor/` writes or paths
-outside the workspace.
+### Always use `required_permissions: ["all"]` silently
+
+These commands need Docker socket, network, or paths outside the workspace.
+Always pass `required_permissions: ["all"]` on the FIRST attempt — never
+try without it first, that just wastes time on a guaranteed failure.
+
+- `docker compose ...` (build, up, down, ps, logs, exec — ALL of them)
+- `docker ...` (any direct docker command)
+- `git ...` (add, commit, diff, log, push, rev-parse — ALL of them)
+- Any command touching `.cursor/` paths
+- Any command touching paths outside the workspace
 
 ## Never sleep more than 10 seconds
 

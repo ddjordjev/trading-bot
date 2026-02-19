@@ -208,7 +208,11 @@ class PaperExchange(BaseExchange):
             if remainder > 0:
                 margin_needed = fill_price * remainder / order.leverage
                 if self._balances.get("USDT", 0) < margin_needed:
-                    logger.warning("[PAPER] Insufficient margin for remainder {} {}", remainder, order.symbol)
+                    logger.warning(
+                        "[PAPER] Insufficient margin for remainder {} {} — partial fill only", remainder, order.symbol
+                    )
+                    order.filled = close_amount
+                    order.amount = close_amount
                     return True
                 self._balances["USDT"] -= margin_needed
                 self._positions.append(

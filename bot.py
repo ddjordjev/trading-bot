@@ -817,7 +817,7 @@ class TradingBot:
         """Log a completed trade to the analytics database."""
         try:
             now = datetime.now(UTC)
-            sp = self.orders.scaler.get(order.symbol)
+            sp = self.orders.scaler.get(order.symbol) or self.orders._closed_scalers.pop(order.symbol, None)
             intel_cond = self.intel.condition if self.intel else None
 
             exit_price = order.average_price or order.price or 0

@@ -11,55 +11,219 @@ The project is preparing for a 10-day paper trading run. Until the bot is
 launched and running cleanly for 10 consecutive days, every fresh agent must
 audit the codebase before anything else.
 
-## On Session Start
+## On Session Start — Execute These Steps In Order
 
-After reading chat history (per the chat-history rule), immediately:
+After reading chat history (per the chat-history rule), immediately execute
+steps 1–6 below. Do NOT read `docs/EXECUTION_PLAN.md` — everything needed
+is in this rule. Just go.
 
-1. **Read `docs/EXECUTION_PLAN.md`** — understand the full plan.
-2. **Read the latest chat history archive** — know what the last session found.
-3. **Run the Pre-Launch steps** from the execution plan (analysis, preflight,
-   Docker build, smoke test, signal flow, teardown).
-4. **Fix everything you find** — bugs, suspicious code, stale references,
-   logic errors, misconfigurations. Even if it "looks fine", dig deeper.
-   Previous agents have missed things.
-5. **After fixing, tear down** (`docker compose down -v`) and report what
-   you found and fixed. The user will then open a fresh session to repeat.
+### Step 1: Check Audit Cache
 
-## What to Analyze (minimum)
+Read `.cursor/last_audit.json` with the Read tool (NOT shell). Then run
+`git rev-parse HEAD` to get the current commit.
 
-- `bot.py` — entry point, strategy registration, tick loop
-- `core/exchange/paper.py` — PaperExchange (this has had repeated bugs)
+**If commit matches cached commit AND result is "clean":**
+- Print: "Audit cache hit — code unchanged since `<commit>`. Skipping
+  codebase analysis."
+- Jump to Step 3 (Preflight).
+
+**If commit differs:**
+- Run `git diff --name-only <cached_commit> HEAD`
+- Map changed files to analysis groups (see File → Group Mapping below).
+- Only launch analysis agents for groups with changes (Step 2).
+- Print "Group X: unchanged — skipping" for clean groups.
+
+**If no cache or empty commit:** Run full analysis on all 4 groups.
+
+### Step 2: Codebase Analysis (only changed groups)
+
+Launch up to 4 parallel agents (one per group that has changes). Each agent
+should scan for bugs, logic errors, stale references — report only actual
+bugs. Fix everything found. After fixing, update `.cursor/last_audit.json`
+with the Write tool (see Cache Format below).
+
+### Step 3: Preflight Check
+
+```
+.venv/bin/python scripts/preflight_check.py
+```
+
+Expect 15/15 PASS. Fix any failures before proceeding.
+
+### Step 4: Docker Build & Smoke Test
+
+Run these commands in sequence:
+
+```
+docker compose build
+```
+
+```
+docker compose up -d
+```
+
+Wait 15 seconds, then:
+
+```
+docker compose ps
+```
+
+Verify: all 3 services show "healthy". If any are unhealthy, check logs
+and fix before continuing.
+
+```
+docker compose exec trading-bot curl -s http://localhost:9035/health
+```
+
+Expect: `{"status":"ok","bot_running":true}`
+
+```
+docker compose logs --tail 25 trading-bot
+```
+
+Verify in the logs:
+- No crash loops or repeating errors
+- Balance shows ~$100 (SESSION_BUDGET)
+- Strategies are registered
+- Intel feeds are active
+
+### Step 5: Signal Flow Verification
+
+Check the other two services:
+
+```
+docker compose logs --tail 15 monitor
+```
+
+Verify: monitor is scanning, generating queue proposals.
+
+```
+docker compose logs --tail 15 analytics
+```
+
+Verify: analytics is running and refreshing.
+
+Then confirm the bot is consuming the queue:
+
+```
+docker compose exec trading-bot python -c "
+from shared.state import SharedState
+s = SharedState()
+q = s.read_trade_queue()
+print(f'Queue: {q.pending_count} pending')
+bs = s.read_bot_status()
+print(f'Bot: level={bs.level} positions={bs.open_positions} trade={bs.should_trade}')
+"
+```
+
+Verify: queue has pending items, bot status is being written.
+
+### Step 6: Teardown
+
+```
+docker compose down -v
+```
+
+Report what was found and fixed. The user will then decide next steps
+(open fresh session to repeat, or start Day 1).
+
+## Force Audit
+
+If the user says **"force audit"**, **"full audit"**, or **"re-audit"**,
+ignore the cache entirely and run a complete codebase analysis on all 4
+groups regardless of what changed. Update the cache afterward as usual.
+
+## Audit Cache
+
+The file `.cursor/last_audit.json` tracks what was already audited and when.
+
+### Cache Format
+
+```json
+{
+  "commit": "<git commit hash at time of last clean audit>",
+  "timestamp": "<ISO 8601>",
+  "result": "clean|bugs_found|none",
+  "bugs_found": 0,
+  "groups": {
+    "exchange_risk": {
+      "commit": "<hash>",
+      "result": "clean",
+      "files_checked": ["core/exchange/paper.py", "..."]
+    },
+    "orders_strategies": { "..." : "..." },
+    "bot_services": { "..." : "..." },
+    "db_intel_scripts": { "..." : "..." }
+  }
+}
+```
+
+### File → Group Mapping
+
+| Group | Files |
+|-------|-------|
+| `exchange_risk` | `core/exchange/**`, `core/risk/**` |
+| `orders_strategies` | `core/orders/**`, `strategies/**` |
+| `bot_services` | `bot.py`, `services/**`, `config/settings.py`, `web/**`, `docker-compose.yml`, `Dockerfile` |
+| `db_intel_scripts` | `db/**`, `intel/**`, `shared/**`, `scripts/**`, `notifications/**`, `core/market_schedule.py` |
+
+Files not in these groups (tests, docs, .github, .cursor, etc.) do NOT
+trigger re-analysis.
+
+### After Analysis Completes
+
+Update `.cursor/last_audit.json` with the Write tool:
+- Set `commit` to current HEAD
+- Set `timestamp` to now (ISO 8601)
+- Set `result` to "clean" if 0 new bugs, "bugs_found" otherwise
+- For each analyzed group, update its `commit` and `result`
+- For skipped groups, keep their existing entries
+
+## What to Analyze (minimum per group)
+
+**exchange_risk:**
+- `core/exchange/paper.py` — PaperExchange (repeated bugs here)
 - `core/exchange/factory.py` — exchange creation, paper mode
-- `core/risk/` — risk manager, daily target tracker
-- `core/orders/` — order manager, scaler, trailing, hedge, wick scalp
+- `core/exchange/binance.py`, `core/exchange/bybit.py` — adapters
+- `core/risk/manager.py` — risk checks, daily loss
+- `core/risk/daily_target.py` — tier system, daily reset
+
+**orders_strategies:**
+- `core/orders/manager.py` — order manager, scaler, trailing, hedge, wick
+- `core/orders/scaler.py`, `trailing.py`, `hedge.py`, `wick_scalp.py`
 - `strategies/` — all 8 strategy implementations
-- `services/` — monitor, analytics, signal generator
+- `strategies/base.py` — BaseStrategy
+
+**bot_services:**
+- `bot.py` — entry point, strategy registration, tick loop
+- `services/monitor.py`, `analytics_service.py`, `signal_generator.py`
 - `config/settings.py` — all configuration
-- `web/server.py` + `web/auth.py` — dashboard (health check has been failing)
+- `web/server.py` + `web/auth.py` — dashboard
 - `docker-compose.yml` + `Dockerfile` — container setup
 
-## Known Recurring Issues (check these specifically)
+**db_intel_scripts:**
+- `db/store.py`, `db/models.py` — trade database
+- `intel/` — all intel modules
+- `shared/state.py`, `shared/models.py` — IPC
+- `scripts/preflight_check.py`, `scripts/run_session.sh`
+- `notifications/notifier.py`
 
-- **Dashboard `/api/status` hangs** — Not yet fixed. The curl health check
-  times out. Investigate uvicorn startup, auth middleware, FastAPI app mounting.
-- **Paper balance drops 67% in minutes** — Trade queue processes too many
-  proposals on first boot. Risk params or queue throttling may need tightening.
-- **PaperExchange margin logic** — Has been fixed multiple times. Verify
-  futures BUY/SELL both reserve margin, partial close works, DCA works.
+## Known Recurring Issues
+
+- **Dashboard health check** — Fixed: uses `/health` (no auth). Verify.
+- **67% balance loss on boot** — Fixed: 3-min warmup + per-tick caps. Verify.
+- **PaperExchange margin** — Fixed multiple times. Verify BUY/SELL both
+  reserve margin, partial close + DCA work correctly.
 
 ## Trading Modes
 
-- **Pre-launch testing** uses `TRADING_MODE=paper_local` (PaperExchange,
-  local simulation, nothing hits the exchange).
-- **10-day run** uses `TRADING_MODE=paper_live` (real orders on Binance
-  testnet at demo.binance.com). Switch only after pre-launch passes clean.
-- **Never** use `live` without explicit user approval.
-- **Health checks** — Monitor/analytics use file freshness checks. Verify
-  they tolerate startup delay.
+- `paper_local` — PaperExchange, local sim, nothing hits exchange (pre-launch)
+- `paper_live` — real orders on Binance testnet (10-day run)
+- `live` — **NEVER** without explicit user approval
 
 ## Important
 
 - Use `.venv/bin/python` for local commands (see python-env rule).
 - Docker handles its own Python — don't conflate the two.
 - Commit fixes to `develop` branch. Never push to `master`.
-- After teardown, tell the user what you found so they can open a fresh chat.
+- After teardown, tell the user what you found so they can decide next steps.

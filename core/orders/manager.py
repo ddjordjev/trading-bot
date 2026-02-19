@@ -19,7 +19,7 @@ from core.models import (
     SignalAction,
 )
 from core.orders.hedge import HedgeManager, HedgeState
-from core.orders.scaler import PositionScaler, ScaleMode
+from core.orders.scaler import PositionScaler, ScaledPosition, ScaleMode
 from core.orders.trailing import TrailingStopManager
 from core.orders.wick_scalp import WickScalpDetector
 from core.risk.manager import RiskManager
@@ -57,6 +57,7 @@ class OrderManager:
         self.wick_scalper = WickScalpDetector()
         self._active_orders: list[Order] = []
         self._trade_log: list[dict[str, Any]] = []
+        self._closed_scalers: dict[str, ScaledPosition] = {}  # stashed before removal for logging
 
     # ------------------------------------------------------------------ #
     #  Signal execution
@@ -664,6 +665,9 @@ class OrderManager:
             self.risk.record_pnl(pnl)
             self._log_trade(signal, order, "close", pnl)
             logger.info("Closed {} {} PnL: {:.2f}", signal.symbol, pos.side.value, pnl)
+            sp = self.scaler.get(signal.symbol)
+            if sp:
+                self._closed_scalers[signal.symbol] = sp
             self.scaler.remove(signal.symbol)
 
         return order
@@ -714,7 +718,10 @@ class OrderManager:
                 )
                 order = await self.execute_signal(signal)
                 if order:
-                    self.scaler.remove(symbol)
+                    self.trailing.remove(f"{symbol}:hedge")
+                    self.trailing.remove(f"{symbol}:wick")
+                    self.hedger.remove(symbol)
+                    self.wick_scalper.close(symbol)
 
             if order:
                 closed.append(order)
@@ -737,7 +744,10 @@ class OrderManager:
                 if order:
                     closed.append(order)
                     self.trailing.remove(pos.symbol)
-                    self.scaler.remove(pos.symbol)
+                    self.trailing.remove(f"{pos.symbol}:hedge")
+                    self.trailing.remove(f"{pos.symbol}:wick")
+                    self.hedger.remove(pos.symbol)
+                    self.wick_scalper.close(pos.symbol)
 
         return closed
 
