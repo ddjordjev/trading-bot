@@ -7,7 +7,12 @@ The agent operating this plan has full autonomy to add, remove, or reconfigure
 strategies at any time based on observed results. The only hard constraints are:
 
 1. **Starting capital: $100** (SESSION_BUDGET=100)
-2. **Don't blow up** — if balance drops below $60, halt and reassess
+2. **Don't blow up** — if balance drops below $60, halt and reassess.
+   If the account hits $0 (or near-zero), **don't panic and don't force it**.
+   Log what happened, analyze why, archive the attempt, reset SESSION_BUDGET
+   back to $100, and start a brand new 10-day session with adjusted
+   strategies/params based on what you learned. Each blown account is a
+   lesson, not a failure — but never repeat the same mistake twice.
 3. **Write reports** — daily snapshot + a final summary at the end
 4. **Fix what breaks** — if something crashes, fix it, **reset the 10-day
    counter to Day 1**, and start a fresh run. The 10 days must be
