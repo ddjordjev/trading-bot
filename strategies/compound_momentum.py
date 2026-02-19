@@ -158,14 +158,17 @@ class CompoundMomentumStrategy(BaseStrategy):
         # Bullish breakout
         breakout_up = price > resistance * (1 + self.breakout_threshold_pct / 100)
         if breakout_up and current_rsi >= self.rsi_bull_min and volume_surge:
-            strength = min(1.0, (price - resistance) / resistance * 100 / self.breakout_threshold_pct)
+            strength = (
+                min(1.0, (price - resistance) / resistance * 100 / self.breakout_threshold_pct) if resistance else 0
+            )
 
+            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
             return Signal(
                 symbol=self.symbol,
                 action=SignalAction.BUY,
                 strength=strength,
                 strategy=self.name,
-                reason=f"SCALP breakout above {resistance:.2f} (RSI={current_rsi:.0f}, vol={current_vol / avg_vol:.1f}x)",
+                reason=f"SCALP breakout above {resistance:.2f} (RSI={current_rsi:.0f}, vol={vol_ratio:.1f}x)",
                 suggested_price=price,
                 suggested_stop_loss=support,
                 market_type=self.market_type,
@@ -178,14 +181,15 @@ class CompoundMomentumStrategy(BaseStrategy):
         # Bearish breakout
         breakout_down = price < support * (1 - self.breakout_threshold_pct / 100)
         if breakout_down and current_rsi <= self.rsi_bear_max and volume_surge:
-            strength = min(1.0, (support - price) / support * 100 / self.breakout_threshold_pct)
+            strength = min(1.0, (support - price) / support * 100 / self.breakout_threshold_pct) if support else 0
 
+            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
             return Signal(
                 symbol=self.symbol,
                 action=SignalAction.SELL,
                 strength=strength,
                 strategy=self.name,
-                reason=f"SCALP breakout below {support:.2f} (RSI={current_rsi:.0f}, vol={current_vol / avg_vol:.1f}x)",
+                reason=f"SCALP breakout below {support:.2f} (RSI={current_rsi:.0f}, vol={vol_ratio:.1f}x)",
                 suggested_price=price,
                 suggested_stop_loss=resistance,
                 market_type=self.market_type,

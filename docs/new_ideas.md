@@ -150,7 +150,6 @@ Build a `MacroTrend` classifier using:
 - BTC daily SMA(50) vs SMA(200) — golden cross = bull, death cross = bear
 - BTC weekly TradingView consensus (1D + 1W timeframes)
 - DeFiLlama TVL trend (capital inflows = bull, outflows = bear)
-- Glassnode accumulation vs distribution phase
 - Fear & Greed 30-day rolling average (persistent fear = bear, greed = bull)
 
 Enforcement:

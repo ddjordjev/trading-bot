@@ -197,6 +197,14 @@ async def grafana_url() -> dict[str, Any]:
     return {"port": port, "dashboard_uid": "trading-bot"}
 
 
+@app.get("/api/system-metrics", response_model=None)
+async def system_metrics() -> dict[str, Any]:
+    from web.metrics import get_metrics_json
+
+    uptime = time.time() - _start_time if _start_time else 0
+    return get_metrics_json(_bot, uptime)
+
+
 @app.get("/metrics", response_model=None)
 async def metrics() -> Response:
     from web.metrics import collect_metrics
@@ -559,11 +567,11 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 # --------------- static files ---------------
 
 
-@app.get("/docs/summary", response_model=None)
-async def serve_summary() -> FileResponse | HTMLResponse:
+@app.get("/api/summary-html", response_model=None)
+async def serve_summary() -> HTMLResponse:
     summary_path = DOCS_DIR / "summary.html"
     if summary_path.exists():
-        return FileResponse(summary_path, media_type="text/html")
+        return HTMLResponse(summary_path.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>Summary not found</h1>", status_code=404)
 
 

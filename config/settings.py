@@ -162,10 +162,6 @@ class Settings(BaseSettings):
     santiment_api_key: str = ""
     santiment_poll_interval: int = 600  # seconds between social data refreshes
 
-    # Glassnode (requires free API key from glassnode.com)
-    glassnode_api_key: str = ""
-    glassnode_poll_interval: int = 900  # seconds between on-chain refreshes
-
     # Dashboard
     dashboard_enabled: bool = True
     dashboard_host: str = "0.0.0.0"

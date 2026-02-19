@@ -258,7 +258,7 @@ def _collect_trading(bot: TradingBot | None) -> None:
     _daily_pnl.set(bot.target.todays_pnl)
     _daily_pnl_pct.set(bot.target.todays_pnl_pct)
     _daily_loss_pct.set(bot.risk.daily_loss_pct)
-    _open_positions.set(len(bot.orders.trailing.active_stops))
+    _open_positions.set(len(bot.orders.scaler.active_positions))
     _trades_today.set(bot.risk._total_trades_today)
     _win_rate.set(bot.risk.win_rate_today)
     _strategies_count.set(len(bot._strategies) + len(bot._dynamic_strategies))
@@ -275,3 +275,61 @@ def collect_metrics(bot: TradingBot | None, uptime: float) -> bytes:
     _collect_process()
     _collect_trading(bot)
     return generate_latest(registry)
+
+
+def get_metrics_json(bot: TradingBot | None, uptime: float) -> dict[str, Any]:
+    """Return key metrics as JSON for the built-in monitoring dashboard."""
+    _collect_system()
+    _collect_process()
+    _collect_trading(bot)
+
+    def _val(g: Gauge) -> float:
+        try:
+            return float(g._value.get())
+        except Exception:
+            return 0.0
+
+    positions: list[dict[str, Any]] = []
+    if bot:
+        for sym, sp in bot.orders.scaler.active_positions.items():
+            positions.append(
+                {
+                    "symbol": sym,
+                    "side": sp.side,
+                    "amount": sp.current_size,
+                    "entry": sp.avg_entry_price,
+                    "leverage": sp.current_leverage,
+                    "adds": sp.adds,
+                }
+            )
+
+    return {
+        "uptime_seconds": round(uptime, 1),
+        "trading": {
+            "balance": _val(_balance),
+            "daily_pnl": _val(_daily_pnl),
+            "daily_pnl_pct": round(_val(_daily_pnl_pct), 2),
+            "daily_loss_pct": round(_val(_daily_loss_pct), 2),
+            "open_positions": int(_val(_open_positions)),
+            "trades_today": int(_val(_trades_today)),
+            "win_rate": round(_val(_win_rate), 1),
+            "strategies": int(_val(_strategies_count)),
+            "fear_greed": int(_val(_fear_greed)),
+        },
+        "positions": positions,
+        "system": {
+            "cpu_pct": round(_val(_sys_cpu_pct), 1),
+            "mem_used_gb": round(_val(_sys_mem_used) / (1024**3), 2),
+            "mem_total_gb": round(_val(_sys_mem_total) / (1024**3), 2),
+            "mem_pct": round(_val(_sys_mem_pct), 1),
+            "disk_used_gb": round(_val(_sys_disk_used) / (1024**3), 1),
+            "disk_free_gb": round(_val(_sys_disk_free) / (1024**3), 1),
+            "disk_pct": round(_val(_sys_disk_pct), 1),
+        },
+        "process": {
+            "cpu_pct": round(_val(_proc_cpu_pct), 1),
+            "rss_mb": round(_val(_proc_rss) / (1024**2), 1),
+            "threads": int(_val(_proc_threads)),
+            "uptime_hours": round(_val(_proc_uptime) / 3600, 1),
+        },
+    }

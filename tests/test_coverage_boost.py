@@ -2,7 +2,7 @@
 
 Covers gaps in: risk/manager, bollinger, shared/models (TradeQueue),
 config/settings, news/monitor, scanner/trending, services/analytics_service,
-intel/liquidations, intel/glassnode, intel/coinmarketcap, intel/whale_sentiment.
+intel/liquidations, intel/coinmarketcap, intel/whale_sentiment.
 """
 
 from __future__ import annotations
@@ -558,85 +558,6 @@ class TestLiquidationMonitor:
         )
         m._latest = snap
         assert m.aggression_boost() == 1.1
-
-
-# ── Glassnode Monitor ────────────────────────────────────────────────────────
-
-
-class TestGlassnodeClient:
-    def test_no_data(self):
-        from intel.glassnode import GlassnodeClient
-
-        m = GlassnodeClient()
-        assert m.get("BTC") is None
-        assert m.on_chain_bias("BTC") == "neutral"
-        assert m.is_distribution_phase() is False
-        assert m.is_accumulation_phase() is False
-        assert m.position_bias() == 1.0
-
-    def test_with_bullish_data(self):
-        from intel.glassnode import GlassnodeClient, OnChainData
-
-        m = GlassnodeClient()
-        data = OnChainData(
-            timestamp=datetime.now(UTC),
-            exchange_netflow_btc=-5000.0,
-            nupl=0.3,
-            sopr=1.05,
-            active_addresses_24h=900_000,
-        )
-        m._data["BTC"] = data
-        assert m.get("BTC") is not None
-        bias = m.on_chain_bias("BTC")
-        assert bias in ("bullish", "bearish", "neutral")
-
-    def test_position_bias_bullish(self):
-        from intel.glassnode import GlassnodeClient, OnChainData
-
-        m = GlassnodeClient()
-        data = OnChainData(
-            timestamp=datetime.now(UTC),
-            exchange_netflow_btc=-5000.0,
-            nupl=0.3,
-            sopr=1.05,
-            active_addresses_24h=900_000,
-        )
-        m._data["BTC"] = data
-        if m.on_chain_bias("BTC") == "bullish":
-            assert m.position_bias() == 1.15
-        elif m.on_chain_bias("BTC") == "bearish":
-            assert m.position_bias() == 0.75
-
-    def test_summary_empty(self):
-        from intel.glassnode import GlassnodeClient
-
-        m = GlassnodeClient()
-        s = m.summary()
-        assert isinstance(s, str)
-
-    def test_summary_with_data(self):
-        from intel.glassnode import GlassnodeClient, OnChainData
-
-        m = GlassnodeClient()
-        m._data["BTC"] = OnChainData(timestamp=datetime.now(UTC))
-        s = m.summary()
-        assert "BTC" in s
-
-    @pytest.mark.asyncio
-    async def test_start_no_api_key(self):
-        from intel.glassnode import GlassnodeClient
-
-        m = GlassnodeClient(api_key="")
-        await m.start()
-        assert m._running is False
-
-    def test_get_strips_usdt(self):
-        from intel.glassnode import GlassnodeClient, OnChainData
-
-        m = GlassnodeClient()
-        m._data["BTC"] = OnChainData(timestamp=datetime.now(UTC))
-        assert m.get("BTC/USDT") is not None
-        assert m.get("BTCUSDT") is not None
 
 
 # ── Scanner/Trending ─────────────────────────────────────────────────────────

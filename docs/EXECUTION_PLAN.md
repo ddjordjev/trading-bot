@@ -178,7 +178,10 @@ At minimum, review:
 - `config/settings.py` — all configuration knobs
 - `docker-compose.yml` and `Dockerfile` — container setup
 - `docs/EXECUTION_PLAN.md` — this file (you're reading it)
-- `.cursor/chat_history.md` — previous session context and decisions
+
+**Optional:** `.cursor/chat_history.md` has previous session context and
+decisions. Only read it if the user explicitly asks — otherwise figure
+everything out from the code and this plan.
 
 Look for: mismatched ports, broken imports, stale references, logic bugs,
 anything that would prevent a clean startup. Fix issues before proceeding.

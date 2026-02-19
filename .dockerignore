@@ -17,10 +17,10 @@ web/frontend/node_modules
 web/frontend/dist
 logs/
 data/
-docs/
+docs/*
+!docs/summary.html
 tests/
 *.md
-*.html
 docker-compose*.yml
 Dockerfile
 .dockerignore

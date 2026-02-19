@@ -298,11 +298,11 @@ class MonitorService:
         snap.tv_analyses = tv_snapshots
 
         # Market regime
-        snap.regime = self._derive_regime(snap)
-        snap.position_size_multiplier = self._compute_size_mult(snap)
         snap.should_reduce_exposure = (
             snap.macro_event_imminent or self.fear_greed.is_extreme_greed or snap.overleveraged_side == "longs"
         )
+        snap.regime = self._derive_regime(snap)
+        snap.position_size_multiplier = self._compute_size_mult(snap)
         snap.preferred_direction = self._compute_direction(snap)
 
         # Trending

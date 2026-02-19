@@ -77,11 +77,11 @@ class MarketSession:
         """Next market close as a UTC datetime (accounts for early closes)."""
         local = dt.astimezone(self.timezone) if dt else self._local_now()
         close = self.early_closes.get(local.date(), self.close_time)
-        candidate = local.replace(hour=close.hour, minute=close.minute, second=0, microsecond=0)
+        candidate = local.replace(hour=close.hour, minute=close.minute, second=0, microsecond=0, fold=0)
         if candidate <= local:
             candidate += timedelta(days=1)
             close = self.early_closes.get(candidate.date(), self.close_time)
-            candidate = candidate.replace(hour=close.hour, minute=close.minute)
+            candidate = candidate.replace(hour=close.hour, minute=close.minute, fold=0)
         for _ in range(10):
             if candidate.isoweekday() not in self.weekend_days and candidate.date() not in self.holidays:
                 return candidate.astimezone(UTC)

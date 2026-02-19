@@ -263,9 +263,8 @@
   <tr><td>Unified MarketIntel orchestrator adjusting sizing, direction, exposure each tick. Now integrates TV consensus (2 votes in direction), CMC/CoinGecko data, and TV signal_boost per trade.</td><td><span class="badge done">Done</span></td><td class="file">intel/market_intel.py → MarketCondition, MarketRegime</td></tr>
   <tr><td><strong>DeFiLlama</strong>: TVL flows across DeFi — capital inflows/outflows, chain rotation, position bias based on TVL trend. Free, no key needed.</td><td><span class="badge done">Done</span></td><td class="file">intel/defillama.py → defillama.com</td></tr>
   <tr><td><strong>Santiment</strong>: Social volume, dev activity, whale transactions. Sentiment signal + social spike detection. Free tier, optional key for rate limits.</td><td><span class="badge done">Done</span></td><td class="file">intel/santiment.py → santiment.net GraphQL API</td></tr>
-  <tr><td><strong>Glassnode</strong>: On-chain metrics — exchange net flows, NUPL, SOPR, active addresses. Detects distribution vs accumulation phases. Requires free API key.</td><td><span class="badge done">Done</span></td><td class="file">intel/glassnode.py → glassnode.com</td></tr>
   <tr><td><strong>CoinGlass OI expansion</strong>: Total open interest, 1h OI change, top trader long ratios, OI history for trend detection.</td><td><span class="badge done">Done</span></td><td class="file">intel/whale_sentiment.py → OISnapshot model</td></tr>
-  <tr><td>MarketIntel now uses 10 data sources: F&amp;G, Liq, Macro, Whales, TV, CMC, CoinGecko, DeFiLlama, Santiment, Glassnode</td><td><span class="badge done">Done</span></td><td class="file">intel/market_intel.py → assess() composite multiplier</td></tr>
+  <tr><td>MarketIntel now uses 9 data sources: F&amp;G, Liq, Macro, Whales, TV, CMC, CoinGecko, DeFiLlama, Santiment</td><td><span class="badge done">Done</span></td><td class="file">intel/market_intel.py → assess() composite multiplier</td></tr>
 </table>
 
 <h3>2.17 Trade Priority Queue System</h3>
@@ -512,7 +511,7 @@
   <li><strong>Wick scalps</strong> — if a PYRAMID position is getting wicked, open a quick counter-scalp to ride the wick</li>
   <li><strong>Expire losers</strong> — close quick trades that timed out <em>and are losing</em> (winners keep riding)</li>
   <li><strong>Process trade queue</strong> — read proposals from monitor (CRITICAL → DAILY → SWING). Only act if idle with spare capacity and budget. Queue is advisory, never forced.</li>
-  <li><strong>Assess intel</strong> — Fear &amp; Greed, liquidations, macro, whales, DeFiLlama, Santiment, Glassnode → MarketCondition</li>
+  <li><strong>Assess intel</strong> — Fear &amp; Greed, liquidations, macro, whales, DeFiLlama, Santiment → MarketCondition</li>
   <li><strong>Legendary check</strong> — at 100%+ daily: close all if reversal risk, or email + ride</li>
   <li><strong>Apply gates</strong> — should we trade at all? (tier, drawdown, intel regime, STOP file)</li>
   <li><strong>Run strategies</strong> — for each symbol, analyze and generate signals:
@@ -574,8 +573,7 @@
   <tr><td><code>intel/coingecko.py</code></td><td>CoinGecko trending, top volume, movers, sparklines</td></tr>
   <tr><td><code>intel/defillama.py</code></td><td>DeFiLlama TVL flows — capital movement, chain rotation</td></tr>
   <tr><td><code>intel/santiment.py</code></td><td>Santiment social volume, sentiment, dev activity, whale txns</td></tr>
-  <tr><td><code>intel/glassnode.py</code></td><td>Glassnode on-chain: exchange flows, NUPL, SOPR, accumulation/distribution</td></tr>
-  <tr><td><code>intel/market_intel.py</code></td><td>Orchestrator: combines all 10 intel sources into MarketCondition</td></tr>
+  <tr><td><code>intel/market_intel.py</code></td><td>Orchestrator: combines all 9 intel sources into MarketCondition</td></tr>
   <tr><td><code>volatility/detector.py</code></td><td>Price spike detection engine</td></tr>
   <tr><td><code>news/monitor.py</code></td><td>RSS feed monitoring, sentiment analysis, spike correlation</td></tr>
   <tr><td><code>scanner/trending.py</code></td><td>Multi-source scanner: CryptoBubbles + CMC + CoinGecko</td></tr>
@@ -634,7 +632,6 @@
   <tr><td><code>COINGECKO_API_KEY</code></td><td>(empty)</td><td>CoinGecko pro API key (optional, free works)</td></tr>
   <tr><td><code>DEFILLAMA_ENABLED</code></td><td>true</td><td>Enable DeFiLlama TVL flow tracking</td></tr>
   <tr><td><code>SANTIMENT_API_KEY</code></td><td>(empty)</td><td>Santiment API key (optional, free tier works)</td></tr>
-  <tr><td><code>GLASSNODE_API_KEY</code></td><td>(empty)</td><td>Glassnode API key (required, free key at glassnode.com)</td></tr>
   <tr><td><code>BINANCE_API_KEY/SECRET</code></td><td>(empty)</td><td>Binance API credentials (if using Binance exchange)</td></tr>
   <tr><td><code>BYBIT_API_KEY/SECRET</code></td><td>(empty)</td><td>Bybit API credentials (if using Bybit exchange)</td></tr>
   <tr><td><code>DASHBOARD_ENABLED</code></td><td>true</td><td>Enable web dashboard on port 9035</td></tr>

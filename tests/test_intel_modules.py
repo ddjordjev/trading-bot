@@ -11,7 +11,6 @@ from intel.coingecko import CoinGeckoClient, GeckoCoin
 from intel.coinmarketcap import CMCCoin, CoinMarketCapClient
 from intel.defillama import DeFiLlamaClient, TVLSnapshot
 from intel.fear_greed import FearGreedClient, FearGreedReading
-from intel.glassnode import GlassnodeClient, OnChainData
 from intel.liquidations import LiquidationMonitor, LiquidationSnapshot
 from intel.macro_calendar import (
     EventImpact,
@@ -215,97 +214,6 @@ class TestSantimentClient:
         out = client.summary()
         assert "bitcoin" in out
         assert "SPIKE" in out
-
-
-# ── Glassnode ───────────────────────────────────────────────────────
-
-
-class TestOnChainData:
-    def test_is_distribution_true(self):
-        d = OnChainData(exchange_netflow_btc=200, nupl=0.7)
-        assert d.is_distribution is True
-
-    def test_is_distribution_false_netflow(self):
-        d = OnChainData(exchange_netflow_btc=50, nupl=0.7)
-        assert d.is_distribution is False
-
-    def test_is_distribution_false_nupl(self):
-        d = OnChainData(exchange_netflow_btc=200, nupl=0.5)
-        assert d.is_distribution is False
-
-    def test_is_accumulation_true(self):
-        d = OnChainData(exchange_netflow_btc=-200, nupl=0.2)
-        assert d.is_accumulation is True
-
-    def test_is_accumulation_false(self):
-        d = OnChainData(exchange_netflow_btc=-50, nupl=0.5)
-        assert d.is_accumulation is False
-
-    def test_on_chain_bias_bullish_accumulation(self):
-        d = OnChainData(exchange_netflow_btc=-150, nupl=0.2)
-        assert d.on_chain_bias == "bullish"
-
-    def test_on_chain_bias_bearish_distribution(self):
-        d = OnChainData(exchange_netflow_btc=150, nupl=0.65)
-        assert d.on_chain_bias == "bearish"
-
-    def test_on_chain_bias_bearish_euphoria(self):
-        d = OnChainData(exchange_netflow_btc=0, nupl=0.8)
-        assert d.on_chain_bias == "bearish"
-
-    def test_on_chain_bias_bullish_capitulation(self):
-        d = OnChainData(exchange_netflow_btc=0, nupl=-0.1)
-        assert d.on_chain_bias == "bullish"
-
-    def test_on_chain_bias_neutral(self):
-        d = OnChainData(exchange_netflow_btc=0, nupl=0.5)
-        assert d.on_chain_bias == "neutral"
-
-
-class TestGlassnodeClient:
-    @pytest.fixture
-    def client(self):
-        return GlassnodeClient(api_key="test-key")
-
-    def test_get_clean_symbol(self, client):
-        client._data["BTC"] = OnChainData(nupl=0.5)
-        assert client.get("BTC/USDT").nupl == 0.5
-        assert client.get("btc").nupl == 0.5
-
-    def test_on_chain_bias_no_data(self, client):
-        assert client.on_chain_bias("BTC") == "neutral"
-
-    def test_is_distribution_phase_no_data(self, client):
-        assert client.is_distribution_phase() is False
-
-    def test_is_distribution_phase_true(self, client):
-        client._data["BTC"] = OnChainData(exchange_netflow_btc=200, nupl=0.7)
-        assert client.is_distribution_phase() is True
-
-    def test_is_accumulation_phase_true(self, client):
-        client._data["BTC"] = OnChainData(exchange_netflow_btc=-200, nupl=0.2)
-        assert client.is_accumulation_phase() is True
-
-    def test_position_bias_bullish(self, client):
-        client._data["BTC"] = OnChainData(exchange_netflow_btc=-150, nupl=0.2)
-        assert client.position_bias() == 1.15
-
-    def test_position_bias_bearish(self, client):
-        client._data["BTC"] = OnChainData(exchange_netflow_btc=150, nupl=0.7)
-        assert client.position_bias() == 0.75
-
-    def test_position_bias_neutral(self, client):
-        client._data["BTC"] = OnChainData(exchange_netflow_btc=0, nupl=0.5)
-        assert client.position_bias() == 1.0
-
-    def test_summary_empty(self, client):
-        assert "no data" in client.summary()
-
-    def test_summary_with_data(self, client):
-        client._data["BTC"] = OnChainData(nupl=0.65, sopr=1.1, exchange_netflow_btc=150)
-        out = client.summary()
-        assert "BTC" in out
-        assert "DISTRIBUTION" in out
 
 
 # ── CoinGecko ────────────────────────────────────────────────────────
@@ -1267,7 +1175,6 @@ class TestMarketIntel:
         assert c.tv_eth_consensus == "no_data"
         assert c.tvl_trend == "stable"
         assert c.social_sentiment == "neutral"
-        assert c.on_chain_bias == "neutral"
         assert c.position_size_multiplier <= 1.5
         assert c.should_reduce_exposure is False
         assert c.regime == MarketRegime.NORMAL
@@ -1326,7 +1233,6 @@ class TestMarketIntel:
             "1h": TVAnalysis(symbol="BTC", summary_rating=TVRating.BUY),
             "4h": TVAnalysis(symbol="BTC", summary_rating=TVRating.BUY),
         }
-        intel.glassnode._data["BTC"] = OnChainData(exchange_netflow_btc=-150, nupl=0.2)
         c = intel.assess()
         assert c.preferred_direction == "long"
 
@@ -1342,12 +1248,6 @@ class TestMarketIntel:
         }
         c = intel.assess()
         assert c.preferred_direction == "short"
-
-    def test_assess_reduce_exposure_distribution(self, intel):
-        intel.glassnode._data["BTC"] = OnChainData(exchange_netflow_btc=200, nupl=0.7)
-        c = intel.assess()
-        assert c.should_reduce_exposure is True
-        assert c.distribution_phase is True
 
     def test_assess_reduce_exposure_extreme_greed(self, intel):
         intel.fear_greed._latest = FearGreedReading(

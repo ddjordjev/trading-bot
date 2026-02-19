@@ -9,7 +9,6 @@ from intel.coingecko import CoinGeckoClient
 from intel.coinmarketcap import CoinMarketCapClient
 from intel.defillama import DeFiLlamaClient
 from intel.fear_greed import FearGreedClient
-from intel.glassnode import GlassnodeClient
 from intel.liquidations import LiquidationMonitor
 from intel.macro_calendar import MacroCalendar
 from intel.santiment import SantimentClient
@@ -51,11 +50,6 @@ class MarketCondition(BaseModel):
     # Santiment
     social_sentiment: str = "neutral"
     social_spike: bool = False
-
-    # Glassnode
-    on_chain_bias: str = "neutral"
-    distribution_phase: bool = False
-    accumulation_phase: bool = False
 
     # OI details
     btc_oi_total_usd: float = 0.0
@@ -112,7 +106,6 @@ class MarketIntel:
         cmc_api_key: str = "",
         coingecko_api_key: str = "",
         santiment_api_key: str = "",
-        glassnode_api_key: str = "",
         defillama_enabled: bool = True,
     ):
         self.fear_greed = FearGreedClient(poll_interval=3600)
@@ -138,7 +131,6 @@ class MarketIntel:
         )
         self.defillama = DeFiLlamaClient(poll_interval=600)
         self.santiment = SantimentClient(api_key=santiment_api_key, poll_interval=600)
-        self.glassnode = GlassnodeClient(api_key=glassnode_api_key, poll_interval=900)
         self._defillama_enabled = defillama_enabled
         self._condition = MarketCondition()
 
@@ -153,10 +145,9 @@ class MarketIntel:
         if self._defillama_enabled:
             await self.defillama.start()
         await self.santiment.start()
-        await self.glassnode.start()
         logger.info(
             "MarketIntel started -- all external feeds active "
-            "(F&G, Liq, Macro, Whales, TV, CMC, CoinGecko, DeFiLlama, Santiment, Glassnode)"
+            "(F&G, Liq, Macro, Whales, TV, CMC, CoinGecko, DeFiLlama, Santiment)"
         )
 
     async def stop(self) -> None:
@@ -169,7 +160,6 @@ class MarketIntel:
         await self.coingecko.stop()
         await self.defillama.stop()
         await self.santiment.stop()
-        await self.glassnode.stop()
 
     def assess(self) -> MarketCondition:
         """Combine all signals into a single MarketCondition."""
@@ -219,12 +209,6 @@ class MarketIntel:
         c.social_spike = self.santiment.is_social_spike("BTC")
         santi_mult = self.santiment.position_bias()
 
-        # Glassnode on-chain
-        c.on_chain_bias = self.glassnode.on_chain_bias("BTC")
-        c.distribution_phase = self.glassnode.is_distribution_phase()
-        c.accumulation_phase = self.glassnode.is_accumulation_phase()
-        glass_mult = self.glassnode.position_bias()
-
         # CoinGlass OI details
         btc_whale = self.whales.get("BTC")
         if btc_whale and btc_whale.oi_snapshot:
@@ -233,18 +217,17 @@ class MarketIntel:
             c.top_trader_long_ratio = btc_whale.oi_snapshot.top_trader_long_ratio
 
         # -- Composite position size multiplier --
-        raw_mult = fg_mult * liq_mult * macro_mult * defi_mult * santi_mult * glass_mult
+        raw_mult = fg_mult * liq_mult * macro_mult * defi_mult * santi_mult
         c.position_size_multiplier = min(raw_mult, 1.5)
 
         logger.debug(
             "Intel multipliers: F&G={:.2f} Liq={:.2f} Macro={:.2f} "
-            "DeFi={:.2f} Santi={:.2f} Glass={:.2f} => raw={:.3f} capped={:.2f}",
+            "DeFi={:.2f} Santi={:.2f} => raw={:.3f} capped={:.2f}",
             fg_mult,
             liq_mult,
             macro_mult,
             defi_mult,
             santi_mult,
-            glass_mult,
             raw_mult,
             c.position_size_multiplier,
         )
@@ -257,8 +240,6 @@ class MarketIntel:
             reduce_reasons.append(f"extreme_greed({c.fear_greed})")
         if btc is not None and btc.is_overleveraged_longs:
             reduce_reasons.append("overleveraged_longs")
-        if c.distribution_phase:
-            reduce_reasons.append("distribution_phase")
         c.should_reduce_exposure = len(reduce_reasons) > 0
 
         if reduce_reasons:
@@ -274,11 +255,8 @@ class MarketIntel:
         if tv_dir in votes:
             votes[tv_dir] += 2
 
-        if c.on_chain_bias in votes:
-            votes[c.on_chain_bias] += 1
-
         logger.debug(
-            "Intel direction votes: L={} S={} N={} | sources: fg={} liq={} whale={} tv={} chain={}",
+            "Intel direction votes: L={} S={} N={} | sources: fg={} liq={} whale={} tv={}",
             votes["long"],
             votes["short"],
             votes["neutral"],
@@ -286,7 +264,6 @@ class MarketIntel:
             c.liquidation_bias,
             c.whale_bias,
             tv_dir,
-            c.on_chain_bias,
         )
 
         if votes["long"] > votes["short"] and votes["long"] > votes["neutral"]:
@@ -358,7 +335,6 @@ class MarketIntel:
             self.coingecko.summary(),
             self.defillama.summary(),
             self.santiment.summary(),
-            self.glassnode.summary(),
             f"Regime: {self._condition.regime.value} | "
             f"Size: {self._condition.position_size_multiplier:.1f}x | "
             f"Direction: {self._condition.preferred_direction}",

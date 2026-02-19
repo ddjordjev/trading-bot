@@ -1,21 +1,21 @@
 ---
-description: Pre-launch audit protocol — every new session runs this automatically
+description: Pre-launch audit protocol — runs on request, not automatically
 alwaysApply: true
 ---
 
 # Pre-Launch Audit Protocol
 
-**This rule runs automatically on every new session.** No user prompt needed.
+**This rule does NOT run automatically.** Only execute when:
+- The user explicitly asks (e.g. "run the audit", "precheck", "force audit")
+- The user references `docs/EXECUTION_PLAN.md` (implicit trigger)
+- The user asks to start/continue the 10-day run
 
-The project is preparing for a 10-day paper trading run. Until the bot is
-launched and running cleanly for 10 consecutive days, every fresh agent must
-audit the codebase before anything else.
+For casual questions, conversations, or unrelated tasks — just answer
+normally. Don't touch this protocol.
 
-## On Session Start — Execute These Steps In Order
+## When Triggered — Execute These Steps In Order
 
-After reading chat history (per the chat-history rule), immediately execute
-steps 1–6 below. Do NOT read `docs/EXECUTION_PLAN.md` — everything needed
-is in this rule. Just go.
+Do NOT read `docs/EXECUTION_PLAN.md` — everything needed is in this rule.
 
 ### Step 1: Always Full Analysis
 

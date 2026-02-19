@@ -38,6 +38,24 @@ Build fixes are never separate commits.
 For new work (features, bug fixes, refactors, doc updates), always create a
 **new commit** with a descriptive message. Never amend in this case.
 
+## User Shorthands
+
+### `csp` — commit, squash, force push (develop)
+
+1. `ruff format .`
+2. `git add -A && git commit -m "wip"`
+3. Squash **all** commits on `develop` since it diverged from `master`:
+   `git reset --soft master && git commit -m "squashed message"`
+4. `git push --force origin develop`
+
+### `cp` — commit, push (master or any branch)
+
+1. `ruff format .`
+2. `git add -A && git commit -m "descriptive message"`
+3. `git push`
+
+Both run in one go, no questions asked.
+
 ## Rules
 
 - Only amend commits you created in the current session

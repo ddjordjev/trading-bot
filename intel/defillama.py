@@ -99,8 +99,17 @@ class DeFiLlamaClient:
                     change_pct = ((total - self._prev_tvl) / self._prev_tvl) * 100
                 self._prev_tvl = total
 
-                gainers = [c["name"] for c in sorted_chains[:5] if (c.get("change_1d") or 0) > 0]
-                losers = [c["name"] for c in sorted_chains[-5:] if (c.get("change_1d") or 0) < 0]
+                def _change_1d(c: dict[str, Any]) -> float:
+                    v = c.get("change_1d")
+                    if v is None:
+                        return 0.0
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return 0.0
+
+                gainers = [c["name"] for c in sorted_chains[:5] if _change_1d(c) > 0]
+                losers = [c["name"] for c in sorted_chains[-5:] if _change_1d(c) < 0]
 
                 self._data = TVLSnapshot(
                     total_tvl=total,

@@ -82,7 +82,7 @@ services:
         max-file: "3"
 
   prometheus:
-    image: prom/prometheus:latest
+    build: ./prometheus
     container_name: trading-bot-prometheus
     restart: unless-stopped
     command:
@@ -90,7 +90,6 @@ services:
       - "--storage.tsdb.retention.time=30d"
       - "--storage.tsdb.retention.size=1GB"
     volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     depends_on:
       trading-bot:
@@ -102,7 +101,7 @@ services:
         max-file: "2"
 
   grafana:
-    image: grafana/grafana:latest
+    build: ./grafana
     container_name: trading-bot-grafana
     restart: unless-stopped
     ports:
@@ -115,8 +114,6 @@ services:
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/trading-bot.json
       - GF_SERVER_SERVE_FROM_SUB_PATH=false
     volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     depends_on:
       - prometheus

@@ -153,8 +153,13 @@ class CoinGeckoClient:
             logger.debug("CoinGecko trending error: {}", e)
             return
 
+        coins_raw = data.get("coins", [])
+        if not isinstance(coins_raw, list):
+            logger.debug("CoinGecko trending returned non-list coins: {}", type(coins_raw).__name__)
+            return
+
         coins: list[GeckoCoin] = []
-        for item in data.get("coins", []):
+        for item in coins_raw:
             coin_data = item.get("item", {})
             try:
                 coins.append(

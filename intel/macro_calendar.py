@@ -190,6 +190,8 @@ class MacroCalendar:
                     continue
 
                 dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
                 impact = self._classify_impact(title, item.get("impact", ""))
 
                 events.append(
