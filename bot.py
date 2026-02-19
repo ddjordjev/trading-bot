@@ -1,37 +1,38 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import signal
 import sys
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from loguru import logger
 
+from analytics import AnalyticsEngine
 from config.settings import Settings, get_settings
-from core.exchange import create_exchange, BaseExchange
-from core.models import Ticker, Candle, Signal, SignalAction
+from core.exchange import BaseExchange, create_exchange
+from core.models import Signal, SignalAction
+from core.models.order import Order
 from core.orders import OrderManager
-from core.orders.scaler import ScaleMode
 from core.risk import RiskManager
 from core.risk.daily_target import DailyTargetTracker, DailyTier
-from core.risk.market_filter import MarketQualityFilter, LiquidityTier
-from notifications import Notifier, NotificationType
-from news import NewsMonitor, NewsItem
-from strategies.base import BaseStrategy
-from strategies import BUILTIN_STRATEGIES
-from volatility import VolatilityDetector, SpikeEvent
-from scanner import TrendingScanner, TrendingCoin
-from intel import MarketIntel, MarketCondition
+from core.risk.market_filter import LiquidityTier, MarketQualityFilter
 from db import TradeDB
 from db.models import TradeRecord
-from analytics import AnalyticsEngine
-from shared.state import SharedState
+from intel import MarketCondition, MarketIntel
+from news import NewsItem, NewsMonitor
+from notifications import NotificationType, Notifier
+from scanner import TrendingCoin, TrendingScanner
 from shared.models import (
-    BotDeploymentStatus, DeploymentLevel, IntelSnapshot, AnalyticsSnapshot,
-    SignalPriority, TradeProposal, TradeQueue,
+    BotDeploymentStatus,
+    DeploymentLevel,
+    SignalPriority,
+    TradeProposal,
 )
-
+from shared.state import SharedState
+from strategies import BUILTIN_STRATEGIES
+from strategies.base import BaseStrategy
+from volatility import SpikeEvent, VolatilityDetector
 
 # PYRAMID (DCA in) is the DEFAULT for all strategies. Nobody can predict exact
 # bottoms, and market makers deliberately wick through expected support to grab
@@ -61,7 +62,7 @@ class TradingBot:
     - After a good day, allow tiny yolo bets on trending shitcoins
     """
 
-    def __init__(self, settings: Optional[Settings] = None, daily_target_pct: float = 10.0):
+    def __init__(self, settings: Settings | None = None, daily_target_pct: float = 10.0):
         self.settings = settings or get_settings()
         self.exchange: BaseExchange = create_exchange(self.settings)
         self.risk = RiskManager(self.settings)
@@ -73,7 +74,7 @@ class TradingBot:
         self.market_filter = MarketQualityFilter(
             min_liquidity_volume=self.settings.min_liquidity_volume,
         )
-        self.intel: Optional[MarketIntel] = None
+        self.intel: MarketIntel | None = None
         if self.settings.intel_enabled:
             self.intel = MarketIntel(
                 coinglass_key=self.settings.coinglass_api_key,
@@ -105,7 +106,7 @@ class TradingBot:
         self._running = False
         self._tick_interval = 60
         self._status_interval = 300
-        self._last_status_log: Optional[datetime] = None
+        self._last_status_log: datetime | None = None
 
     # -- Strategy Management --
 
@@ -696,8 +697,9 @@ class TradingBot:
         is_short = sig.action == SignalAction.SELL
 
         # Going against mass liquidation reversal bias = bad idea
-        if condition.mass_liquidation:
-            if (preferred == "long" and is_short) or (preferred == "short" and is_long):
+        if condition.mass_liquidation and (
+            (preferred == "long" and is_short) or (preferred == "short" and is_long)
+        ):
                 logger.info("Intel BLOCKED {} {} -- mass liq bias is {} (reversal zone)",
                             sig.action.value, sig.symbol, preferred)
                 adjusted.strength = 0
@@ -726,10 +728,10 @@ class TradingBot:
 
         return adjusted
 
-    def _log_closed_trade(self, order: "Order", close_reason: str = "") -> None:
+    def _log_closed_trade(self, order: Order, close_reason: str = "") -> None:
         """Log a completed trade to the analytics database."""
         try:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             sp = self.orders.scaler.get(order.symbol)
             intel_cond = self.intel.condition if self.intel else None
 
@@ -862,7 +864,7 @@ class TradingBot:
         )
         self.shared.write_bot_status(status)
 
-    def _read_shared_intel(self) -> Optional[MarketCondition]:
+    def _read_shared_intel(self) -> MarketCondition | None:
         """Read intel from shared state file (written by monitor service).
 
         If the monitor is running, we use its data instead of running our
@@ -962,10 +964,8 @@ class TradingBot:
 
     async def _on_trending(self, movers: list[TrendingCoin]) -> None:
         available = set()
-        try:
+        with contextlib.suppress(Exception):
             available = set(await self.exchange.get_available_symbols())
-        except Exception:
-            pass
 
         current_symbols = {m.trading_pair for m in movers}
         for sym in list(self._dynamic_strategies.keys()):
@@ -1011,7 +1011,7 @@ class TradingBot:
             await self.notifier.alert_news(item.headline, item.matched_symbols, item.source)
 
     async def _log_status(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if self._last_status_log and (now - self._last_status_log).seconds < self._status_interval:
             return
         self._last_status_log = now
@@ -1024,7 +1024,7 @@ class TradingBot:
         logger.info("Active strategies: {} static + {} dynamic",
                      len(self._strategies), len(self._dynamic_strategies))
 
-        for sym, sp in self.orders.scaler.active_positions.items():
+        for _sym, sp in self.orders.scaler.active_positions.items():
             logger.info("  {}", sp.status_line())
 
         stops = self.orders.trailing.active_stops
@@ -1038,7 +1038,7 @@ class TradingBot:
 
         hedges = self.orders.hedger.active_pairs
         if hedges:
-            for sym, hp in hedges.items():
+            for _sym, hp in hedges.items():
                 logger.info("  {}", hp.status_line())
 
         wick_scalps = self.orders.wick_scalper.active_scalps
@@ -1048,7 +1048,7 @@ class TradingBot:
                             sym, ws.scalp_side, ws.entry_price, ws.age_minutes)
 
     async def _check_daily_reset(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if now.hour == 0 and now.minute < 2:
             balance_map = await self.exchange.fetch_balance()
             balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
@@ -1097,16 +1097,18 @@ def main() -> None:
     bot.add_strategy("swing_opportunity", "ETH/USDT", market_type=mkt)
 
     loop = asyncio.new_event_loop()
+    _background_tasks: list[asyncio.Task[None]] = []
 
     def _shutdown(sig_num: int, frame: object) -> None:
         logger.info("Received signal {}, shutting down...", sig_num)
-        loop.create_task(bot.stop())
+        _background_tasks.append(loop.create_task(bot.stop()))
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
     if settings.dashboard_enabled:
         import uvicorn
+
         from web.server import app, set_bot, setup_log_capture
 
         setup_log_capture()
@@ -1121,7 +1123,7 @@ def main() -> None:
             bot_task = asyncio.create_task(bot.start())
             web_task = asyncio.create_task(server.serve())
             logger.info("Dashboard: http://{}:{}", settings.dashboard_host, settings.dashboard_port)
-            done, pending = await asyncio.wait(
+            _done, pending = await asyncio.wait(
                 [bot_task, web_task], return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:

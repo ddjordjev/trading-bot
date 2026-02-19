@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from loguru import logger
 
-from db.store import TradeDB
 from db.models import (
-    TradeRecord, StrategyScore, PatternInsight, ModificationSuggestion,
+    ModificationSuggestion,
+    PatternInsight,
+    StrategyScore,
+    TradeRecord,
 )
+from db.store import TradeDB
 
 MIN_TRADES_FOR_ANALYSIS = 10
 MIN_TRADES_FOR_SUGGESTION = 15
@@ -126,7 +129,7 @@ class AnalyticsEngine:
                 worst_hour_utc=worst_hour,
                 best_regime=best_regime,
                 worst_regime=worst_regime,
-                last_updated=datetime.now(timezone.utc).isoformat(),
+                last_updated=datetime.now(UTC).isoformat(),
             )
 
     @staticmethod
@@ -349,7 +352,7 @@ class AnalyticsEngine:
             return
         dca_winners = sum(1 for t in dca_trades if t.is_winner)
         dca_total = len(dca_trades)
-        win_rate = dca_winners / dca_total
+        _win_rate = dca_winners / dca_total
 
         high_dca = [t for t in dca_trades if t.dca_count >= 3]
         if len(high_dca) >= 3:
