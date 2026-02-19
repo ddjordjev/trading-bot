@@ -24,6 +24,20 @@ Everything else — which strategies to run, when to change them, leverage,
 risk params, symbols — is at the agent's discretion. Use the analytics
 engine, trade DB, and logs to make data-driven decisions.
 
+### Testnet Balance vs Session Budget
+
+Binance testnet pre-funds accounts with $5,000–$10,000 USDT that you
+cannot remove. **This does not matter.** In paper mode, `PaperExchange`
+manages its own simulated balance starting at exactly $100 (SESSION_BUDGET).
+The testnet's $5,000 is only used for live market data (prices, candles).
+The bot's `fetch_balance()` returns the simulated balance, not the
+exchange's. So if the dashboard shows $40, you really lost $60 of your
+$100. If it shows $170, you really made $70. The testnet balance is
+invisible to the bot.
+
+To reset after a blown account: restart the Docker containers. The
+PaperExchange re-initializes with a fresh $100 on every startup.
+
 ---
 
 ## Architecture
