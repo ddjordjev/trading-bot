@@ -945,6 +945,64 @@ class TestOrderManagerTryScaleInBranches:
         added = await order_manager.try_scale_in()
         assert added == []
 
+    @pytest.mark.asyncio
+    async def test_try_scale_in_respects_per_tick_cap(self, order_manager, mock_exchange):
+        """Only MAX_DCA_ADDS_PER_TICK adds happen per tick even when multiple qualify."""
+        sp1 = order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="t",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+        )
+        sp1.current_size = 0.01
+        sp1.avg_entry_price = 50_000.0
+        sp1.last_add_price = 50_000.0
+        sp2 = order_manager.scaler.create(
+            symbol="ETH/USDT",
+            side="long",
+            strategy="t",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+        )
+        sp2.current_size = 0.1
+        sp2.avg_entry_price = 3000.0
+        sp2.last_add_price = 3000.0
+
+        pos_btc = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.01,
+            entry_price=50_000.0,
+            current_price=48_000.0,
+            leverage=2,
+            market_type="futures",
+        )
+        pos_eth = Position(
+            symbol="ETH/USDT",
+            side=OrderSide.BUY,
+            amount=0.1,
+            entry_price=3000.0,
+            current_price=2900.0,
+            leverage=2,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions.return_value = [pos_btc, pos_eth]
+        filled = Order(
+            id="dca",
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.001,
+            status=OrderStatus.FILLED,
+            filled=0.001,
+            average_price=48_000.0,
+        )
+        mock_exchange.place_order.return_value = filled
+
+        added = await order_manager.try_scale_in()
+        assert len(added) <= order_manager.MAX_DCA_ADDS_PER_TICK
+
 
 class TestOrderManagerTryLeverUpBranches:
     @pytest.mark.asyncio

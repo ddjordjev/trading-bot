@@ -108,6 +108,8 @@ class TradingBot:
         self._tick_interval = 60
         self._status_interval = 300
         self._last_status_log: datetime | None = None
+        self._started_at: datetime | None = None
+        self._warmup_minutes = 3  # no queue processing for first N minutes
 
     # -- Strategy Management --
 
@@ -208,6 +210,7 @@ class TradingBot:
         )
 
         self._running = True
+        self._started_at = datetime.now(UTC)
         await self._run_loop()
 
     async def stop(self) -> None:
@@ -264,10 +267,14 @@ class TradingBot:
             await self.notifier.alert_liquidation(order.symbol, 0, balance)
             self._log_closed_trade(order, "stop")
 
+        await asyncio.sleep(0)  # yield to event loop (dashboard, etc.)
+
         # 2. Scale into positions (both WINNERS adds and PYRAMID DCA-downs)
         scale_orders = await self.orders.try_scale_in()
         if scale_orders:
             logger.info("Scaled into {} position(s) this tick", len(scale_orders))
+
+        await asyncio.sleep(0)
 
         # 3. PYRAMID: check if any positions are ready for leverage raise
         levered = await self.orders.try_lever_up()
@@ -295,6 +302,8 @@ class TradingBot:
 
         # 7. Close expired quick trades
         await self.orders.close_expired_quick_trades(self._active_signals)
+
+        await asyncio.sleep(0)
 
         # 8. Process trade queue (CRITICAL -> DAILY -> SWING)
         await self._process_trade_queue()
@@ -366,6 +375,8 @@ class TradingBot:
                 aggression,
                 allow_gambling,
             )
+
+        await asyncio.sleep(0)
 
         # 12. Run all strategies (collect candles for hedge analysis)
         candles_map: dict[str, list] = {}
@@ -514,6 +525,8 @@ class TradingBot:
 
     # -- Trade Queue Consumer (advisory, never forced) -- #
 
+    MAX_QUEUE_EXECUTIONS_PER_TICK = 1
+
     async def _process_trade_queue(self) -> None:
         """Consume proposals from the monitor's trade queue.
 
@@ -521,7 +534,21 @@ class TradingBot:
         genuine spare capacity, budget, and secured positions.  A
         successful day means existing trades are protected; new queue
         items are not forced just because they exist.
+
+        Safeguards against rapid balance drain on boot:
+        - Warmup: no queue processing for the first N minutes
+        - Per-tick cap: at most MAX_QUEUE_EXECUTIONS_PER_TICK per tick
         """
+        if self._started_at:
+            uptime_min = (datetime.now(UTC) - self._started_at).total_seconds() / 60
+            if uptime_min < self._warmup_minutes:
+                logger.debug(
+                    "Queue: warmup ({:.0f}s / {}m) — skipping",
+                    uptime_min * 60,
+                    self._warmup_minutes,
+                )
+                return
+
         try:
             queue = self.shared.read_trade_queue()
         except Exception:
@@ -540,7 +567,6 @@ class TradingBot:
         aggression = self.target.aggression_multiplier()
         pnl_pct = self.target.todays_pnl_pct
 
-        # Positions are "secured" when all have break-even stops or are profitable
         avg_health = 0.0
         if active_count > 0:
             pnls = [p.pnl_pct for p in positions if p.amount > 0]
@@ -548,10 +574,13 @@ class TradingBot:
         positions_secured = active_count == 0 or avg_health >= 0
 
         executed = 0
+        tick_limit = self.MAX_QUEUE_EXECUTIONS_PER_TICK
         modified = False
 
-        # --- CRITICAL: time-sensitive, but still respect capacity ---
+        # --- CRITICAL: time-sensitive, but still respect capacity + tick cap ---
         for proposal in queue.get_actionable(SignalPriority.CRITICAL):
+            if executed >= tick_limit:
+                break
             if not self.settings.is_market_type_allowed(proposal.market_type):
                 queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
                 modified = True
@@ -584,6 +613,8 @@ class TradingBot:
 
         if allow_new and idle_enough and budget_ok:
             for proposal in queue.get_actionable(SignalPriority.DAILY):
+                if executed >= tick_limit:
+                    break
                 if not self.settings.is_market_type_allowed(proposal.market_type):
                     queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
                     modified = True
@@ -609,6 +640,8 @@ class TradingBot:
 
         if allow_new and genuinely_idle:
             for proposal in queue.get_actionable(SignalPriority.SWING):
+                if executed >= tick_limit:
+                    break
                 if not self.settings.is_market_type_allowed(proposal.market_type):
                     queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
                     modified = True

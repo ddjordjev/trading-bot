@@ -183,6 +183,14 @@ def _recent_logs() -> list[LogEntry]:
     return [LogEntry(**e) for e in _log_buffer]
 
 
+# --------------- health (no auth) ---------------
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "bot_running": _bot._running if _bot else False}
+
+
 # --------------- REST endpoints ---------------
 
 

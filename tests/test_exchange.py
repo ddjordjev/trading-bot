@@ -212,12 +212,13 @@ class TestPaperExchange:
         assert order.status == OrderStatus.FAILED
 
     @pytest.mark.asyncio
-    async def test_futures_sell_no_balance_deduction(self, paper):
+    async def test_futures_sell_reserves_margin(self, paper):
         bal_before = paper._balances["USDT"]
         await paper.place_order(
             "BTC/USDT", OrderSide.SELL, OrderType.MARKET, 1.0, leverage=10, market_type=MarketType.FUTURES
         )
-        assert paper._balances["USDT"] == bal_before
+        expected_margin = (1.0 * 100.0) / 10
+        assert paper._balances["USDT"] == bal_before - expected_margin
 
     @pytest.mark.asyncio
     async def test_spot_buy_insufficient_balance(self):

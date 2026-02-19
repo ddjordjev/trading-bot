@@ -200,14 +200,22 @@ class OrderManager:
     #  Scaling: add to positions (both WINNERS and PYRAMID)
     # ------------------------------------------------------------------ #
 
+    MAX_DCA_ADDS_PER_TICK = 1
+
     async def try_scale_in(self) -> list[Order]:
-        """Add to existing positions (winners or DCA-down)."""
+        """Add to existing positions (winners or DCA-down).
+
+        Capped to MAX_DCA_ADDS_PER_TICK per tick to prevent rapid
+        balance depletion when multiple positions qualify simultaneously.
+        """
         added: list[Order] = []
         positions = await self.exchange.fetch_positions()
         prices = {p.symbol: p.current_price for p in positions}
         to_add = self.scaler.get_symbols_to_add(prices)
 
         for symbol, amount in to_add:
+            if len(added) >= self.MAX_DCA_ADDS_PER_TICK:
+                break
             sp = self.scaler.get(symbol)
             if not sp:
                 continue

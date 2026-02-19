@@ -98,6 +98,38 @@ async def client(auth_override):
         yield ac
 
 
+# ── GET /health (no auth) ─────────────────────────────────────────────
+
+
+class TestHealth:
+    async def test_health_no_bot(self, client):
+        set_bot(None)  # type: ignore[arg-type]
+        r = await client.get("/health")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "ok"
+        assert data["bot_running"] is False
+
+    async def test_health_with_bot(self, client, mock_bot):
+        mock_bot._running = True
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        r = await client.get("/health")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "ok"
+        assert data["bot_running"] is True
+
+    async def test_health_no_auth_required(self):
+        """Health endpoint works without auth override."""
+        from web.auth import verify_token
+
+        app.dependency_overrides.pop(verify_token, None)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            r = await ac.get("/health")
+        assert r.status_code == 200
+
+
 # ── GET /api/status ───────────────────────────────────────────────────
 
 

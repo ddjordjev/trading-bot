@@ -1,0 +1,28 @@
+---
+description: Shell execution rules — permissions, polling, timeouts
+alwaysApply: true
+---
+
+# Shell Execution Rules
+
+## Permissions: Don't prompt for routine commands
+
+Run all routine dev commands **without** `required_permissions`. The sandbox
+is fine for:
+
+- `.venv/bin/python ...` (pytest, scripts, ruff, mypy)
+- `docker compose ...` (build, up, down, ps, logs, exec)
+- `git ...` (add, commit, diff, log, push)
+- Any read/write inside the workspace
+
+Only use `required_permissions: ["all"]` for `.cursor/` writes or paths
+outside the workspace.
+
+## Never sleep more than 10 seconds
+
+When polling for command output or waiting for background processes, **never
+use `sleep` for more than 10 seconds**. If you need to wait:
+
+- Use `block_until_ms` on the original command instead of sleeping after
+- Read the terminal file directly instead of sleeping then re-running
+- If you must sleep, cap it at 10s and loop

@@ -118,8 +118,13 @@ class PaperExchange(BaseExchange):
                 if self._balances.get("USDT", 0) < cost:
                     logger.warning("[PAPER] Insufficient USDT for BUY {} {}", amount, symbol)
                     return Order(
-                        id=order_id, symbol=symbol, side=side, order_type=order_type,
-                        amount=amount, price=fill_price, status=OrderStatus.FAILED,
+                        id=order_id,
+                        symbol=symbol,
+                        side=side,
+                        order_type=order_type,
+                        amount=amount,
+                        price=fill_price,
+                        status=OrderStatus.FAILED,
                         market_type=market_type.value,
                     )
                 self._balances["USDT"] -= cost
@@ -131,8 +136,13 @@ class PaperExchange(BaseExchange):
                 if held < amount:
                     logger.warning("[PAPER] Insufficient {} for SELL ({:.6f} held, {:.6f} needed)", base, held, amount)
                     return Order(
-                        id=order_id, symbol=symbol, side=side, order_type=order_type,
-                        amount=amount, price=fill_price, status=OrderStatus.FAILED,
+                        id=order_id,
+                        symbol=symbol,
+                        side=side,
+                        order_type=order_type,
+                        amount=amount,
+                        price=fill_price,
+                        status=OrderStatus.FAILED,
                         market_type=market_type.value,
                     )
                 self._balances[base] -= amount
@@ -153,10 +163,9 @@ class PaperExchange(BaseExchange):
         )
         self._orders[order_id] = order
 
-        if market_type == MarketType.FUTURES:
-            if not self._update_position(order, fill_price):
-                order.status = OrderStatus.FAILED
-                return order
+        if market_type == MarketType.FUTURES and not self._update_position(order, fill_price):
+            order.status = OrderStatus.FAILED
+            return order
 
         logger.info(
             "[PAPER] {} {} {} {} @ {:.6f} (leverage={}x)",
@@ -204,9 +213,13 @@ class PaperExchange(BaseExchange):
                 self._balances["USDT"] -= margin_needed
                 self._positions.append(
                     Position(
-                        symbol=order.symbol, side=order.side, amount=remainder,
-                        entry_price=fill_price, current_price=fill_price,
-                        leverage=order.leverage, market_type=order.market_type,
+                        symbol=order.symbol,
+                        side=order.side,
+                        amount=remainder,
+                        entry_price=fill_price,
+                        current_price=fill_price,
+                        leverage=order.leverage,
+                        market_type=order.market_type,
                     )
                 )
             return True
@@ -225,7 +238,9 @@ class PaperExchange(BaseExchange):
             existing.leverage = max(existing.leverage, order.leverage)
             logger.info(
                 "[PAPER] DCA into {} — avg entry: {:.6f}, total: {:.6f}",
-                order.symbol, avg_entry, total_amount,
+                order.symbol,
+                avg_entry,
+                total_amount,
             )
             return True
 
@@ -236,9 +251,13 @@ class PaperExchange(BaseExchange):
         self._balances["USDT"] -= margin_needed
         self._positions.append(
             Position(
-                symbol=order.symbol, side=order.side, amount=order.amount,
-                entry_price=fill_price, current_price=fill_price,
-                leverage=order.leverage, market_type=order.market_type,
+                symbol=order.symbol,
+                side=order.side,
+                amount=order.amount,
+                entry_price=fill_price,
+                current_price=fill_price,
+                leverage=order.leverage,
+                market_type=order.market_type,
             )
         )
         return True

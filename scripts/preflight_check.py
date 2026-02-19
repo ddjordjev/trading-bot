@@ -137,6 +137,7 @@ async def run_checks() -> bool:
     }.get(settings.trading_mode, settings.trading_mode)
     check("Trading mode", True, mode_label)
 
+    is_paper = settings.trading_mode.startswith("paper")
     if not is_paper:
         print("\n  ⚠  WARNING: You are about to trade with REAL MONEY.")
         print("  Make sure you've tested thoroughly in paper mode first.\n")
