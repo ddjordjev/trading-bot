@@ -9,7 +9,11 @@ strategies at any time based on observed results. The only hard constraints are:
 1. **Starting capital: $100** (SESSION_BUDGET=100)
 2. **Don't blow up** — if balance drops below $60, halt and reassess
 3. **Write reports** — daily snapshot + a final summary at the end
-4. **Fix what breaks** — if something crashes, fix it and restart. Log what happened.
+4. **Fix what breaks** — if something crashes, fix it, **reset the 10-day
+   counter to Day 1**, and start a fresh run. The 10 days must be
+   consecutive and uninterrupted. Log what broke and how it was fixed
+   before restarting. Previous run data stays in `docs/reports/` as
+   a separate attempt (e.g., `attempt_1/`, `attempt_2/`).
 
 Everything else — which strategies to run, when to change them, leverage,
 risk params, symbols — is at the agent's discretion. Use the analytics
