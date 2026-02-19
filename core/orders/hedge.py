@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import Enum
+from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -302,7 +303,7 @@ class HedgeManager:
 
         return ready
 
-    def get_hedge_params(self, symbol: str, current_price: float, leverage: int = 10) -> dict | None:
+    def get_hedge_params(self, symbol: str, current_price: float, leverage: int = 10) -> dict[str, Any] | None:
         """Get parameters for opening a hedge position."""
         pair = self._pairs.get(symbol)
         if not pair:

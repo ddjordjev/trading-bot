@@ -27,7 +27,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["B011", "SIM117", "E731"]
+"tests/*" = ["B011", "SIM117", "E731", "RUF006"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -57,7 +57,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 77
+fail_under = 80
 show_missing = true
 exclude_lines = [
     "pragma: no cover",

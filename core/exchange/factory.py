@@ -22,7 +22,7 @@ def create_exchange(settings: Settings) -> BaseExchange:
 
     use_paper = settings.is_paper()
 
-    exchange_map: dict[str, tuple[type[BaseExchange], dict]] = {
+    exchange_map: dict[str, tuple[type[BaseExchange], dict[str, str]]] = {
         "mexc": (
             MexcExchange,
             {

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -75,7 +77,7 @@ class PatternInsight(BaseModel):
     sample_size: int = 0
     confidence: float = 0.0  # 0-1
     suggestion: str = ""
-    data: dict = {}
+    data: dict[str, Any] = {}
 
 
 class ModificationSuggestion(BaseModel):

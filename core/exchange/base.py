@@ -117,11 +117,11 @@ class BaseExchange(ABC):
     # -- Stream --
 
     @abstractmethod
-    async def watch_ticker(self, symbol: str, callback: Callable) -> None:
+    async def watch_ticker(self, symbol: str, callback: Callable[..., Any]) -> None:
         """Subscribe to real-time ticker updates."""
         ...
 
     @abstractmethod
-    async def watch_candles(self, symbol: str, timeframe: str, callback: Callable) -> None:
+    async def watch_candles(self, symbol: str, timeframe: str, callback: Callable[..., Any]) -> None:
         """Subscribe to real-time candle updates."""
         ...

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from loguru import logger
 
@@ -55,7 +56,7 @@ class OrderManager:
         )
         self.wick_scalper = WickScalpDetector()
         self._active_orders: list[Order] = []
-        self._trade_log: list[dict] = []
+        self._trade_log: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------ #
     #  Signal execution
@@ -403,14 +404,14 @@ class OrderManager:
             if self.hedger.has_active_hedge(symbol):
                 continue
 
-            pos = next((p for p in positions if p.symbol == symbol), None)
-            if not pos:
+            hedge_pos = next((p for p in positions if p.symbol == symbol), None)
+            if not hedge_pos:
                 continue
 
             params = self.hedger.get_hedge_params(
                 symbol,
-                pos.current_price,
-                pos.leverage,
+                hedge_pos.current_price,
+                hedge_pos.leverage,
             )
             if not params:
                 continue
@@ -605,10 +606,10 @@ class OrderManager:
                 reason="wick_scalp_expired",
                 market_type="futures",
             )
-            order = await self.execute_signal(close_signal)
-            if order:
+            close_order = await self.execute_signal(close_signal)
+            if close_order:
                 self.wick_scalper.close(sym)
-                opened.append(order)
+                opened.append(close_order)
 
         self.wick_scalper.cleanup()
         return opened
@@ -775,5 +776,5 @@ class OrderManager:
         )
 
     @property
-    def trade_history(self) -> list[dict]:
+    def trade_history(self) -> list[dict[str, Any]]:
         return list(self._trade_log)

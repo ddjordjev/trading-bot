@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -151,10 +152,10 @@ class TradeDB:
         rows = self._conn.execute("SELECT DISTINCT strategy FROM trades ORDER BY strategy").fetchall()
         return [r["strategy"] for r in rows]
 
-    def get_strategy_stats(self, strategy: str, symbol: str = "") -> dict:
+    def get_strategy_stats(self, strategy: str, symbol: str = "") -> dict[str, Any]:
         assert self._conn
         where = "strategy = ?"
-        params: list = [strategy]
+        params: list[str] = [strategy]
         if symbol:
             where += " AND symbol = ?"
             params.append(symbol)
@@ -178,7 +179,7 @@ class TradeDB:
 
         return dict(row) if row else {}
 
-    def get_hourly_performance(self, strategy: str = "") -> list[dict]:
+    def get_hourly_performance(self, strategy: str = "") -> list[dict[str, Any]]:
         assert self._conn
         where = "WHERE strategy = ?" if strategy else ""
         params = [strategy] if strategy else []
@@ -197,7 +198,7 @@ class TradeDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_regime_performance(self, strategy: str = "") -> list[dict]:
+    def get_regime_performance(self, strategy: str = "") -> list[dict[str, Any]]:
         assert self._conn
         where = "WHERE strategy = ? AND market_regime != ''" if strategy else "WHERE market_regime != ''"
         params = [strategy] if strategy else []
