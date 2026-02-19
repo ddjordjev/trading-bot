@@ -9,6 +9,8 @@ from pydantic import BaseModel
 class BotStatus(BaseModel):
     running: bool = False
     trading_mode: str = "paper"
+    exchange_name: str = ""
+    exchange_url: str = ""
     balance: float = 0.0
     daily_pnl: float = 0.0
     daily_pnl_pct: float = 0.0
@@ -40,6 +42,7 @@ class PositionInfo(BaseModel):
     scale_mode: str = ""
     scale_phase: str = ""
     dca_count: int = 0
+    trade_url: str = ""
 
 
 class TradeRecord(BaseModel):

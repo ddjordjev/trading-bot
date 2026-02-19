@@ -11,6 +11,8 @@ export interface FullSnapshot {
 export interface BotStatus {
   running: boolean;
   trading_mode: string;
+  exchange_name: string;
+  exchange_url: string;
   balance: number;
   daily_pnl: number;
   daily_pnl_pct: number;
@@ -42,6 +44,7 @@ export interface PositionInfo {
   scale_mode: string;
   scale_phase: string;
   dca_count: number;
+  trade_url: string;
 }
 
 export interface IntelSnapshot {

@@ -133,6 +133,10 @@ class Settings(BaseSettings):
     dashboard_port: int = 8080
     dashboard_token: str = ""  # set a secret token for remote access
 
+    # Exchange platform URL (for quick-link from the dashboard).
+    # Leave empty for auto-detection based on exchange + trading_mode.
+    exchange_platform_url: str = ""
+
     log_level: str = "INFO"
 
     @property
@@ -174,6 +178,58 @@ class Settings(BaseSettings):
         if self.session_budget > 0:
             return min(raw_balance, self.session_budget)
         return raw_balance
+
+    # ---- exchange platform URLs (auto-resolve if not set) ----
+
+    _PLATFORM_URLS: dict[str, dict[str, str]] = {
+        "binance": {
+            "paper_futures": "https://demo.binance.com/en/futures",
+            "paper_spot":    "https://demo.binance.com/en/trade",
+            "live_futures":  "https://www.binance.com/en/futures",
+            "live_spot":     "https://www.binance.com/en/trade",
+        },
+        "bybit": {
+            "paper_futures": "https://testnet.bybit.com/trade/usdt",
+            "paper_spot":    "https://testnet.bybit.com/trade/spot",
+            "live_futures":  "https://www.bybit.com/trade/usdt",
+            "live_spot":     "https://www.bybit.com/trade/spot",
+        },
+        "mexc": {
+            "paper_spot":    "https://www.mexc.com/exchange",
+            "paper_futures": "https://www.mexc.com/exchange",
+            "live_spot":     "https://www.mexc.com/exchange",
+            "live_futures":  "https://www.mexc.com/exchange",
+        },
+    }
+
+    @property
+    def platform_url(self) -> str:
+        """Base URL for the exchange trading UI."""
+        if self.exchange_platform_url:
+            return self.exchange_platform_url
+        mode = "paper" if self.is_paper() else "live"
+        mkt = "futures" if self.futures_allowed else "spot"
+        urls = self._PLATFORM_URLS.get(self.exchange, {})
+        return urls.get(f"{mode}_{mkt}", "")
+
+    def symbol_platform_url(self, symbol: str, market_type: str = "") -> str:
+        """Direct link to a specific trading pair on the exchange."""
+        base = self.platform_url
+        if not base:
+            return ""
+        clean = symbol.replace("/", "")
+        mkt = market_type or ("futures" if self.futures_allowed else "spot")
+        if self.exchange == "binance":
+            if mkt == "futures":
+                return f"{base}/{clean}"
+            return f"{base}/{clean.replace('USDT', '_USDT')}"
+        if self.exchange == "bybit":
+            return f"{base}/{clean}"
+        if self.exchange == "mexc":
+            return f"{base}/{clean.replace('USDT', '_USDT')}"
+        return base
+
+    # ---- API key resolution (prod vs test) ----
 
     @property
     def binance_api_key(self) -> str:

@@ -61,6 +61,24 @@ export function Dashboard({ data }: { data: FullSnapshot | null }) {
             {s.manual_stop_active && <span style={{ color: "var(--yellow)", fontSize: "0.7rem" }}> (HALTED)</span>}
           </div>
         </div>
+        {s.exchange_url && (
+          <div className="stat-card">
+            <div className="label">Exchange</div>
+            <div className="value">
+              <a
+                href={s.exchange_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "var(--accent)", textDecoration: "none", fontSize: "0.9rem" }}
+              >
+                {s.exchange_name} ↗
+              </a>
+              <div style={{ fontSize: "0.65rem", color: "var(--text-muted)", marginTop: 2 }}>
+                {s.trading_mode === "paper" ? "TESTNET" : "LIVE"}
+              </div>
+            </div>
+          </div>
+        )}
         <div className="stat-card">
           <div className="label">Uptime</div>
           <div className="value">{fmtUptime(s.uptime_seconds)}</div>

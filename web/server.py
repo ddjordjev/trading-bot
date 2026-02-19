@@ -52,6 +52,8 @@ def _bot_status() -> BotStatus:
     return BotStatus(
         running=_bot._running,
         trading_mode=_bot.settings.trading_mode,
+        exchange_name=_bot.settings.exchange.upper(),
+        exchange_url=_bot.settings.platform_url,
         balance=_bot.target._current_balance,
         daily_pnl=_bot.target.todays_pnl,
         daily_pnl_pct=_bot.target.todays_pnl_pct,
@@ -97,6 +99,7 @@ async def _positions() -> list[PositionInfo]:
             scale_mode=sp.mode.value if sp else "",
             scale_phase=sp.phase.value if sp else "",
             dca_count=sp.adds if sp else 0,
+            trade_url=_bot.settings.symbol_platform_url(pos.symbol, pos.market_type),
         ))
     return result
 

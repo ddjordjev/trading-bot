@@ -27,7 +27,18 @@ export function PositionRow({ position: p, onAction }: Props) {
   return (
     <tr>
       <td>
-        <strong>{p.symbol}</strong>
+        {p.trade_url ? (
+          <a
+            href={p.trade_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 700 }}
+          >
+            {p.symbol} ↗
+          </a>
+        ) : (
+          <strong>{p.symbol}</strong>
+        )}
         <br />
         <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
           {p.side.toUpperCase()} · {p.leverage}x · {p.market_type}
