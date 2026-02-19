@@ -1,13 +1,37 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Callable, Optional
 
-from core.models import Candle, Ticker, OrderBook, Order, OrderSide, OrderType, Position, MarketType
+from core.models import Candle, Ticker, OrderBook, Order, OrderSide, OrderType, OrderStatus, Position, MarketType
+
+
+def parse_order_status(status: str) -> OrderStatus:
+    """Translate ccxt order status strings to our enum."""
+    mapping = {
+        "open": OrderStatus.OPEN,
+        "closed": OrderStatus.FILLED,
+        "canceled": OrderStatus.CANCELLED,
+        "cancelled": OrderStatus.CANCELLED,
+        "expired": OrderStatus.CANCELLED,
+        "rejected": OrderStatus.FAILED,
+    }
+    return mapping.get(status, OrderStatus.PENDING)
+
+
+def ts_to_dt(ts: Any) -> datetime:
+    """Convert a millisecond timestamp (from ccxt) to a timezone-aware datetime."""
+    if ts is None:
+        return datetime.now(timezone.utc)
+    return datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
 
 
 class BaseExchange(ABC):
     """Abstract exchange interface. Implement this for each exchange."""
+
+    SUPPORTED_MARKET_TYPES: tuple[str, ...] = ("spot",)
+    HAS_TESTNET: bool = False
 
     def __init__(self, api_key: str = "", api_secret: str = "", sandbox: bool = True):
         self.api_key = api_key
@@ -18,6 +42,9 @@ class BaseExchange(ABC):
     @abstractmethod
     def name(self) -> str:
         ...
+
+    def supports(self, market_type: str) -> bool:
+        return market_type.lower() in self.SUPPORTED_MARKET_TYPES
 
     @abstractmethod
     async def connect(self) -> None:
@@ -103,11 +130,11 @@ class BaseExchange(ABC):
     # -- Stream --
 
     @abstractmethod
-    async def watch_ticker(self, symbol: str, callback: object) -> None:
+    async def watch_ticker(self, symbol: str, callback: Callable) -> None:
         """Subscribe to real-time ticker updates."""
         ...
 
     @abstractmethod
-    async def watch_candles(self, symbol: str, timeframe: str, callback: object) -> None:
+    async def watch_candles(self, symbol: str, timeframe: str, callback: Callable) -> None:
         """Subscribe to real-time candle updates."""
         ...

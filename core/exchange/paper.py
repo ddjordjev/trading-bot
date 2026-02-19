@@ -56,9 +56,19 @@ class PaperExchange(BaseExchange):
         return {k: v for k, v in self._balances.items() if v > 0}
 
     async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
-        if symbol:
-            return [p for p in self._positions if p.symbol == symbol]
-        return list(self._positions)
+        targets = [p for p in self._positions if p.symbol == symbol] if symbol else list(self._positions)
+        for pos in targets:
+            try:
+                ticker = await self._real.fetch_ticker(pos.symbol)
+                pos.current_price = ticker.last
+                if pos.entry_price > 0:
+                    if pos.side == OrderSide.BUY:
+                        pos.unrealized_pnl = (ticker.last - pos.entry_price) * pos.amount * pos.leverage
+                    else:
+                        pos.unrealized_pnl = (pos.entry_price - ticker.last) * pos.amount * pos.leverage
+            except Exception:
+                pass
+        return targets
 
     # -- Trading (simulated) --
 

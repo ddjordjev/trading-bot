@@ -13,17 +13,29 @@ class Settings(BaseSettings):
     trading_mode: Literal["paper", "live"] = "paper"
 
     exchange: str = "mexc"
+
+    # MEXC (no testnet — same keys for paper & live)
     mexc_api_key: str = ""
     mexc_api_secret: str = ""
-    binance_api_key: str = ""
-    binance_api_secret: str = ""
-    bybit_api_key: str = ""
-    bybit_api_secret: str = ""
 
-    # Per-exchange capability flags — set based on your account type.
-    # MEXC restricts futures to institutional accounts, so retail = "spot" only.
-    # Comma-separated: "spot", "futures", or "spot,futures"
+    # Binance — separate prod and testnet keys
+    binance_prod_api_key: str = ""
+    binance_prod_api_secret: str = ""
+    binance_test_api_key: str = ""
+    binance_test_api_secret: str = ""
+
+    # Bybit — separate prod and testnet keys
+    bybit_prod_api_key: str = ""
+    bybit_prod_api_secret: str = ""
+    bybit_test_api_key: str = ""
+    bybit_test_api_secret: str = ""
+
+    # What market types the user wants to use. The factory auto-restricts
+    # to what the exchange actually supports (e.g. MEXC = spot only).
     allowed_market_types: str = "spot,futures"
+
+    # 0 = no cap (use full exchange balance)
+    session_budget: float = 100.0
 
     default_leverage: int = 10
 
@@ -156,6 +168,28 @@ class Settings(BaseSettings):
 
     def is_paper(self) -> bool:
         return self.trading_mode == "paper"
+
+    def cap_balance(self, raw_balance: float) -> float:
+        """Apply session_budget cap. Returns raw_balance if no cap is set."""
+        if self.session_budget > 0:
+            return min(raw_balance, self.session_budget)
+        return raw_balance
+
+    @property
+    def binance_api_key(self) -> str:
+        return self.binance_test_api_key if self.is_paper() else self.binance_prod_api_key
+
+    @property
+    def binance_api_secret(self) -> str:
+        return self.binance_test_api_secret if self.is_paper() else self.binance_prod_api_secret
+
+    @property
+    def bybit_api_key(self) -> str:
+        return self.bybit_test_api_key if self.is_paper() else self.bybit_prod_api_key
+
+    @property
+    def bybit_api_secret(self) -> str:
+        return self.bybit_test_api_secret if self.is_paper() else self.bybit_prod_api_secret
 
 
 @lru_cache

@@ -1,39 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 import ccxt.async_support as ccxt
 from loguru import logger
 
-from core.exchange.base import BaseExchange
+from core.exchange.base import BaseExchange, parse_order_status, ts_to_dt
 from core.models import (
     Candle, Ticker, OrderBook, Order, OrderSide, OrderType, OrderStatus,
     Position, MarketType,
 )
 
 
-def _parse_order_status(status: str) -> OrderStatus:
-    mapping = {
-        "open": OrderStatus.OPEN,
-        "closed": OrderStatus.FILLED,
-        "canceled": OrderStatus.CANCELLED,
-        "cancelled": OrderStatus.CANCELLED,
-        "expired": OrderStatus.CANCELLED,
-        "rejected": OrderStatus.FAILED,
-    }
-    return mapping.get(status, OrderStatus.PENDING)
-
-
-def _ts_to_dt(ts: Any) -> datetime:
-    if ts is None:
-        return datetime.now(timezone.utc)
-    return datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-
-
 class BinanceExchange(BaseExchange):
     """Binance implementation via ccxt. Supports spot and USDT-M futures."""
+
+    SUPPORTED_MARKET_TYPES = ("spot", "futures")
+    HAS_TESTNET = True
 
     def __init__(self, api_key: str = "", api_secret: str = "", sandbox: bool = True):
         super().__init__(api_key, api_secret, sandbox)
@@ -85,7 +69,7 @@ class BinanceExchange(BaseExchange):
             last=data.get("last", 0) or 0,
             volume_24h=data.get("quoteVolume", 0) or 0,
             change_pct_24h=data.get("percentage", 0) or 0,
-            timestamp=_ts_to_dt(data.get("timestamp")),
+            timestamp=ts_to_dt(data.get("timestamp")),
         )
 
     async def fetch_tickers(self, symbols: Optional[list[str]] = None) -> list[Ticker]:
@@ -98,7 +82,7 @@ class BinanceExchange(BaseExchange):
                 last=d.get("last", 0) or 0,
                 volume_24h=d.get("quoteVolume", 0) or 0,
                 change_pct_24h=d.get("percentage", 0) or 0,
-                timestamp=_ts_to_dt(d.get("timestamp")),
+                timestamp=ts_to_dt(d.get("timestamp")),
             )
             for sym, d in raw.items()
         ]
@@ -108,7 +92,7 @@ class BinanceExchange(BaseExchange):
     ) -> list[Candle]:
         data = await self._spot.fetch_ohlcv(symbol, timeframe, limit=limit)
         return [
-            Candle(timestamp=_ts_to_dt(c[0]), open=c[1], high=c[2],
+            Candle(timestamp=ts_to_dt(c[0]), open=c[1], high=c[2],
                    low=c[3], close=c[4], volume=c[5])
             for c in data
         ]
@@ -119,13 +103,16 @@ class BinanceExchange(BaseExchange):
             symbol=symbol,
             bids=[(b[0], b[1]) for b in data.get("bids", [])],
             asks=[(a[0], a[1]) for a in data.get("asks", [])],
-            timestamp=_ts_to_dt(data.get("timestamp")),
+            timestamp=ts_to_dt(data.get("timestamp")),
         )
 
     async def fetch_balance(self) -> dict[str, float]:
         data = await self._spot.fetch_balance()
-        return {k: v["free"] for k, v in data.get("total", {}).items()
-                if isinstance(v, dict) and v.get("free", 0) > 0}
+        result: dict[str, float] = {}
+        for asset, info in data.items():
+            if isinstance(info, dict) and info.get("free", 0) > 0:
+                result[asset] = float(info["free"])
+        return result
 
     async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
         try:
@@ -178,7 +165,7 @@ class BinanceExchange(BaseExchange):
             id=str(data.get("id", "")), symbol=symbol, side=side,
             order_type=order_type, amount=amount, price=price,
             stop_price=stop_price,
-            status=_parse_order_status(data.get("status", "open")),
+            status=parse_order_status(data.get("status", "open")),
             filled=float(data.get("filled", 0) or 0),
             average_price=float(data.get("average", 0) or 0),
             leverage=leverage, market_type=market_type.value,
@@ -200,7 +187,7 @@ class BinanceExchange(BaseExchange):
             side=OrderSide.BUY if data.get("side") == "buy" else OrderSide.SELL,
             order_type=OrderType.MARKET if data.get("type") == "market" else OrderType.LIMIT,
             amount=float(data.get("amount", 0) or 0),
-            status=_parse_order_status(data.get("status", "")),
+            status=parse_order_status(data.get("status", "")),
             filled=float(data.get("filled", 0) or 0),
             average_price=float(data.get("average", 0) or 0),
         )
@@ -213,7 +200,7 @@ class BinanceExchange(BaseExchange):
                 side=OrderSide.BUY if d.get("side") == "buy" else OrderSide.SELL,
                 order_type=OrderType.MARKET if d.get("type") == "market" else OrderType.LIMIT,
                 amount=float(d.get("amount", 0) or 0),
-                status=_parse_order_status(d.get("status", "")),
+                status=parse_order_status(d.get("status", "")),
                 filled=float(d.get("filled", 0) or 0),
             )
             for d in raw
@@ -240,7 +227,7 @@ class BinanceExchange(BaseExchange):
                         ask=data.get("ask", 0) or 0, last=data.get("last", 0) or 0,
                         volume_24h=data.get("quoteVolume", 0) or 0,
                         change_pct_24h=data.get("percentage", 0) or 0,
-                        timestamp=_ts_to_dt(data.get("timestamp")),
+                        timestamp=ts_to_dt(data.get("timestamp")),
                     )
                     await callback(ticker)
                 except asyncio.CancelledError:
@@ -258,7 +245,7 @@ class BinanceExchange(BaseExchange):
                     data = await self._spot.watch_ohlcv(symbol, timeframe)
                     for c in data:
                         candle = Candle(
-                            timestamp=_ts_to_dt(c[0]), open=c[1], high=c[2],
+                            timestamp=ts_to_dt(c[0]), open=c[1], high=c[2],
                             low=c[3], close=c[4], volume=c[5],
                         )
                         await callback(candle)

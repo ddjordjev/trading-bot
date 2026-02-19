@@ -172,11 +172,14 @@ class TradingBot:
         self.scanner.on_trending(self._on_trending)
 
         balance_map = await self.exchange.fetch_balance()
-        balance = balance_map.get("USDT", 0.0)
+        balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
         self.risk.reset_daily(balance)
         self.target.reset_day(balance)
 
         projected = self.target.projected_balance
+        if self.settings.session_budget > 0:
+            logger.info("Session budget: ${:.2f} (exchange has ${:.2f})",
+                         balance, balance_map.get("USDT", 0.0))
         logger.info("Starting balance: {:.2f} USDT", balance)
         logger.info("Projections if target hit daily -> 1w: {:.0f} | 1mo: {:.0f} | 3mo: {:.0f}",
                      projected["1_week"], projected["1_month"], projected["3_months"])
@@ -211,7 +214,7 @@ class TradingBot:
     async def _tick(self) -> None:
 
         balance_map = await self.exchange.fetch_balance()
-        balance = balance_map.get("USDT", 0.0)
+        balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
         self.target.update_balance(balance)
 
         logger.debug(
@@ -265,13 +268,13 @@ class TradingBot:
         except Exception as e:
             logger.error("Wick scalp error: {}", e)
 
-        # 6. Close expired quick trades
+        # 7. Close expired quick trades
         await self.orders.close_expired_quick_trades(self._active_signals)
 
-        # 6b. Process trade queue (CRITICAL → DAILY → SWING)
+        # 8. Process trade queue (CRITICAL -> DAILY -> SWING)
         await self._process_trade_queue()
 
-        # 7. Assess market intelligence
+        # 9. Assess market intelligence
         # Prefer shared state from monitor service; fall back to in-process
         intel_condition = self._read_shared_intel()
         if intel_condition is None and self.intel:
@@ -283,7 +286,7 @@ class TradingBot:
                 except Exception as e:
                     logger.debug("TV multi-analyze error: {}", e)
 
-        # 8. Legendary day check: at 100%+ decide whether to close or ride
+        # 10. Legendary day check: at 100%+ decide whether to close or ride
         if self.target.tier.value == "legendary":
             reversal_risk = (intel_condition is not None and
                              intel_condition.should_reduce_exposure)
@@ -308,11 +311,11 @@ class TradingBot:
                     ride_reason,
                 )
 
-        # 9. Trading gates
+        # 11. Trading gates
         allow_new_entries = self.target.should_trade()
         base_aggression = self.target.aggression_multiplier()
         aggression = base_aggression
-        allow_gambling = self.target.todays_pnl_pct > 10 and self.target.todays_pnl_pct > 0
+        allow_gambling = self.target.todays_pnl_pct > 10
 
         if intel_condition:
             aggression *= intel_condition.position_size_multiplier
@@ -333,7 +336,7 @@ class TradingBot:
                 allow_new_entries, self.target.tier.value, aggression, allow_gambling,
             )
 
-        # 10. Run all strategies (collect candles for hedge analysis)
+        # 12. Run all strategies (collect candles for hedge analysis)
         candles_map: dict[str, list] = {}
         all_strategies = list(self._strategies) + list(self._dynamic_strategies.values())
         for strategy in all_strategies:
@@ -392,7 +395,7 @@ class TradingBot:
                     continue
 
                 # Intel: direction filter -- don't go against strong crowd consensus
-                if intel_condition and sig.action in (SignalAction.LONG, SignalAction.SHORT):
+                if intel_condition and sig.action in (SignalAction.BUY, SignalAction.SELL):
                     sig = self._apply_intel_to_signal(sig, intel_condition)
                     if sig.strength <= 0:
                         continue
@@ -441,7 +444,7 @@ class TradingBot:
             except Exception as e:
                 logger.error("Strategy '{}' error for {}: {}", strategy.name, strategy.symbol, e)
 
-        # 11. Hedge check: open counter-positions on reversal signals
+        # 13. Hedge check: open counter-positions on reversal signals
         if self.settings.hedge_enabled:
             try:
                 hedges = await self.orders.try_hedge(candles_map)
@@ -450,13 +453,13 @@ class TradingBot:
             except Exception as e:
                 logger.error("Hedge tick error: {}", e)
 
-        # 12. Write deployment status for monitor service
+        # 14. Write deployment status for monitor service
         try:
             await self._write_deployment_status()
         except Exception as e:
             logger.debug("Failed to write deployment status: {}", e)
 
-        # 13. Status + daily reset
+        # 15. Status + daily reset
         await self._log_status()
         await self._check_daily_reset()
 
@@ -597,6 +600,13 @@ class TradingBot:
     async def _execute_proposal(self, proposal: TradeProposal,
                                 aggression: float) -> bool:
         """Convert a queue proposal into a trading signal and execute it."""
+        try:
+            ticker = await self.exchange.fetch_ticker(proposal.symbol)
+            price = ticker.last
+        except Exception as e:
+            logger.error("Queue: can't fetch price for {}: {}", proposal.symbol, e)
+            return False
+
         action = SignalAction.BUY if proposal.side == "long" else SignalAction.SELL
         sig = Signal(
             symbol=proposal.symbol,
@@ -604,6 +614,7 @@ class TradingBot:
             strength=min(1.0, proposal.strength * aggression),
             strategy=proposal.strategy,
             reason=f"[QUEUE/{proposal.priority.value}] {proposal.reason}",
+            suggested_price=price,
             market_type=proposal.market_type,
             leverage=proposal.leverage,
             quick_trade=proposal.quick_trade,
@@ -634,6 +645,13 @@ class TradingBot:
         plan = proposal.entry_plan
         strength = min(1.0, proposal.strength * aggression)
 
+        try:
+            ticker = await self.exchange.fetch_ticker(proposal.symbol)
+            price = ticker.last
+        except Exception as e:
+            logger.error("Queue: can't fetch price for {}: {}", proposal.symbol, e)
+            return False
+
         action = SignalAction.BUY if proposal.side == "long" else SignalAction.SELL
         leverage = plan.initial_leverage if plan else proposal.leverage
 
@@ -643,6 +661,7 @@ class TradingBot:
             strength=strength,
             strategy=proposal.strategy,
             reason=f"[QUEUE/swing] {proposal.reason}",
+            suggested_price=price,
             market_type=proposal.market_type,
             leverage=leverage,
             suggested_stop_loss=plan.stop_loss if plan and plan.stop_loss else None,
@@ -673,8 +692,8 @@ class TradingBot:
         if preferred == "neutral":
             return adjusted
 
-        is_long = sig.action == SignalAction.LONG
-        is_short = sig.action == SignalAction.SHORT
+        is_long = sig.action == SignalAction.BUY
+        is_short = sig.action == SignalAction.SELL
 
         # Going against mass liquidation reversal bias = bad idea
         if condition.mass_liquidation:
@@ -1032,7 +1051,7 @@ class TradingBot:
         now = datetime.now(timezone.utc)
         if now.hour == 0 and now.minute < 2:
             balance_map = await self.exchange.fetch_balance()
-            balance = balance_map.get("USDT", 0.0)
+            balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
             self.target.update_balance(balance)
             positions = await self.exchange.fetch_positions()
 

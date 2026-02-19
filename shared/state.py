@@ -21,11 +21,6 @@ T = TypeVar("T", bound=BaseModel)
 
 DATA_DIR = Path("data")
 
-BOT_STATUS_FILE = DATA_DIR / "bot_status.json"
-INTEL_STATE_FILE = DATA_DIR / "intel_state.json"
-ANALYTICS_STATE_FILE = DATA_DIR / "analytics_state.json"
-
-
 class SharedState:
     """Atomic read/write of JSON state files for inter-process communication.
 
@@ -40,17 +35,23 @@ class SharedState:
     # ---- Generic helpers ---- #
 
     def _write(self, path: Path, model: BaseModel) -> None:
-        """Atomic write: temp file → fsync → rename."""
+        """Atomic write: temp file -> fsync -> rename."""
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        closed = False
         try:
             data = model.model_dump_json(indent=2)
             os.write(fd, data.encode())
             os.fsync(fd)
             os.close(fd)
+            closed = True
             os.replace(tmp, str(path))
         except Exception:
-            os.close(fd) if not os.get_inheritable(fd) else None
+            if not closed:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             try:
                 os.unlink(tmp)
             except OSError:

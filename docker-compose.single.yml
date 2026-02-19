@@ -1,8 +1,10 @@
-version: "3.8"
-
 # Single-container mode: bot runs everything in-process (no separate monitor/analytics).
-# Use this if you don't want 3 containers:
+# Usage:
 #   docker compose -f docker-compose.single.yml up -d
+
+volumes:
+  bot-data:
+  bot-logs:
 
 services:
   trading-bot:
@@ -10,14 +12,22 @@ services:
     container_name: trading-bot
     restart: unless-stopped
     env_file: .env
+    environment:
+      - TZ=UTC
     command: python bot.py
     ports:
       - "${DASHBOARD_PORT:-8080}:8080"
     volumes:
-      - ./logs:/app/logs
-      - ./data:/app/data
+      - bot-logs:/app/logs
+      - bot-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/status"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
-        max-file: "3"
+        max-file: "5"

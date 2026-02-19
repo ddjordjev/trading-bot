@@ -57,7 +57,7 @@ class OrderManager:
     async def execute_signal(self, signal: Signal, low_liquidity: bool = False,
                              pyramid: bool = False) -> Order | None:
         balance_map = await self.exchange.fetch_balance()
-        balance = balance_map.get("USDT", 0.0)
+        balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
         positions = await self.exchange.fetch_positions()
 
         if not self.risk.check_signal(signal, balance, positions):
@@ -553,7 +553,7 @@ class OrderManager:
         closed: list[Order] = []
         positions = await self.exchange.fetch_positions()
         balance_map = await self.exchange.fetch_balance()
-        balance = balance_map.get("USDT", 0.0)
+        balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
 
         stopped_symbols = self.trailing.update_all(positions)
         for symbol in stopped_symbols:

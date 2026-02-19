@@ -287,12 +287,7 @@ class ScaledPosition(BaseModel):
             return (price - self.avg_entry_price) / self.avg_entry_price * 100
         return (self.avg_entry_price - price) / self.avg_entry_price * 100
 
-    def _profit_at_price(self, price: float) -> float:
-        if self.avg_entry_price == 0:
-            return 0
-        if self.side == "long":
-            return (price - self.avg_entry_price) / self.avg_entry_price * 100
-        return (self.avg_entry_price - price) / self.avg_entry_price * 100
+    _profit_at_price = _current_profit_pct
 
     def status_line(self) -> str:
         return (

@@ -45,7 +45,6 @@ async def run_checks() -> bool:
 
     # 1. Config loaded
     check("Config loaded", True, f"mode={settings.trading_mode}, exchange={settings.exchange}")
-    check("Allowed market types", True, settings.allowed_market_types)
 
     # 2. API keys present
     key_map = {
@@ -64,6 +63,10 @@ async def run_checks() -> bool:
 
     # 3. Exchange connectivity
     exchange = create_exchange(settings)
+    check("Exchange capabilities", True,
+          f"{exchange.name.upper()} supports: {', '.join(exchange.SUPPORTED_MARKET_TYPES)}")
+    check("Allowed market types", True,
+          f"configured: {settings.allowed_market_types}")
     try:
         await exchange.connect()
         check("Exchange connectivity", True, f"connected to {exchange.name}")
@@ -74,9 +77,13 @@ async def run_checks() -> bool:
     # 4. Balance check
     try:
         balance = await exchange.fetch_balance()
-        usdt = balance.get("USDT", 0)
+        raw_usdt = balance.get("USDT", 0)
+        usdt = settings.cap_balance(raw_usdt)
+        budget_note = f" (capped from ${raw_usdt:.2f})" if settings.session_budget > 0 and raw_usdt > usdt else ""
         check("USDT balance", usdt >= settings.initial_risk_amount,
-              f"${usdt:.2f} USDT (min ${settings.initial_risk_amount} needed)")
+              f"${usdt:.2f} USDT{budget_note} (min ${settings.initial_risk_amount} needed)")
+        if settings.session_budget > 0:
+            check("Session budget", True, f"${settings.session_budget:.2f}")
     except Exception as e:
         check("Balance fetch", False, str(e))
 

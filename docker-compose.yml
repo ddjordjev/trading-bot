@@ -1,8 +1,6 @@
-version: "3.8"
-
-# Shared volume for inter-process communication (JSON state files + SQLite)
 volumes:
   bot-data:
+  bot-logs:
 
 services:
   trading-bot:
@@ -10,27 +8,48 @@ services:
     container_name: trading-bot
     restart: unless-stopped
     env_file: .env
+    environment:
+      - TZ=UTC
     command: python bot.py
     ports:
       - "${DASHBOARD_PORT:-8080}:8080"
     volumes:
-      - ./logs:/app/logs
+      - bot-logs:/app/logs
       - bot-data:/app/data
+    depends_on:
+      monitor:
+        condition: service_started
+      analytics:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/status"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
-        max-file: "3"
+        max-file: "5"
 
   monitor:
     build: .
     container_name: trading-bot-monitor
     restart: unless-stopped
     env_file: .env
+    environment:
+      - TZ=UTC
     command: python run_monitor.py
     volumes:
-      - ./logs:/app/logs
+      - bot-logs:/app/logs
       - bot-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     logging:
       driver: "json-file"
       options:
@@ -42,10 +61,18 @@ services:
     container_name: trading-bot-analytics
     restart: unless-stopped
     env_file: .env
+    environment:
+      - TZ=UTC
     command: python run_analytics.py
     volumes:
-      - ./logs:/app/logs
+      - bot-logs:/app/logs
       - bot-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     logging:
       driver: "json-file"
       options:

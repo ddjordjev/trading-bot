@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -42,8 +42,8 @@ class Order(BaseModel):
     average_price: float = 0.0
     leverage: int = 1
     market_type: str = "spot"
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     strategy: str = ""
 
     @property
@@ -67,7 +67,7 @@ class Position(BaseModel):
     take_profit: Optional[float] = None
     unrealized_pnl: float = 0.0
     realized_pnl: float = 0.0
-    opened_at: datetime = Field(default_factory=datetime.utcnow)
+    opened_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     strategy: str = ""
 
     @property
