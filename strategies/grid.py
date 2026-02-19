@@ -19,8 +19,17 @@ class GridStrategy(BaseStrategy):
         super().__init__(symbol, market_type, leverage, **params)
         self.grid_size_pct = float(params.get("grid_size_pct", 1.0))
         self.num_grids = int(params.get("num_grids", 5))
+        self.recenter_threshold = int(params.get("recenter_threshold", 0))
         self._center_price: float | None = None
         self._last_grid_level: int = 0
+
+    def _should_recenter(self, price: float) -> bool:
+        """Recenter the grid when price drifts beyond the outermost grid level."""
+        if self._center_price is None:
+            return False
+        threshold = self.recenter_threshold or self.num_grids
+        max_drift = self._center_price * (self.grid_size_pct / 100) * threshold
+        return abs(price - self._center_price) > max_drift
 
     def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:
         df = self.candles_to_df(candles)
@@ -31,6 +40,11 @@ class GridStrategy(BaseStrategy):
 
         if self._center_price is None:
             self._center_price = price
+            return None
+
+        if self._should_recenter(price):
+            self._center_price = price
+            self._last_grid_level = 0
             return None
 
         grid_step = self._center_price * (self.grid_size_pct / 100)

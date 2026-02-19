@@ -783,19 +783,35 @@ class TradingBot:
             sp = self.orders.scaler.get(order.symbol)
             intel_cond = self.intel.condition if self.intel else None
 
+            exit_price = order.average_price or order.price or 0
+            entry_price = sp.avg_entry_price if sp and sp.avg_entry_price > 0 else exit_price
+            amount = order.filled or order.amount
+            leverage = order.leverage or (sp.current_leverage if sp else 1)
+            side_str = order.side.value if hasattr(order.side, "value") else str(order.side)
+
+            pnl_usd = 0.0
+            pnl_pct = 0.0
+            if entry_price > 0 and exit_price > 0:
+                if side_str in ("buy", "long"):
+                    pnl_usd = (exit_price - entry_price) * amount * leverage
+                    pnl_pct = (exit_price - entry_price) / entry_price * 100
+                else:
+                    pnl_usd = (entry_price - exit_price) * amount * leverage
+                    pnl_pct = (entry_price - exit_price) / entry_price * 100
+
             record = TradeRecord(
                 symbol=order.symbol,
-                side=order.side.value if hasattr(order.side, "value") else str(order.side),
+                side=side_str,
                 strategy=order.strategy or close_reason,
                 action="close",
                 scale_mode=sp.mode.value if sp else "",
-                entry_price=order.average_price or order.price or 0,
-                exit_price=order.average_price or 0,
-                amount=order.filled or order.amount,
-                leverage=order.leverage,
-                pnl_usd=0,
-                pnl_pct=0,
-                is_winner=False,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                amount=amount,
+                leverage=leverage,
+                pnl_usd=pnl_usd,
+                pnl_pct=pnl_pct,
+                is_winner=pnl_usd > 0,
                 dca_count=sp.adds if sp else 0,
                 was_quick_trade=False,
                 was_low_liquidity=sp.low_liquidity if sp else False,

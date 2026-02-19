@@ -418,18 +418,18 @@ async def take_profit(symbol: str, pct: float = Query(default=50, ge=1, le=100),
         if not pos:
             return ActionResponse(success=False, message=f"No open position for {symbol}")
         close_amount = pos.amount * (pct / 100)
-        from core.models import Order, OrderSide, OrderType
+        from core.models import MarketType, OrderSide, OrderType
 
-        order = Order(
+        close_side = OrderSide.SELL if pos.side.value == "buy" else OrderSide.BUY
+        mkt = MarketType(pos.market_type) if pos.market_type in ("spot", "futures") else MarketType.SPOT
+        _result = await _bot.exchange.place_order(
             symbol=symbol,
-            side=OrderSide.SELL if pos.side.value == "buy" else OrderSide.BUY,
+            side=close_side,
             order_type=OrderType.MARKET,
             amount=close_amount,
             leverage=pos.leverage,
-            market_type=pos.market_type,
-            strategy="dashboard_partial",
+            market_type=mkt,
         )
-        _result = await _bot.exchange.place_order(order)
         return ActionResponse(success=True, message=f"Took {pct}% profit on {symbol} ({close_amount:.6f})")
     except Exception as e:
         return ActionResponse(success=False, message=str(e))

@@ -94,7 +94,7 @@ class TestNotifier:
             current_price=62500,
             leverage=10,
             adds=5,
-            dashboard_url="http://localhost:8080",
+            dashboard_url="http://localhost:9035",
         )
 
     @pytest.mark.asyncio

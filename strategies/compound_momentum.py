@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import ta
 
 from core.models import Candle, Signal, SignalAction, Ticker
@@ -57,13 +55,10 @@ class CompoundMomentumStrategy(BaseStrategy):
 
         self._in_position = False
         self._position_side: str | None = None
-        self._entry_time: datetime | None = None
 
     def set_position_state(self, has_position: bool, side: str | None = None) -> None:
         self._in_position = has_position
         self._position_side = side
-        if not has_position:
-            self._entry_time = None
 
     def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:
         df = self.candles_to_df(candles)
@@ -121,10 +116,6 @@ class CompoundMomentumStrategy(BaseStrategy):
         action = SignalAction.BUY if direction_up else SignalAction.SELL
         strength = min(1.0, abs(change_pct) / (self.spike_pct * 2))
 
-        self._in_position = True
-        self._position_side = "long" if direction_up else "short"
-        self._entry_time = datetime.now(UTC)
-
         return Signal(
             symbol=self.symbol,
             action=action,
@@ -163,9 +154,6 @@ class CompoundMomentumStrategy(BaseStrategy):
         # Bullish breakout
         breakout_up = price > resistance * (1 + self.breakout_threshold_pct / 100)
         if breakout_up and current_rsi >= self.rsi_bull_min and volume_surge:
-            self._in_position = True
-            self._position_side = "long"
-            self._entry_time = datetime.now(UTC)
             strength = min(1.0, (price - resistance) / resistance * 100 / self.breakout_threshold_pct)
 
             return Signal(
@@ -185,9 +173,6 @@ class CompoundMomentumStrategy(BaseStrategy):
         # Bearish breakout
         breakout_down = price < support * (1 - self.breakout_threshold_pct / 100)
         if breakout_down and current_rsi <= self.rsi_bear_max and volume_surge:
-            self._in_position = True
-            self._position_side = "short"
-            self._entry_time = datetime.now(UTC)
             strength = min(1.0, (support - price) / support * 100 / self.breakout_threshold_pct)
 
             return Signal(
@@ -219,9 +204,6 @@ class CompoundMomentumStrategy(BaseStrategy):
         import pandas as pd
 
         assert isinstance(df, pd.DataFrame)
-
-        if not self._entry_time:
-            return None
 
         rsi = ta.momentum.RSIIndicator(df["close"], window=self.rsi_period).rsi()
         current_rsi = rsi.iloc[-1]

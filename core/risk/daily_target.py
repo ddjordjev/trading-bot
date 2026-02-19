@@ -47,8 +47,8 @@ class DailyTargetTracker:
     - Delete the file to resume normal operation
     """
 
-    STOP_FILE = Path("STOP")
-    CLOSE_ALL_FILE = Path("CLOSE_ALL")
+    STOP_FILE = Path("data/STOP")
+    CLOSE_ALL_FILE = Path("data/CLOSE_ALL")
 
     def __init__(self, daily_target_pct: float = 10.0, compound: bool = True):
         self.daily_target_pct = daily_target_pct
@@ -274,11 +274,11 @@ class DailyTargetTracker:
             f"- Break-even locks are active on profitable positions\n\n"
             f"Market conditions:\n{intel_summary}\n\n"
             f"To close everything immediately:\n"
-            f"  Create a file named CLOSE_ALL in the bot directory\n"
-            f"  Or: touch CLOSE_ALL\n\n"
+            f"  Create a file named data/CLOSE_ALL in the bot directory\n"
+            f"  Or: touch data/CLOSE_ALL\n\n"
             f"To stop new trades but keep existing:\n"
-            f"  Create a file named STOP in the bot directory\n"
-            f"  Or: touch STOP\n"
+            f"  Create a file named data/STOP in the bot directory\n"
+            f"  Or: touch data/STOP\n"
         )
 
     @property

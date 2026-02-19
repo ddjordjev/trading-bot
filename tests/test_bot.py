@@ -278,6 +278,8 @@ class TestLogClosedTrade:
         sp.mode = ScaleMode.PYRAMID
         sp.adds = 2
         sp.low_liquidity = False
+        sp.avg_entry_price = 49_500.0
+        sp.current_leverage = 10
         bot.orders.scaler.get = MagicMock(return_value=sp)
         bot.intel = None
 
@@ -290,7 +292,10 @@ class TestLogClosedTrade:
         assert record.action == "close"
         assert record.scale_mode == "pyramid"
         assert record.dca_count == 2
-        assert record.entry_price == 50_100.0
+        assert record.entry_price == 49_500.0
+        assert record.exit_price == 50_100.0
+        assert record.pnl_usd > 0
+        assert record.is_winner is True
 
     def test_log_closed_trade_discards_whale_alerted(self, bot, mock_trade_db):
         bot._whale_alerted.add("BTC/USDT")

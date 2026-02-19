@@ -346,7 +346,6 @@ class TestCompoundMomentumStrategy:
         s = CompoundMomentumStrategy("BTC/USDT")
         s._in_position = True
         s._position_side = "long"
-        s._entry_time = datetime.now(UTC)
         candles = _make_candles_flat(30, price=100, volume=1000)
         sig = s.analyze(candles)
         # In profit or no exit signal, should return None
@@ -401,7 +400,6 @@ class TestSetPositionState:
         s.set_position_state(False)
         assert not s._in_position
         assert s._position_side is None
-        assert s._entry_time is None
 
     def test_compound_momentum_sync_short(self):
         from strategies.compound_momentum import CompoundMomentumStrategy

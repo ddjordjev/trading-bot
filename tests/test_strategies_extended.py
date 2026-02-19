@@ -74,8 +74,6 @@ class TestCompoundMomentumExtended:
         assert sig is not None
         assert sig.action == SignalAction.SELL
         assert sig.quick_trade is True
-        assert s._in_position is True
-        assert s._position_side == "short"
 
     def test_exit_long_in_loss_rsi_low_volume_drying(self):
         from strategies.compound_momentum import CompoundMomentumStrategy
@@ -83,7 +81,6 @@ class TestCompoundMomentumExtended:
         s = CompoundMomentumStrategy("BTC/USDT")
         s._in_position = True
         s._position_side = "long"
-        s._entry_time = datetime.now(UTC)
         # Price below entry, RSI < 45, volume drying
         candles = _make_candles_flat(30, price=98, volume=500)  # low recent vol
         for i in range(20):
@@ -104,7 +101,6 @@ class TestCompoundMomentumExtended:
         s = CompoundMomentumStrategy("BTC/USDT")
         s._in_position = True
         s._position_side = "short"
-        s._entry_time = datetime.now(UTC)
         candles = _make_candles_flat(30, price=104, volume=500)
         for i in range(20):
             candles[i] = _make_candle(100 + i * 0.1, volume=2000)
@@ -124,7 +120,6 @@ class TestCompoundMomentumExtended:
         s = CompoundMomentumStrategy("BTC/USDT")
         s._in_position = True
         s._position_side = "long"
-        s._entry_time = datetime.now(UTC)
         candles = _make_candles_flat(30, price=105, volume=1000)
         sig = s.analyze(candles)
         assert sig is None
