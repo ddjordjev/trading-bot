@@ -1107,8 +1107,9 @@ def main() -> None:
 
     if settings.dashboard_enabled:
         import uvicorn
-        from web.server import app, set_bot
+        from web.server import app, set_bot, setup_log_capture
 
+        setup_log_capture()
         set_bot(bot)
         config = uvicorn.Config(
             app, host=settings.dashboard_host, port=settings.dashboard_port,

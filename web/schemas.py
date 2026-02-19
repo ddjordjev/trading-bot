@@ -124,11 +124,19 @@ class WickScalpInfo(BaseModel):
     max_hold_minutes: int = 5
 
 
+class LogEntry(BaseModel):
+    ts: str = ""
+    level: str = "INFO"
+    msg: str = ""
+    module: str = ""
+
+
 class FullSnapshot(BaseModel):
     status: BotStatus
     positions: list[PositionInfo] = []
     intel: Optional[IntelSnapshot] = None
     wick_scalps: list[WickScalpInfo] = []
+    logs: list[LogEntry] = []
 
 
 class StrategyScoreInfo(BaseModel):

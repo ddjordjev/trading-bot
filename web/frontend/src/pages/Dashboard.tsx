@@ -2,6 +2,7 @@ import type { FullSnapshot } from "../hooks/useWebSocket";
 import { post } from "../api/client";
 import { TierBadge } from "../components/TierBadge";
 import { PositionRow } from "../components/PositionRow";
+import { LogViewer } from "../components/LogViewer";
 import { useState } from "react";
 
 export function Dashboard({ data }: { data: FullSnapshot | null }) {
@@ -174,6 +175,11 @@ export function Dashboard({ data }: { data: FullSnapshot | null }) {
           </table>
         </>
       )}
+
+      <h3 style={{ color: "var(--heading)", margin: "1.5rem 0 0.5rem" }}>
+        Live Logs
+      </h3>
+      <LogViewer logs={data.logs ?? []} />
     </div>
   );
 }

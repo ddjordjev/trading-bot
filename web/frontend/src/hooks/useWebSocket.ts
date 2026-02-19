@@ -6,6 +6,7 @@ export interface FullSnapshot {
   positions: PositionInfo[];
   intel: IntelSnapshot | null;
   wick_scalps: WickScalpInfo[];
+  logs: LogEntry[];
 }
 
 export interface BotStatus {
@@ -72,6 +73,13 @@ export interface WickScalpInfo {
   amount: number;
   age_minutes: number;
   max_hold_minutes: number;
+}
+
+export interface LogEntry {
+  ts: string;
+  level: string;
+  msg: string;
+  module: string;
 }
 
 export function useWebSocket() {

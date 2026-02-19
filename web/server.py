@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -14,9 +15,9 @@ from loguru import logger
 from web.auth import verify_token, verify_ws_token
 from web.schemas import (
     ActionResponse, AnalyticsSnapshot, BotStatus, DailyReportData, FullSnapshot,
-    IntelSnapshot, ModificationSuggestionInfo, ModuleStatus, PatternInsightInfo,
-    PositionInfo, StrategyInfo, StrategyScoreInfo, TradeRecord,
-    TrendingCoinInfo, WickScalpInfo,
+    IntelSnapshot, LogEntry, ModificationSuggestionInfo, ModuleStatus,
+    PatternInsightInfo, PositionInfo, StrategyInfo, StrategyScoreInfo,
+    TradeRecord, TrendingCoinInfo, WickScalpInfo,
 )
 
 if TYPE_CHECKING:
@@ -24,6 +25,21 @@ if TYPE_CHECKING:
 
 _bot: Optional[TradingBot] = None
 _start_time: float = 0.0
+_log_buffer: deque[dict] = deque(maxlen=200)
+
+
+def _log_sink(message: object) -> None:
+    record = message.record  # type: ignore[union-attr]
+    _log_buffer.append({
+        "ts": record["time"].strftime("%H:%M:%S"),
+        "level": record["level"].name,
+        "msg": record["message"],
+        "module": record["name"] or "",
+    })
+
+
+def setup_log_capture() -> None:
+    logger.add(_log_sink, level="DEBUG", format="{message}")
 
 
 def set_bot(bot: TradingBot) -> None:
@@ -141,6 +157,10 @@ def _wick_scalps() -> list[WickScalpInfo]:
             max_hold_minutes=ws.max_hold_minutes,
         ))
     return result
+
+
+def _recent_logs() -> list[LogEntry]:
+    return [LogEntry(**e) for e in _log_buffer]
 
 
 # --------------- REST endpoints ---------------
@@ -450,6 +470,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 positions=await _positions(),
                 intel=_intel_snapshot(),
                 wick_scalps=_wick_scalps(),
+                logs=_recent_logs(),
             )
             await websocket.send_json(snapshot.model_dump())
             await asyncio.sleep(2)
