@@ -12,6 +12,7 @@ build/
 logs/
 *.log
 .cursor/chat_history.md
+.cursor/chat_history_archive/
 .github/.commit_msg*
 .github/.commitmsg
 .idea/
