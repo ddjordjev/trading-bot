@@ -60,6 +60,25 @@ interface LivePosition {
   dca_count: number;
 }
 
+interface ClosedTrade {
+  id: number;
+  symbol: string;
+  side: string;
+  strategy: string;
+  scale_mode: string;
+  entry_price: number;
+  exit_price: number;
+  amount: number;
+  leverage: number;
+  pnl_usd: number;
+  pnl_pct: number;
+  is_winner: boolean;
+  hold_minutes: number;
+  dca_count: number;
+  opened_at: string;
+  closed_at: string;
+}
+
 interface AnalyticsData {
   strategy_scores: StrategyScore[];
   patterns: PatternInsight[];
@@ -107,18 +126,21 @@ function weightColor(w: number): string {
 export function Analytics() {
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [report, setReport] = useState<DailyReport | null>(null);
+  const [closedTrades, setClosedTrades] = useState<ClosedTrade[]>([]);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"live" | "scores" | "patterns" | "suggestions" | "hourly" | "report">("live");
+  const [tab, setTab] = useState<"live" | "closed" | "scores" | "patterns" | "suggestions" | "hourly" | "report">("live");
 
   const refresh = async () => {
     setLoading(true);
     try {
-      const [a, r] = await Promise.all([
+      const [a, r, ct] = await Promise.all([
         get<AnalyticsData>("/api/analytics"),
         get<DailyReport>("/api/daily-report"),
+        get<ClosedTrade[]>("/api/closed-trades?limit=200"),
       ]);
       setAnalytics(a);
       setReport(r);
+      setClosedTrades(ct);
     } catch {}
     setLoading(false);
   };
@@ -177,10 +199,11 @@ export function Analytics() {
       </div>
 
       <div className="tabs" style={{ marginBottom: "1rem" }}>
-        {(["live", "scores", "patterns", "suggestions", "hourly", "report"] as const).map((t) => (
+        {(["live", "closed", "scores", "patterns", "suggestions", "hourly", "report"] as const).map((t) => (
           <button key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
             {t === "live" ? `Live (${analytics?.live_positions.length ?? 0})`
-              : t === "scores" ? `Closed Trades (${analytics?.strategy_scores.length ?? 0})`
+              : t === "closed" ? `Closed Trades (${closedTrades.length})`
+              : t === "scores" ? `Strategy Stats (${analytics?.strategy_scores.length ?? 0})`
               : t === "patterns" ? `Patterns (${analytics?.patterns.length ?? 0})`
               : t === "suggestions" ? `Suggestions (${analytics?.suggestions.length ?? 0})`
               : t === "hourly" ? "Time & Regime"
@@ -190,6 +213,7 @@ export function Analytics() {
       </div>
 
       {tab === "live" && <LivePositionsTab positions={analytics?.live_positions ?? []} />}
+      {tab === "closed" && <ClosedTradesTab trades={closedTrades} />}
       {tab === "scores" && <StrategyScoresTab scores={analytics?.strategy_scores ?? []} />}
       {tab === "patterns" && <PatternsTab patterns={analytics?.patterns ?? []} />}
       {tab === "suggestions" && <SuggestionsTab suggestions={analytics?.suggestions ?? []} />}
@@ -267,8 +291,82 @@ function LivePositionsTab({ positions }: { positions: LivePosition[] }) {
   );
 }
 
+function ClosedTradesTab({ trades }: { trades: ClosedTrade[] }) {
+  if (trades.length === 0) return <div className="empty-state">No closed trades yet. Trades appear here when positions are closed.</div>;
+
+  const totalPnl = trades.reduce((s, t) => s + t.pnl_usd, 0);
+  const winners = trades.filter((t) => t.is_winner).length;
+
+  return (
+    <div>
+      <div className="stat-grid" style={{ marginBottom: "1rem" }}>
+        <div className="stat-card">
+          <div className="label">Closed Trades</div>
+          <div className="value">{trades.length}</div>
+        </div>
+        <div className="stat-card">
+          <div className="label">Win Rate</div>
+          <div className="value" style={{ color: winners / trades.length >= 0.5 ? "var(--green)" : "var(--red)" }}>
+            {((winners / trades.length) * 100).toFixed(0)}%
+          </div>
+        </div>
+        <div className="stat-card">
+          <div className="label">Total Realized PnL</div>
+          <div className={`value ${totalPnl >= 0 ? "pnl-positive" : "pnl-negative"}`}>
+            ${totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
+          </div>
+        </div>
+      </div>
+      <div style={{ overflowX: "auto", maxHeight: 500, overflowY: "auto" }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Strategy</th>
+              <th>Entry</th>
+              <th>Exit</th>
+              <th>PnL</th>
+              <th>Leverage</th>
+              <th>Mode</th>
+              <th>DCAs</th>
+              <th>Hold Time</th>
+              <th>Closed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {trades.map((t) => (
+              <tr key={t.id}>
+                <td><strong>{t.symbol}</strong></td>
+                <td style={{ color: t.side === "buy" || t.side === "long" ? "var(--green)" : "var(--red)" }}>
+                  {t.side.toUpperCase()}
+                </td>
+                <td style={{ fontSize: "0.85rem" }}>{t.strategy}</td>
+                <td>{t.entry_price < 1 ? t.entry_price.toFixed(6) : t.entry_price.toFixed(2)}</td>
+                <td>{t.exit_price < 1 ? t.exit_price.toFixed(6) : t.exit_price.toFixed(2)}</td>
+                <td className={t.pnl_usd >= 0 ? "pnl-positive" : "pnl-negative"} style={{ fontWeight: 600 }}>
+                  {t.pnl_pct >= 0 ? "+" : ""}{t.pnl_pct.toFixed(2)}%
+                  <br />
+                  <span style={{ fontSize: "0.8rem" }}>${t.pnl_usd >= 0 ? "+" : ""}{t.pnl_usd.toFixed(2)}</span>
+                </td>
+                <td>{t.leverage}x</td>
+                <td style={{ fontSize: "0.8rem" }}>{t.scale_mode || "—"}</td>
+                <td>{t.dca_count}</td>
+                <td>{t.hold_minutes < 60 ? `${t.hold_minutes.toFixed(0)}m` : `${(t.hold_minutes / 60).toFixed(1)}h`}</td>
+                <td style={{ fontSize: "0.8rem" }}>
+                  {t.closed_at ? new Date(t.closed_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function StrategyScoresTab({ scores }: { scores: StrategyScore[] }) {
-  if (scores.length === 0) return <div className="empty-state">No closed trades yet — stats populate as positions close.</div>;
+  if (scores.length === 0) return <div className="empty-state">No strategy stats yet — stats populate as positions close.</div>;
 
   return (
     <div style={{ overflowX: "auto" }}>

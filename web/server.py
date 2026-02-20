@@ -480,11 +480,10 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
     regime = _bot.trade_db.get_regime_performance()
 
     live = []
+    positions = await _bot.exchange.fetch_positions()
+    price_map = {p.symbol: p.current_price for p in positions if p.amount > 0}
     for sym, sp in _bot.orders.scaler.active_positions.items():
-        ts = _bot.orders.trailing.active_stops.get(sym)
-        current_price = sp.last_add_price or sp.avg_entry_price
-        if ts and ts.peak_price > 0:
-            current_price = ts.peak_price
+        current_price = price_map.get(sym, sp.last_add_price or sp.avg_entry_price)
         if sp.avg_entry_price > 0:
             if sp.side == "long":
                 pnl_pct = (current_price - sp.avg_entry_price) / sp.avg_entry_price * 100
@@ -492,7 +491,7 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
                 pnl_pct = (sp.avg_entry_price - current_price) / sp.avg_entry_price * 100
         else:
             pnl_pct = 0.0
-        notional = sp.current_size * sp.avg_entry_price * sp.current_leverage
+        notional = sp.current_size * current_price * sp.current_leverage
         pnl_usd = notional * pnl_pct / 100 if sp.current_leverage > 0 else 0
         _opened = getattr(sp, "opened_at", 0)
         age = (time.time() - _opened) / 60 if _opened else 0
@@ -521,6 +520,14 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
         regime_performance=regime,
         live_positions=live,
     )
+
+
+@app.get("/api/closed-trades", response_model=list[TradeRecord])
+async def get_closed_trades(limit: int = 100, _: str = Depends(verify_token)) -> list[TradeRecord]:
+    if not _bot:
+        return []
+    rows = _bot.trade_db.get_all_trades(limit=limit)
+    return [TradeRecord(**r.model_dump()) for r in rows if r.closed_at]
 
 
 @app.post("/api/analytics/refresh", response_model=ActionResponse)
