@@ -1052,15 +1052,15 @@ class TestOISnapshot:
 
 class TestWhaleSentimentData:
     def test_is_overleveraged_longs_true(self):
-        d = WhaleSentimentData(funding_rate=0.06, long_short_ratio=1.6)
+        d = WhaleSentimentData(funding_rate=0.001, long_short_ratio=1.6)
         assert d.is_overleveraged_longs is True
 
     def test_is_overleveraged_longs_false(self):
-        d = WhaleSentimentData(funding_rate=0.03, long_short_ratio=1.6)
+        d = WhaleSentimentData(funding_rate=0.0003, long_short_ratio=1.6)
         assert d.is_overleveraged_longs is False
 
     def test_is_overleveraged_shorts_true(self):
-        d = WhaleSentimentData(funding_rate=-0.06, long_short_ratio=0.6)
+        d = WhaleSentimentData(funding_rate=-0.001, long_short_ratio=0.6)
         assert d.is_overleveraged_shorts is True
 
     def test_oi_building_true(self):

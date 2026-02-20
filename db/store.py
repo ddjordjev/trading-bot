@@ -177,7 +177,13 @@ class TradeDB:
             params,
         ).fetchone()
 
-        return dict(row) if row else {}
+        if not row:
+            return {}
+        result = dict(row)
+        for key in ("avg_win", "avg_loss", "avg_hold", "total_pnl", "gross_profit", "gross_loss"):
+            if result.get(key) is None:
+                result[key] = 0.0
+        return result
 
     def get_hourly_performance(self, strategy: str = "") -> list[dict[str, Any]]:
         assert self._conn
@@ -196,7 +202,14 @@ class TradeDB:
         """,
             params,
         ).fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            row_dict = dict(r)
+            for key in ("avg_pnl", "total_pnl"):
+                if row_dict.get(key) is None:
+                    row_dict[key] = 0.0
+            result.append(row_dict)
+        return result
 
     def get_regime_performance(self, strategy: str = "") -> list[dict[str, Any]]:
         assert self._conn
@@ -215,7 +228,14 @@ class TradeDB:
         """,
             params,
         ).fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            row_dict = dict(r)
+            for key in ("avg_pnl", "total_pnl"):
+                if row_dict.get(key) is None:
+                    row_dict[key] = 0.0
+            result.append(row_dict)
+        return result
 
     def get_recent_streak(self, strategy: str) -> int:
         """Positive = consecutive wins, negative = consecutive losses."""

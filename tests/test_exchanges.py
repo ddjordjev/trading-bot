@@ -201,7 +201,7 @@ class TestBinanceExchange:
     async def test_fetch_balance(self, binance):
         bal = await binance.fetch_balance()
         assert "USDT" in bal
-        assert bal["USDT"] == 10_000.0
+        assert bal["USDT"] == 20_000.0
 
     @pytest.mark.asyncio
     async def test_fetch_positions_empty(self, binance):

@@ -278,7 +278,7 @@ class MonitorService:
         snap.tv_eth_consensus = self.tv.consensus("ETH/USDT")
 
         tv_snapshots = []
-        for sym, analyses in self.tv._cache.items():
+        for sym, analyses in self.tv.get_all_cached().items():
             for interval, analysis in analyses.items():
                 tv_snapshots.append(
                     TVSymbolSnapshot(

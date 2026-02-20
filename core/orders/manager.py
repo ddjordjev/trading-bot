@@ -184,7 +184,7 @@ class OrderManager:
             pos = Position(
                 symbol=signal.symbol,
                 side=side,
-                amount=amount,
+                amount=order.filled,
                 entry_price=order.average_price,
                 current_price=order.average_price,
                 leverage=actual_leverage,
@@ -654,6 +654,15 @@ class OrderManager:
                 market_type=market_type,
             )
             if close_order and close_order.status == OrderStatus.FILLED:
+                exit_price = close_order.average_price or 0
+                entry_price = scalp.entry_price
+                pnl = 0.0
+                if entry_price > 0 and exit_price > 0:
+                    if scalp.scalp_side == "long":
+                        pnl = (exit_price - entry_price) * scalp.amount
+                    else:
+                        pnl = (entry_price - exit_price) * scalp.amount
+                self.risk.record_pnl(pnl)
                 self.wick_scalper.close(sym)
                 self.trailing.remove(f"{sym}:wick")
                 self._log_trade(
@@ -666,6 +675,7 @@ class OrderManager:
                     ),
                     close_order,
                     "wick_scalp_close",
+                    pnl,
                 )
                 opened.append(close_order)
 
@@ -682,29 +692,32 @@ class OrderManager:
             logger.info("No position to close for {}", signal.symbol)
             return None
 
-        pos = positions[0]
-        close_side = OrderSide.SELL if pos.side == OrderSide.BUY else OrderSide.BUY
-        market_type = MarketType(pos.market_type) if pos.market_type else MarketType.SPOT
+        last_order: Order | None = None
+        for pos in positions:
+            close_side = OrderSide.SELL if pos.side == OrderSide.BUY else OrderSide.BUY
+            market_type = MarketType(pos.market_type) if pos.market_type else MarketType.SPOT
 
-        order = await self.exchange.place_order(
-            symbol=signal.symbol,
-            side=close_side,
-            order_type=OrderType.MARKET,
-            amount=pos.amount,
-            leverage=pos.leverage,
-            market_type=market_type,
-        )
+            order = await self.exchange.place_order(
+                symbol=signal.symbol,
+                side=close_side,
+                order_type=OrderType.MARKET,
+                amount=pos.amount,
+                leverage=pos.leverage,
+                market_type=market_type,
+            )
 
-        if order.status == OrderStatus.FILLED:
-            pnl = pos.unrealized_pnl
-            self.risk.record_pnl(pnl)
-            self._log_trade(signal, order, "close", pnl)
-            logger.info("Closed {} {} PnL: {:.2f}", signal.symbol, pos.side.value, pnl)
+            if order.status == OrderStatus.FILLED:
+                pnl = pos.unrealized_pnl
+                self.risk.record_pnl(pnl)
+                self._log_trade(signal, order, "close", pnl)
+                logger.info("Closed {} {} PnL: {:.2f}", signal.symbol, pos.side.value, pnl)
+                last_order = order
+
+        if last_order:
             sp = self.scaler.get(signal.symbol)
             if sp:
                 self._closed_scalers.setdefault(signal.symbol, []).append(sp)
             self.scaler.remove(signal.symbol)
-            # Full close: clean up trailing stops (main + hedge/wick), related state, and cooldowns
             self.trailing.remove(signal.symbol)
             self.trailing.remove(f"{signal.symbol}:hedge")
             self.trailing.remove(f"{signal.symbol}:wick")
@@ -714,7 +727,7 @@ class OrderManager:
             self._partial_take_cooldowns.pop(signal.symbol, None)
             self._hedge_cooldowns.pop(signal.symbol, None)
 
-        return order
+        return last_order
 
     # ------------------------------------------------------------------ #
     #  Stop management
@@ -816,11 +829,21 @@ class OrderManager:
             market_type=MarketType.FUTURES,
         )
         if order and order.status == OrderStatus.FILLED:
+            exit_price = order.average_price or 0
+            entry_price = pair.hedge_entry
+            pnl = 0.0
+            if entry_price > 0 and exit_price > 0:
+                if pair.hedge_side == "long":
+                    pnl = (exit_price - entry_price) * hedge_amount
+                else:
+                    pnl = (entry_price - exit_price) * hedge_amount
+            self.risk.record_pnl(pnl)
             hedger.close(symbol)
             self._log_trade(
                 Signal(symbol=symbol, action=SignalAction.CLOSE, strategy=tag, reason=f"{tag}_stop_hit"),
                 order,
                 f"{tag}_close",
+                pnl,
             )
             return order
         return None
@@ -844,11 +867,21 @@ class OrderManager:
             market_type=market_type,
         )
         if order and order.status == OrderStatus.FILLED:
+            exit_price = order.average_price or 0
+            entry_price = scalp.entry_price
+            pnl = 0.0
+            if entry_price > 0 and exit_price > 0:
+                if scalp.scalp_side == "long":
+                    pnl = (exit_price - entry_price) * scalp.amount
+                else:
+                    pnl = (entry_price - exit_price) * scalp.amount
+            self.risk.record_pnl(pnl)
             self.wick_scalper.close(symbol)
             self._log_trade(
                 Signal(symbol=symbol, action=SignalAction.CLOSE, strategy="wick_scalp", reason="wick_stop_hit"),
                 order,
                 "wick_scalp_close",
+                pnl,
             )
             return order
         return None

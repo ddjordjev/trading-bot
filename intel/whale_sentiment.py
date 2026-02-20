@@ -36,12 +36,13 @@ class WhaleSentimentData(BaseModel):
 
     @property
     def is_overleveraged_longs(self) -> bool:
-        """Extreme positive funding + high L/S ratio = too many longs. Crash incoming?"""
-        return self.funding_rate > 0.05 and self.long_short_ratio > 1.5
+        """Extreme positive funding (>0.05%) + high L/S ratio = too many longs."""
+        return self.funding_rate > 0.0005 and self.long_short_ratio > 1.5
 
     @property
     def is_overleveraged_shorts(self) -> bool:
-        return self.funding_rate < -0.05 and self.long_short_ratio < 0.7
+        """Extreme negative funding (<-0.05%) + low L/S ratio = too many shorts."""
+        return self.funding_rate < -0.0005 and self.long_short_ratio < 0.7
 
     @property
     def oi_building(self) -> bool:

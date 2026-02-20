@@ -117,7 +117,14 @@ class BybitExchange(BaseExchange):
         for asset, info in data.items():
             if isinstance(info, dict) and info.get("free", 0) > 0:
                 result[asset] = float(info["free"])
-        return result
+        try:
+            futures_data = await self._futures.fetch_balance()
+            for asset, info in futures_data.items():
+                if isinstance(info, dict) and info.get("free", 0) > 0:
+                    result[asset] = result.get(asset, 0) + float(info["free"])
+        except Exception:
+            pass
+        return {k: v for k, v in result.items() if v > 0}
 
     async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
         try:

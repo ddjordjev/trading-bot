@@ -115,7 +115,7 @@ class CompoundMomentumStrategy(BaseStrategy):
 
         if abs(change_pct) < self.spike_pct:
             return None
-        if vol_ratio < 1.5:
+        if vol_ratio < self.volume_surge_mult:
             return None
 
         direction_up = change_pct > 0

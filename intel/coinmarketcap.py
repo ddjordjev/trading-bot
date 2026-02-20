@@ -260,8 +260,12 @@ class CoinMarketCapClient:
         coins: list[CMCCoin] = []
         for item in data.get("data", {}).get("cryptoCurrencyList", []):
             try:
-                quotes = item.get("quotes", [{}])
-                q = quotes[0] if quotes else {}
+                raw_quotes = item.get("quotes", [{}])
+                q: dict[str, object]
+                if isinstance(raw_quotes, dict):
+                    q = raw_quotes.get("USD", {}) or next(iter(raw_quotes.values()), {})
+                else:
+                    q = raw_quotes[0] if raw_quotes else {}
                 coins.append(
                     CMCCoin(
                         id=item.get("id", 0),
@@ -302,7 +306,7 @@ class CoinMarketCapClient:
     @staticmethod
     def _parse_api_coin(item: dict[str, Any]) -> CMCCoin | None:
         try:
-            quote = item.get("quote", {}).get("USD", {})
+            quote = (item.get("quote") or {}).get("USD", {})
             return CMCCoin(
                 id=item.get("id", 0),
                 symbol=item.get("symbol", ""),

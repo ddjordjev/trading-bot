@@ -228,9 +228,17 @@ class TrailingStopManager:
         """
         stopped: list[str] = []
         price_map = {p.symbol: p.current_price for p in positions}
+        active_symbols = {p.symbol for p in positions if p.amount > 0}
         for key, ts in list(self._stops.items()):
             price = price_map.get(ts.symbol)
             if price is None:
+                # If this is a sub-position stop and the main position is gone,
+                # trigger the stop so the sub-position gets closed
+                if ":" in key:
+                    base_sym = key.rsplit(":", 1)[0]
+                    if base_sym not in active_symbols:
+                        logger.warning("Main position gone for {} — triggering sub-stop {}", base_sym, key)
+                        stopped.append(key)
                 continue
             if ts.update(price):
                 stopped.append(key)

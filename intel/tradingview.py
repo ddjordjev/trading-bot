@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime
 from enum import Enum
 
@@ -127,18 +128,42 @@ class TradingViewClient:
         self.poll_interval = poll_interval
         self._cache: dict[str, dict[str, TVAnalysis]] = {}
         self._running = False
+        self._poll_symbols: list[str] = []
+        self._poll_task: asyncio.Task[None] | None = None
+
+    def set_poll_symbols(self, symbols: list[str]) -> None:
+        """Configure which symbols are periodically refreshed."""
+        self._poll_symbols = list(symbols)
 
     async def start(self) -> None:
         self._running = True
+        self._poll_task = asyncio.create_task(self._poll_loop())
         logger.info(
-            "TradingView client started (exchange={}, intervals={}, poll={}s)",
+            "TradingView client started (exchange={}, intervals={}, poll={}s, symbols={})",
             self.exchange,
             self.intervals,
             self.poll_interval,
+            self._poll_symbols or "none (call set_poll_symbols)",
         )
 
     async def stop(self) -> None:
         self._running = False
+        if self._poll_task:
+            self._poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._poll_task
+            self._poll_task = None
+
+    async def _poll_loop(self) -> None:
+        while self._running:
+            try:
+                for symbol in self._poll_symbols:
+                    if not self._running:
+                        break
+                    await self.full_analysis(symbol)
+            except Exception as e:
+                logger.debug("TV poll error: {}", e)
+            await asyncio.sleep(self.poll_interval)
 
     async def analyze(self, symbol: str, interval: str = "1h") -> TVAnalysis | None:
         """Get TV analysis for a single symbol at a given interval."""
@@ -239,6 +264,10 @@ class TradingViewClient:
 
     def get_cached(self, symbol: str, interval: str = "1h") -> TVAnalysis | None:
         return self._cache.get(symbol, {}).get(interval)
+
+    def get_all_cached(self) -> dict[str, dict[str, TVAnalysis]]:
+        """Public accessor for all cached analyses."""
+        return dict(self._cache)
 
     def consensus(self, symbol: str) -> str:
         """Cross-interval consensus for a symbol."""

@@ -298,7 +298,19 @@ class TradingBot:
         # 1. Check trailing stops and liquidation
         closed = await self.orders.check_stops()
         for order in closed:
-            await self.notifier.alert_liquidation(order.symbol, 0, balance)
+            sp = self.orders.scaler.get(order.symbol)
+            stashed = self.orders._closed_scalers.get(order.symbol, [])
+            sp = sp or (stashed[0] if stashed else None)
+            entry_price = sp.avg_entry_price if sp and sp.avg_entry_price > 0 else 0
+            exit_price = order.average_price or order.price or 0
+            pnl = 0.0
+            if entry_price > 0 and exit_price > 0:
+                side_str = order.side.value if hasattr(order.side, "value") else str(order.side)
+                if side_str in ("buy", "long"):
+                    pnl = (exit_price - entry_price) * (order.filled or order.amount)
+                else:
+                    pnl = (entry_price - exit_price) * (order.filled or order.amount)
+            await self.notifier.alert_stop_loss(order.symbol, entry_price, exit_price, pnl)
             self._log_closed_trade(order, "stop")
 
         await asyncio.sleep(0)  # yield to event loop (dashboard, etc.)
@@ -593,7 +605,8 @@ class TradingBot:
 
         try:
             queue = self.shared.read_trade_queue()
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to read trade queue: {}", e)
             return
 
         if queue.pending_count == 0:
@@ -739,7 +752,9 @@ class TradingBot:
             leverage=proposal.leverage,
             quick_trade=proposal.quick_trade,
             max_hold_minutes=proposal.max_hold_minutes or None,
-            tick_urgency=TickUrgency(proposal.tick_urgency),
+            tick_urgency=TickUrgency(proposal.tick_urgency)
+            if proposal.tick_urgency in {e.value for e in TickUrgency}
+            else TickUrgency.ACTIVE,
         )
 
         logger.info(
@@ -876,10 +891,10 @@ class TradingBot:
             pnl_pct = 0.0
             if entry_price > 0 and exit_price > 0:
                 if side_str in ("buy", "long"):
-                    pnl_usd = (exit_price - entry_price) * amount * leverage
+                    pnl_usd = (exit_price - entry_price) * amount
                     pnl_pct = (exit_price - entry_price) / entry_price * 100
                 else:
-                    pnl_usd = (entry_price - exit_price) * amount * leverage
+                    pnl_usd = (entry_price - exit_price) * amount
                     pnl_pct = (entry_price - exit_price) / entry_price * 100
 
             record = TradeRecord(
@@ -953,9 +968,9 @@ class TradingBot:
             profit_pct = sp._current_profit_pct(price)
 
             if notional >= self.WHALE_NOTIONAL_THRESHOLD and profit_pct >= self.WHALE_PROFIT_PCT_THRESHOLD:
-                profit_usd = sp.current_size * (price - sp.avg_entry_price) * sp.current_leverage
+                profit_usd = sp.current_size * (price - sp.avg_entry_price)
                 if sp.side == "short":
-                    profit_usd = sp.current_size * (sp.avg_entry_price - price) * sp.current_leverage
+                    profit_usd = sp.current_size * (sp.avg_entry_price - price)
 
                 dashboard_url = f"http://localhost:{self.settings.dashboard_port}"
                 await self.notifier.alert_whale_position(

@@ -250,7 +250,6 @@ class PaperExchange(BaseExchange):
                         "[PAPER] Insufficient margin for remainder {} {} — partial fill only", remainder, order.symbol
                     )
                     order.filled = close_amount
-                    order.amount = close_amount
                     order.status = OrderStatus.PARTIALLY_FILLED
                     return True
                 self._balances["USDT"] -= margin_needed
@@ -319,6 +318,7 @@ class PaperExchange(BaseExchange):
             order_type=OrderType.LIMIT,
             amount=0,
             status=OrderStatus.CANCELLED,
+            market_type=market_type.value,
         )
 
     async def fetch_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
@@ -331,6 +331,7 @@ class PaperExchange(BaseExchange):
             order_type=OrderType.LIMIT,
             amount=0,
             status=OrderStatus.FAILED,
+            market_type=market_type.value,
         )
 
     async def fetch_open_orders(
