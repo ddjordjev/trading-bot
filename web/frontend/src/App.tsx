@@ -57,7 +57,7 @@ export function App() {
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
           <h1 style={{ color: "var(--heading)", fontSize: "1.3rem", fontWeight: 600 }}>
-            Botra
+            Trade Borg
           </h1>
           {multiBot && (
             <select

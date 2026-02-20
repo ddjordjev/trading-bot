@@ -191,7 +191,7 @@ class Notifier:
         msg = MIMEMultipart()
         msg["From"] = self.smtp_user
         msg["To"] = self.notify_email
-        msg["Subject"] = f"[Trading Bot] {subject}"
+        msg["Subject"] = f"[Trade Borg] {subject}"
         msg.attach(MIMEText(body, "plain"))
 
         try:

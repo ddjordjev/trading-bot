@@ -1,6 +1,6 @@
 {
   "uid": "trading-bot",
-  "title": "Trading Bot",
+  "title": "Trade Borg",
   "tags": ["trading"],
   "timezone": "utc",
   "refresh": "15s",

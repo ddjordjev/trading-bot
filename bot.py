@@ -172,7 +172,7 @@ class TradingBot:
 
     async def start(self) -> None:
         logger.info("=" * 60)
-        logger.info("TRADING BOT v0.6.0")
+        logger.info("TRADE BORG v0.7.0")
         logger.info("Mode: {}", self.settings.trading_mode.upper())
         logger.info("Exchange: {} | Allowed: {}", self.settings.exchange, self.settings.allowed_market_types)
         logger.info("Daily target: {:.0f}% (compounding)", self.target.daily_target_pct)
@@ -190,6 +190,7 @@ class TradingBot:
         logger.info("Gambling budget: {}% for low-liq coins", self.settings.gambling_budget_pct)
         logger.info("Intel: {}", "ENABLED" if self.intel else "disabled")
         logger.info("Analytics DB: {} trades logged", self.trade_db.trade_count())
+        self._check_data_dir_size()
         logger.info("=" * 60)
 
         self.analytics.refresh()
@@ -920,6 +921,18 @@ class TradingBot:
             adjusted.strength = min(1.0, adjusted.strength * 1.15)
 
         return adjusted
+
+    def _check_data_dir_size(self) -> None:
+        """Log data directory size on startup. Warn if > 10 MB."""
+        data_path = Path(self.settings.data_dir)
+        if not data_path.exists():
+            return
+        total = sum(f.stat().st_size for f in data_path.rglob("*") if f.is_file())
+        size_mb = total / (1024 * 1024)
+        if size_mb > 10:
+            logger.warning("Data dir {} is {:.1f} MB — consider cleanup", data_path, size_mb)
+        else:
+            logger.info("Data dir: {:.2f} MB", size_mb)
 
     def _log_opened_trade(self, signal: Signal, order: Order, *, low_liquidity: bool = False) -> None:
         """INSERT a row into the DB when a position first opens."""

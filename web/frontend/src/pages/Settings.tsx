@@ -79,12 +79,66 @@ function AuthSection() {
 }
 
 function AboutSection() {
+  const VERSION = "0.7.0";
+  const BUILD_DATE = "2026-02-20";
+
+  const rows: [string, string][] = [
+    ["Name", "Trade Borg"],
+    ["Version", `v${VERSION}`],
+    ["Build Date", BUILD_DATE],
+    ["Runtime", "Python 3.11 + FastAPI + React"],
+    ["Exchanges", "MEXC · Binance · Bybit"],
+    ["License", "Proprietary"],
+  ];
+
   return (
     <div>
-      <h3 style={{ color: "var(--heading)", marginBottom: "0.5rem" }}>About</h3>
-      <p style={{ color: "var(--text-muted)", fontSize: "0.9rem" }}>
-        More information coming soon.
-      </p>
+      <div style={{
+        display: "flex", flexDirection: "column", alignItems: "center",
+        padding: "2rem 0 1.5rem", borderBottom: "1px solid var(--border)", marginBottom: "1.5rem",
+      }}>
+        <span style={{ fontSize: "2.5rem", fontWeight: 700, color: "var(--heading)", letterSpacing: "-0.5px" }}>
+          Trade Borg
+        </span>
+        <span style={{ fontSize: "0.9rem", color: "var(--text-muted)", marginTop: "0.25rem" }}>
+          Algorithmic Trading System
+        </span>
+        <span style={{
+          marginTop: "0.5rem", padding: "0.2rem 0.6rem",
+          background: "var(--surface)", border: "1px solid var(--border)",
+          borderRadius: "12px", fontSize: "0.75rem", color: "var(--accent)",
+        }}>
+          v{VERSION}
+        </span>
+      </div>
+
+      <table style={{ maxWidth: 420 }}>
+        <tbody>
+          {rows.map(([label, value]) => (
+            <tr key={label}>
+              <td style={{ color: "var(--text-muted)", fontWeight: 500, width: 140 }}>{label}</td>
+              <td style={{ color: "var(--heading)" }}>{value}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <div style={{
+        marginTop: "2rem", paddingTop: "1.5rem",
+        borderTop: "1px solid var(--border)",
+        fontSize: "0.75rem", color: "#484f58", lineHeight: 1.8,
+      }}>
+        <p>&copy; {new Date().getFullYear()} Trade Borg. All rights reserved.</p>
+        <p>
+          This software is proprietary and confidential. Unauthorized copying, distribution,
+          or use of this software, via any medium, is strictly prohibited.
+        </p>
+        <p style={{ marginTop: "0.5rem" }}>
+          Trade Borg is provided &ldquo;as is&rdquo; without warranty of any kind. Trading
+          cryptocurrencies involves substantial risk of loss. Past performance does not
+          guarantee future results.
+        </p>
+      </div>
     </div>
   );
 }

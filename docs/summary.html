@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Trading Bot — Requirements &amp; Implementation Summary</title>
+<title>Trade Borg — Requirements &amp; Implementation Summary</title>
 <style>
   :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #c9d1d9; --heading: #f0f6fc; --accent: #58a6ff; --green: #3fb950; --red: #f85149; --yellow: #d29922; --purple: #bc8cff; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -34,8 +34,8 @@
 </head>
 <body>
 
-<h1>Trading Bot — Requirements &amp; Implementation Summary</h1>
-<p class="meta">Last updated: 2026-02-20 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: MEXC, Binance, Bybit &nbsp;|&nbsp; Tests: 1100+ (80%+ coverage) &nbsp;|&nbsp; CI: GitHub Actions (green)</p>
+<h1>Trade Borg — Requirements &amp; Implementation Summary</h1>
+<p class="meta">Last updated: 2026-02-20 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: MEXC, Binance, Bybit &nbsp;|&nbsp; Tests: 1200+ (80%+ coverage) &nbsp;|&nbsp; CI: GitHub Actions (green)</p>
 
 <!-- ============================================================ -->
 <h2>Table of Contents</h2>
@@ -904,6 +904,80 @@
   <tr><td>Queue consumer uses effective_max_concurrent_positions (respects paper mode overrides)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _process_trade_queue()</td></tr>
   <tr><td>SignalGenerator accepts custom major_symbols set from config</td><td><span class="badge done">Done</span></td><td class="file">services/signal_generator.py, services/monitor.py</td></tr>
   <tr><td>10 new tests for major coin proposals, queue thresholds, swing generation</td><td><span class="badge done">Done</span></td><td class="file">tests/test_services.py → TestSignalGenerator</td></tr>
+</table>
+
+<h3 id="s7-32">7.32 Multi-Bot Strategy Tournament</h3>
+
+<div class="principle">
+  <strong>Run 3 bot instances in parallel with different strategies, same capital, one dashboard.</strong> Each bot writes state to <code>data/{bot_id}/</code>, reads shared intel from <code>data/</code>. A dropdown in the header switches between bots, reconnecting the WebSocket to the selected bot's port. Prometheus scrapes all 3 with <code>bot_id</code> labels.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td><code>BOT_ID</code> and <code>BOT_STRATEGIES</code> env vars for per-instance config</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → bot_id, bot_strategies, bot_strategy_list, data_dir</td></tr>
+  <tr><td>Each bot writes to <code>data/{bot_id}/</code>, reads shared intel from <code>data/</code></td><td><span class="badge done">Done</span></td><td class="file">bot.py → self.shared (bot-specific), self.shared_intel (shared)</td></tr>
+  <tr><td>Docker compose: 3 bot services (momentum, meanrev, swing) + shared monitor</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml → bot-momentum, bot-meanrev, bot-swing</td></tr>
+  <tr><td>Dashboard bot selector dropdown, WebSocket auto-reconnect on switch</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/App.tsx, hooks/useWebSocket.ts, api/client.ts</td></tr>
+  <tr><td><code>/api/bots</code> endpoint discovers running bot instances</td><td><span class="badge done">Done</span></td><td class="file">web/server.py → get_bots()</td></tr>
+  <tr><td>Prometheus scrapes all 3 bots with <code>bot_id</code> labels</td><td><span class="badge done">Done</span></td><td class="file">prometheus/prometheus.yml</td></tr>
+  <tr><td>Backward compatible — no BOT_ID = single bot like before</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → data_dir defaults to "data"</td></tr>
+  <tr><td>7 tests for config, data isolation, bot_id in status</td><td><span class="badge done">Done</span></td><td class="file">tests/test_coverage_boost.py, tests/test_shared.py</td></tr>
+</table>
+
+<h3 id="s7-33">7.33 Trade DB Lifecycle (Open → Close)</h3>
+
+<div class="principle">
+  <strong>Every position is recorded in the DB at open time and updated on close.</strong> Previously only stop-loss hits wrote to DB. Now all close paths — signals, manual, expired, hedge, wick, emergency — update the original row with exit data and PnL. If no open row exists (legacy), falls back to INSERT.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td><code>_log_opened_trade()</code> INSERTs a row with entry data when position opens</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _log_opened_trade()</td></tr>
+  <tr><td><code>_log_closed_trade()</code> UPDATEs the open row with exit/PnL data on close</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _log_closed_trade()</td></tr>
+  <tr><td>TradeDB methods: <code>open_trade()</code>, <code>close_trade()</code>, <code>find_open_trade()</code></td><td><span class="badge done">Done</span></td><td class="file">db/store.py</td></tr>
+  <tr><td>All close paths call <code>_log_closed_trade</code>: stops, signals, manual, expired, close-all</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _tick(), _process_signal(), _close_all_positions()</td></tr>
+  <tr><td><code>hold_minutes</code> calculated from <code>opened_at</code> timestamp</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _log_closed_trade()</td></tr>
+  <tr><td><code>order.strategy</code> propagated on both open and close paths</td><td><span class="badge done">Done</span></td><td class="file">core/orders/manager.py</td></tr>
+  <tr><td>10 tests for open/close lifecycle</td><td><span class="badge done">Done</span></td><td class="file">tests/test_db.py, tests/test_bot.py</td></tr>
+</table>
+
+<h3 id="s7-34">7.34 Analytics Fixes — PnL &amp; Closed Trades Tab</h3>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Fix: Unrealized PnL used trailing stop <code>peak_price</code> (all-time high) instead of current market price</td><td><span class="badge done">Done</span></td><td class="file">web/server.py → get_analytics() now fetches real prices from exchange</td></tr>
+  <tr><td>New "Closed Trades" tab with individual trade records from DB</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Analytics.tsx → ClosedTradesTab</td></tr>
+  <tr><td><code>/api/closed-trades</code> endpoint returns individual closed trade rows</td><td><span class="badge done">Done</span></td><td class="file">web/server.py → get_closed_trades()</td></tr>
+  <tr><td>Old strategy scores tab renamed to "Strategy Stats"</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Analytics.tsx</td></tr>
+</table>
+
+<h3 id="s7-35">7.35 Settings Page &amp; Branding</h3>
+
+<div class="principle">
+  <strong>Rebranded to "Trade Borg".</strong> The top-level Modules and Summary tabs are consolidated into a Settings page with a left sidebar layout. Auth/token management moved from the header into Settings.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Rebranded to "Trade Borg" (title, header, FastAPI, HTML)</td><td><span class="badge done">Done</span></td><td class="file">App.tsx, index.html, web/server.py, bot.py</td></tr>
+  <tr><td>Settings page with left sidebar: Modules, Auth, separator, About, Summary</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Settings.tsx</td></tr>
+  <tr><td>Auth/token moved from header button to proper Settings form</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Settings.tsx → AuthSection</td></tr>
+  <tr><td>About page with version, build date, runtime info, legal notice</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Settings.tsx → AboutSection</td></tr>
+</table>
+
+<h3 id="s7-36">7.36 Persistent Data &amp; DB Sync</h3>
+
+<div class="principle">
+  <strong>Data survives container rebuilds.</strong> Docker volumes replaced with host bind mounts (<code>./persistent/data</code>, <code>./persistent/logs</code>). A background <code>db-sync</code> service merges per-bot SQLite DBs into a unified <code>trades_all.db</code> every 30 seconds. Startup size check warns if any data directory exceeds 10 MB.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Host bind mounts: <code>./persistent/data</code> and <code>./persistent/logs</code></td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml → volumes</td></tr>
+  <tr><td>Background <code>db-sync</code> service merges per-bot DBs into <code>data/trades_all.db</code></td><td><span class="badge done">Done</span></td><td class="file">scripts/db_sync.py, docker-compose.yml → db-sync service</td></tr>
+  <tr><td>Unified DB has <code>bot_id</code> and <code>source_id</code> columns for traceability</td><td><span class="badge done">Done</span></td><td class="file">scripts/db_sync.py → _ensure_unified_db()</td></tr>
+  <tr><td>Sync re-updates rows that changed (open→close) since last sync</td><td><span class="badge done">Done</span></td><td class="file">scripts/db_sync.py → _resync_updated()</td></tr>
+  <tr><td>Startup data size check — warns if any dir &gt; 10 MB</td><td><span class="badge done">Done</span></td><td class="file">scripts/db_sync.py → _check_data_sizes(), bot.py → _check_data_dir_size()</td></tr>
 </table>
 
 </body>
