@@ -86,7 +86,6 @@ function AboutSection() {
     ["Name", "Trade Borg"],
     ["Version", `v${VERSION}`],
     ["Build Date", BUILD_DATE],
-    ["Runtime", "Python 3.11 + FastAPI + React"],
     ["Exchanges", "MEXC · Binance · Bybit"],
     ["License", "Proprietary"],
   ];

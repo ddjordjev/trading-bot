@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from web.server import _ALLOWED_TABLES, app, set_bot
+from web.server import _ALLOWED_TABLES, _bot_reports, app, report_bot_snapshot, set_bot
 
 # ── Fixtures ─────────────────────────────────────────────────────────
 
@@ -70,6 +70,7 @@ def mock_bot():
     bot.exchange = AsyncMock()
     bot.exchange.fetch_positions = AsyncMock(return_value=[])
     bot.intel = None
+    bot._multibot = False
     bot.news = MagicMock()
     bot.news.enabled = False
     bot.news._running = False
@@ -106,9 +107,11 @@ def auth_override():
 
 @pytest.fixture
 async def client(auth_override):
+    _bot_reports.clear()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+    _bot_reports.clear()
 
 
 # ── GET /health (no auth) ─────────────────────────────────────────────
@@ -147,32 +150,36 @@ class TestHealth:
 
 
 class TestGetBots:
-    async def test_bots_from_data_dirs(self, client, mock_bot, tmp_path):
+    async def test_bots_from_reports(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        data_dir = tmp_path / "data"
-        momentum_dir = data_dir / "momentum"
-        momentum_dir.mkdir(parents=True)
-        (momentum_dir / "bot_status.json").write_text(
-            '{"bot_id":"momentum","bot_style":"momentum","exchange":"MEXC","level":"hunting"}'
+        _bot_reports.clear()
+        report_bot_snapshot(
+            {
+                "bot_id": "momentum",
+                "bot_style": "momentum",
+                "exchange": "MEXC",
+                "status": {"running": True},
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [{"name": "rsi", "symbol": "BTC/USDT"}],
+            }
         )
-        with patch("web.server.Path", return_value=data_dir):
-            r = await client.get("/api/bots")
+        r = await client.get("/api/bots")
         assert r.status_code == 200
         bots = r.json()
         assert len(bots) >= 1
         bot0 = bots[0]
         assert bot0["bot_id"] == "momentum"
         assert bot0["exchange"] == "MEXC"
+        _bot_reports.clear()
 
-    async def test_bots_fallback_to_current_bot(self, client, mock_bot, tmp_path):
+    async def test_bots_fallback_to_current_bot(self, client, mock_bot):
         mock_bot.settings.bot_id = "solo"
         mock_bot.settings.dashboard_port = 9035
         mock_bot.settings.bot_strategy_list = ["rsi"]
         set_bot(mock_bot)  # type: ignore[arg-type]
-        empty_dir = tmp_path / "data_empty"
-        empty_dir.mkdir()
-        with patch("web.server.Path", return_value=empty_dir):
-            r = await client.get("/api/bots")
+        _bot_reports.clear()
+        r = await client.get("/api/bots")
         assert r.status_code == 200
         bots = r.json()
         assert len(bots) == 1
@@ -430,33 +437,66 @@ class TestGetIntelTrendingStrategies:
 
     async def test_strategies_with_strategies(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        strat = MagicMock()
-        strat.name = "rsi"
-        strat.symbol = "BTC/USDT"
-        strat.market_type = "futures"
-        strat.leverage = 10
-        mock_bot._strategies = [strat]
+        _bot_reports.clear()
+        report_bot_snapshot(
+            {
+                "bot_id": "test",
+                "exchange": "MEXC",
+                "status": {},
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [
+                    {
+                        "name": "rsi",
+                        "symbol": "BTC/USDT",
+                        "market_type": "futures",
+                        "leverage": 10,
+                        "is_dynamic": False,
+                        "open_now": 0,
+                        "applied_count": 5,
+                        "success_count": 3,
+                        "fail_count": 2,
+                    },
+                ],
+            }
+        )
         r = await client.get("/api/strategies")
         assert r.status_code == 200
         data = r.json()
         assert len(data) == 1
         assert data[0]["name"] == "rsi"
         assert data[0]["is_dynamic"] is False
+        _bot_reports.clear()
 
 
 class TestGetStrategiesNoneStats:
-    """Strategies endpoint when get_strategy_stats returns None values (no 500)."""
+    """Strategies endpoint when report has zero stats."""
 
     async def test_strategies_none_stats_returns_zero(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        strat = MagicMock()
-        strat.name = "rsi"
-        strat.symbol = "BTC/USDT"
-        strat.market_type = "futures"
-        strat.leverage = 10
-        mock_bot._strategies = [strat]
-        mock_bot.trade_db.get_strategy_stats = MagicMock(return_value={"total": None, "winners": None, "losers": None})
-        mock_bot.orders.scaler.active_positions = {}
+        _bot_reports.clear()
+        report_bot_snapshot(
+            {
+                "bot_id": "test",
+                "exchange": "MEXC",
+                "status": {},
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [
+                    {
+                        "name": "rsi",
+                        "symbol": "BTC/USDT",
+                        "market_type": "futures",
+                        "leverage": 10,
+                        "is_dynamic": False,
+                        "open_now": 0,
+                        "applied_count": 0,
+                        "success_count": 0,
+                        "fail_count": 0,
+                    },
+                ],
+            }
+        )
         r = await client.get("/api/strategies")
         assert r.status_code == 200
         data = r.json()
@@ -464,6 +504,92 @@ class TestGetStrategiesNoneStats:
         assert data[0]["applied_count"] == 0
         assert data[0]["success_count"] == 0
         assert data[0]["fail_count"] == 0
+        _bot_reports.clear()
+
+
+# ── POST /internal/report & merged snapshot ──────────────────────────
+
+
+class TestInternalReport:
+    async def test_post_internal_report(self, client):
+        payload = {
+            "bot_id": "momentum",
+            "exchange": "MEXC",
+            "status": {
+                "running": True,
+                "balance": 1000,
+                "available_margin": 500,
+                "daily_pnl": 50,
+                "daily_pnl_pct": 5,
+                "total_growth_usd": 100,
+                "total_growth_pct": 10,
+                "profit_buffer_pct": 2,
+                "uptime_seconds": 3600,
+                "manual_stop_active": False,
+                "strategies_count": 2,
+                "dynamic_strategies_count": 1,
+                "trading_mode": "paper_local",
+                "exchange_name": "MEXC",
+                "exchange_url": "",
+                "tier": "building",
+                "tier_progress_pct": 50,
+                "daily_target_pct": 10,
+            },
+            "positions": [{"symbol": "BTC/USDT", "side": "long", "pnl": 10}],
+            "wick_scalps": [{"symbol": "ETH/USDT"}],
+            "strategies": [{"name": "rsi", "symbol": "BTC/USDT"}],
+        }
+        r = await client.post("/internal/report", json=payload)
+        assert r.status_code == 200
+        assert r.json() == {"status": "ok"}
+        assert "momentum" in _bot_reports
+
+    async def test_post_report_no_bot_id_ignored(self, client):
+        r = await client.post("/internal/report", json={"exchange": "MEXC"})
+        assert r.status_code == 200
+        assert len(_bot_reports) == 0
+
+    async def test_merged_snapshot_aggregates_bots(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports.clear()
+        for bid, bal in [("a", 500), ("b", 700)]:
+            report_bot_snapshot(
+                {
+                    "bot_id": bid,
+                    "exchange": "MEXC",
+                    "status": {
+                        "running": True,
+                        "balance": bal,
+                        "available_margin": bal / 2,
+                        "daily_pnl": 10,
+                        "daily_pnl_pct": 1,
+                        "total_growth_usd": 20,
+                        "total_growth_pct": 2,
+                        "profit_buffer_pct": 1,
+                        "uptime_seconds": 60,
+                        "manual_stop_active": False,
+                        "strategies_count": 1,
+                        "dynamic_strategies_count": 0,
+                        "trading_mode": "paper_local",
+                        "exchange_name": "MEXC",
+                        "exchange_url": "",
+                        "tier": "building",
+                        "tier_progress_pct": 50,
+                        "daily_target_pct": 10,
+                    },
+                    "positions": [{"symbol": "BTC/USDT", "side": "long", "pnl": 5}],
+                    "wick_scalps": [],
+                    "strategies": [],
+                }
+            )
+        from web.server import _build_merged_snapshot
+
+        snap = _build_merged_snapshot()
+        assert snap["status"]["balance"] == 1200
+        assert snap["status"]["running"] is True
+        assert len(snap["positions"]) == 2
+        assert len(snap["bots"]) == 2
+        _bot_reports.clear()
 
 
 # ── GET /api/modules, /api/daily-report, /api/analytics ─────────────────
@@ -932,6 +1058,6 @@ class TestSystemMetricsNoTrading:
 class TestServeSummary:
     async def test_summary_missing_returns_404(self, client):
         with patch("web.server.DOCS_DIR", Path("/nonexistent/docs_dir_404")):
-            r = await client.get("/docs/summary")
+            r = await client.get("/api/summary-html")
             assert r.status_code == 404
             assert "not found" in r.text.lower()

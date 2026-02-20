@@ -32,6 +32,7 @@ from intel.liquidations import LiquidationMonitor
 from intel.macro_calendar import MacroCalendar
 from intel.tradingview import TradingViewClient
 from intel.whale_sentiment import WhaleSentiment
+from news import NewsItem, NewsMonitor
 from scanner.trending import TrendingScanner
 from services.signal_generator import SignalGenerator
 from shared.models import (
@@ -91,6 +92,8 @@ class MonitorService:
             min_volume_24h=5_000_000,
             min_market_cap=50_000_000,
         )
+        self.news = NewsMonitor(self.settings)
+        self._recent_news: list[NewsItem] = []
 
         mkt = "futures" if self.settings.futures_allowed else "spot"
         self.signal_gen = SignalGenerator(
@@ -122,6 +125,8 @@ class MonitorService:
         await self.cmc.start()
         await self.gecko.start()
         await self.scanner.start()
+        await self.news.start()
+        self.news.on_news(self._on_news)
 
         await self._run_loop()
 
@@ -135,7 +140,21 @@ class MonitorService:
         await self.cmc.stop()
         await self.gecko.stop()
         await self.scanner.stop()
+        await self.news.stop()
         logger.info("Monitor service stopped")
+
+    async def _on_news(self, item: NewsItem) -> None:
+        self._recent_news.append(item)
+        if len(self._recent_news) > 200:
+            self._recent_news = self._recent_news[-200:]
+        if item.matched_symbols and abs(item.sentiment_score) > 0.3:
+            logger.info(
+                "News [{}]: {} (symbols: {}, sentiment: {})",
+                item.source,
+                item.headline,
+                item.matched_symbols,
+                item.sentiment,
+            )
 
     async def _run_loop(self) -> None:
         tick_count = 0
@@ -440,6 +459,20 @@ class MonitorService:
             for c in self.gecko.all_interesting[:15]
         ]
 
+        # News
+        snap.news_items = [
+            {
+                "headline": n.headline,
+                "source": n.source,
+                "url": n.url,
+                "published": n.published.isoformat() if n.published else "",
+                "matched_symbols": n.matched_symbols,
+                "sentiment": n.sentiment,
+                "sentiment_score": n.sentiment_score,
+            }
+            for n in self._recent_news[-50:]
+        ]
+
         # Metadata
         now_iso = datetime.now(UTC).isoformat()
         snap.monitor_intensity = self._current_level.value
@@ -468,6 +501,9 @@ class MonitorService:
         if self.scanner.hot_movers:
             sources.append("scanner")
             ts["scanner"] = now_iso
+        if self._recent_news:
+            sources.append("news")
+            ts["news"] = now_iso
         snap.sources_active = sources
         prev = self.state.read_intel()
         merged_ts = dict(prev.source_timestamps) if prev.source_timestamps else {}

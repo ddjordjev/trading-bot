@@ -55,13 +55,12 @@ services:
       - BOT_ID=meanrev
       - BOT_STYLE=meanrev
       - BOT_STRATEGIES=bollinger,mean_reversion,grid
-      - DASHBOARD_PORT=9036
-    ports:
-      - "9036:9036"
+      - DASHBOARD_ENABLED=false
+      - DASHBOARD_HUB_URL=http://bot-momentum:9035
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9036/health"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD", "python", "-c", "print('ok')"]
+      interval: 60s
+      timeout: 5s
       start_period: 90s
       retries: 3
 
@@ -74,13 +73,12 @@ services:
       - BOT_ID=swing
       - BOT_STYLE=swing
       - BOT_STRATEGIES=swing_opportunity
-      - DASHBOARD_PORT=9037
-    ports:
-      - "9037:9037"
+      - DASHBOARD_ENABLED=false
+      - DASHBOARD_HUB_URL=http://bot-momentum:9035
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9037/health"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD", "python", "-c", "print('ok')"]
+      interval: 60s
+      timeout: 5s
       start_period: 90s
       retries: 3
 

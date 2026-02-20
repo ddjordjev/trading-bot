@@ -242,6 +242,16 @@ class AnalyticsSnapshot(BaseModel):
     live_positions: list[LivePositionInfo] = []
 
 
+class NewsItemInfo(BaseModel):
+    headline: str
+    source: str
+    url: str = ""
+    published: str = ""
+    matched_symbols: list[str] = []
+    sentiment: str = "neutral"
+    sentiment_score: float = 0.0
+
+
 class ActionResponse(BaseModel):
     success: bool
     message: str

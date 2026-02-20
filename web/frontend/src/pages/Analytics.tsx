@@ -123,7 +123,7 @@ function weightColor(w: number): string {
   return "var(--red)";
 }
 
-export function Analytics() {
+export function Analytics({ bots = [] }: { bots?: { bot_id: string }[] }) {
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [report, setReport] = useState<DailyReport | null>(null);
   const [closedTrades, setClosedTrades] = useState<ClosedTrade[]>([]);

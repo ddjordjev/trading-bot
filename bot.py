@@ -7,7 +7,9 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+import aiohttp
 from loguru import logger
 
 from analytics import AnalyticsEngine
@@ -76,7 +78,6 @@ class TradingBot:
         self.orders = OrderManager(self.exchange, self.risk, self.settings)
         self.notifier = Notifier(self.settings)
         self.volatility = VolatilityDetector(self.settings)
-        self.news = NewsMonitor(self.settings)
         self.target = DailyTargetTracker(
             daily_target_pct=daily_target_pct,
             compound=True,
@@ -86,24 +87,32 @@ class TradingBot:
         self.market_filter = MarketQualityFilter(
             min_liquidity_volume=self.settings.min_liquidity_volume,
         )
-        self.intel: MarketIntel | None = None
-        if self.settings.intel_enabled:
-            self.intel = MarketIntel(
-                coinglass_key=self.settings.coinglass_api_key,
-                symbols=self.settings.intel_symbol_list,
-                tv_exchange=self.settings.tv_exchange,
-                cmc_api_key=self.settings.cmc_api_key,
-                coingecko_api_key=self.settings.coingecko_api_key,
-            )
 
-        self.scanner = TrendingScanner(
-            poll_interval=60,
-            min_volume_24h=5_000_000,
-            min_market_cap=50_000_000,
-            min_hourly_move_pct=2.0,
-            min_daily_move_pct=5.0,
-            intel=self.intel,
-        )
+        self._multibot = bool(self.settings.bot_id)
+
+        # In multi-bot mode the monitor service handles all external data.
+        # Bots only read shared state — no duplicate API calls.
+        self.news: NewsMonitor | None = None
+        self.intel: MarketIntel | None = None
+        self.scanner: TrendingScanner | None = None
+        if not self._multibot:
+            self.news = NewsMonitor(self.settings)
+            if self.settings.intel_enabled:
+                self.intel = MarketIntel(
+                    coinglass_key=self.settings.coinglass_api_key,
+                    symbols=self.settings.intel_symbol_list,
+                    tv_exchange=self.settings.tv_exchange,
+                    cmc_api_key=self.settings.cmc_api_key,
+                    coingecko_api_key=self.settings.coingecko_api_key,
+                )
+            self.scanner = TrendingScanner(
+                poll_interval=60,
+                min_volume_24h=5_000_000,
+                min_market_cap=50_000_000,
+                min_hourly_move_pct=2.0,
+                min_daily_move_pct=5.0,
+                intel=self.intel,
+            )
 
         bot_data = Path(self.settings.data_dir)
         self.trade_db = TradeDB(path=bot_data / "trades.db")
@@ -128,6 +137,7 @@ class TradingBot:
         self._last_status_log: datetime | None = None
         self._started_at: datetime | None = None
         self._warmup_minutes = 3  # no queue processing for first N minutes
+        self._hub_session: aiohttp.ClientSession | None = None
 
     # -- Strategy Management --
 
@@ -205,19 +215,26 @@ class TradingBot:
 
         await self.exchange.connect()
 
-        try:
-            futures_symbols = await self.exchange.get_available_symbols(MarketType.FUTURES)
-            self.scanner.set_exchange_symbols(futures_symbols)
-        except Exception as e:
-            logger.warning("Could not load exchange symbols for scanner filter: {}", e)
-
         await self.notifier.start()
-        await self.news.start()
-        await self.scanner.start()
-        if self.intel:
-            await self.intel.start()
-        self.news.on_news(self._on_news)
-        self.scanner.on_trending(self._on_trending)
+
+        if self._multibot:
+            logger.info("Multi-bot mode: external data from monitor service (no local intel/news/scanner)")
+        else:
+            try:
+                futures_symbols = await self.exchange.get_available_symbols(MarketType.FUTURES)
+                if self.scanner:
+                    self.scanner.set_exchange_symbols(futures_symbols)
+            except Exception as e:
+                logger.warning("Could not load exchange symbols for scanner filter: {}", e)
+
+            if self.news:
+                await self.news.start()
+                self.news.on_news(self._on_news)
+            if self.scanner:
+                await self.scanner.start()
+                self.scanner.on_trending(self._on_trending)
+            if self.intel:
+                await self.intel.start()
 
         balance_map = await self.exchange.fetch_balance()
         balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
@@ -245,11 +262,16 @@ class TradingBot:
         self._running = False
         if self.intel:
             await self.intel.stop()
-        await self.scanner.stop()
-        await self.news.stop()
+        if self.scanner:
+            await self.scanner.stop()
+        if self.news:
+            await self.news.stop()
         await self.notifier.stop()
         await self.exchange.disconnect()
         self.trade_db.close()
+        if self._hub_session:
+            await self._hub_session.close()
+            self._hub_session = None
         logger.info("Bot stopped")
 
     async def _run_loop(self) -> None:
@@ -336,8 +358,16 @@ class TradingBot:
             exit_price = order.average_price or order.price or 0
             pnl = 0.0
             if entry_price > 0 and exit_price > 0:
-                side_str = order.side.value if hasattr(order.side, "value") else str(order.side)
-                if side_str in ("buy", "long"):
+                pos_side = (
+                    sp.side
+                    if sp
+                    else (
+                        "long"
+                        if (order.side.value if hasattr(order.side, "value") else str(order.side)) in ("buy", "long")
+                        else "short"
+                    )
+                )
+                if pos_side == "long":
                     pnl = (exit_price - entry_price) * (order.filled or order.amount)
                 else:
                     pnl = (entry_price - exit_price) * (order.filled or order.amount)
@@ -981,12 +1011,13 @@ class TradingBot:
             entry_price = sp.avg_entry_price if sp and sp.avg_entry_price > 0 else exit_price
             amount = order.filled or order.amount
             leverage = order.leverage or (sp.current_leverage if sp else 1)
-            side_str = order.side.value if hasattr(order.side, "value") else str(order.side)
+            order_side = order.side.value if hasattr(order.side, "value") else str(order.side)
+            pos_side = sp.side if sp else ("long" if order_side in ("buy", "long") else "short")
 
             pnl_usd = 0.0
             pnl_pct = 0.0
             if entry_price > 0 and exit_price > 0:
-                if side_str in ("buy", "long"):
+                if pos_side == "long":
                     pnl_usd = (exit_price - entry_price) * amount
                     pnl_pct = (exit_price - entry_price) / entry_price * 100
                 else:
@@ -1018,7 +1049,7 @@ class TradingBot:
 
             record = TradeRecord(
                 symbol=order.symbol,
-                side=side_str,
+                side=pos_side,
                 strategy=order.strategy or close_reason,
                 action="close",
                 scale_mode=sp.mode.value if sp else "",
@@ -1160,6 +1191,138 @@ class TradingBot:
             manual_stop=self.target.manual_stop,
         )
         self.shared.write_bot_status(status)
+        await self._report_dashboard_snapshot(active)
+
+    async def _report_dashboard_snapshot(self, active_positions: list[Any]) -> None:
+        """Build and send dashboard snapshot to the central hub."""
+        import time as _time
+
+        pos_list = []
+        for pos in active_positions:
+            ts = self.orders.trailing.active_stops.get(pos.symbol)
+            sp = self.orders.scaler.get(pos.symbol)
+            pos_list.append(
+                {
+                    "symbol": pos.symbol,
+                    "side": pos.side.value if hasattr(pos.side, "value") else str(pos.side),
+                    "amount": pos.amount,
+                    "entry_price": pos.entry_price,
+                    "current_price": pos.current_price,
+                    "pnl_pct": pos.pnl_pct,
+                    "pnl_usd": pos.unrealized_pnl,
+                    "leverage": pos.leverage,
+                    "market_type": pos.market_type,
+                    "strategy": pos.strategy,
+                    "stop_loss": (ts.current_stop if ts else pos.stop_loss),
+                    "notional_value": pos.notional_value,
+                    "age_minutes": ((_time.time() - pos.opened_at.timestamp()) / 60 if pos.opened_at else 0),
+                    "breakeven_locked": ts.breakeven_locked if ts else False,
+                    "scale_mode": sp.mode.value if sp else "",
+                    "scale_phase": sp.phase.value if sp else "",
+                    "dca_count": sp.adds if sp else 0,
+                    "trade_url": self.settings.symbol_platform_url(pos.symbol, pos.market_type),
+                }
+            )
+
+        wick_list = []
+        for sym, ws in self.orders.wick_scalper.active_scalps.items():
+            wick_list.append(
+                {
+                    "symbol": sym,
+                    "scalp_side": ws.scalp_side,
+                    "entry_price": ws.entry_price,
+                    "amount": ws.amount,
+                    "age_minutes": ws.age_minutes,
+                    "max_hold_minutes": ws.max_hold_minutes,
+                }
+            )
+
+        strat_list = []
+        open_syms = set(self.orders.scaler.active_positions.keys())
+        for s in self._strategies:
+            stats = self.trade_db.get_strategy_stats(s.name, s.symbol)
+            strat_list.append(
+                {
+                    "name": s.name,
+                    "symbol": s.symbol,
+                    "market_type": s.market_type,
+                    "leverage": s.leverage,
+                    "is_dynamic": False,
+                    "open_now": 1 if s.symbol in open_syms else 0,
+                    "applied_count": stats.get("total") or 0,
+                    "success_count": stats.get("winners") or 0,
+                    "fail_count": stats.get("losers") or 0,
+                }
+            )
+        for _sym, s in self._dynamic_strategies.items():
+            stats = self.trade_db.get_strategy_stats(s.name, s.symbol)
+            strat_list.append(
+                {
+                    "name": s.name,
+                    "symbol": s.symbol,
+                    "market_type": s.market_type,
+                    "leverage": s.leverage,
+                    "is_dynamic": True,
+                    "open_now": 1 if s.symbol in open_syms else 0,
+                    "applied_count": stats.get("total") or 0,
+                    "success_count": stats.get("winners") or 0,
+                    "fail_count": stats.get("losers") or 0,
+                }
+            )
+
+        margin_used = 0.0
+        for sp in self.orders.scaler.active_positions.values():
+            margin_used += sp.avg_entry_price * sp.current_size / max(sp.current_leverage, 1)
+        total_balance = self.target._current_balance
+
+        payload = {
+            "bot_id": self.settings.bot_id or "default",
+            "bot_style": self.settings.bot_style,
+            "exchange": self.settings.exchange.upper(),
+            "status": {
+                "running": self._running,
+                "trading_mode": self.settings.trading_mode,
+                "exchange_name": self.settings.exchange.upper(),
+                "exchange_url": self.settings.platform_url,
+                "balance": total_balance,
+                "available_margin": max(0.0, total_balance - margin_used),
+                "daily_pnl": self.target.todays_pnl,
+                "daily_pnl_pct": self.target.todays_pnl_pct,
+                "tier": self.target.tier.value,
+                "tier_progress_pct": self.target.progress_pct,
+                "daily_target_pct": self.target.daily_target_pct,
+                "total_growth_pct": self.target.total_growth_pct,
+                "total_growth_usd": total_balance - self.target._initial_capital,
+                "uptime_seconds": time.time() - self._started_at.timestamp() if self._started_at else 0,
+                "strategies_count": len(self._strategies),
+                "dynamic_strategies_count": len(self._dynamic_strategies),
+                "profit_buffer_pct": self.target.profit_buffer_pct,
+                "manual_stop_active": self.target.manual_stop,
+            },
+            "positions": pos_list,
+            "wick_scalps": wick_list,
+            "strategies": strat_list,
+        }
+
+        hub_url = self.settings.dashboard_hub_url
+        if hub_url:
+            await self._post_to_hub(hub_url, payload)
+        elif self.settings.dashboard_enabled:
+            from web.server import report_bot_snapshot
+
+            report_bot_snapshot(payload)
+
+    async def _post_to_hub(self, hub_url: str, payload: dict[str, Any]) -> None:
+        """POST snapshot to the central dashboard via HTTP."""
+        if not self._hub_session:
+            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
+        try:
+            url = f"{hub_url.rstrip('/')}/internal/report"
+            async with self._hub_session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    logger.debug("Hub report failed: {}", resp.status)
+        except Exception as e:
+            logger.debug("Hub report error: {}", e)
 
     def _read_shared_intel(self) -> MarketCondition | None:
         """Read intel from shared state file (written by monitor service).
@@ -1174,6 +1337,26 @@ class TradingBot:
         snap = self.shared_intel.read_intel()
         if not snap.sources_active:
             return None
+
+        # Hydrate news from shared state (monitor collects it centrally)
+        if self._multibot and snap.news_items:
+            self._recent_news = []
+            for nd in snap.news_items:
+                try:
+                    pub = datetime.fromisoformat(nd["published"]) if nd.get("published") else datetime.now(UTC)
+                    self._recent_news.append(
+                        NewsItem(
+                            headline=nd.get("headline", ""),
+                            source=nd.get("source", ""),
+                            url=nd.get("url", ""),
+                            published=pub,
+                            matched_symbols=nd.get("matched_symbols", []),
+                            sentiment=nd.get("sentiment", "neutral"),
+                            sentiment_score=nd.get("sentiment_score", 0.0),
+                        )
+                    )
+                except Exception:
+                    pass
 
         return MarketCondition(
             regime=MarketRegime(snap.regime),
@@ -1404,7 +1587,7 @@ class TradingBot:
     async def _handle_spike(self, spike: SpikeEvent) -> None:
         await self.notifier.alert_spike(spike.symbol, spike.change_pct, spike.direction, spike.price)
 
-        news_item = self.news.correlate_spike(spike.symbol, self._recent_news)
+        news_item = self.news.correlate_spike(spike.symbol, self._recent_news) if self.news else None
         if news_item:
             spike.confirmed_by_news = True
             spike.news_headline = news_item.headline
@@ -1484,7 +1667,8 @@ class TradingBot:
 
         logger.info(self.target.status_report())
         logger.info(self.risk.risk_summary())
-        logger.info(self.scanner.scan_summary())
+        if self.scanner:
+            logger.info(self.scanner.scan_summary())
         if self.intel:
             logger.info(self.intel.full_summary())
         logger.info("Active strategies: {} static + {} dynamic", len(self._strategies), len(self._dynamic_strategies))

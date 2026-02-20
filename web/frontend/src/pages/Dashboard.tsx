@@ -162,7 +162,7 @@ export function Dashboard({ data, showBotColumn = false }: { data: FullSnapshot 
           <table>
             <thead>
               <tr>
-                {showBotColumn && <th>Bot</th>}
+                {showBotColumn && <th>Bot / Strategy</th>}
                 {showBotColumn && <th>Exchange</th>}
                 <th>Symbol</th>
                 <th>Entry</th>

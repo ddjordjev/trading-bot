@@ -1,6 +1,5 @@
-import { useState, useEffect, useMemo } from "react";
-import { useMultiBotWebSocket } from "./hooks/useMultiBotWebSocket";
-import type { MergedDashboard } from "./hooks/useMultiBotWebSocket";
+import { useState, useMemo } from "react";
+import { useWebSocket } from "./hooks/useWebSocket";
 import type { FullSnapshot } from "./hooks/useWebSocket";
 import { Dashboard } from "./pages/Dashboard";
 import { Intel } from "./pages/Intel";
@@ -9,71 +8,73 @@ import { Strategies } from "./pages/Strategies";
 import { Analytics } from "./pages/Analytics";
 import { Monitoring } from "./pages/Monitoring";
 import { Settings } from "./pages/Settings";
-import { get } from "./api/client";
 
-interface BotInfo {
-  bot_id: string;
-  label: string;
-  port: number;
-  exchange: string;
-  strategies: string[];
-}
-
-const EXCHANGES = ["MEXC", "BINANCE", "BYBIT"];
+const FALLBACK_EXCHANGES = ["MEXC", "BINANCE", "BYBIT"];
 
 const TABS = [
   "Dashboard", "Intel", "Scanner", "Strategies", "Analytics", "Monitoring", "Settings",
 ] as const;
 type Tab = typeof TABS[number];
 
+const LABEL_MAP: Record<string, string> = {
+  momentum: "Momentum",
+  meanrev: "Mean Reversion",
+  swing: "Swing",
+};
+
 export function App() {
-  const [bots, setBots] = useState<BotInfo[]>([]);
   const [selected, setSelected] = useState("all");
+  const [exchangeFilter, setExchangeFilter] = useState("all");
   const [tab, setTab] = useState<Tab>("Dashboard");
-  const [botExchanges, setBotExchanges] = useState<Record<string, string>>({});
 
-  useEffect(() => {
-    get<BotInfo[]>("/api/bots")
-      .then((list) => {
-        setBots(list);
-        const initial: Record<string, string> = {};
-        for (const b of list) initial[b.bot_id] = b.exchange || "MEXC";
-        setBotExchanges(initial);
-      })
-      .catch(() => {});
-  }, []);
+  const { data: snapshot, connected } = useWebSocket();
 
-  const botPorts = useMemo(
-    () => bots.map((b) => ({ bot_id: b.bot_id, port: b.port })),
-    [bots],
-  );
+  const bots = useMemo(() => {
+    if (!snapshot?.bots) return [];
+    return snapshot.bots.map((b) => ({
+      bot_id: b.bot_id,
+      label: LABEL_MAP[b.bot_id] || b.bot_id.charAt(0).toUpperCase() + b.bot_id.slice(1),
+      exchange: b.exchange || "",
+    }));
+  }, [snapshot?.bots]);
 
-  const { merged, allConnected } = useMultiBotWebSocket(botPorts);
+  const exchanges = useMemo(() => {
+    const fromBots = [...new Set(bots.map((b) => b.exchange.toUpperCase()).filter(Boolean))];
+    return fromBots.length > 0 ? fromBots.sort() : FALLBACK_EXCHANGES;
+  }, [bots]);
 
   const dashboardData: FullSnapshot | null = useMemo(() => {
-    if (!merged) return null;
+    if (!snapshot) return null;
+
+    const exMatch = (item: any) =>
+      exchangeFilter === "all" ||
+      (item.exchange_name || "").toUpperCase() === exchangeFilter;
+
     if (selected === "all") {
       return {
-        status: merged.status,
-        positions: merged.positions,
-        wick_scalps: merged.wick_scalps,
-        logs: merged.logs,
-        intel: merged.intel,
+        status: snapshot.status,
+        positions: snapshot.positions.filter(exMatch),
+        wick_scalps: snapshot.wick_scalps.filter(exMatch),
+        logs: snapshot.logs,
+        intel: snapshot.intel,
+        bots: snapshot.bots,
       };
     }
-    const bot = merged.bots.find((b) => b.bot_id === selected);
-    if (!bot?.data) return null;
-    const exName = bot.data.status.exchange_name || "";
-    return {
-      ...bot.data,
-      positions: bot.data.positions.map((p) => ({ ...p, bot_id: selected, exchange_name: exName })),
-      wick_scalps: bot.data.wick_scalps.map((w) => ({ ...w, bot_id: selected, exchange_name: exName })),
-    };
-  }, [merged, selected]);
 
-  const connCount = merged?.bots.filter((b) => b.connected).length ?? 0;
-  const totalBots = bots.length;
-  const connected = selected === "all" ? connCount > 0 : (merged?.bots.find((b) => b.bot_id === selected)?.connected ?? false);
+    const bot = snapshot.bots?.find((b) => b.bot_id === selected);
+    if (!bot?.data) return null;
+    const exName = bot.exchange || "";
+    const taggedPositions = bot.data.positions.map((p) => ({ ...p, bot_id: selected, exchange_name: exName }));
+    const taggedWicks = bot.data.wick_scalps.map((w) => ({ ...w, bot_id: selected, exchange_name: exName }));
+    return {
+      status: bot.data.status,
+      positions: taggedPositions.filter(exMatch),
+      wick_scalps: taggedWicks.filter(exMatch),
+      logs: bot.data.logs || [],
+      intel: snapshot.intel,
+      bots: snapshot.bots,
+    };
+  }, [snapshot, selected, exchangeFilter]);
 
   return (
     <div className="app-container">
@@ -85,55 +86,49 @@ export function App() {
           <h1 style={{ color: "var(--heading)", fontSize: "1.3rem", fontWeight: 600 }}>
             Trade Borg
           </h1>
-          {bots.length > 1 && (
-            <select
-              value={selected}
-              onChange={(e) => setSelected(e.target.value)}
-              style={{
-                padding: "0.25rem 0.5rem",
-                borderRadius: "var(--radius)",
-                border: "1px solid var(--border)",
-                background: "var(--surface)",
-                color: "var(--text)",
-                fontSize: "0.85rem",
-                cursor: "pointer",
-              }}
-            >
-              <option value="all">All Bots</option>
-              {bots.map((b) => (
-                <option key={b.bot_id} value={b.bot_id}>
-                  {b.label}
-                </option>
-              ))}
-            </select>
-          )}
-          {bots.length > 1 && selected !== "all" && (
-            <select
-              value={botExchanges[selected] || "MEXC"}
-              onChange={(e) =>
-                setBotExchanges((prev) => ({ ...prev, [selected]: e.target.value }))
-              }
-              title="Exchange for this bot (switching not yet wired)"
-              style={{
-                padding: "0.25rem 0.5rem",
-                borderRadius: "var(--radius)",
-                border: "1px solid var(--border)",
-                background: "var(--surface)",
-                color: "var(--text)",
-                fontSize: "0.8rem",
-                cursor: "pointer",
-              }}
-            >
-              {EXCHANGES.map((ex) => (
-                <option key={ex} value={ex}>{ex}</option>
-              ))}
-            </select>
-          )}
+          <select
+            value={selected}
+            onChange={(e) => setSelected(e.target.value)}
+            style={{
+              padding: "0.25rem 0.5rem",
+              borderRadius: "var(--radius)",
+              border: "1px solid var(--border)",
+              background: "var(--surface)",
+              color: "var(--text)",
+              fontSize: "0.85rem",
+              cursor: "pointer",
+            }}
+          >
+            <option value="all">All Bots</option>
+            {bots.map((b) => (
+              <option key={b.bot_id} value={b.bot_id}>
+                {b.label}
+              </option>
+            ))}
+          </select>
+          <select
+            value={exchangeFilter}
+            onChange={(e) => setExchangeFilter(e.target.value)}
+            style={{
+              padding: "0.25rem 0.5rem",
+              borderRadius: "var(--radius)",
+              border: "1px solid var(--border)",
+              background: "var(--surface)",
+              color: "var(--text)",
+              fontSize: "0.8rem",
+              cursor: "pointer",
+            }}
+          >
+            <option value="all">All Exchanges</option>
+            {exchanges.map((ex) => (
+              <option key={ex} value={ex}>{ex}</option>
+            ))}
+          </select>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
           {bots.length > 1 && selected === "all" && (
             <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-              {connCount}/{totalBots} bots
+              {bots.filter((b) => snapshot?.bots?.find((sb) => sb.bot_id === b.bot_id)?.connected).length}/{bots.length} bots
             </span>
           )}
           <span style={{
@@ -159,11 +154,11 @@ export function App() {
         ))}
       </nav>
 
-      {tab === "Dashboard" && <Dashboard data={dashboardData} showBotColumn={selected === "all" && bots.length > 1} />}
+      {tab === "Dashboard" && <Dashboard data={dashboardData} showBotColumn={bots.length > 1} />}
       {tab === "Intel" && <Intel wsIntel={dashboardData?.intel ?? null} />}
       {tab === "Scanner" && <Scanner />}
-      {tab === "Strategies" && <Strategies />}
-      {tab === "Analytics" && <Analytics />}
+      {tab === "Strategies" && <Strategies bots={[]} />}
+      {tab === "Analytics" && <Analytics bots={[]} />}
       {tab === "Monitoring" && <Monitoring />}
       {tab === "Settings" && <Settings />}
     </div>

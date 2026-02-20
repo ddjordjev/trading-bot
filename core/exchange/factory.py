@@ -50,12 +50,13 @@ def create_exchange(settings: Settings) -> BaseExchange:
         raise ValueError(f"Unsupported exchange: {settings.exchange}. Supported: {', '.join(exchange_map)}")
 
     cls, kwargs = entry
-    sandbox = settings.is_paper() and cls.HAS_TESTNET
+    sandbox = settings.is_paper_live() and cls.HAS_TESTNET
     real_exchange = cls(**kwargs, sandbox=sandbox)
 
     if sandbox:
-        label = "local simulation" if settings.is_paper_local() else "testnet orders"
-        logger.info("Testnet mode enabled for {} ({})", settings.exchange.upper(), label)
+        logger.info("Testnet mode enabled for {} (testnet orders)", settings.exchange.upper())
+    elif settings.is_paper_local():
+        logger.info("Paper LOCAL: using production prices for {} (orders simulated locally)", settings.exchange.upper())
 
     wanted = set(settings.allowed_market_type_list)
     supported = set(real_exchange.SUPPORTED_MARKET_TYPES)

@@ -3,6 +3,22 @@ import type { IntelSnapshot } from "../hooks/useWebSocket";
 import { get } from "../api/client";
 import { FearGreedGauge } from "../components/FearGreedGauge";
 
+interface NewsItem {
+  headline: string;
+  source: string;
+  url: string;
+  published: string;
+  matched_symbols: string[];
+  sentiment: string;
+  sentiment_score: number;
+}
+
+const SENTIMENT_COLORS: Record<string, string> = {
+  bullish: "var(--green)",
+  bearish: "var(--red)",
+  neutral: "var(--text-muted)",
+};
+
 const REGIME_COLORS: Record<string, string> = {
   risk_on: "var(--green)",
   normal: "var(--text)",
@@ -13,6 +29,7 @@ const REGIME_COLORS: Record<string, string> = {
 
 export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
   const [intel, setIntel] = useState<IntelSnapshot | null>(wsIntel);
+  const [news, setNews] = useState<NewsItem[]>([]);
 
   useEffect(() => {
     if (wsIntel) setIntel(wsIntel);
@@ -22,6 +39,10 @@ export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
     if (!intel) {
       get<IntelSnapshot | null>("/api/intel").then(setIntel).catch(() => {});
     }
+    const fetchNews = () => get<NewsItem[]>("/api/news").then(setNews).catch(() => {});
+    fetchNews();
+    const iv = setInterval(fetchNews, 30000);
+    return () => clearInterval(iv);
   }, []);
 
   if (!intel) return <div className="empty-state">Intel module not active</div>;
@@ -170,6 +191,59 @@ export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
             </div>
           )}
         </div>
+      </div>
+
+      <div className="card" style={{ marginTop: "1rem" }}>
+        <h3 style={{ color: "var(--heading)", marginBottom: "0.8rem" }}>
+          News Feed ({news.length})
+        </h3>
+        {news.length === 0 ? (
+          <div style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
+            No news items yet. Feed refreshes every 60s.
+          </div>
+        ) : (
+          <div style={{ maxHeight: 350, overflowY: "auto" }}>
+            {news.map((n, i) => (
+              <div key={i} style={{
+                padding: "0.5rem 0",
+                borderBottom: i < news.length - 1 ? "1px solid var(--border)" : "none",
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem" }}>
+                  <div style={{ flex: 1 }}>
+                    {n.url ? (
+                      <a href={n.url} target="_blank" rel="noopener noreferrer"
+                        style={{ color: "var(--heading)", textDecoration: "none", fontWeight: 500, fontSize: "0.85rem" }}>
+                        {n.headline}
+                      </a>
+                    ) : (
+                      <span style={{ color: "var(--heading)", fontWeight: 500, fontSize: "0.85rem" }}>{n.headline}</span>
+                    )}
+                    <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.25rem", flexWrap: "wrap", alignItems: "center" }}>
+                      <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>{n.source}</span>
+                      {n.published && (
+                        <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+                          {new Date(n.published).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      )}
+                      {n.matched_symbols.map((s) => (
+                        <span key={s} className="badge" style={{ fontSize: "0.65rem", padding: "0.1rem 0.3rem", background: "rgba(88,166,255,0.15)", color: "var(--accent)" }}>
+                          {s}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <span style={{
+                    fontSize: "0.7rem", fontWeight: 600, whiteSpace: "nowrap",
+                    color: SENTIMENT_COLORS[n.sentiment] || "var(--text-muted)",
+                  }}>
+                    {n.sentiment.toUpperCase()}
+                    {n.sentiment !== "neutral" && ` ${(n.sentiment_score * 100).toFixed(0)}%`}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

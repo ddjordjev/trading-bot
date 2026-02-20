@@ -115,7 +115,7 @@
       <li><a href="#s7-29">Chart Pattern Recognition &amp; Smart SL/TP</a></li>
       <li><a href="#s7-31">Multi-Queue Trading &amp; Major Coin Coverage</a></li>
       <li><a href="#s7-30">Prometheus &amp; Grafana Monitoring</a></li>
-      <li><a href="#s7-31">Multi-Queue Trading &amp; Major Coin Coverage</a></li>
+      <li><a href="#s7-38">Centralized Dashboard &amp; API-Based Bot Reporting</a></li>
     </ol>
   </li>
 </ol>
@@ -238,7 +238,7 @@
   <tr><td><code>db/models.py</code></td><td>TradeRecord, StrategyScore, PatternInsight, ModificationSuggestion</td></tr>
   <tr><td><code>analytics/engine.py</code></td><td>Pattern detection, strategy scoring, weight factors, modification suggestions</td></tr>
   <tr><td><code>shared/state.py</code></td><td>Atomic JSON read/write with fcntl file locking for inter-process communication</td></tr>
-  <tr><td><code>shared/models.py</code></td><td>BotDeploymentStatus, IntelSnapshot, AnalyticsSnapshot, TradeQueue, TradeProposal</td></tr>
+  <tr><td><code>shared/models.py</code></td><td>BotDeploymentStatus, BotDashboardSnapshot, IntelSnapshot, AnalyticsSnapshot, TradeQueue, TradeProposal</td></tr>
   <tr><td><code>services/monitor.py</code></td><td>Standalone monitoring service with adaptive intensity + signal generation</td></tr>
   <tr><td><code>services/signal_generator.py</code></td><td>Converts intel snapshots into CRITICAL/DAILY/SWING trade proposals</td></tr>
   <tr><td><code>services/analytics_service.py</code></td><td>Standalone analytics service (reads trades.db, writes scores)</td></tr>
@@ -714,7 +714,7 @@
     <td><span class="badge done">Done</span></td>
     <td class="file">services/monitor.py → INTENSITY_TABLE</td>
   </tr>
-  <tr><td>Docker Compose: 5 services (bot, monitor, analytics, prometheus, grafana) with shared volume</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml (multi-service), docker-compose.single.yml (all-in-one)</td></tr>
+  <tr><td>Docker Compose: 10 services (3 bots, monitor, analytics, db-sync, prometheus, grafana, loki, promtail) with shared volume</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml</td></tr>
   <tr><td>Backwards compatible: bot still works in single-process mode</td><td><span class="badge done">Done</span></td><td class="file">bot.py falls back to in-process intel/analytics if shared state stale</td></tr>
 </table>
 
@@ -909,7 +909,7 @@
 <h3 id="s7-32">7.32 Multi-Bot Strategy Tournament</h3>
 
 <div class="principle">
-  <strong>Run 3 bot instances in parallel with different strategies, same capital, one dashboard.</strong> Each bot writes state to <code>data/{bot_id}/</code>, reads shared intel from <code>data/</code>. A dropdown in the header switches between bots, reconnecting the WebSocket to the selected bot's port. Prometheus scrapes all 3 with <code>bot_id</code> labels.
+  <strong>Run 3 bot instances in parallel with different strategies, same capital, one central dashboard.</strong> Each bot writes state to <code>data/{bot_id}/</code>, reads shared intel from <code>data/</code>. External data (news, intel, scanner) is centralized in the monitor service — bots are thin clients that only execute trades. Only <code>bot-momentum</code> runs the web dashboard; other bots POST their snapshots to it via HTTP.
 </div>
 
 <table>
@@ -917,8 +917,8 @@
   <tr><td><code>BOT_ID</code> and <code>BOT_STRATEGIES</code> env vars for per-instance config</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → bot_id, bot_strategies, bot_strategy_list, data_dir</td></tr>
   <tr><td>Each bot writes to <code>data/{bot_id}/</code>, reads shared intel from <code>data/</code></td><td><span class="badge done">Done</span></td><td class="file">bot.py → self.shared (bot-specific), self.shared_intel (shared)</td></tr>
   <tr><td>Docker compose: 3 bot services (momentum, meanrev, swing) + shared monitor</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml → bot-momentum, bot-meanrev, bot-swing</td></tr>
-  <tr><td>Dashboard bot selector dropdown, WebSocket auto-reconnect on switch</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/App.tsx, hooks/useWebSocket.ts, api/client.ts</td></tr>
-  <tr><td><code>/api/bots</code> endpoint discovers running bot instances</td><td><span class="badge done">Done</span></td><td class="file">web/server.py → get_bots()</td></tr>
+  <tr><td>Multi-bot mode: bots don't run their own NewsMonitor, MarketIntel, or TrendingScanner — read from shared state</td><td><span class="badge done">Done</span></td><td class="file">bot.py → self._multibot, conditional module init</td></tr>
+  <tr><td>Monitor service centrally runs news, intel, scanner and writes to shared <code>intel_state.json</code></td><td><span class="badge done">Done</span></td><td class="file">services/monitor.py → NewsMonitor, _build_snapshot()</td></tr>
   <tr><td>Prometheus scrapes all 3 bots with <code>bot_id</code> labels</td><td><span class="badge done">Done</span></td><td class="file">prometheus/prometheus.yml</td></tr>
   <tr><td>Backward compatible — no BOT_ID = single bot like before</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → data_dir defaults to "data"</td></tr>
   <tr><td>7 tests for config, data isolation, bot_id in status</td><td><span class="badge done">Done</span></td><td class="file">tests/test_coverage_boost.py, tests/test_shared.py</td></tr>
@@ -994,6 +994,27 @@
   <tr><td>Grafana Loki datasource auto-provisioned</td><td><span class="badge done">Done</span></td><td class="file">grafana/provisioning/datasources/loki.yml</td></tr>
   <tr><td>Pre-built log dashboard: volume chart, error rate, warning rate, log viewer</td><td><span class="badge done">Done</span></td><td class="file">grafana/dashboards/logs.json</td></tr>
   <tr><td>No changes to bot trading logic — pure observability layer</td><td><span class="badge done">Done</span></td><td class="file">N/A — Promtail reads Docker stdout logs externally</td></tr>
+</table>
+
+<h3 id="s7-38">7.38 Centralized Dashboard &amp; API-Based Bot Reporting</h3>
+
+<div class="principle">
+  <strong>Bots report to the dashboard via HTTP, not shared files.</strong> Only <code>bot-momentum</code> runs the web server (port 9035). Other bots (<code>bot-meanrev</code>, <code>bot-swing</code>) POST their full dashboard snapshot (positions, strategies, status, wick scalps) to <code>POST /internal/report</code> on every tick. The dashboard server merges all bot data in-memory and serves a unified view via a single WebSocket. The frontend connects to one port only — no cross-port calls, no multi-WebSocket complexity.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Bots POST dashboard snapshots to central server via HTTP (aiohttp)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _report_dashboard_snapshot(), _post_to_hub()</td></tr>
+  <tr><td><code>DASHBOARD_HUB_URL</code> env var for non-primary bots</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → dashboard_hub_url</td></tr>
+  <tr><td><code>POST /internal/report</code> endpoint stores snapshots in-memory (no auth — Docker internal network)</td><td><span class="badge done">Done</span></td><td class="file">web/server.py → receive_bot_report(), _bot_reports dict</td></tr>
+  <tr><td>WebSocket serves merged view from all bot reports (server-side merge)</td><td><span class="badge done">Done</span></td><td class="file">web/server.py → _build_merged_snapshot()</td></tr>
+  <tr><td>Only bot-momentum runs the dashboard; others set <code>DASHBOARD_ENABLED=false</code></td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml → bot-meanrev, bot-swing env vars</td></tr>
+  <tr><td><code>/api/bots</code> and <code>/api/strategies</code> read from in-memory reports, not per-bot APIs</td><td><span class="badge done">Done</span></td><td class="file">web/server.py → get_bots(), get_strategies()</td></tr>
+  <tr><td>Frontend: single WebSocket connection, no multi-port logic</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/App.tsx, hooks/useWebSocket.ts</td></tr>
+  <tr><td>Frontend: Strategies/Analytics fetch from central server only</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Strategies.tsx, Analytics.tsx</td></tr>
+  <tr><td>Bot/Exchange filter dropdowns always visible in header</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/App.tsx</td></tr>
+  <tr><td>Positions table: "Bot / Strategy" column header, actions: Close, 25%, Tighten</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/components/PositionRow.tsx, pages/Dashboard.tsx</td></tr>
+  <tr><td><code>last-stable-single-bot</code> branch preserves pre-multibot code at commit <code>b3ba4c8</code></td><td><span class="badge done">Done</span></td><td class="file">git branch (pushed to origin)</td></tr>
 </table>
 
 </body>

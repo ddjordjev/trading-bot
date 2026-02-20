@@ -276,6 +276,7 @@ class TestLogClosedTrade:
         )
         sp = MagicMock()
         sp.mode = ScaleMode.PYRAMID
+        sp.side = "long"
         sp.adds = 2
         sp.low_liquidity = False
         sp.avg_entry_price = 49_500.0
@@ -292,6 +293,7 @@ class TestLogClosedTrade:
         record = mock_trade_db.close_trade.call_args[0][1]
         assert row_id == 42
         assert record.symbol == "BTC/USDT"
+        assert record.side == "long"
         assert record.strategy == "compound_momentum"
         assert record.action == "close"
         assert record.scale_mode == "pyramid"

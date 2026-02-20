@@ -1,12 +1,26 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { wsUrl } from "../api/client";
 
+export interface BotSnapshot {
+  bot_id: string;
+  exchange: string;
+  connected: boolean;
+  data: {
+    status: BotStatus;
+    positions: PositionInfo[];
+    wick_scalps: WickScalpInfo[];
+    intel: IntelSnapshot | null;
+    logs: LogEntry[];
+  } | null;
+}
+
 export interface FullSnapshot {
   status: BotStatus;
-  positions: PositionInfo[];
+  positions: (PositionInfo & { bot_id?: string; exchange_name?: string })[];
   intel: IntelSnapshot | null;
-  wick_scalps: WickScalpInfo[];
+  wick_scalps: (WickScalpInfo & { bot_id?: string; exchange_name?: string })[];
   logs: LogEntry[];
+  bots?: BotSnapshot[];
 }
 
 export interface BotStatus {

@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     volatility_lookback_minutes: int = 5
 
     # News
-    news_enabled: bool = False
+    news_enabled: bool = True
     news_sources: str = "coindesk,cointelegraph,cryptopanic"
 
     # Market Intelligence
@@ -180,6 +180,7 @@ class Settings(BaseSettings):
     dashboard_host: str = "0.0.0.0"
     dashboard_port: int = 9035
     dashboard_token: str = ""  # set a secret token for remote access
+    dashboard_hub_url: str = ""  # central dashboard URL bots POST snapshots to
     grafana_port: int = 3001
 
     # Exchange platform URL (for quick-link from the dashboard).

@@ -268,6 +268,9 @@ class IntelSnapshot(BaseModel):
     cmc_trending: list[TrendingSnapshot] = []
     coingecko_trending: list[TrendingSnapshot] = []
 
+    # News
+    news_items: list[dict[str, Any]] = []
+
     # Monitoring metadata
     monitor_intensity: str = "normal"
     poll_multiplier: float = 1.0
@@ -283,6 +286,19 @@ class StrategyWeightEntry(BaseModel):
     total_trades: int = 0
     total_pnl: float = 0.0
     streak: int = 0
+
+
+class BotDashboardSnapshot(BaseModel):
+    """Written by each bot on every tick -- read by central dashboard."""
+
+    bot_id: str = ""
+    bot_style: str = ""
+    exchange: str = ""
+    status: dict[str, Any] = {}
+    positions: list[dict[str, Any]] = []
+    wick_scalps: list[dict[str, Any]] = []
+    strategies: list[dict[str, Any]] = []
+    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class AnalyticsSnapshot(BaseModel):
