@@ -17,113 +17,100 @@ normally. Don't touch this protocol.
 
 Do NOT read `docs/EXECUTION_PLAN.md` — everything needed is in this rule.
 
-### Step 1: Always Full Analysis
+### Precheck — Decide Whether to Audit
 
-**The audit cache is DISABLED.** Every session runs a full analysis on all
-4 groups regardless of what changed. Previous audits have repeatedly missed
-bugs that only a fresh full scan catches. The cache will be re-enabled once
-the bot completes a clean 10-day run.
+Read `.cursor/last_audit.json` with the Read tool (NOT shell). Determine
+which mode applies:
 
-Read `.cursor/last_audit.json` with the Read tool (NOT shell) for context
-on what was previously found, but always proceed to Step 2 with all 4 groups.
+**Mode A — Skip (no code changes AND last audit < 5 days old):**
+For each group, compare its `commit` against current HEAD using
+`git diff <cached_commit> -- <group files>`. If ALL groups have zero diffs
+AND were audited within the last 5 days → skip the entire precheck. Go
+straight to the run.
 
-### Step 2: Codebase Analysis (only changed groups)
+**Mode B — Incremental (code changed, regardless of time):**
+Only re-analyze groups whose files changed since their last audit commit.
+Launch up to 4 parallel agents (one per changed group). Each agent does a
+deep scan for bugs, logic errors, stale references — report only actual
+bugs per the strict classification. Fix everything found. Update
+`.cursor/last_audit.json` afterward. Then run preflight + docker smoke
+test (see Operational Checks below).
 
-Launch up to 4 parallel agents (one per group that has changes). Each agent
-should scan for bugs, logic errors, stale references — report only actual
-bugs. Fix everything found. After fixing, update `.cursor/last_audit.json`
-with the Write tool (see Cache Format below).
+**Mode C — Full deep scan (last audit ≥ 5 days old, regardless of changes):**
+Run a complete, maximally thorough codebase analysis on ALL 4 groups.
+Launch up to 4 parallel agents. Every file in every group gets a deep scan.
+Fix everything found. Update `.cursor/last_audit.json` afterward. Then run
+preflight + docker smoke test (see Operational Checks below).
 
-### Step 3: Preflight Check
+When scanning (Mode B or C), only flag issues that matter:
 
-```
-.venv/bin/python scripts/preflight_check.py
-```
+- **Math errors** (wrong PnL, margin, position sizing, division bugs)
+- **Money-losing bugs** (wrong order side, incorrect close logic, balance drift)
+- **Crash bugs** (unhandled None/zero in hot path, missing awaits, deadlocks)
 
-Expect 15/15 PASS. Fix any failures before proceeding.
+Do NOT flag: missing logs, style issues, defensive suggestions, theoretical
+edge cases without a concrete trigger, or anything that won't crash the bot
+or lose money. The bar is the same as Bug Classification below.
 
-### Step 4: Docker Build & Smoke Test
+### Operational Checks (only when Mode B or C ran)
 
-Run these commands in sequence:
+After fixing any bugs found, run these in sequence:
 
-```
-docker compose build
-```
+1. **Preflight:**
+   ```
+   .venv/bin/python scripts/preflight_check.py
+   ```
+   Expect 15/15 PASS. Fix any failures.
 
-```
-docker compose up -d
-```
+2. **Docker Build & Smoke Test:**
+   ```
+   docker compose build
+   docker compose up -d
+   ```
+   Wait 15 seconds, then:
+   ```
+   docker compose ps
+   ```
+   Verify: all 3 services show "healthy". If any are unhealthy, check logs
+   and fix.
+   ```
+   docker compose exec trading-bot curl -s http://localhost:9035/health
+   ```
+   Expect: `{"status":"ok","bot_running":true}`
+   ```
+   docker compose logs --tail 25 trading-bot
+   ```
+   Verify: no crash loops, balance ~$100, strategies registered, intel active.
 
-Wait 15 seconds, then:
+3. **Signal Flow:**
+   ```
+   docker compose logs --tail 15 monitor
+   docker compose logs --tail 15 analytics
+   ```
+   Verify monitor is scanning and analytics is refreshing.
+   ```
+   docker compose exec trading-bot python -c "
+   from shared.state import SharedState
+   s = SharedState()
+   q = s.read_trade_queue()
+   print(f'Queue: {q.pending_count} pending')
+   bs = s.read_bot_status()
+   print(f'Bot: level={bs.level} positions={bs.open_positions} trade={bs.should_trade}')
+   "
+   ```
+   Verify: queue has pending items, bot status is being written.
 
-```
-docker compose ps
-```
-
-Verify: all 3 services show "healthy". If any are unhealthy, check logs
-and fix before continuing.
-
-```
-docker compose exec trading-bot curl -s http://localhost:9035/health
-```
-
-Expect: `{"status":"ok","bot_running":true}`
-
-```
-docker compose logs --tail 25 trading-bot
-```
-
-Verify in the logs:
-- No crash loops or repeating errors
-- Balance shows ~$100 (SESSION_BUDGET)
-- Strategies are registered
-- Intel feeds are active
-
-### Step 5: Signal Flow Verification
-
-Check the other two services:
-
-```
-docker compose logs --tail 15 monitor
-```
-
-Verify: monitor is scanning, generating queue proposals.
-
-```
-docker compose logs --tail 15 analytics
-```
-
-Verify: analytics is running and refreshing.
-
-Then confirm the bot is consuming the queue:
-
-```
-docker compose exec trading-bot python -c "
-from shared.state import SharedState
-s = SharedState()
-q = s.read_trade_queue()
-print(f'Queue: {q.pending_count} pending')
-bs = s.read_bot_status()
-print(f'Bot: level={bs.level} positions={bs.open_positions} trade={bs.should_trade}')
-"
-```
-
-Verify: queue has pending items, bot status is being written.
-
-### Step 6: Teardown
-
-```
-docker compose down -v
-```
-
-Report what was found and fixed. The user will then decide next steps
-(open fresh session to repeat, or start Day 1).
+4. **Teardown:**
+   ```
+   docker compose down -v
+   ```
+   Report what was found and fixed.
 
 ## Force Audit
 
 If the user says **"force audit"**, **"full audit"**, or **"re-audit"**,
-ignore the cache entirely and run a complete codebase analysis on all 4
-groups regardless of what changed. Update the cache afterward as usual.
+ignore the cache entirely and run Mode C (full deep scan on all 4 groups)
+regardless of what changed or when. Update the cache afterward as usual.
 
 ## Audit Cache
 

@@ -1,0 +1,14 @@
+# Execution Log Capture
+
+**Applies to every bot run** (paper_local, paper_live, live).
+
+## Rules
+
+1. During any bot execution session, monitor Docker logs throughout the run.
+2. At the end of the run (teardown or stop), dump **all** container logs
+   into `docs/execution_logs/`.
+3. Name the log file with a timestamp in `YYYYMMDDHHmmss.log` format
+   (e.g. `20260220021430.log`).
+4. Capture logs from all services (trading-bot, monitor, analytics) into
+   the single timestamped file, separated by service headers.
+5. This folder is gitignored — logs stay local for analysis.
