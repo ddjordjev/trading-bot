@@ -34,6 +34,8 @@ class TrailingStop(BaseModel):
     activation_pct: float = 0.5
     breakeven_trigger_pct: float = 5.0  # move stop to entry once at +5%
     low_liquidity: bool = False  # if True, we manage stop ourselves (no exchange SL)
+    tightened_stop: float = 0.0  # textbook level to tighten to after wick bounce
+    wick_bounced: bool = False  # True once price wicked near tightened_stop and recovered
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     def model_post_init(self, __context: object) -> None:
@@ -96,6 +98,21 @@ class TrailingStop(BaseModel):
                         self.entry_price,
                     )
 
+        # Wick-bounce tighten: price dropped near tightened_stop level then recovered
+        if self.tightened_stop > 0 and not self.wick_bounced and self.tightened_stop > self.current_stop:
+            proximity_pct = (price - self.tightened_stop) / self.entry_price * 100
+            if proximity_pct < 1.5 and price > self.tightened_stop:
+                self.wick_bounced = True
+                old = self.current_stop
+                self.current_stop = self._be_with_fee_offset(self.tightened_stop, long=True)
+                logger.info(
+                    "WICK BOUNCE tighten {}: {:.6f} -> {:.6f} (price wicked near {:.6f} and recovered)",
+                    self.symbol,
+                    old,
+                    self.current_stop,
+                    self.tightened_stop,
+                )
+
         # Trailing activation
         if not self.activated and profit_pct >= self.activation_pct:
             self.activated = True
@@ -154,6 +171,21 @@ class TrailingStop(BaseModel):
                         be_stop,
                         self.entry_price,
                     )
+
+        # Wick-bounce tighten (short): price spiked near tightened_stop then fell back
+        if self.tightened_stop > 0 and not self.wick_bounced and self.tightened_stop < self.current_stop:
+            proximity_pct = (self.tightened_stop - price) / self.entry_price * 100
+            if proximity_pct < 1.5 and price < self.tightened_stop:
+                self.wick_bounced = True
+                old = self.current_stop
+                self.current_stop = self._be_with_fee_offset(self.tightened_stop, long=False)
+                logger.info(
+                    "WICK BOUNCE tighten {}: {:.6f} -> {:.6f} (price wicked near {:.6f} and recovered)",
+                    self.symbol,
+                    old,
+                    self.current_stop,
+                    self.tightened_stop,
+                )
 
         if not self.activated and profit_pct >= self.activation_pct:
             self.activated = True
@@ -230,6 +262,7 @@ class TrailingStopManager:
         trail_pct: float | None = None,
         low_liquidity: bool = False,
         key: str | None = None,
+        tightened_stop: float = 0.0,
     ) -> TrailingStop:
         ts = TrailingStop(
             symbol=position.symbol,
@@ -238,6 +271,7 @@ class TrailingStopManager:
             initial_stop_pct=initial_stop_pct or self.default_initial_pct,
             trail_pct=trail_pct or self.default_trail_pct,
             activation_pct=self.activation_pct,
+            tightened_stop=tightened_stop,
             breakeven_trigger_pct=self.breakeven_pct,
             low_liquidity=low_liquidity,
         )

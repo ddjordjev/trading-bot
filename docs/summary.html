@@ -38,7 +38,55 @@
 <p class="meta">Last updated: 2026-02-20 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: MEXC, Binance, Bybit &nbsp;|&nbsp; Tests: 1100+ (80%+ coverage) &nbsp;|&nbsp; CI: GitHub Actions (green)</p>
 
 <!-- ============================================================ -->
-<h2>1. Core Philosophy &amp; Trading Principles</h2>
+<h2>Table of Contents</h2>
+<!-- ============================================================ -->
+
+<div class="section-card" style="columns: 2; column-gap: 2rem;">
+<ol>
+  <li><a href="#s1">Core Philosophy &amp; Trading Principles</a></li>
+  <li><a href="#s2">All Requirements</a>
+    <ol style="font-size:0.85em; margin-top:0.3rem;">
+      <li><a href="#s2-1">Infrastructure &amp; Deployment</a></li>
+      <li><a href="#s2-2">Exchange &amp; Market Support</a></li>
+      <li><a href="#s2-3">Core Trading Features</a></li>
+      <li><a href="#s2-4">Strategy Layer</a></li>
+      <li><a href="#s2-5">Risk Management &amp; Capital Preservation</a></li>
+      <li><a href="#s2-6">Tiered Daily Targets &amp; Manual Override</a></li>
+      <li><a href="#s2-7">Position Scaling</a></li>
+      <li><a href="#s2-8">Pyramid / DCA</a></li>
+      <li><a href="#s2-9">Wick Scalping</a></li>
+      <li><a href="#s2-10">MEXC Liquidity Awareness</a></li>
+      <li><a href="#s2-11">Hedging</a></li>
+      <li><a href="#s2-12">Volatility Exploitation</a></li>
+      <li><a href="#s2-13">News Monitoring</a></li>
+      <li><a href="#s2-14">Trending / Scanner</a></li>
+      <li><a href="#s2-15">Notifications &amp; Alerts</a></li>
+      <li><a href="#s2-16">External Market Intelligence</a></li>
+      <li><a href="#s2-17">Trade Priority Queue System</a></li>
+      <li><a href="#s2-18">Preflight Check &amp; Live Run Prep</a></li>
+      <li><a href="#s2-19">Manual Override / Kill Switch</a></li>
+      <li><a href="#s2-20">Trade Analytics &amp; Pattern Detection</a></li>
+      <li><a href="#s2-21">Web Dashboard</a></li>
+      <li><a href="#s2-22">Service Architecture &amp; Adaptive Monitoring</a></li>
+      <li><a href="#s2-23">Market Hours &amp; Holiday System</a></li>
+      <li><a href="#s2-24">MEXC Futures Restriction</a></li>
+      <li><a href="#s2-25">CI/CD Pipeline</a></li>
+      <li><a href="#s2-26">10-Day Execution Plan</a></li>
+      <li><a href="#s2-27">Configurable Paper Risk Relaxation</a></li>
+      <li><a href="#s2-28">Smart Risk Management</a></li>
+      <li><a href="#s2-29">Prometheus &amp; Grafana Monitoring</a></li>
+    </ol>
+  </li>
+  <li><a href="#s3">How It All Fits Together</a></li>
+  <li><a href="#s4">Project File Map</a></li>
+  <li><a href="#s5">Key Configuration</a></li>
+  <li><a href="#s6">Manual Controls</a></li>
+  <li><a href="#s7">Ideas &amp; Future Plans</a></li>
+</ol>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s1">1. Core Philosophy &amp; Trading Principles</h2>
 <!-- ============================================================ -->
 
 <div class="principle">

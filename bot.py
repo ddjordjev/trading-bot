@@ -18,6 +18,7 @@ from core.models.order import Order, OrderSide
 from core.models.signal import TickUrgency
 from core.orders import OrderManager
 from core.orders.scaler import ScaleMode
+from core.patterns import PatternDetector, StructureAnalyzer
 from core.risk import RiskManager
 from core.risk.daily_target import DailyTargetTracker, DailyTier
 from core.risk.market_filter import LiquidityTier, MarketQualityFilter
@@ -106,6 +107,10 @@ class TradingBot:
         self.trade_db.connect()
         self.analytics = AnalyticsEngine(self.trade_db)
         self.shared = SharedState()
+        self.pattern_detector = PatternDetector(
+            structure=StructureAnalyzer(swing_lookback=5, zone_tolerance_pct=0.3),
+            min_confidence=0.3,
+        )
 
         self._strategies: list[BaseStrategy] = []
         self._dynamic_strategies: dict[str, BaseStrategy] = {}
@@ -574,16 +579,20 @@ class TradingBot:
                         sig.quick_trade = True
                         sig.max_hold_minutes = min(sig.max_hold_minutes or 15, 15)
 
+                # Pattern detection: smart SL/TP from chart structure
+                pattern_boost = self._apply_pattern_analysis(sig, candles, is_low_liq)
+
                 sig = self._adjust_for_target(sig, aggression)
 
                 logger.debug(
-                    "Final signal: {} {} str={:.3f} (tv={:.2f} analytics={:.2f} news={:.2f} aggr={:.2f}) pyramid={} | executing",
+                    "Final signal: {} {} str={:.3f} (tv={:.2f} analytics={:.2f} news={:.2f} pattern={:.2f} aggr={:.2f}) pyramid={} | executing",
                     sig.action.value,
                     sig.symbol,
                     sig.strength,
                     tv_boost,
                     strat_weight,
                     news_mult,
+                    pattern_boost,
                     aggression,
                     use_pyramid,
                 )
@@ -1199,6 +1208,67 @@ class TradingBot:
             )
 
         return round(mult, 3), force_quick
+
+    def _apply_pattern_analysis(
+        self,
+        sig: Signal,
+        candles: list[Candle],
+        is_low_liq: bool,
+    ) -> float:
+        """Run chart pattern detection and enrich signal with smart SL/TP.
+
+        Returns the pattern signal boost (0.0 if no pattern found).
+        Mutates sig in-place (model_copy already happened upstream).
+        """
+        if not candles or len(candles) < 30:
+            return 0.0
+
+        side = "long" if sig.action == SignalAction.BUY else "short"
+        current_price = sig.suggested_price or candles[-1].close
+        fallback_pct = self.risk.default_stop_loss_pct
+
+        try:
+            smart = self.pattern_detector.analyze(
+                candles=candles,
+                current_price=current_price,
+                side=side,
+                low_liquidity=is_low_liq,
+                fallback_stop_pct=fallback_pct,
+            )
+        except Exception as e:
+            logger.debug("Pattern analysis error for {}: {}", sig.symbol, e)
+            return 0.0
+
+        if smart.initial_stop > 0 and not sig.suggested_stop_loss:
+            sig.suggested_stop_loss = smart.initial_stop
+        if smart.tightened_stop > 0:
+            sig.tightened_stop = smart.tightened_stop
+        if smart.take_profit_1 > 0 and not sig.suggested_take_profit:
+            sig.suggested_take_profit = smart.take_profit_1
+
+        boost = 0.0
+        if smart.has_pattern and smart.pattern:
+            boost = smart.pattern.signal_boost
+            sig.strength = min(1.0, sig.strength * (1.0 + boost))
+            logger.info(
+                "Pattern {} for {} → SL={:.6f} (deep) / {:.6f} (tight), TP={:.4f}/{:.4f}, boost={:.2f}",
+                smart.pattern.pattern_type.value,
+                sig.symbol,
+                smart.initial_stop,
+                smart.tightened_stop,
+                smart.take_profit_1,
+                smart.take_profit_2,
+                boost,
+            )
+        elif smart.has_structure:
+            logger.debug(
+                "Structure SL for {}: {:.6f} (deep) / {:.6f} (tight) — no pattern",
+                sig.symbol,
+                smart.initial_stop,
+                smart.tightened_stop,
+            )
+
+        return boost
 
     def _adjust_for_target(self, sig: Signal, aggression: float) -> Signal:
         adjusted = sig.model_copy()

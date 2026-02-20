@@ -196,16 +196,22 @@ class OrderManager:
             # risk is small — even if we get wicked 15-20%, the dollar loss
             # is tiny. The real stop is "thesis invalidated" level, not a
             # tight technical level that MMs will hunt.
+            tightened = signal.tightened_stop or 0.0
             if pyramid:
                 pyramid_stop = max(sp.dca_interval_pct * 8, 15.0)
                 self.trailing.register(
                     pos,
                     initial_stop_pct=pyramid_stop,
                     low_liquidity=low_liquidity,
+                    tightened_stop=tightened,
                 )
                 logger.info("PYRAMID wide stop for {}: {:.1f}% (survive wicks, DCA zone)", signal.symbol, pyramid_stop)
             else:
-                self.trailing.register(pos, low_liquidity=low_liquidity)
+                self.trailing.register(
+                    pos,
+                    low_liquidity=low_liquidity,
+                    tightened_stop=tightened,
+                )
 
         self._active_orders.append(order)
         return order
