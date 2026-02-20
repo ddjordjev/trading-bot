@@ -3,11 +3,18 @@ import type { PositionInfo } from "../hooks/useWebSocket";
 import { postBody } from "../api/client";
 
 interface Props {
-  position: PositionInfo;
+  position: PositionInfo & { bot_id?: string };
   onAction: () => void;
+  showBot?: boolean;
 }
 
-export function PositionRow({ position: p, onAction }: Props) {
+const BOT_COLORS: Record<string, string> = {
+  momentum: "#58a6ff",
+  meanrev: "#d29922",
+  swing: "#a371f7",
+};
+
+export function PositionRow({ position: p, onAction, showBot = false }: Props) {
   const [loading, setLoading] = useState("");
 
   const act = async (action: string, fn: () => Promise<unknown>) => {
@@ -23,8 +30,22 @@ export function PositionRow({ position: p, onAction }: Props) {
 
   const pnlClass = p.pnl_pct >= 0 ? "pnl-positive" : "pnl-negative";
 
+  const botId = (p as any).bot_id || "";
+
   return (
     <tr>
+      {showBot && (
+        <td>
+          <span style={{
+            fontSize: "0.75rem",
+            fontWeight: 600,
+            color: BOT_COLORS[botId] || "var(--text-muted)",
+            textTransform: "uppercase",
+          }}>
+            {botId || "—"}
+          </span>
+        </td>
+      )}
       <td>
         {p.trade_url ? (
           <a
