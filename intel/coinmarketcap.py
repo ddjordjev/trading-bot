@@ -261,7 +261,7 @@ class CoinMarketCapClient:
         for item in data.get("data", {}).get("cryptoCurrencyList", []):
             try:
                 raw_quotes = item.get("quotes", [{}])
-                q: dict[str, object]
+                q: dict[str, Any]
                 if isinstance(raw_quotes, dict):
                     q = raw_quotes.get("USD", {}) or next(iter(raw_quotes.values()), {})
                 else:

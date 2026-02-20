@@ -186,6 +186,23 @@ everything out from the code and this plan.
 Look for: mismatched ports, broken imports, stale references, logic bugs,
 anything that would prevent a clean startup. Fix issues before proceeding.
 
+**Bug classification — strict rules:**
+
+Only flag things that will **crash the bot** or **lose money**. A finding
+must demonstrate a concrete failure: a traceback that will happen, or a
+dollar amount that will be wrong. If neither applies, it's not a bug.
+
+- A missing log statement is NOT a bug
+- A missing try/except is NOT a bug unless the exception WILL occur in normal flow
+- "Could theoretically crash if the API returns X" is NOT a bug unless X is a documented/observed API response
+- Defensive coding suggestions are NOT bugs
+- Style and maintainability issues are NOT bugs
+
+If a scan finds zero bugs under these rules, the group is **CLEAN** — move
+on. Do not re-scan clean groups hoping to find something. The audit
+converges when all groups are clean, not when the agent runs out of things
+to suggest.
+
 ### 2. Preflight Check
 
 ```bash
