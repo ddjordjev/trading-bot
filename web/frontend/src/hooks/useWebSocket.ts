@@ -27,6 +27,7 @@ export interface BotStatus {
   manual_stop_active: boolean;
   strategies_count: number;
   dynamic_strategies_count: number;
+  profit_buffer_pct: number;
 }
 
 export interface PositionInfo {

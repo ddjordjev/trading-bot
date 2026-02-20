@@ -57,6 +57,25 @@ export function Dashboard({ data }: { data: FullSnapshot | null }) {
             {s.total_growth_pct >= 0 ? "+" : ""}{s.total_growth_pct.toFixed(1)}%
           </div>
         </div>
+        {s.profit_buffer_pct > 0 && (
+          <div className="stat-card">
+            <div className="label">Profit Buffer</div>
+            <div className="value" style={{ color: "var(--green)" }}>
+              {s.profit_buffer_pct.toFixed(1)}%
+            </div>
+            <button
+              style={{
+                marginTop: 6, padding: "3px 10px", fontSize: "0.7rem",
+                background: "var(--surface)", border: "1px solid var(--border)",
+                color: "var(--text)", borderRadius: 4, cursor: "pointer",
+              }}
+              title="Lock in your profits: resets the house-money buffer to 0 and restores the base daily loss limit."
+              onClick={() => doAction("Lock Profits", () => post("/api/reset-profit-buffer"))}
+            >
+              Lock Profits
+            </button>
+          </div>
+        )}
         <div className="stat-card">
           <div className="label">Bot Status</div>
           <div className="value" style={{ color: s.running ? "var(--green)" : "var(--red)" }}>

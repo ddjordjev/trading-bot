@@ -453,7 +453,25 @@
   <tr><td>Aggressive mode in paper_local: no sit-out, no tier-based trade blocking, full aggression multiplier. Catches more anomalies during testing</td><td><span class="badge done">Done</span></td><td class="file">core/risk/daily_target.py → aggressive_mode, bot.py → DailyTargetTracker init</td></tr>
 </table>
 
-<h3>2.28 Prometheus &amp; Grafana Monitoring Stack</h3>
+<h3>2.28 Smart Risk Management (Issue #7)</h3>
+
+<div class="principle">
+  <strong>Never freeze the bot over a single bad trade.</strong> The blanket sit-out that blocked all trading when daily PnL dropped below a threshold has been replaced with nuanced, position-aware risk management. Pyramid/DCA positions are excluded from daily loss calculations (they're designed to go red). Short-term losers are auto-cut. Excess profits carry forward as a risk buffer.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Remove blanket sit-out — LOSING tier reduces aggression (0.5-0.7x) but never blocks new trades</td><td><span class="badge done">Done</span></td><td class="file">core/risk/daily_target.py → should_trade() no longer returns False for LOSING</td></tr>
+  <tr><td>Exclude pyramid/DCA unrealized PnL from daily loss calculation — tier and aggression use adjusted PnL</td><td><span class="badge done">Done</span></td><td class="file">core/risk/daily_target.py → update_pyramid_unrealized(), adjusted_todays_pnl_pct</td></tr>
+  <tr><td>Auto-cut stale short-term (WINNERS-mode) losers after configurable timeout (default 60 min)</td><td><span class="badge done">Done</span></td><td class="file">core/orders/manager.py → close_expired_quick_trades(), config/settings.py → short_term_max_hold_minutes</td></tr>
+  <tr><td>Prioritize existing losers: halve aggression when stale non-pyramid losers exist</td><td><span class="badge done">Done</span></td><td class="file">core/orders/manager.py → has_stale_losers(), bot.py → aggression *= 0.5</td></tr>
+  <tr><td>Profit buffer ("house money"): excess daily profits above target carry forward to expand next day's loss limit</td><td><span class="badge done">Done</span></td><td class="file">core/risk/daily_target.py → _compute_profit_buffer(), core/risk/manager.py → reset_daily(profit_buffer_pct=)</td></tr>
+  <tr><td>"Lock Profits" button on Dashboard: reset profit buffer to 0 and restore base daily loss limit</td><td><span class="badge done">Done</span></td><td class="file">web/server.py → POST /api/reset-profit-buffer, Dashboard.tsx → Lock Profits button</td></tr>
+  <tr><td>Pyramid PnL computed each tick from PYRAMID-mode positions and passed to tracker</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _tick() computes pyramid_pnl, calls target.update_pyramid_unrealized()</td></tr>
+  <tr><td>Full test coverage for all smart risk changes</td><td><span class="badge done">Done</span></td><td class="file">tests/test_daily_target.py, tests/test_risk_manager.py, tests/test_orders_manager.py, tests/test_web_server.py</td></tr>
+</table>
+
+<h3>2.29 Prometheus &amp; Grafana Monitoring Stack</h3>
 
 <div class="principle">
   <strong>Industry-standard observability.</strong> Prometheus scrapes a <code>/metrics</code> endpoint on the bot every 15 seconds. Grafana visualizes system resources, process health, and method-level performance in a pre-provisioned dashboard. Embedded in the web UI as the "Monitoring" tab via iframe.
@@ -657,6 +675,7 @@
   <tr><td><code>PAPER_MAX_CONCURRENT_POSITIONS</code></td><td>10</td><td>Paper-local override: max open positions</td></tr>
   <tr><td><code>PAPER_MIN_SIGNAL_STRENGTH</code></td><td>0.2</td><td>Paper-local override: accept weaker signals</td></tr>
   <tr><td><code>PAPER_CONSECUTIVE_LOSS_COOLDOWN</code></td><td>999</td><td>Paper-local override: effectively disable cooldown</td></tr>
+  <tr><td><code>SHORT_TERM_MAX_HOLD_MINUTES</code></td><td>60</td><td>Auto-cut non-pyramid losing positions after this many minutes</td></tr>
   <tr><td><code>GRAFANA_PORT</code></td><td>3001</td><td>Grafana dashboard port (embedded in Monitoring tab)</td></tr>
   <tr><td><code>NOTIFICATIONS_ENABLED</code></td><td>daily_summary</td><td>Comma-separated notification types to actually email (others are logged only)</td></tr>
   <tr><td><code>SESSION_BUDGET</code></td><td>1000</td><td>Paper trading starting balance; also caps position sizing</td></tr>

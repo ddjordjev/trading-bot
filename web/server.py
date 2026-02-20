@@ -109,6 +109,7 @@ def _bot_status() -> BotStatus:
         manual_stop_active=_bot.target.manual_stop,
         strategies_count=len(_bot._strategies),
         dynamic_strategies_count=len(_bot._dynamic_strategies),
+        profit_buffer_pct=_bot.target.profit_buffer_pct,
     )
 
 
@@ -596,6 +597,16 @@ async def resume_trading(_: str = Depends(verify_token)) -> ActionResponse:
         return ActionResponse(success=False, message="Bot not initialized")
     _bot.target.STOP_FILE.unlink(missing_ok=True)
     return ActionResponse(success=True, message="Trading resumed (STOP file removed)")
+
+
+@app.post("/api/reset-profit-buffer", response_model=ActionResponse)
+async def reset_profit_buffer(_: str = Depends(verify_token)) -> ActionResponse:
+    if not _bot:
+        return ActionResponse(success=False, message="Bot not initialized")
+    old = _bot.target.profit_buffer_pct
+    _bot.target._profit_buffer_pct = 0.0
+    _bot.risk.max_daily_loss_pct = _bot.risk._base_max_daily_loss_pct
+    return ActionResponse(success=True, message=f"Profit buffer reset (was {old:.1f}%). Daily loss limit back to base.")
 
 
 @app.post("/api/module/{name}/toggle", response_model=ActionResponse)

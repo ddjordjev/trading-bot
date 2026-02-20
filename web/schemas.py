@@ -23,6 +23,7 @@ class BotStatus(BaseModel):
     manual_stop_active: bool = False
     strategies_count: int = 0
     dynamic_strategies_count: int = 0
+    profit_buffer_pct: float = 0.0
 
 
 class PositionInfo(BaseModel):

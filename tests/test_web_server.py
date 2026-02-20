@@ -38,6 +38,9 @@ def mock_bot():
     bot.target.daily_target_pct = 10.0
     bot.target.total_growth_pct = 25.0
     bot.target.manual_stop = False
+    bot.target.profit_buffer_pct = 0.0
+    bot.target._profit_buffer_pct = 0.0
+    bot.target._initial_capital = 9_000.0
     bot.target.history = []
     bot.target.winning_days = 3
     bot.target.losing_days = 1
@@ -51,6 +54,9 @@ def mock_bot():
     bot.start = AsyncMock()
     bot._strategies = []
     bot._dynamic_strategies = {}
+    bot.risk = MagicMock()
+    bot.risk._base_max_daily_loss_pct = 3.0
+    bot.risk.max_daily_loss_pct = 3.0
     bot.orders = MagicMock()
     bot.orders.trailing = MagicMock()
     bot.orders.trailing.active_stops = {}
@@ -705,6 +711,38 @@ class TestToggleModule:
         assert r.json()["success"] is True
         assert "disabled" in r.json()["message"].lower()
         intel_stop_mock.assert_awaited_once()
+
+
+# ── Reset Profit Buffer ──────────────────────────────────────────────────
+
+
+class TestResetProfitBuffer:
+    async def test_reset_no_bot(self, client):
+        set_bot(None)  # type: ignore[arg-type]
+        r = await client.post("/api/reset-profit-buffer")
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+
+    async def test_reset_clears_buffer(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        mock_bot.target.profit_buffer_pct = 20.0
+        mock_bot.target._profit_buffer_pct = 20.0
+        mock_bot.risk._base_max_daily_loss_pct = 3.0
+        mock_bot.risk.max_daily_loss_pct = 13.0
+        r = await client.post("/api/reset-profit-buffer")
+        assert r.status_code == 200
+        assert r.json()["success"] is True
+        assert "20.0" in r.json()["message"]
+        assert mock_bot.target._profit_buffer_pct == 0.0
+        assert mock_bot.risk.max_daily_loss_pct == 3.0
+
+    async def test_status_includes_profit_buffer(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        mock_bot.target.profit_buffer_pct = 15.5
+        mock_bot.orders.scaler.active_positions = {}
+        r = await client.get("/api/status")
+        assert r.status_code == 200
+        assert r.json()["profit_buffer_pct"] == 15.5
 
 
 # ── DB Explorer ─────────────────────────────────────────────────────────
