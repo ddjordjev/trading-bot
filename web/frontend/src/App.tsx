@@ -15,8 +15,11 @@ interface BotInfo {
   bot_id: string;
   label: string;
   port: number;
+  exchange: string;
   strategies: string[];
 }
+
+const EXCHANGES = ["MEXC", "BINANCE", "BYBIT"];
 
 const TABS = [
   "Dashboard", "Intel", "Scanner", "Strategies", "Analytics", "Monitoring", "Settings",
@@ -27,10 +30,16 @@ export function App() {
   const [bots, setBots] = useState<BotInfo[]>([]);
   const [selected, setSelected] = useState("all");
   const [tab, setTab] = useState<Tab>("Dashboard");
+  const [botExchanges, setBotExchanges] = useState<Record<string, string>>({});
 
   useEffect(() => {
     get<BotInfo[]>("/api/bots")
-      .then((list) => setBots(list))
+      .then((list) => {
+        setBots(list);
+        const initial: Record<string, string> = {};
+        for (const b of list) initial[b.bot_id] = b.exchange || "MEXC";
+        setBotExchanges(initial);
+      })
       .catch(() => {});
   }, []);
 
@@ -54,10 +63,11 @@ export function App() {
     }
     const bot = merged.bots.find((b) => b.bot_id === selected);
     if (!bot?.data) return null;
+    const exName = bot.data.status.exchange_name || "";
     return {
       ...bot.data,
-      positions: bot.data.positions.map((p) => ({ ...p, bot_id: selected })),
-      wick_scalps: bot.data.wick_scalps.map((w) => ({ ...w, bot_id: selected })),
+      positions: bot.data.positions.map((p) => ({ ...p, bot_id: selected, exchange_name: exName })),
+      wick_scalps: bot.data.wick_scalps.map((w) => ({ ...w, bot_id: selected, exchange_name: exName })),
     };
   }, [merged, selected]);
 
@@ -94,6 +104,28 @@ export function App() {
                 <option key={b.bot_id} value={b.bot_id}>
                   {b.label}
                 </option>
+              ))}
+            </select>
+          )}
+          {bots.length > 1 && selected !== "all" && (
+            <select
+              value={botExchanges[selected] || "MEXC"}
+              onChange={(e) =>
+                setBotExchanges((prev) => ({ ...prev, [selected]: e.target.value }))
+              }
+              title="Exchange for this bot (switching not yet wired)"
+              style={{
+                padding: "0.25rem 0.5rem",
+                borderRadius: "var(--radius)",
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+                color: "var(--text)",
+                fontSize: "0.8rem",
+                cursor: "pointer",
+              }}
+            >
+              {EXCHANGES.map((ex) => (
+                <option key={ex} value={ex}>{ex}</option>
               ))}
             </select>
           )}

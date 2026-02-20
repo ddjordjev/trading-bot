@@ -76,6 +76,18 @@ class SharedState:
         s = self._read(self._data_dir / "bot_status.json", BotDeploymentStatus)
         return s or BotDeploymentStatus()
 
+    def read_all_bot_statuses(self) -> list[BotDeploymentStatus]:
+        """Scan data/*/bot_status.json to discover all running bots."""
+        results: list[BotDeploymentStatus] = []
+        for child in sorted(self._data_dir.iterdir()):
+            if not child.is_dir():
+                continue
+            status_file = child / "bot_status.json"
+            s = self._read(status_file, BotDeploymentStatus)
+            if s and s.bot_id:
+                results.append(s)
+        return results
+
     # ---- Intel state (written by monitor, read by bot) ---- #
 
     def write_intel(self, intel: IntelSnapshot) -> None:
@@ -130,6 +142,20 @@ class SharedState:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
                 self._write(self._data_dir / "trade_queue.json", queue)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
+    def write_bot_trade_queue(self, bot_id: str, queue: TradeQueue) -> None:
+        """Write a queue file into a specific bot's data directory."""
+        bot_dir = self._data_dir / bot_id
+        bot_dir.mkdir(parents=True, exist_ok=True)
+        queue.updated_at = datetime.now(UTC).isoformat()
+        lock_path = bot_dir / "trade_queue.lock"
+        lock_path.touch(exist_ok=True)
+        with open(lock_path) as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                self._write(bot_dir / "trade_queue.json", queue)
             finally:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
 

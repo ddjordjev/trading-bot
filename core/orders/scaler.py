@@ -370,7 +370,7 @@ class PositionScaler:
     ) -> ScaledPosition:
 
         if mode == ScaleMode.PYRAMID:
-            init_lev = max(2, leverage // 3)
+            init_lev = min(leverage, max(2, leverage // 3))
             sp = ScaledPosition(
                 symbol=symbol,
                 side=side,

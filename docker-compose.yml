@@ -34,6 +34,7 @@ services:
     environment:
       - TZ=UTC
       - BOT_ID=momentum
+      - BOT_STYLE=momentum
       - BOT_STRATEGIES=compound_momentum,market_open_volatility,rsi,macd
       - DASHBOARD_PORT=9035
     ports:
@@ -52,6 +53,7 @@ services:
     environment:
       - TZ=UTC
       - BOT_ID=meanrev
+      - BOT_STYLE=meanrev
       - BOT_STRATEGIES=bollinger,mean_reversion,grid
       - DASHBOARD_PORT=9036
     ports:
@@ -70,6 +72,7 @@ services:
     environment:
       - TZ=UTC
       - BOT_ID=swing
+      - BOT_STYLE=swing
       - BOT_STRATEGIES=swing_opportunity
       - DASHBOARD_PORT=9037
     ports:

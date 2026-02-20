@@ -38,7 +38,7 @@ from shared.models import (
     BotDeploymentStatus,
     DeploymentLevel,
     IntelSnapshot,
-    SignalPriority,
+    TradeQueue,
     TrendingSnapshot,
     TVSymbolSnapshot,
 )
@@ -141,8 +141,9 @@ class MonitorService:
         tick_count = 0
         while self._running:
             try:
-                bot_status = self.state.read_bot_status()
-                self._update_intensity(bot_status)
+                all_statuses = self.state.read_all_bot_statuses()
+                combined = self._aggregate_bot_statuses(all_statuses)
+                self._update_intensity(combined)
 
                 multipliers = INTENSITY_TABLE[self._current_level]
                 now = time.monotonic()
@@ -150,7 +151,7 @@ class MonitorService:
                 # TradingView: refresh active symbols
                 tv_interval = self.settings.tv_poll_interval * multipliers["tv"]
                 if now - self._last_tv_refresh >= tv_interval:
-                    await self._refresh_tv(bot_status)
+                    await self._refresh_tv(combined)
                     self._last_tv_refresh = now
 
                 # Scanner (CryptoBubbles + CMC + CoinGecko merge happens inside)
@@ -163,26 +164,28 @@ class MonitorService:
                 snapshot = self._build_snapshot(multipliers)
                 self.state.write_intel(snapshot)
 
-                # Generate trade proposals from the intel snapshot
+                # Generate proposals into a staging queue, then route to per-bot queues
                 try:
-                    trade_queue = self.state.read_trade_queue()
-                    trade_queue = self.signal_gen.generate(snapshot, trade_queue)
-                    self.state.write_trade_queue(trade_queue)
+                    staging_queue = TradeQueue()
+                    staging_queue = self.signal_gen.generate(snapshot, staging_queue)
+                    self._route_to_bots(staging_queue, all_statuses)
                 except Exception as e:
                     logger.debug("Signal generator error: {}", e)
 
                 if tick_count % 10 == 0:
-                    tq = self.state.read_trade_queue()
+                    bot_queues = {s.bot_id: s for s in all_statuses}
+                    bot_summary = (
+                        ", ".join(f"{bid}:{s.open_positions}/{s.max_positions}" for bid, s in bot_queues.items())
+                        or "no bots"
+                    )
                     logger.info(
-                        "Monitor [{}] | mult={:.1f}x | sources={} | movers={} | tv={} | queue: C={} D={} S={}",
+                        "Monitor [{}] | mult={:.1f}x | sources={} | movers={} | tv={} | bots: {}",
                         self._current_level.value,
                         multipliers["base"],
                         len(snapshot.sources_active),
                         len(snapshot.hot_movers),
                         len(snapshot.tv_analyses),
-                        len(tq.get_actionable(SignalPriority.CRITICAL)),
-                        len(tq.get_actionable(SignalPriority.DAILY)),
-                        len(tq.get_actionable(SignalPriority.SWING)),
+                        bot_summary,
                     )
 
                 tick_count += 1
@@ -202,6 +205,87 @@ class MonitorService:
         if old != self._current_level:
             mult = INTENSITY_TABLE[self._current_level]["base"]
             logger.info("Monitor intensity: {} -> {} (poll mult: {:.1f}x)", old.value, self._current_level.value, mult)
+
+    @staticmethod
+    def _aggregate_bot_statuses(statuses: list[BotDeploymentStatus]) -> BotDeploymentStatus:
+        """Combine per-bot statuses into one view for intensity decisions.
+
+        Uses the most constrained level (STRESSED > DEPLOYED > ACTIVE > HUNTING)
+        and sums positions across bots.
+        """
+        if not statuses:
+            return BotDeploymentStatus()
+
+        priority = {
+            DeploymentLevel.STRESSED: 0,
+            DeploymentLevel.DEPLOYED: 1,
+            DeploymentLevel.ACTIVE: 2,
+            DeploymentLevel.HUNTING: 3,
+        }
+        worst = max(statuses, key=lambda s: -priority.get(s.level, 99))
+        return BotDeploymentStatus(
+            bot_id="aggregated",
+            level=worst.level,
+            open_positions=sum(s.open_positions for s in statuses),
+            max_positions=sum(s.max_positions for s in statuses),
+            daily_pnl_pct=sum(s.daily_pnl_pct for s in statuses) / len(statuses),
+            should_trade=any(s.should_trade for s in statuses),
+            avg_position_health=min((s.avg_position_health for s in statuses), default=0.0),
+            worst_position_pnl=min((s.worst_position_pnl for s in statuses), default=0.0),
+        )
+
+    def _route_to_bots(
+        self,
+        staging: TradeQueue,
+        bot_statuses: list[BotDeploymentStatus],
+    ) -> None:
+        """Route proposals from staging queue to per-bot queues by target_bot.
+
+        Each bot gets only proposals matching its style. If the target bot
+        has no capacity or isn't trading, the proposal is skipped (expires).
+        """
+        status_by_style: dict[str, BotDeploymentStatus] = {}
+        for s in bot_statuses:
+            if s.bot_style:
+                status_by_style[s.bot_style] = s
+
+        bot_queues: dict[str, TradeQueue] = {}
+
+        all_proposals = staging.critical + staging.daily + staging.swing
+        for proposal in all_proposals:
+            if proposal.consumed or proposal.rejected or proposal.is_expired:
+                continue
+
+            target = proposal.target_bot or "momentum"
+            bot_status = status_by_style.get(target)
+
+            if bot_status and not bot_status.should_trade:
+                continue
+            if bot_status and not bot_status.has_capacity:
+                continue
+
+            bot_id = bot_status.bot_id if bot_status else target
+            if bot_id not in bot_queues:
+                existing = self._read_bot_queue(bot_id)
+                bot_queues[bot_id] = existing
+
+            bot_queues[bot_id].add(proposal)
+
+        for bot_id, queue in bot_queues.items():
+            queue.purge_stale()
+            self.state.write_bot_trade_queue(bot_id, queue)
+
+    def _read_bot_queue(self, bot_id: str) -> TradeQueue:
+        """Read existing queue for a bot so we don't overwrite unconsumed proposals."""
+        bot_dir = self.state._data_dir / bot_id
+        queue_file = bot_dir / "trade_queue.json"
+        if not queue_file.exists():
+            return TradeQueue()
+        try:
+            raw = queue_file.read_text()
+            return TradeQueue.model_validate_json(raw)
+        except Exception:
+            return TradeQueue()
 
     async def _refresh_tv(self, bot_status: BotDeploymentStatus) -> None:
         """Refresh TradingView analysis, adapting to deployment state."""

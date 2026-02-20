@@ -163,6 +163,7 @@ export function Dashboard({ data, showBotColumn = false }: { data: FullSnapshot 
             <thead>
               <tr>
                 {showBotColumn && <th>Bot</th>}
+                {showBotColumn && <th>Exchange</th>}
                 <th>Symbol</th>
                 <th>Entry</th>
                 <th>Current</th>
@@ -193,6 +194,7 @@ export function Dashboard({ data, showBotColumn = false }: { data: FullSnapshot 
             <thead>
               <tr>
                 {showBotColumn && <th>Bot</th>}
+                {showBotColumn && <th>Exchange</th>}
                 <th>Symbol</th>
                 <th>Side</th>
                 <th>Entry</th>
@@ -205,6 +207,7 @@ export function Dashboard({ data, showBotColumn = false }: { data: FullSnapshot 
               {data.wick_scalps.map((ws) => (
                 <tr key={`${(ws as any).bot_id || ""}:${ws.symbol}`}>
                   {showBotColumn && <td style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)" }}>{(ws as any).bot_id || "—"}</td>}
+                  {showBotColumn && <td style={{ fontSize: "0.75rem", fontWeight: 500, textTransform: "uppercase", color: "var(--text-muted)" }}>{(ws as any).exchange_name || "—"}</td>}
                   <td>{ws.symbol}</td>
                   <td>{ws.scalp_side.toUpperCase()}</td>
                   <td>{ws.entry_price.toFixed(ws.entry_price < 1 ? 6 : 2)}</td>

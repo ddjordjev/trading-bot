@@ -427,8 +427,19 @@ class SignalGenerator:
     # Helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _route_target(proposal: TradeProposal) -> str:
+        """Determine which bot style should handle this proposal."""
+        if proposal.priority == SignalPriority.SWING:
+            return "swing"
+        if proposal.quick_trade or proposal.tick_urgency == "scalp":
+            return "momentum"
+        return "momentum"
+
     def _propose(self, queue: TradeQueue, proposal: TradeProposal) -> None:
         """Add proposal if not on cooldown and not a duplicate."""
+        if not proposal.target_bot:
+            proposal.target_bot = self._route_target(proposal)
         if proposal.market_type == "futures" and self._preferred_market_type != "futures":
             proposal.market_type = self._preferred_market_type
         key = f"{proposal.priority.value}_{proposal.symbol}_{proposal.strategy}"

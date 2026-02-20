@@ -601,13 +601,13 @@ class TestProcessSignalAndQueue:
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_empty_returns_early(self, bot):
-        bot.shared_intel.read_trade_queue = MagicMock(return_value=MagicMock(pending_count=0))
+        bot.shared.read_trade_queue = MagicMock(return_value=MagicMock(pending_count=0))
         await bot._process_trade_queue()
         bot.exchange.fetch_positions.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_read_exception_returns_early(self, bot):
-        bot.shared_intel.read_trade_queue = MagicMock(side_effect=RuntimeError("read failed"))
+        bot.shared.read_trade_queue = MagicMock(side_effect=RuntimeError("read failed"))
         await bot._process_trade_queue()
         # no exception, early return
         bot.exchange.fetch_positions.assert_not_called()
@@ -617,9 +617,9 @@ class TestProcessSignalAndQueue:
         """Queue processing is skipped during warmup period."""
         bot._started_at = datetime.now(UTC)
         bot._warmup_minutes = 5
-        bot.shared_intel.read_trade_queue = MagicMock()
+        bot.shared.read_trade_queue = MagicMock()
         await bot._process_trade_queue()
-        bot.shared_intel.read_trade_queue.assert_not_called()
+        bot.shared.read_trade_queue.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_after_warmup_proceeds(self, bot):
@@ -628,9 +628,9 @@ class TestProcessSignalAndQueue:
 
         bot._started_at = datetime.now(UTC) - timedelta(minutes=10)
         bot._warmup_minutes = 3
-        bot.shared_intel.read_trade_queue = MagicMock(return_value=MagicMock(pending_count=0))
+        bot.shared.read_trade_queue = MagicMock(return_value=MagicMock(pending_count=0))
         await bot._process_trade_queue()
-        bot.shared_intel.read_trade_queue.assert_called_once()
+        bot.shared.read_trade_queue.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_respects_per_tick_cap(self, bot, mock_exchange):
@@ -662,8 +662,8 @@ class TestProcessSignalAndQueue:
         )
         queue = MagicMock(pending_count=2)
         queue.get_actionable = MagicMock(return_value=[p1, p2])
-        bot.shared_intel.read_trade_queue = MagicMock(return_value=queue)
-        bot.shared_intel.apply_trade_queue_updates = MagicMock()
+        bot.shared.read_trade_queue = MagicMock(return_value=queue)
+        bot.shared.apply_trade_queue_updates = MagicMock()
 
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot._execute_proposal = AsyncMock(return_value=True)

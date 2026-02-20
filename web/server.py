@@ -263,14 +263,24 @@ async def get_bots(_: str = Depends(verify_token)) -> list[BotInstance]:
     data_root = Path("data")
     port_map = {"momentum": 9035, "meanrev": 9036, "swing": 9037}
     label_map = {"momentum": "Momentum", "meanrev": "Mean Reversion", "swing": "Swing"}
+    from shared.models import BotDeploymentStatus
+
     for sub in sorted(data_root.iterdir()):
         if sub.is_dir() and (sub / "bot_status.json").exists():
             bid = sub.name
+            exchange = ""
+            try:
+                raw = (sub / "bot_status.json").read_text()
+                bs = BotDeploymentStatus.model_validate_json(raw)
+                exchange = bs.exchange
+            except Exception:
+                pass
             bots.append(
                 BotInstance(
                     bot_id=bid,
                     label=label_map.get(bid, bid.title()),
                     port=port_map.get(bid, 9035),
+                    exchange=exchange,
                     strategies=_bot.settings.bot_strategy_list if _bot and _bot.settings.bot_id == bid else [],
                 )
             )
@@ -280,6 +290,7 @@ async def get_bots(_: str = Depends(verify_token)) -> list[BotInstance]:
                 bot_id=_bot.settings.bot_id or "default",
                 label="Default",
                 port=_bot.settings.dashboard_port,
+                exchange=_bot.settings.exchange.upper(),
                 strategies=_bot.settings.bot_strategy_list,
             )
         )

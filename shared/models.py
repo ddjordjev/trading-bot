@@ -75,6 +75,7 @@ class TradeProposal(BaseModel):
     reject_reason: str = ""
 
     source: str = ""
+    target_bot: str = ""  # routing: which bot style should handle this (momentum/meanrev/swing)
 
     @property
     def is_expired(self) -> bool:
@@ -180,6 +181,8 @@ class BotDeploymentStatus(BaseModel):
     """Written by the bot every tick so the monitor knows how hard to work."""
 
     bot_id: str = ""
+    bot_style: str = ""  # momentum / meanrev / swing
+    exchange: str = ""  # exchange this bot trades on (e.g. MEXC, BINANCE)
     level: DeploymentLevel = DeploymentLevel.HUNTING
     open_positions: int = 0
     max_positions: int = 3

@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     # BOT_STRATEGIES is a comma-separated list; empty = all strategies.
     bot_id: str = ""
     bot_strategies: str = ""
+    bot_style: str = "momentum"  # momentum / meanrev / swing — determines queue routing
 
     exchange: str = "mexc"
 

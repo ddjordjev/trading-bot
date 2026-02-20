@@ -26,11 +26,19 @@ try without it first, that just wastes time on a guaranteed failure.
 - Any command touching `.cursor/` paths
 - Any command touching paths outside the workspace
 
+## No polling loops — save tokens
+
+Every tool round-trip re-sends the full conversation to the model. Late in
+a session one poll can burn 500K+ tokens. Rules:
+
+1. **CI builds** — push and stop. The user will report success or failure.
+   NEVER poll `gh run list` in a loop.
+2. **Docker** — run the command, check output once. If not ready, check
+   once more max. NEVER loop.
+3. **General** — if a command is backgrounded, read the terminal file once
+   after a reasonable wait. Don't keep re-reading.
+
 ## Never sleep more than 10 seconds
 
-When polling for command output or waiting for background processes, **never
-use `sleep` for more than 10 seconds**. If you need to wait:
-
-- Use `block_until_ms` on the original command instead of sleeping after
-- Read the terminal file directly instead of sleeping then re-running
-- If you must sleep, cap it at 10s and loop
+When waiting for a single check (not a loop), cap sleep at 10s.
+Use `block_until_ms` on the original command when possible.

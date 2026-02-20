@@ -3,7 +3,7 @@ import type { PositionInfo } from "../hooks/useWebSocket";
 import { postBody } from "../api/client";
 
 interface Props {
-  position: PositionInfo & { bot_id?: string };
+  position: PositionInfo & { bot_id?: string; exchange_name?: string };
   onAction: () => void;
   showBot?: boolean;
 }
@@ -31,6 +31,7 @@ export function PositionRow({ position: p, onAction, showBot = false }: Props) {
   const pnlClass = p.pnl_pct >= 0 ? "pnl-positive" : "pnl-negative";
 
   const botId = (p as any).bot_id || "";
+  const exchangeName = (p as any).exchange_name || "";
 
   return (
     <tr>
@@ -43,6 +44,18 @@ export function PositionRow({ position: p, onAction, showBot = false }: Props) {
             textTransform: "uppercase",
           }}>
             {botId || "—"}
+          </span>
+        </td>
+      )}
+      {showBot && (
+        <td>
+          <span style={{
+            fontSize: "0.75rem",
+            fontWeight: 500,
+            color: "var(--text-muted)",
+            textTransform: "uppercase",
+          }}>
+            {exchangeName || "—"}
           </span>
         </td>
       )}

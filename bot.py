@@ -81,6 +81,7 @@ class TradingBot:
             daily_target_pct=daily_target_pct,
             compound=True,
             aggressive_mode=self.settings.is_paper_local(),
+            bot_data_dir=Path(self.settings.data_dir),
         )
         self.market_filter = MarketQualityFilter(
             min_liquidity_volume=self.settings.min_liquidity_volume,
@@ -656,7 +657,7 @@ class TradingBot:
                 return
 
         try:
-            queue = self.shared_intel.read_trade_queue()
+            queue = self.shared.read_trade_queue()
         except Exception as e:
             logger.warning("Failed to read trade queue: {}", e)
             return
@@ -771,7 +772,7 @@ class TradingBot:
                     rejected[proposal.id] = "swing execution failed"
 
         if consumed_ids or rejected:
-            self.shared_intel.apply_trade_queue_updates(consumed_ids, rejected)
+            self.shared.apply_trade_queue_updates(consumed_ids, rejected)
 
         if executed > 0:
             logger.info(
@@ -1145,6 +1146,8 @@ class TradingBot:
 
         status = BotDeploymentStatus(
             bot_id=self.settings.bot_id or "default",
+            bot_style=self.settings.bot_style,
+            exchange=self.settings.exchange.upper(),
             level=level,
             open_positions=len(active),
             max_positions=self.settings.effective_max_concurrent_positions,

@@ -50,10 +50,17 @@ class DailyTargetTracker:
     STOP_FILE = Path("data/STOP")
     CLOSE_ALL_FILE = Path("data/CLOSE_ALL")
 
-    def __init__(self, daily_target_pct: float = 10.0, compound: bool = True, aggressive_mode: bool = False):
+    def __init__(
+        self,
+        daily_target_pct: float = 10.0,
+        compound: bool = True,
+        aggressive_mode: bool = False,
+        bot_data_dir: Path | None = None,
+    ):
         self.daily_target_pct = daily_target_pct
         self.compound = compound
         self.aggressive_mode = aggressive_mode
+        self._bot_data_dir = bot_data_dir
 
         self._day_start_balance: float = 0.0
         self._current_balance: float = 0.0
@@ -157,8 +164,13 @@ class DailyTargetTracker:
 
     @property
     def adjusted_todays_pnl(self) -> float:
-        """Daily PnL excluding unrealized losses from PYRAMID positions."""
-        return self.todays_pnl - self._pyramid_unrealized_pnl
+        """Daily PnL excluding unrealized losses from PYRAMID positions.
+
+        Only subtract pyramid *losses* (negative unrealized PnL). Positive
+        pyramid PnL must not reduce reported daily PnL or the bot would
+        incorrectly drop into LOSING tier and shrink position sizing.
+        """
+        return self.todays_pnl - min(self._pyramid_unrealized_pnl, 0)
 
     @property
     def adjusted_todays_pnl_pct(self) -> float:
@@ -215,13 +227,19 @@ class DailyTargetTracker:
 
     @property
     def manual_stop(self) -> bool:
-        """Check if the user dropped a STOP file to halt trading."""
-        return self.STOP_FILE.exists()
+        """Check if the user dropped a STOP file to halt trading.
+
+        Checks both global data/STOP and per-bot data/{bot_id}/STOP.
+        """
+        return self.STOP_FILE.exists() or bool(self._bot_data_dir and (self._bot_data_dir / "STOP").exists())
 
     @property
     def manual_close_all(self) -> bool:
-        """Check if the user dropped a CLOSE_ALL file to close everything."""
-        return self.CLOSE_ALL_FILE.exists()
+        """Check if the user dropped a CLOSE_ALL file to close everything.
+
+        Checks both global data/CLOSE_ALL and per-bot data/{bot_id}/CLOSE_ALL.
+        """
+        return self.CLOSE_ALL_FILE.exists() or bool(self._bot_data_dir and (self._bot_data_dir / "CLOSE_ALL").exists())
 
     def clear_close_all(self) -> None:
         """Remove the CLOSE_ALL file after positions are closed."""

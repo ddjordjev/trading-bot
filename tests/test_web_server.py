@@ -143,6 +143,43 @@ class TestHealth:
         assert r.status_code == 200
 
 
+# ── GET /api/bots ────────────────────────────────────────────────────
+
+
+class TestGetBots:
+    async def test_bots_from_data_dirs(self, client, mock_bot, tmp_path):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        data_dir = tmp_path / "data"
+        momentum_dir = data_dir / "momentum"
+        momentum_dir.mkdir(parents=True)
+        (momentum_dir / "bot_status.json").write_text(
+            '{"bot_id":"momentum","bot_style":"momentum","exchange":"MEXC","level":"hunting"}'
+        )
+        with patch("web.server.Path", return_value=data_dir):
+            r = await client.get("/api/bots")
+        assert r.status_code == 200
+        bots = r.json()
+        assert len(bots) >= 1
+        bot0 = bots[0]
+        assert bot0["bot_id"] == "momentum"
+        assert bot0["exchange"] == "MEXC"
+
+    async def test_bots_fallback_to_current_bot(self, client, mock_bot, tmp_path):
+        mock_bot.settings.bot_id = "solo"
+        mock_bot.settings.dashboard_port = 9035
+        mock_bot.settings.bot_strategy_list = ["rsi"]
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        empty_dir = tmp_path / "data_empty"
+        empty_dir.mkdir()
+        with patch("web.server.Path", return_value=empty_dir):
+            r = await client.get("/api/bots")
+        assert r.status_code == 200
+        bots = r.json()
+        assert len(bots) == 1
+        assert bots[0]["bot_id"] == "solo"
+        assert bots[0]["exchange"] == "MEXC"
+
+
 # ── GET /api/status ───────────────────────────────────────────────────
 
 

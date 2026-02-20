@@ -50,9 +50,11 @@ def monitor(mock_settings, tmp_path):
                                                 mock_state.read_bot_status.return_value = BotDeploymentStatus(
                                                     level=DeploymentLevel.HUNTING
                                                 )
+                                                mock_state.read_all_bot_statuses.return_value = []
                                                 mock_state.read_trade_queue.return_value = TradeQueue()
                                                 mock_state.write_intel = MagicMock()
                                                 mock_state.write_trade_queue = MagicMock()
+                                                mock_state.write_bot_trade_queue = MagicMock()
                                                 mock_state_cls.return_value = mock_state
 
                                                 # Async start/stop for all clients
@@ -111,7 +113,7 @@ async def test_stop_sets_running_false_and_stops_clients(monitor):
 @pytest.mark.asyncio
 async def test_run_loop_handles_tick_exception(monitor):
     monitor._running = True
-    monitor.state.read_bot_status.side_effect = RuntimeError("tick error")
+    monitor.state.read_all_bot_statuses.side_effect = RuntimeError("tick error")
 
     async def stop_after_one(secs):
         monitor._running = False
@@ -121,7 +123,7 @@ async def test_run_loop_handles_tick_exception(monitor):
         with patch("asyncio.sleep", side_effect=stop_after_one):
             await monitor._run_loop()
     # Loop should have caught the exception and slept
-    monitor.state.read_bot_status.assert_called()
+    monitor.state.read_all_bot_statuses.assert_called()
 
 
 # ── _update_intensity ─────────────────────────────────────────────────────

@@ -9,6 +9,7 @@ class BotInstance(BaseModel):
     bot_id: str
     label: str
     port: int
+    exchange: str = ""
     strategies: list[str] = []
 
 

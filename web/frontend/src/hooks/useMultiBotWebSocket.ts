@@ -11,8 +11,8 @@ export interface BotSnapshot {
 
 export interface MergedDashboard {
   status: BotStatus;
-  positions: (PositionInfo & { bot_id: string })[];
-  wick_scalps: (WickScalpInfo & { bot_id: string })[];
+  positions: (PositionInfo & { bot_id: string; exchange_name: string })[];
+  wick_scalps: (WickScalpInfo & { bot_id: string; exchange_name: string })[];
   logs: LogEntry[];
   intel: IntelSnapshot | null;
   bots: BotSnapshot[];
@@ -44,8 +44,8 @@ export function useMultiBotWebSocket(botPorts: { bot_id: string; port: number }[
 
     setAllConnected(conns.every((c) => c.connected));
 
-    const allPositions: (PositionInfo & { bot_id: string })[] = [];
-    const allWicks: (WickScalpInfo & { bot_id: string })[] = [];
+    const allPositions: (PositionInfo & { bot_id: string; exchange_name: string })[] = [];
+    const allWicks: (WickScalpInfo & { bot_id: string; exchange_name: string })[] = [];
     const allLogs: LogEntry[] = [];
     let intel: IntelSnapshot | null = null;
 
@@ -84,8 +84,9 @@ export function useMultiBotWebSocket(botPorts: { bot_id: string; port: number }[
       dynamicCount += s.dynamic_strategies_count;
       botCount++;
 
-      for (const p of d.positions) allPositions.push({ ...p, bot_id: bid });
-      for (const w of d.wick_scalps) allWicks.push({ ...w, bot_id: bid });
+      const exName = s.exchange_name || "";
+      for (const p of d.positions) allPositions.push({ ...p, bot_id: bid, exchange_name: exName });
+      for (const w of d.wick_scalps) allWicks.push({ ...w, bot_id: bid, exchange_name: exName });
       for (const l of d.logs) allLogs.push(l);
       if (!intel && d.intel) intel = d.intel;
     }
