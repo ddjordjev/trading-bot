@@ -1,5 +1,7 @@
-import { useState, useEffect, useCallback } from "react";
-import { useWebSocket } from "./hooks/useWebSocket";
+import { useState, useEffect, useMemo } from "react";
+import { useMultiBotWebSocket } from "./hooks/useMultiBotWebSocket";
+import type { MergedDashboard } from "./hooks/useMultiBotWebSocket";
+import type { FullSnapshot } from "./hooks/useWebSocket";
 import { Dashboard } from "./pages/Dashboard";
 import { Intel } from "./pages/Intel";
 import { Scanner } from "./pages/Scanner";
@@ -7,7 +9,7 @@ import { Strategies } from "./pages/Strategies";
 import { Analytics } from "./pages/Analytics";
 import { Monitoring } from "./pages/Monitoring";
 import { Settings } from "./pages/Settings";
-import { setBotPort, get } from "./api/client";
+import { get } from "./api/client";
 
 interface BotInfo {
   bot_id: string;
@@ -23,31 +25,45 @@ type Tab = typeof TABS[number];
 
 export function App() {
   const [bots, setBots] = useState<BotInfo[]>([]);
-  const [activeBot, setActiveBot] = useState<string>("");
-  const { data, connected, reconnect } = useWebSocket();
+  const [selected, setSelected] = useState("all");
   const [tab, setTab] = useState<Tab>("Dashboard");
 
   useEffect(() => {
     get<BotInfo[]>("/api/bots")
-      .then((list) => {
-        setBots(list);
-        if (list.length > 0 && !activeBot) {
-          setActiveBot(list[0].bot_id);
-        }
-      })
+      .then((list) => setBots(list))
       .catch(() => {});
   }, []);
 
-  const switchBot = useCallback((botId: string) => {
-    const bot = bots.find((b) => b.bot_id === botId);
-    if (!bot) return;
-    setActiveBot(botId);
-    setBotPort(bot.port);
-    reconnect();
-  }, [bots, reconnect]);
+  const botPorts = useMemo(
+    () => bots.map((b) => ({ bot_id: b.bot_id, port: b.port })),
+    [bots],
+  );
 
-  const multiBot = bots.length > 1;
-  const activeBotLabel = bots.find((b) => b.bot_id === activeBot)?.label || activeBot;
+  const { merged, allConnected } = useMultiBotWebSocket(botPorts);
+
+  const dashboardData: FullSnapshot | null = useMemo(() => {
+    if (!merged) return null;
+    if (selected === "all") {
+      return {
+        status: merged.status,
+        positions: merged.positions,
+        wick_scalps: merged.wick_scalps,
+        logs: merged.logs,
+        intel: merged.intel,
+      };
+    }
+    const bot = merged.bots.find((b) => b.bot_id === selected);
+    if (!bot?.data) return null;
+    return {
+      ...bot.data,
+      positions: bot.data.positions.map((p) => ({ ...p, bot_id: selected })),
+      wick_scalps: bot.data.wick_scalps.map((w) => ({ ...w, bot_id: selected })),
+    };
+  }, [merged, selected]);
+
+  const connCount = merged?.bots.filter((b) => b.connected).length ?? 0;
+  const totalBots = bots.length;
+  const connected = selected === "all" ? connCount > 0 : (merged?.bots.find((b) => b.bot_id === selected)?.connected ?? false);
 
   return (
     <div className="app-container">
@@ -59,10 +75,10 @@ export function App() {
           <h1 style={{ color: "var(--heading)", fontSize: "1.3rem", fontWeight: 600 }}>
             Trade Borg
           </h1>
-          {multiBot && (
+          {bots.length > 1 && (
             <select
-              value={activeBot}
-              onChange={(e) => switchBot(e.target.value)}
+              value={selected}
+              onChange={(e) => setSelected(e.target.value)}
               style={{
                 padding: "0.25rem 0.5rem",
                 borderRadius: "var(--radius)",
@@ -73,6 +89,7 @@ export function App() {
                 cursor: "pointer",
               }}
             >
+              <option value="all">All Bots</option>
               {bots.map((b) => (
                 <option key={b.bot_id} value={b.bot_id}>
                   {b.label}
@@ -82,9 +99,9 @@ export function App() {
           )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-          {multiBot && (
-            <span style={{ fontSize: "0.75rem", color: "var(--accent)", fontWeight: 500 }}>
-              {activeBotLabel}
+          {bots.length > 1 && selected === "all" && (
+            <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+              {connCount}/{totalBots} bots
             </span>
           )}
           <span style={{
@@ -110,8 +127,8 @@ export function App() {
         ))}
       </nav>
 
-      {tab === "Dashboard" && <Dashboard data={data} />}
-      {tab === "Intel" && <Intel wsIntel={data?.intel ?? null} />}
+      {tab === "Dashboard" && <Dashboard data={dashboardData} showBotColumn={selected === "all" && bots.length > 1} />}
+      {tab === "Intel" && <Intel wsIntel={dashboardData?.intel ?? null} />}
       {tab === "Scanner" && <Scanner />}
       {tab === "Strategies" && <Strategies />}
       {tab === "Analytics" && <Analytics />}

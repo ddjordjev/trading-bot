@@ -54,3 +54,13 @@ export function wsUrl(): string {
   }
   return `${proto}//${window.location.host}/ws?token=${token}`;
 }
+
+export function wsUrlForPort(port: number): string {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const token = localStorage.getItem("dashboard_token") || "";
+  return `${proto}//${window.location.hostname}:${port}/ws?token=${token}`;
+}
+
+export function apiUrlForPort(port: number, path: string): string {
+  return `${window.location.protocol}//${window.location.hostname}:${port}${path}`;
+}

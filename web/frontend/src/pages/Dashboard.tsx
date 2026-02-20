@@ -4,7 +4,7 @@ import { PositionRow } from "../components/PositionRow";
 import { LogViewer } from "../components/LogViewer";
 import { useState } from "react";
 
-export function Dashboard({ data }: { data: FullSnapshot | null }) {
+export function Dashboard({ data, showBotColumn = false }: { data: FullSnapshot | null; showBotColumn?: boolean }) {
   const [actionMsg, setActionMsg] = useState("");
   const [logsExpanded, setLogsExpanded] = useState(true);
 
@@ -162,6 +162,7 @@ export function Dashboard({ data }: { data: FullSnapshot | null }) {
           <table>
             <thead>
               <tr>
+                {showBotColumn && <th>Bot</th>}
                 <th>Symbol</th>
                 <th>Entry</th>
                 <th>Current</th>
@@ -176,7 +177,7 @@ export function Dashboard({ data }: { data: FullSnapshot | null }) {
             </thead>
             <tbody>
               {data.positions.map((p) => (
-                <PositionRow key={p.symbol} position={p} onAction={() => {}} />
+                <PositionRow key={`${(p as any).bot_id || ""}:${p.symbol}`} position={p} onAction={() => {}} showBot={showBotColumn} />
               ))}
             </tbody>
           </table>
@@ -191,6 +192,7 @@ export function Dashboard({ data }: { data: FullSnapshot | null }) {
           <table>
             <thead>
               <tr>
+                {showBotColumn && <th>Bot</th>}
                 <th>Symbol</th>
                 <th>Side</th>
                 <th>Entry</th>
@@ -201,7 +203,8 @@ export function Dashboard({ data }: { data: FullSnapshot | null }) {
             </thead>
             <tbody>
               {data.wick_scalps.map((ws) => (
-                <tr key={ws.symbol}>
+                <tr key={`${(ws as any).bot_id || ""}:${ws.symbol}`}>
+                  {showBotColumn && <td style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)" }}>{(ws as any).bot_id || "—"}</td>}
                   <td>{ws.symbol}</td>
                   <td>{ws.scalp_side.toUpperCase()}</td>
                   <td>{ws.entry_price.toFixed(ws.entry_price < 1 ? 6 : 2)}</td>
