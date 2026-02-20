@@ -46,6 +46,20 @@ interface ModSuggestion {
   based_on_trades: number;
 }
 
+interface LivePosition {
+  symbol: string;
+  side: string;
+  strategy: string;
+  entry_price: number;
+  current_price: number;
+  pnl_pct: number;
+  pnl_usd: number;
+  notional: number;
+  leverage: number;
+  age_minutes: number;
+  dca_count: number;
+}
+
 interface AnalyticsData {
   strategy_scores: StrategyScore[];
   patterns: PatternInsight[];
@@ -53,6 +67,7 @@ interface AnalyticsData {
   total_trades_logged: number;
   hourly_performance: Array<{ hour_utc: number; trades: number; wins: number; avg_pnl: number; total_pnl: number }>;
   regime_performance: Array<{ market_regime: string; trades: number; wins: number; avg_pnl: number; total_pnl: number }>;
+  live_positions: LivePosition[];
 }
 
 interface DailyReport {
@@ -93,7 +108,7 @@ export function Analytics() {
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [report, setReport] = useState<DailyReport | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"scores" | "patterns" | "suggestions" | "hourly" | "report">("scores");
+  const [tab, setTab] = useState<"live" | "scores" | "patterns" | "suggestions" | "hourly" | "report">("live");
 
   const refresh = async () => {
     setLoading(true);
@@ -113,7 +128,11 @@ export function Analytics() {
     await refresh();
   };
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    refresh();
+    const iv = setInterval(refresh, 10000);
+    return () => clearInterval(iv);
+  }, []);
 
   if (loading) return <div className="empty-state">Loading analytics...</div>;
 
@@ -158,9 +177,10 @@ export function Analytics() {
       </div>
 
       <div className="tabs" style={{ marginBottom: "1rem" }}>
-        {(["scores", "patterns", "suggestions", "hourly", "report"] as const).map((t) => (
+        {(["live", "scores", "patterns", "suggestions", "hourly", "report"] as const).map((t) => (
           <button key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
-            {t === "scores" ? `Strategy Scores (${analytics?.strategy_scores.length ?? 0})`
+            {t === "live" ? `Live (${analytics?.live_positions.length ?? 0})`
+              : t === "scores" ? `Closed Trades (${analytics?.strategy_scores.length ?? 0})`
               : t === "patterns" ? `Patterns (${analytics?.patterns.length ?? 0})`
               : t === "suggestions" ? `Suggestions (${analytics?.suggestions.length ?? 0})`
               : t === "hourly" ? "Time & Regime"
@@ -169,6 +189,7 @@ export function Analytics() {
         ))}
       </div>
 
+      {tab === "live" && <LivePositionsTab positions={analytics?.live_positions ?? []} />}
       {tab === "scores" && <StrategyScoresTab scores={analytics?.strategy_scores ?? []} />}
       {tab === "patterns" && <PatternsTab patterns={analytics?.patterns ?? []} />}
       {tab === "suggestions" && <SuggestionsTab suggestions={analytics?.suggestions ?? []} />}
@@ -178,8 +199,76 @@ export function Analytics() {
   );
 }
 
+function LivePositionsTab({ positions }: { positions: LivePosition[] }) {
+  if (positions.length === 0) return <div className="empty-state">No open positions right now</div>;
+
+  const totalPnl = positions.reduce((sum, p) => sum + p.pnl_usd, 0);
+  const totalNotional = positions.reduce((sum, p) => sum + p.notional, 0);
+
+  return (
+    <div>
+      <div className="stat-grid" style={{ marginBottom: "1rem" }}>
+        <div className="stat-card">
+          <div className="label">Open Positions</div>
+          <div className="value">{positions.length}</div>
+        </div>
+        <div className="stat-card">
+          <div className="label">Total Notional</div>
+          <div className="value">${Math.round(totalNotional).toLocaleString()}</div>
+        </div>
+        <div className="stat-card">
+          <div className="label">Unrealized PnL</div>
+          <div className={`value ${totalPnl >= 0 ? "pnl-positive" : "pnl-negative"}`}>
+            ${totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
+          </div>
+        </div>
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Strategy</th>
+              <th>Entry</th>
+              <th>Current</th>
+              <th>PnL</th>
+              <th>Notional</th>
+              <th>Leverage</th>
+              <th>DCAs</th>
+              <th>Age</th>
+            </tr>
+          </thead>
+          <tbody>
+            {positions.map((p) => (
+              <tr key={p.symbol}>
+                <td><strong>{p.symbol}</strong></td>
+                <td style={{ color: p.side === "long" ? "var(--green)" : "var(--red)" }}>
+                  {p.side.toUpperCase()}
+                </td>
+                <td style={{ fontSize: "0.85rem" }}>{p.strategy}</td>
+                <td>{p.entry_price < 1 ? p.entry_price.toFixed(6) : p.entry_price.toFixed(2)}</td>
+                <td>{p.current_price < 1 ? p.current_price.toFixed(6) : p.current_price.toFixed(2)}</td>
+                <td className={p.pnl_pct >= 0 ? "pnl-positive" : "pnl-negative"} style={{ fontWeight: 600 }}>
+                  {p.pnl_pct >= 0 ? "+" : ""}{p.pnl_pct.toFixed(2)}%
+                  <br />
+                  <span style={{ fontSize: "0.8rem" }}>${p.pnl_usd >= 0 ? "+" : ""}{p.pnl_usd.toFixed(2)}</span>
+                </td>
+                <td>${Math.round(p.notional).toLocaleString()}</td>
+                <td>{p.leverage}x</td>
+                <td>{p.dca_count}</td>
+                <td>{p.age_minutes < 60 ? `${p.age_minutes.toFixed(0)}m` : `${(p.age_minutes / 60).toFixed(1)}h`}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function StrategyScoresTab({ scores }: { scores: StrategyScore[] }) {
-  if (scores.length === 0) return <div className="empty-state">No strategy data yet. Trades need to be logged first.</div>;
+  if (scores.length === 0) return <div className="empty-state">No closed trades yet — stats populate as positions close.</div>;
 
   return (
     <div style={{ overflowX: "auto" }}>

@@ -87,7 +87,7 @@ class Settings(BaseSettings):
         return self.consecutive_loss_cooldown
 
     # Tick intervals (seconds) — adaptive, fastest active tier wins
-    tick_interval_scalp: int = 5  # quick_trade / wick scalp positions
+    tick_interval_scalp: int = 1  # quick_trade / wick scalp positions (aggressive monitoring)
     tick_interval_active: int = 60  # standard positions (DCA, pyramid)
     tick_interval_swing: int = 300  # only swing positions open
     tick_interval_idle: int = 60  # no open positions, just scanning
@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_password: str = ""
     notify_email: str = ""
-    notifications_enabled: str = "liquidation,stop_loss,daily_summary"
+    notifications_enabled: str = "liquidation,daily_summary"
 
     # Volatility
     spike_threshold_pct: float = 3.0

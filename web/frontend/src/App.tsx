@@ -42,8 +42,9 @@ export function App() {
           <button
             style={{ fontSize: "0.75rem", padding: "0.2rem 0.5rem" }}
             onClick={() => setShowTokenInput(!showTokenInput)}
+            title="Set the dashboard authentication token. Required when DASHBOARD_TOKEN is configured in your .env file."
           >
-            Token
+            Auth
           </button>
         </div>
       </div>

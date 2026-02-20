@@ -8,6 +8,10 @@ interface Strategy {
   leverage: number;
   mode: string;
   is_dynamic: boolean;
+  open_now: number;
+  applied_count: number;
+  success_count: number;
+  fail_count: number;
 }
 
 export function Strategies() {
@@ -37,6 +41,10 @@ export function Strategies() {
             <th>Market</th>
             <th>Leverage</th>
             <th>Mode</th>
+            <th>Open</th>
+            <th>Closed</th>
+            <th>Wins</th>
+            <th>Losses</th>
           </tr>
         </thead>
         <tbody>
@@ -54,6 +62,12 @@ export function Strategies() {
                   {s.mode.toUpperCase()}
                 </span>
               </td>
+              <td>{s.open_now > 0 ? (
+                <span className="badge" style={{ background: "rgba(63,185,80,0.15)", color: "var(--green)" }}>ACTIVE</span>
+              ) : "—"}</td>
+              <td>{s.applied_count}</td>
+              <td className="pnl-positive">{s.success_count}</td>
+              <td className="pnl-negative">{s.fail_count}</td>
             </tr>
           ))}
         </tbody>
@@ -75,6 +89,10 @@ export function Strategies() {
                 <th>Market</th>
                 <th>Leverage</th>
                 <th>Mode</th>
+                <th>Open</th>
+                <th>Closed</th>
+                <th>Wins</th>
+                <th>Losses</th>
               </tr>
             </thead>
             <tbody>
@@ -89,6 +107,12 @@ export function Strategies() {
                       {s.mode.toUpperCase()}
                     </span>
                   </td>
+                  <td>{s.open_now > 0 ? (
+                    <span className="badge" style={{ background: "rgba(63,185,80,0.15)", color: "var(--green)" }}>ACTIVE</span>
+                  ) : "—"}</td>
+                  <td>{s.applied_count}</td>
+                  <td className="pnl-positive">{s.success_count}</td>
+                  <td className="pnl-negative">{s.fail_count}</td>
                 </tr>
               ))}
             </tbody>

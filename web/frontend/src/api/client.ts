@@ -17,6 +17,8 @@ async function api<T>(path: string, opts?: RequestInit): Promise<T> {
 
 export const get = <T>(path: string) => api<T>(path);
 export const post = <T>(path: string) => api<T>(path, { method: "POST" });
+export const postBody = <T>(path: string, body: object) =>
+  api<T>(path, { method: "POST", body: JSON.stringify(body) });
 export const postQuery = <T>(path: string, params: Record<string, string | number>) => {
   const qs = new URLSearchParams(
     Object.entries(params).map(([k, v]) => [k, String(v)]),

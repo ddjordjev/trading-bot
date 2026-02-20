@@ -6,12 +6,13 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import Depends, FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
+from shared.state import SharedState
 from web.auth import verify_token, verify_ws_token
 from web.schemas import (
     ActionResponse,
@@ -20,13 +21,18 @@ from web.schemas import (
     DailyReportData,
     FullSnapshot,
     IntelSnapshot,
+    LivePositionInfo,
     LogEntry,
     ModificationSuggestionInfo,
     ModuleStatus,
     PatternInsightInfo,
+    PositionCloseBody,
     PositionInfo,
+    PositionTakeProfitBody,
+    PositionTightenStopBody,
     StrategyInfo,
     StrategyScoreInfo,
+    TradeQueueItem,
     TradeRecord,
     TrendingCoinInfo,
     WickScalpInfo,
@@ -81,18 +87,24 @@ app.add_middleware(
 def _bot_status() -> BotStatus:
     if not _bot:
         return BotStatus()
+    total_balance = _bot.target._current_balance
+    margin_used = 0.0
+    for pos in _bot.orders.scaler.active_positions.values():
+        margin_used += pos.avg_entry_price * pos.current_size / max(pos.current_leverage, 1)
     return BotStatus(
         running=_bot._running,
         trading_mode=_bot.settings.trading_mode,
         exchange_name=_bot.settings.exchange.upper(),
         exchange_url=_bot.settings.platform_url,
-        balance=_bot.target._current_balance,
+        balance=total_balance,
+        available_margin=max(0.0, total_balance - margin_used),
         daily_pnl=_bot.target.todays_pnl,
         daily_pnl_pct=_bot.target.todays_pnl_pct,
         tier=_bot.target.tier.value,
         tier_progress_pct=_bot.target.progress_pct,
         daily_target_pct=_bot.target.daily_target_pct,
         total_growth_pct=_bot.target.total_growth_pct,
+        total_growth_usd=_bot.target._current_balance - _bot.target._initial_capital,
         uptime_seconds=time.time() - _start_time if _start_time else 0,
         manual_stop_active=_bot.target.manual_stop,
         strategies_count=len(_bot._strategies),
@@ -255,6 +267,29 @@ async def get_intel(_: str = Depends(verify_token)) -> IntelSnapshot | None:
     return _intel_snapshot()
 
 
+@app.get("/api/trade-queue", response_model=list[TradeQueueItem])
+async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem]:
+    """Return pending trade proposals (symbol, side, strategy, strength, age)."""
+    state = SharedState()
+    queue = state.read_trade_queue()
+    pending = [
+        p
+        for bucket in (queue.critical, queue.daily, queue.swing)
+        for p in bucket
+        if not p.consumed and not p.rejected and not p.is_expired
+    ]
+    return [
+        TradeQueueItem(
+            symbol=p.symbol,
+            side=p.side,
+            strategy=p.strategy or "",
+            strength=p.strength,
+            age_seconds=p.age_seconds,
+        )
+        for p in pending
+    ]
+
+
 @app.get("/api/trending", response_model=list[TrendingCoinInfo])
 async def get_trending(_: str = Depends(verify_token)) -> list[TrendingCoinInfo]:
     if not _bot:
@@ -284,7 +319,10 @@ async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
     result = []
     from bot import SCALP_ONLY_STRATEGIES
 
+    open_positions = set(_bot.orders.scaler.active_positions.keys())
+
     for s in _bot._strategies:
+        stats = _bot.trade_db.get_strategy_stats(s.name, s.symbol)
         result.append(
             StrategyInfo(
                 name=s.name,
@@ -293,9 +331,14 @@ async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
                 leverage=s.leverage,
                 mode="winners" if s.name in SCALP_ONLY_STRATEGIES else "pyramid",
                 is_dynamic=False,
+                open_now=1 if s.symbol in open_positions else 0,
+                applied_count=stats.get("total") or 0,
+                success_count=stats.get("winners") or 0,
+                fail_count=stats.get("losers") or 0,
             )
         )
     for _sym, s in _bot._dynamic_strategies.items():
+        stats = _bot.trade_db.get_strategy_stats(s.name, s.symbol)
         result.append(
             StrategyInfo(
                 name=s.name,
@@ -304,6 +347,10 @@ async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
                 leverage=s.leverage,
                 mode="pyramid",
                 is_dynamic=True,
+                open_now=1 if s.symbol in open_positions else 0,
+                applied_count=stats.get("total") or 0,
+                success_count=stats.get("winners") or 0,
+                fail_count=stats.get("losers") or 0,
             )
         )
     return result
@@ -381,6 +428,40 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
     suggestions = [ModificationSuggestionInfo(**s.model_dump()) for s in _bot.analytics.suggestions]
     hourly = _bot.trade_db.get_hourly_performance()
     regime = _bot.trade_db.get_regime_performance()
+
+    live = []
+    for sym, sp in _bot.orders.scaler.active_positions.items():
+        ts = _bot.orders.trailing.active_stops.get(sym)
+        current_price = sp.last_add_price or sp.avg_entry_price
+        if ts and ts.peak_price > 0:
+            current_price = ts.peak_price
+        if sp.avg_entry_price > 0:
+            if sp.side == "long":
+                pnl_pct = (current_price - sp.avg_entry_price) / sp.avg_entry_price * 100
+            else:
+                pnl_pct = (sp.avg_entry_price - current_price) / sp.avg_entry_price * 100
+        else:
+            pnl_pct = 0.0
+        notional = sp.current_size * sp.avg_entry_price * sp.current_leverage
+        pnl_usd = notional * pnl_pct / 100 if sp.current_leverage > 0 else 0
+        _opened = getattr(sp, "opened_at", 0)
+        age = (time.time() - _opened) / 60 if _opened else 0
+        live.append(
+            LivePositionInfo(
+                symbol=sym,
+                side=sp.side,
+                strategy=sp.strategy or "unknown",
+                entry_price=sp.avg_entry_price,
+                current_price=current_price,
+                pnl_pct=pnl_pct,
+                pnl_usd=pnl_usd,
+                notional=notional,
+                leverage=sp.current_leverage,
+                age_minutes=age,
+                dca_count=sp.adds,
+            )
+        )
+
     return AnalyticsSnapshot(
         strategy_scores=scores,
         patterns=patterns,
@@ -388,6 +469,7 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
         total_trades_logged=_bot.trade_db.trade_count(),
         hourly_performance=hourly,
         regime_performance=regime,
+        live_positions=live,
     )
 
 
@@ -423,12 +505,13 @@ async def bot_stop(_: str = Depends(verify_token)) -> ActionResponse:
     return ActionResponse(success=True, message="Bot stopped")
 
 
-@app.post("/api/position/{symbol}/close", response_model=ActionResponse)
-async def close_position(symbol: str, _: str = Depends(verify_token)) -> ActionResponse:
+@app.post("/api/position/close", response_model=ActionResponse)
+async def close_position(body: PositionCloseBody, _: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     from core.models import Signal, SignalAction
 
+    symbol = body.symbol
     sig = Signal(
         symbol=symbol,
         action=SignalAction.CLOSE,
@@ -442,12 +525,12 @@ async def close_position(symbol: str, _: str = Depends(verify_token)) -> ActionR
         return ActionResponse(success=False, message=str(e))
 
 
-@app.post("/api/position/{symbol}/take-profit", response_model=ActionResponse)
-async def take_profit(
-    symbol: str, pct: float = Query(default=50, ge=1, le=100), _: str = Depends(verify_token)
-) -> ActionResponse:
+@app.post("/api/position/take-profit", response_model=ActionResponse)
+async def take_profit(body: PositionTakeProfitBody, _: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
+    symbol = body.symbol
+    pct = max(1, min(100, body.pct))
     try:
         positions = await _bot.exchange.fetch_positions()
         pos = next((p for p in positions if p.symbol == symbol and p.amount > 0), None)
@@ -471,12 +554,12 @@ async def take_profit(
         return ActionResponse(success=False, message=str(e))
 
 
-@app.post("/api/position/{symbol}/tighten-stop", response_model=ActionResponse)
-async def tighten_stop(
-    symbol: str, pct: float = Query(default=2, ge=0.1, le=50), _: str = Depends(verify_token)
-) -> ActionResponse:
+@app.post("/api/position/tighten-stop", response_model=ActionResponse)
+async def tighten_stop(body: PositionTightenStopBody, _: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
+    symbol = body.symbol
+    pct = max(0.1, min(50, body.pct))
     ts = _bot.orders.trailing.active_stops.get(symbol)
     if not ts:
         return ActionResponse(success=False, message=f"No trailing stop for {symbol}")
@@ -538,9 +621,79 @@ async def toggle_module(name: str, _: str = Depends(verify_token)) -> ActionResp
             return ActionResponse(success=True, message="Intel enabled")
     elif name == "news":
         _bot.settings.news_enabled = not _bot.settings.news_enabled
-        state = "enabled" if _bot.settings.news_enabled else "disabled"
+        _bot.news.enabled = _bot.settings.news_enabled
+        if _bot.settings.news_enabled:
+            if not _bot.news._running:
+                await _bot.news.start()
+            state = "enabled"
+        else:
+            await _bot.news.stop()
+            state = "disabled"
         return ActionResponse(success=True, message=f"News {state}")
     return ActionResponse(success=False, message=f"Unknown module: {name}")
+
+
+# --------------- DB Explorer (read-only) ---------------
+
+_ALLOWED_TABLES: set[str] = set()
+
+
+def _get_db_tables() -> list[dict[str, Any]]:
+    if not _bot or not _bot.trade_db._conn:
+        return []
+    conn = _bot.trade_db._conn
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    ).fetchall()
+    result = []
+    for r in rows:
+        name = r["name"]
+        count = conn.execute(f"SELECT COUNT(*) as c FROM [{name}]").fetchone()["c"]
+        result.append({"name": name, "row_count": count})
+    _ALLOWED_TABLES.update(t["name"] for t in result)
+    return result
+
+
+@app.get("/api/db/tables", response_model=None)
+async def db_tables(_: str = Depends(verify_token)) -> list[dict[str, Any]]:
+    return _get_db_tables()
+
+
+@app.get("/api/db/table/{table_name}", response_model=None)
+async def db_table_rows(
+    table_name: str,
+    page: int = 1,
+    page_size: int = 100,
+    _: str = Depends(verify_token),
+) -> dict[str, Any]:
+    if not _bot or not _bot.trade_db._conn:
+        return {"columns": [], "rows": [], "total": 0, "page": page, "page_size": page_size}
+
+    if not _ALLOWED_TABLES:
+        _get_db_tables()
+    if table_name not in _ALLOWED_TABLES:
+        raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found")
+
+    conn = _bot.trade_db._conn
+    page_size = min(max(page_size, 10), 500)
+    offset = (max(page, 1) - 1) * page_size
+
+    total = conn.execute(f"SELECT COUNT(*) as c FROM [{table_name}]").fetchone()["c"]
+    cursor = conn.execute(
+        f"SELECT * FROM [{table_name}] ORDER BY rowid DESC LIMIT ? OFFSET ?",
+        (page_size, offset),
+    )
+    columns = [desc[0] for desc in cursor.description] if cursor.description else []
+    rows = [dict(r) for r in cursor.fetchall()]
+
+    return {
+        "columns": columns,
+        "rows": rows,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size,
+    }
 
 
 # --------------- WebSocket ---------------

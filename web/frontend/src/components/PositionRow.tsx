@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { PositionInfo } from "../hooks/useWebSocket";
-import { post, postQuery } from "../api/client";
+import { postBody } from "../api/client";
 
 interface Props {
   position: PositionInfo;
@@ -21,7 +21,6 @@ export function PositionRow({ position: p, onAction }: Props) {
     setLoading("");
   };
 
-  const sym = encodeURIComponent(p.symbol);
   const pnlClass = p.pnl_pct >= 0 ? "pnl-positive" : "pnl-negative";
 
   return (
@@ -46,6 +45,8 @@ export function PositionRow({ position: p, onAction }: Props) {
       </td>
       <td>{p.entry_price.toFixed(p.entry_price < 1 ? 6 : 2)}</td>
       <td>{p.current_price.toFixed(p.current_price < 1 ? 6 : 2)}</td>
+      <td>${Math.round(p.notional_value).toLocaleString()}</td>
+      <td>${Math.round(p.notional_value / Math.max(p.leverage, 1)).toLocaleString()}</td>
       <td className={pnlClass} style={{ fontWeight: 600 }}>
         {p.pnl_pct >= 0 ? "+" : ""}{p.pnl_pct.toFixed(2)}%
         <br />
@@ -79,8 +80,9 @@ export function PositionRow({ position: p, onAction }: Props) {
         <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
           <button
             className="btn-danger"
+            title="Close this position at market."
             disabled={loading === "close"}
-            onClick={() => act("close", () => post(`/api/position/${sym}/close`))}
+            onClick={() => act("close", () => postBody("/api/position/close", { symbol: p.symbol }))}
           >
             Close
           </button>
@@ -88,18 +90,24 @@ export function PositionRow({ position: p, onAction }: Props) {
             <button
               key={pct}
               className="btn-warning"
+              title={`Take profit: close ${pct}% of this position at market.`}
               style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
               disabled={loading === `tp${pct}`}
-              onClick={() => act(`tp${pct}`, () => postQuery(`/api/position/${sym}/take-profit`, { pct }))}
+              onClick={() =>
+                act(`tp${pct}`, () => postBody("/api/position/take-profit", { symbol: p.symbol, pct }))
+              }
             >
               {pct}%
             </button>
           ))}
           <button
             className="btn-primary"
+            title="Tighten trailing stop (move stop loss closer to current price)."
             style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
             disabled={loading === "stop"}
-            onClick={() => act("stop", () => postQuery(`/api/position/${sym}/tighten-stop`, { pct: 2 }))}
+            onClick={() =>
+              act("stop", () => postBody("/api/position/tighten-stop", { symbol: p.symbol, pct: 2 }))
+            }
           >
             Tighten
           </button>

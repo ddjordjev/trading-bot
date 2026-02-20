@@ -289,34 +289,8 @@ def get_metrics_json(bot: TradingBot | None, uptime: float) -> dict[str, Any]:
         except Exception:
             return 0.0
 
-    positions: list[dict[str, Any]] = []
-    if bot:
-        for sym, sp in bot.orders.scaler.active_positions.items():
-            positions.append(
-                {
-                    "symbol": sym,
-                    "side": sp.side,
-                    "amount": sp.current_size,
-                    "entry": sp.avg_entry_price,
-                    "leverage": sp.current_leverage,
-                    "adds": sp.adds,
-                }
-            )
-
     return {
         "uptime_seconds": round(uptime, 1),
-        "trading": {
-            "balance": _val(_balance),
-            "daily_pnl": _val(_daily_pnl),
-            "daily_pnl_pct": round(_val(_daily_pnl_pct), 2),
-            "daily_loss_pct": round(_val(_daily_loss_pct), 2),
-            "open_positions": int(_val(_open_positions)),
-            "trades_today": int(_val(_trades_today)),
-            "win_rate": round(_val(_win_rate), 1),
-            "strategies": int(_val(_strategies_count)),
-            "fear_greed": int(_val(_fear_greed)),
-        },
-        "positions": positions,
         "system": {
             "cpu_pct": round(_val(_sys_cpu_pct), 1),
             "mem_used_gb": round(_val(_sys_mem_used) / (1024**3), 2),

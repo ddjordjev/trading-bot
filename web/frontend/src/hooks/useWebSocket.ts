@@ -15,12 +15,14 @@ export interface BotStatus {
   exchange_name: string;
   exchange_url: string;
   balance: number;
+  available_margin: number;
   daily_pnl: number;
   daily_pnl_pct: number;
   tier: string;
   tier_progress_pct: number;
   daily_target_pct: number;
   total_growth_pct: number;
+  total_growth_usd: number;
   uptime_seconds: number;
   manual_stop_active: boolean;
   strategies_count: number;

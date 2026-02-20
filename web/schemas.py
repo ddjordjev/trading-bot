@@ -11,12 +11,14 @@ class BotStatus(BaseModel):
     exchange_name: str = ""
     exchange_url: str = ""
     balance: float = 0.0
+    available_margin: float = 0.0
     daily_pnl: float = 0.0
     daily_pnl_pct: float = 0.0
     tier: str = "building"
     tier_progress_pct: float = 0.0
     daily_target_pct: float = 10.0
     total_growth_pct: float = 0.0
+    total_growth_usd: float = 0.0
     uptime_seconds: float = 0.0
     manual_stop_active: bool = False
     strategies_count: int = 0
@@ -55,6 +57,16 @@ class TradeRecord(BaseModel):
     pnl: float = 0.0
 
 
+class TradeQueueItem(BaseModel):
+    """Pending proposal in the trade queue (symbol, side, strategy, strength, age)."""
+
+    symbol: str
+    side: str
+    strategy: str
+    strength: float
+    age_seconds: float
+
+
 class IntelSnapshot(BaseModel):
     regime: str = "normal"
     fear_greed: int = 50
@@ -79,6 +91,7 @@ class TrendingCoinInfo(BaseModel):
     price: float = 0.0
     volume_24h: float = 0.0
     market_cap: float = 0.0
+    change_5m: float = 0.0
     change_1h: float = 0.0
     change_24h: float = 0.0
     is_low_liquidity: bool = False
@@ -92,6 +105,10 @@ class StrategyInfo(BaseModel):
     leverage: int
     mode: str = "pyramid"
     is_dynamic: bool = False
+    open_now: int = 0
+    applied_count: int = 0
+    success_count: int = 0
+    fail_count: int = 0
 
 
 class ModuleStatus(BaseModel):
@@ -183,6 +200,20 @@ class ModificationSuggestionInfo(BaseModel):
     based_on_trades: int = 0
 
 
+class LivePositionInfo(BaseModel):
+    symbol: str
+    side: str
+    strategy: str
+    entry_price: float
+    current_price: float
+    pnl_pct: float
+    pnl_usd: float
+    notional: float
+    leverage: int
+    age_minutes: float
+    dca_count: int
+
+
 class AnalyticsSnapshot(BaseModel):
     strategy_scores: list[StrategyScoreInfo] = []
     patterns: list[PatternInsightInfo] = []
@@ -190,8 +221,23 @@ class AnalyticsSnapshot(BaseModel):
     total_trades_logged: int = 0
     hourly_performance: list[dict[str, Any]] = []
     regime_performance: list[dict[str, Any]] = []
+    live_positions: list[LivePositionInfo] = []
 
 
 class ActionResponse(BaseModel):
     success: bool
     message: str
+
+
+class PositionCloseBody(BaseModel):
+    symbol: str
+
+
+class PositionTakeProfitBody(BaseModel):
+    symbol: str
+    pct: float = 50.0
+
+
+class PositionTightenStopBody(BaseModel):
+    symbol: str
+    pct: float = 2.0

@@ -50,9 +50,10 @@ class DailyTargetTracker:
     STOP_FILE = Path("data/STOP")
     CLOSE_ALL_FILE = Path("data/CLOSE_ALL")
 
-    def __init__(self, daily_target_pct: float = 10.0, compound: bool = True):
+    def __init__(self, daily_target_pct: float = 10.0, compound: bool = True, aggressive_mode: bool = False):
         self.daily_target_pct = daily_target_pct
         self.compound = compound
+        self.aggressive_mode = aggressive_mode
 
         self._day_start_balance: float = 0.0
         self._current_balance: float = 0.0
@@ -187,6 +188,9 @@ class DailyTargetTracker:
         MONSTER:    0.15x — 50-100%, almost nothing new
         LEGENDARY:  0.0x  — 100%+, no new trades at all
         """
+        if self.aggressive_mode:
+            return 1.0
+
         t = self.tier
 
         if t == DailyTier.LOSING:
@@ -210,6 +214,7 @@ class DailyTargetTracker:
         Manual override: STOP file kills all new entries.
         Tier-based: at MONSTER (50-100%) only high-conviction.
         At LEGENDARY (100%+): no new trades, ride existing only.
+        Aggressive mode: always trade (only manual overrides respected).
         """
         if self.manual_stop:
             logger.warning("MANUAL STOP active (STOP file detected) -- no new trades")
@@ -218,6 +223,9 @@ class DailyTargetTracker:
         if self.manual_close_all:
             logger.warning("MANUAL CLOSE_ALL active -- closing all positions")
             return False
+
+        if self.aggressive_mode:
+            return True
 
         t = self.tier
 

@@ -65,7 +65,19 @@ class PaperExchange(BaseExchange):
 
     @timed("exchange.fetch_balance")
     async def fetch_balance(self) -> dict[str, float]:
-        return {k: v for k, v in self._balances.items() if v > 0}
+        total = dict(self._balances)
+        for pos in self._positions:
+            margin = pos.entry_price * pos.amount / max(pos.leverage, 1)
+            try:
+                ticker = await self._real.fetch_ticker(pos.symbol)
+                if pos.side == OrderSide.BUY:
+                    pnl = (ticker.last - pos.entry_price) * pos.amount
+                else:
+                    pnl = (pos.entry_price - ticker.last) * pos.amount
+            except Exception:
+                pnl = pos.unrealized_pnl or 0
+            total["USDT"] = total.get("USDT", 0) + margin + pnl
+        return {k: v for k, v in total.items() if v > 0}
 
     @timed("exchange.fetch_positions")
     async def fetch_positions(self, symbol: str | None = None) -> list[Position]:

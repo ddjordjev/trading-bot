@@ -1,12 +1,13 @@
 import type { FullSnapshot } from "../hooks/useWebSocket";
 import { post } from "../api/client";
-import { TierBadge } from "../components/TierBadge";
 import { PositionRow } from "../components/PositionRow";
 import { LogViewer } from "../components/LogViewer";
 import { useState } from "react";
 
 export function Dashboard({ data }: { data: FullSnapshot | null }) {
   const [actionMsg, setActionMsg] = useState("");
+  const [logsExpanded, setLogsExpanded] = useState(true);
+
   if (!data) return <div className="empty-state">Connecting...</div>;
 
   const s = data.status;
@@ -32,26 +33,36 @@ export function Dashboard({ data }: { data: FullSnapshot | null }) {
     <div>
       <div className="stat-grid">
         <div className="stat-card">
-          <div className="label">Balance</div>
-          <div className="value">${s.balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+          <div className="label">Balance / Available</div>
+          <div className="value">${Math.round(s.balance).toLocaleString()}</div>
+          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: 2 }}>
+            ${Math.round(s.available_margin).toLocaleString()} available
+          </div>
         </div>
         <div className="stat-card">
           <div className="label">Daily PnL</div>
           <div className={`value ${pnlClass}`}>
+            {s.daily_pnl >= 0 ? "+" : ""}${s.daily_pnl.toFixed(2)}
+          </div>
+          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: 2 }}>
             {s.daily_pnl_pct >= 0 ? "+" : ""}{s.daily_pnl_pct.toFixed(2)}%
           </div>
         </div>
         <div className="stat-card">
-          <div className="label">Tier</div>
-          <div className="value"><TierBadge tier={s.tier} /></div>
-        </div>
-        <div className="stat-card">
           <div className="label">Target Progress</div>
-          <div className="value">{s.tier_progress_pct.toFixed(0)}%</div>
+          <div className="value">
+            {s.daily_pnl >= 0 ? "+" : ""}${s.daily_pnl.toFixed(2)}
+          </div>
+          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: 2 }}>
+            {s.tier_progress_pct.toFixed(0)}% of {s.daily_target_pct.toFixed(0)}% target
+          </div>
         </div>
         <div className="stat-card">
           <div className="label">Total Growth</div>
           <div className={`value ${s.total_growth_pct >= 0 ? "pnl-positive" : "pnl-negative"}`}>
+            {s.total_growth_usd >= 0 ? "+" : ""}${s.total_growth_usd.toFixed(2)}
+          </div>
+          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: 2 }}>
             {s.total_growth_pct >= 0 ? "+" : ""}{s.total_growth_pct.toFixed(1)}%
           </div>
         </div>
@@ -84,28 +95,44 @@ export function Dashboard({ data }: { data: FullSnapshot | null }) {
           <div className="label">Uptime</div>
           <div className="value">{fmtUptime(s.uptime_seconds)}</div>
         </div>
-        <div className="stat-card">
-          <div className="label">Strategies</div>
-          <div className="value">{s.strategies_count + s.dynamic_strategies_count}</div>
-        </div>
       </div>
 
       <div className="controls">
-        <button className="btn-success" onClick={() => doAction("Start", () => post("/api/bot/start"))}>
+        <button
+          className="btn-success"
+          title="Start the trading bot tick loop; it will begin processing the trade queue and managing positions."
+          onClick={() => doAction("Start", () => post("/api/bot/start"))}
+        >
           Start Bot
         </button>
-        <button className="btn-danger" onClick={() => doAction("Stop", () => post("/api/bot/stop"))}>
+        <button
+          className="btn-danger"
+          title="Stop the bot process; no new trades and no position management until started again."
+          onClick={() => doAction("Stop", () => post("/api/bot/stop"))}
+        >
           Stop Bot
         </button>
-        <button className="btn-warning" onClick={() => doAction("Halt", () => post("/api/stop-trading"))}>
+        <button
+          className="btn-warning"
+          title="Temporarily halt taking new trades; bot keeps running and managing existing positions."
+          onClick={() => doAction("Halt", () => post("/api/stop-trading"))}
+        >
           Halt Trading
         </button>
-        <button className="btn-primary" onClick={() => doAction("Resume", () => post("/api/resume-trading"))}>
+        <button
+          className="btn-primary"
+          title="Resume taking new trades after a halt."
+          onClick={() => doAction("Resume", () => post("/api/resume-trading"))}
+        >
           Resume Trading
         </button>
-        <button className="btn-danger" onClick={() => {
-          if (confirm("Close ALL positions?")) doAction("Close All", () => post("/api/close-all"));
-        }}>
+        <button
+          className="btn-danger"
+          title="Close all open positions at market. Use with caution."
+          onClick={() => {
+            if (confirm("Close ALL positions?")) doAction("Close All", () => post("/api/close-all"));
+          }}
+        >
           Close All Positions
         </button>
         {actionMsg && (
@@ -128,6 +155,8 @@ export function Dashboard({ data }: { data: FullSnapshot | null }) {
                 <th>Symbol</th>
                 <th>Entry</th>
                 <th>Current</th>
+                <th>Size</th>
+                <th>Margin</th>
                 <th>PnL</th>
                 <th>Stop Loss</th>
                 <th>Strategy</th>
@@ -176,10 +205,18 @@ export function Dashboard({ data }: { data: FullSnapshot | null }) {
         </>
       )}
 
-      <h3 style={{ color: "var(--heading)", margin: "1.5rem 0 0.5rem" }}>
-        Live Logs
-      </h3>
-      <LogViewer logs={data.logs ?? []} />
+      <div
+        style={{ display: "flex", alignItems: "center", gap: "0.5rem", margin: "1.5rem 0 0.5rem", cursor: "pointer" }}
+        onClick={() => setLogsExpanded(!logsExpanded)}
+      >
+        <span style={{ fontSize: "1.4rem", lineHeight: 1, color: "var(--text-muted)", transition: "transform 0.2s", transform: logsExpanded ? "rotate(90deg)" : "rotate(0deg)" }}>
+          ▶
+        </span>
+        <h3 style={{ color: "var(--heading)", margin: 0 }}>
+          Live Logs
+        </h3>
+      </div>
+      {logsExpanded && <LogViewer logs={data.logs ?? []} />}
     </div>
   );
 }

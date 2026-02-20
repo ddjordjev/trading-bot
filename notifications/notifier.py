@@ -54,6 +54,7 @@ class Notifier:
 
     async def send(self, ntype: NotificationType, subject: str, body: str) -> None:
         if not self.is_enabled(ntype):
+            logger.info("NOTIFICATION [{}] (not emailed): {} - {}", ntype.value, subject, body)
             return
 
         if not self.smtp_user or not self.notify_email:

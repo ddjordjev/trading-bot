@@ -17,14 +17,18 @@ class TrendingCoin(BaseModel):
     price: float = 0.0
     market_cap: float = 0.0
     volume_24h: float = 0.0
+    change_5m: float = 0.0  # Populated when 5m candle/price source available
     change_1h: float = 0.0
     change_24h: float = 0.0
     change_7d: float = 0.0
     change_30d: float = 0.0
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    exchange_pair: str = ""
 
     @property
     def trading_pair(self) -> str:
+        if self.exchange_pair:
+            return self.exchange_pair
         clean = self.symbol.upper().replace(" ", "")
         if clean.endswith("USDT") or clean.endswith("USD"):
             return clean
@@ -72,12 +76,41 @@ class TrendingScanner:
         self.min_hourly_move_pct = min_hourly_move_pct
         self.min_daily_move_pct = min_daily_move_pct
         self._intel = intel  # MarketIntel reference for CMC/CoinGecko data
+        self._exchange_symbols: set[str] = set()
+        self._symbol_alias_map: dict[str, tuple[str, int]] = {}
 
         self._callbacks: list[Callable[..., Any]] = []
         self._running = False
         self._latest_scan: list[TrendingCoin] = []
         self._hot_movers: list[TrendingCoin] = []
         self._background_tasks: list[asyncio.Task[None]] = []
+
+    def set_exchange_symbols(self, symbols: list[str]) -> None:
+        """Set the list of symbols available on the active exchange for filtering.
+
+        Builds a normalized set for exact matching and a fuzzy alias map for
+        multiplier-prefix tokens (e.g. 1000LUNC/USDT → base LUNC, mult 1000).
+        """
+        self._exchange_symbols = set()
+        self._symbol_alias_map.clear()
+
+        _prefix_re = re.compile(r"^(\d+)([A-Z]+)(/USDT.*)$")
+        for raw in symbols:
+            normed = raw.upper().split(":")[0]  # strip :USDT settle suffix
+            self._exchange_symbols.add(normed)
+
+            m = _prefix_re.match(normed)
+            if m:
+                mult, base, suffix = int(m.group(1)), m.group(2), m.group(3)
+                plain = f"{base}{suffix}"  # e.g. LUNC/USDT
+                self._symbol_alias_map[plain] = (normed, mult)
+
+        logger.info(
+            "Scanner: loaded {} exchange symbols, {} multiplier aliases (e.g. {})",
+            len(self._exchange_symbols),
+            len(self._symbol_alias_map),
+            ", ".join(f"{k}->{v[0]}" for k, v in list(self._symbol_alias_map.items())[:3]) or "none",
+        )
 
     def on_trending(self, callback: Callable[..., Any]) -> None:
         """Register callback for when interesting movers are found."""
@@ -253,6 +286,42 @@ class TrendingScanner:
         )
         return coins
 
+    def _resolve_exchange_symbol(self, coin: TrendingCoin) -> bool:
+        """Try to match a coin to an exchange symbol.
+
+        Checks exact match first, then looks for multiplier-prefix aliases
+        (e.g. LUNC → 1000LUNC). Validates via price: the mapped price
+        (coin.price * multiplier) must land in a reasonable futures range.
+        Returns True if the coin is tradeable and sets coin.exchange_pair.
+        """
+        if not self._exchange_symbols:
+            return True
+
+        pair = coin.trading_pair.upper()
+        if pair in self._exchange_symbols:
+            return True
+
+        alias = getattr(self, "_symbol_alias_map", {}).get(pair)
+        if not alias:
+            return False
+
+        exchange_sym, multiplier = alias
+        mapped_price = coin.price * multiplier
+        if mapped_price < 0.0001 or mapped_price > 10_000_000:
+            logger.debug(
+                "Scanner: {} -> {} price sanity fail (${:.6f} * {} = ${:.4f})",
+                pair,
+                exchange_sym,
+                coin.price,
+                multiplier,
+                mapped_price,
+            )
+            return False
+
+        coin.exchange_pair = exchange_sym
+        logger.debug("Scanner: mapped {} -> {} (x{}, ~${:.4f})", pair, exchange_sym, multiplier, mapped_price)
+        return True
+
     def _filter_movers(self, coins: list[TrendingCoin]) -> list[TrendingCoin]:
         """Filter for tradeable, liquid coins that are actually moving."""
         stablecoins = {"USDT", "USDC", "DAI", "TUSD", "BUSD", "FDUSD", "PYUSD", "USDP", "USDD", "EURC", "GHO", "RLUSD"}
@@ -265,6 +334,8 @@ class TrendingScanner:
             if coin.volume_24h < self.min_volume_24h:
                 continue
             if coin.market_cap < self.min_market_cap:
+                continue
+            if not self._resolve_exchange_symbol(coin):
                 continue
 
             hourly_hot = abs(coin.change_1h) >= self.min_hourly_move_pct

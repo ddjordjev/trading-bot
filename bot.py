@@ -13,7 +13,7 @@ from analytics import AnalyticsEngine
 from config.settings import Settings, get_settings
 from core.exchange import BaseExchange, create_exchange
 from core.market_schedule import get_market_schedule
-from core.models import Candle, Signal, SignalAction
+from core.models import Candle, MarketType, Signal, SignalAction
 from core.models.order import Order, OrderSide
 from core.models.signal import TickUrgency
 from core.orders import OrderManager
@@ -74,7 +74,11 @@ class TradingBot:
         self.notifier = Notifier(self.settings)
         self.volatility = VolatilityDetector(self.settings)
         self.news = NewsMonitor(self.settings)
-        self.target = DailyTargetTracker(daily_target_pct=daily_target_pct, compound=True)
+        self.target = DailyTargetTracker(
+            daily_target_pct=daily_target_pct,
+            compound=True,
+            aggressive_mode=self.settings.is_paper_local(),
+        )
         self.market_filter = MarketQualityFilter(
             min_liquidity_volume=self.settings.min_liquidity_volume,
         )
@@ -188,6 +192,13 @@ class TradingBot:
         logger.info("Market schedule: {}", schedule.summary())
 
         await self.exchange.connect()
+
+        try:
+            futures_symbols = await self.exchange.get_available_symbols(MarketType.FUTURES)
+            self.scanner.set_exchange_symbols(futures_symbols)
+        except Exception as e:
+            logger.warning("Could not load exchange symbols for scanner filter: {}", e)
+
         await self.notifier.start()
         await self.news.start()
         await self.scanner.start()
@@ -250,7 +261,7 @@ class TradingBot:
     def _update_tick_interval(self) -> None:
         """Adapt tick speed based on the most urgent open position.
 
-        Priority (fastest wins): scalp (5s) > active (60s) > swing (300s) > idle (60s).
+        Priority (fastest wins): scalp (1s) > active (60s) > swing (300s) > idle (60s).
         """
         urgencies: set[TickUrgency] = set()
         for s in self._active_signals:
@@ -274,8 +285,9 @@ class TradingBot:
     async def _tick(self) -> None:
 
         balance_map = await self.exchange.fetch_balance()
-        balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
-        self.target.update_balance(balance)
+        raw_balance = balance_map.get("USDT", 0.0)
+        balance = self.settings.cap_balance(raw_balance)
+        self.target.update_balance(raw_balance)
 
         logger.debug(
             "=== TICK === bal=${:.2f} pnl={:+.2f}% tier={} aggr={:.2f} strats={} dynamic={} trade={}",
@@ -365,6 +377,8 @@ class TradingBot:
                     await self.intel.tradingview.analyze_multi(active_symbols, "1h")
                 except Exception as e:
                     logger.debug("TV multi-analyze error: {}", e)
+        elif intel_condition and self.intel:
+            self.intel._condition = intel_condition
 
         # 10. Legendary day check: at 100%+ decide whether to close or ride
         if self.target.tier.value == "legendary":
@@ -539,15 +553,25 @@ class TradingBot:
                         )
                         continue
 
+                # News factor: volatility indicator, buy-rumor/sell-news, force quick trades
+                news_mult, news_force_quick = self._get_news_factor(sig.symbol, side, sig.quick_trade)
+                if news_mult != 1.0 or news_force_quick:
+                    sig = sig.model_copy()
+                    sig.strength *= news_mult
+                    if news_force_quick and not sig.quick_trade:
+                        sig.quick_trade = True
+                        sig.max_hold_minutes = min(sig.max_hold_minutes or 15, 15)
+
                 sig = self._adjust_for_target(sig, aggression)
 
                 logger.debug(
-                    "Final signal: {} {} str={:.3f} (tv={:.2f} analytics={:.2f} aggr={:.2f}) pyramid={} | executing",
+                    "Final signal: {} {} str={:.3f} (tv={:.2f} analytics={:.2f} news={:.2f} aggr={:.2f}) pyramid={} | executing",
                     sig.action.value,
                     sig.symbol,
                     sig.strength,
                     tv_boost,
                     strat_weight,
+                    news_mult,
                     aggression,
                     use_pyramid,
                 )
@@ -1087,6 +1111,83 @@ class TradingBot:
             return self.intel.tv_signal_boost(symbol, side)
         return 1.0
 
+    def _get_news_factor(self, symbol: str, side: str, is_quick_trade: bool) -> tuple[float, bool]:
+        """Compute signal multiplier from recent news for a symbol.
+
+        Returns (multiplier, should_force_quick) where:
+        - multiplier adjusts signal strength (0.5-1.5x)
+        - should_force_quick=True means news makes this a short-term play only
+
+        Philosophy:
+        - News = volatility indicator, not directional oracle
+        - "Buy the rumor, sell the news": strong bullish news on a BUY
+          signal is actually risky (sell-the-news dump), so we penalize
+          longer holds and force quick_trade
+        - Bearish news + BUY = contrarian, small boost if short-term
+        - Any strong news = monitor closely, force quick trade
+        - No long-term decisions based on news alone
+        """
+        now = datetime.now(UTC)
+        cutoff_seconds = 300 if is_quick_trade else 900
+        relevant = [
+            n
+            for n in self._recent_news
+            if symbol in n.matched_symbols and (now - n.published).total_seconds() < cutoff_seconds
+        ]
+        if not relevant:
+            return 1.0, False
+
+        avg_score = sum(n.sentiment_score for n in relevant) / len(relevant)
+        news_count = len(relevant)
+        force_quick = False
+
+        if side == "long":
+            if avg_score > 0.3:
+                # "Sell the news" — bullish news on a long is risky, likely
+                # to dump after initial spike. Slight boost for scalps,
+                # penalize anything longer.
+                if is_quick_trade:
+                    mult = 1.15
+                else:
+                    mult = 0.7
+                    force_quick = True
+            elif avg_score < -0.3:
+                # Bearish news + long = contrarian. Small scalp boost only.
+                mult = 1.1 if is_quick_trade else 0.6
+                force_quick = True
+            else:
+                mult = 1.0
+        else:  # short
+            if avg_score < -0.3:
+                # Bearish news + short = obvious, everyone shorts the panic.
+                # Risky due to snap-back rallies. Quick scalp only.
+                mult = 1.15 if is_quick_trade else 0.7
+                force_quick = True
+            elif avg_score > 0.3:
+                # Bullish news + short = contrarian "sell the news" play.
+                mult = 1.2 if is_quick_trade else 0.8
+                force_quick = True
+            else:
+                mult = 1.0
+
+        # More headlines = higher volatility = tighter hold
+        if news_count >= 3:
+            force_quick = True
+            mult = min(mult * 1.1, 1.5)
+
+        if mult != 1.0 or force_quick:
+            logger.info(
+                "News factor for {} {}: {:.2f}x (avg_sentiment={:.2f}, headlines={}, force_quick={})",
+                symbol,
+                side,
+                mult,
+                avg_score,
+                news_count,
+                force_quick,
+            )
+
+        return round(mult, 3), force_quick
+
     def _adjust_for_target(self, sig: Signal, aggression: float) -> Signal:
         adjusted = sig.model_copy()
         adjusted.strength = min(1.0, sig.strength * aggression)
@@ -1250,8 +1351,8 @@ class TradingBot:
             if self.target._last_reset and self.target._last_reset.date() == now.date():
                 return
             balance_map = await self.exchange.fetch_balance()
-            balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
-            self.target.update_balance(balance)
+            raw_balance = balance_map.get("USDT", 0.0)
+            self.target.update_balance(raw_balance)
             positions = await self.exchange.fetch_positions()
 
             logger.info("=== DAILY SUMMARY ===")
@@ -1266,7 +1367,7 @@ class TradingBot:
             logger.info("\n{}", compound_report)
 
             await self.notifier.send_daily_summary(
-                balance=balance,
+                balance=raw_balance,
                 pnl=self.target.todays_pnl,
                 pnl_pct=self.target.todays_pnl_pct,
                 trades=self.target._todays_trades,
@@ -1274,8 +1375,8 @@ class TradingBot:
                 compound_report=compound_report,
                 target_hit=self.target.target_reached,
             )
-            self.risk.reset_daily(balance)
-            self.target.reset_day(balance)
+            self.risk.reset_daily(raw_balance)
+            self.target.reset_day(raw_balance)
 
 
 def main() -> None:
@@ -1288,12 +1389,15 @@ def main() -> None:
     bot = TradingBot(settings, daily_target_pct=10.0)
 
     mkt = "futures" if settings.futures_allowed else "spot"
-    bot.add_strategy("compound_momentum", "BTC/USDT", market_type=mkt)
-    bot.add_strategy("compound_momentum", "ETH/USDT", market_type=mkt)
-    bot.add_strategy("market_open_volatility", "BTC/USDT", market_type=mkt)
-    bot.add_strategy("market_open_volatility", "ETH/USDT", market_type=mkt)
-    bot.add_strategy("swing_opportunity", "BTC/USDT", market_type=mkt)
-    bot.add_strategy("swing_opportunity", "ETH/USDT", market_type=mkt)
+    for symbol in ("BTC/USDT", "ETH/USDT"):
+        bot.add_strategy("compound_momentum", symbol, market_type=mkt)
+        bot.add_strategy("market_open_volatility", symbol, market_type=mkt)
+        bot.add_strategy("swing_opportunity", symbol, market_type=mkt)
+        bot.add_strategy("rsi", symbol, market_type=mkt)
+        bot.add_strategy("macd", symbol, market_type=mkt)
+        bot.add_strategy("bollinger", symbol, market_type=mkt)
+        bot.add_strategy("mean_reversion", symbol, market_type=mkt)
+        bot.add_strategy("grid", symbol, market_type=mkt)
 
     loop = asyncio.new_event_loop()
     _background_tasks: list[asyncio.Task[None]] = []

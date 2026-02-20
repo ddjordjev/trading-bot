@@ -1,16 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-
-interface TradingMetrics {
-  balance: number;
-  daily_pnl: number;
-  daily_pnl_pct: number;
-  daily_loss_pct: number;
-  open_positions: number;
-  trades_today: number;
-  win_rate: number;
-  strategies: number;
-  fear_greed: number;
-}
+import { get } from "../api/client";
 
 interface SystemMetrics {
   cpu_pct: number;
@@ -29,19 +18,8 @@ interface ProcessMetrics {
   uptime_hours: number;
 }
 
-interface Position {
-  symbol: string;
-  side: string;
-  amount: number;
-  entry: number;
-  leverage: number;
-  adds: number;
-}
-
 interface MetricsData {
   uptime_seconds: number;
-  trading: TradingMetrics;
-  positions: Position[];
   system: SystemMetrics;
   process: ProcessMetrics;
 }
@@ -98,74 +76,11 @@ function ProgressBar({ pct, color }: { pct: number; color: string }) {
 }
 
 function BuiltInDashboard({ data }: { data: MetricsData }) {
-  const t = data.trading;
   const s = data.system;
   const p = data.process;
-  const pnlColor = t.daily_pnl >= 0 ? "#3fb950" : "#f85149";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
-      {/* Trading */}
-      <div>
-        <h3 style={{ margin: "0 0 0.75rem", fontSize: "0.85rem", color: "var(--text-muted, #8b949e)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-          Trading
-        </h3>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: "0.75rem" }}>
-          <MetricCard label="Balance" value={`$${t.balance.toFixed(2)}`} />
-          <MetricCard
-            label="Daily PnL"
-            value={`${t.daily_pnl >= 0 ? "+" : ""}$${t.daily_pnl.toFixed(2)}`}
-            sub={`${t.daily_pnl_pct >= 0 ? "+" : ""}${t.daily_pnl_pct}%`}
-            color={pnlColor}
-          />
-          <MetricCard label="Positions" value={String(t.open_positions)} sub={`of ${t.strategies} strategies`} />
-          <MetricCard label="Trades Today" value={String(t.trades_today)} sub={`${t.win_rate}% win rate`} />
-          <MetricCard label="Fear & Greed" value={String(t.fear_greed)} sub={t.fear_greed <= 25 ? "Extreme Fear" : t.fear_greed <= 45 ? "Fear" : t.fear_greed <= 55 ? "Neutral" : t.fear_greed <= 75 ? "Greed" : "Extreme Greed"} color={t.fear_greed <= 25 ? "#f85149" : t.fear_greed >= 75 ? "#3fb950" : undefined} />
-          <MetricCard label="Uptime" value={formatUptime(data.uptime_seconds)} />
-        </div>
-      </div>
-
-      {/* Open Positions */}
-      {data.positions.length > 0 && (
-        <div>
-          <h3 style={{ margin: "0 0 0.75rem", fontSize: "0.85rem", color: "var(--text-muted, #8b949e)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-            Open Positions
-          </h3>
-          <div style={{
-            background: "var(--bg-card, #161b22)",
-            border: "1px solid var(--border, #30363d)",
-            borderRadius: "var(--radius, 8px)",
-            overflow: "hidden",
-          }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid var(--border, #30363d)" }}>
-                  {["Symbol", "Side", "Amount", "Entry", "Leverage", "DCA Adds"].map(h => (
-                    <th key={h} style={{ padding: "0.5rem 0.75rem", textAlign: "left", color: "var(--text-muted, #8b949e)", fontWeight: 500, fontSize: "0.75rem" }}>
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {data.positions.map(pos => (
-                  <tr key={pos.symbol} style={{ borderBottom: "1px solid var(--border, #30363d)" }}>
-                    <td style={{ padding: "0.5rem 0.75rem", fontWeight: 600 }}>{pos.symbol}</td>
-                    <td style={{ padding: "0.5rem 0.75rem", color: pos.side === "long" ? "#3fb950" : "#f85149" }}>
-                      {pos.side.toUpperCase()}
-                    </td>
-                    <td style={{ padding: "0.5rem 0.75rem" }}>{pos.amount.toFixed(4)}</td>
-                    <td style={{ padding: "0.5rem 0.75rem" }}>${pos.entry.toFixed(2)}</td>
-                    <td style={{ padding: "0.5rem 0.75rem" }}>{pos.leverage}x</td>
-                    <td style={{ padding: "0.5rem 0.75rem" }}>{pos.adds}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
       {/* System & Process */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.25rem" }}>
         <div>
@@ -209,9 +124,173 @@ function BuiltInDashboard({ data }: { data: MetricsData }) {
             <MetricCard label="Memory (RSS)" value={`${p.rss_mb} MB`} />
             <MetricCard label="Threads" value={String(p.threads)} />
             <MetricCard label="Process Uptime" value={`${p.uptime_hours}h`} />
+            <MetricCard label="Server Uptime" value={formatUptime(data.uptime_seconds)} />
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+interface DbTable {
+  name: string;
+  row_count: number;
+}
+
+interface DbTableData {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+function DbExplorer() {
+  const [tables, setTables] = useState<DbTable[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [tableData, setTableData] = useState<DbTableData | null>(null);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    get<DbTable[]>("/api/db/tables").then(setTables).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!selected) { setTableData(null); return; }
+    setLoading(true);
+    get<DbTableData>(`/api/db/table/${selected}?page=${page}&page_size=100`)
+      .then(setTableData)
+      .catch(() => setTableData(null))
+      .finally(() => setLoading(false));
+  }, [selected, page]);
+
+  const selectTable = (name: string) => {
+    setSelected(name);
+    setPage(1);
+  };
+
+  return (
+    <div style={{ marginTop: "1.5rem" }}>
+      <h3 style={{
+        margin: "0 0 0.75rem", fontSize: "0.85rem",
+        color: "var(--text-muted, #8b949e)", textTransform: "uppercase", letterSpacing: "0.05em",
+      }}>
+        Database Explorer
+      </h3>
+
+      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+        {tables.map(t => (
+          <button
+            key={t.name}
+            onClick={() => selectTable(t.name)}
+            style={{
+              padding: "0.35rem 0.75rem", fontSize: "0.8rem", cursor: "pointer",
+              borderRadius: "var(--radius, 6px)",
+              border: `1px solid ${selected === t.name ? "var(--accent, #58a6ff)" : "var(--border, #30363d)"}`,
+              background: selected === t.name ? "var(--accent, #58a6ff)" : "var(--bg-card, #161b22)",
+              color: selected === t.name ? "#fff" : "var(--text, #c9d1d9)",
+            }}
+          >
+            {t.name} <span style={{ opacity: 0.6 }}>({t.row_count})</span>
+          </button>
+        ))}
+        {tables.length === 0 && (
+          <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>No tables found</span>
+        )}
+      </div>
+
+      {loading && <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Loading...</div>}
+
+      {tableData && !loading && (
+        <div style={{
+          background: "var(--bg-card, #161b22)", border: "1px solid var(--border, #30363d)",
+          borderRadius: "var(--radius, 8px)", overflow: "hidden",
+        }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.75rem" }}>
+              <thead>
+                <tr>
+                  {tableData.columns.map(col => (
+                    <th key={col} style={{
+                      padding: "0.5rem 0.6rem", textAlign: "left", whiteSpace: "nowrap",
+                      borderBottom: "1px solid var(--border, #30363d)",
+                      color: "var(--text-muted, #8b949e)", fontWeight: 600, fontSize: "0.7rem",
+                      textTransform: "uppercase", letterSpacing: "0.03em",
+                      position: "sticky", top: 0, background: "var(--bg-card, #161b22)",
+                    }}>
+                      {col}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {tableData.rows.map((row, i) => (
+                  <tr key={i} style={{
+                    borderBottom: "1px solid var(--border, #30363d)",
+                    background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.02)",
+                  }}>
+                    {tableData.columns.map(col => (
+                      <td key={col} style={{
+                        padding: "0.4rem 0.6rem", whiteSpace: "nowrap",
+                        maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis",
+                      }}>
+                        {row[col] == null ? <span style={{ opacity: 0.3 }}>NULL</span> : String(row[col])}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+                {tableData.rows.length === 0 && (
+                  <tr>
+                    <td colSpan={tableData.columns.length} style={{
+                      padding: "1rem", textAlign: "center", color: "var(--text-muted)",
+                    }}>
+                      Empty table
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {tableData.total_pages > 1 && (
+            <div style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              padding: "0.5rem 0.75rem", borderTop: "1px solid var(--border, #30363d)",
+              fontSize: "0.75rem", color: "var(--text-muted)",
+            }}>
+              <span>{tableData.total} rows total</span>
+              <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
+                <button
+                  disabled={page <= 1}
+                  onClick={() => setPage(p => p - 1)}
+                  style={{
+                    padding: "0.2rem 0.5rem", fontSize: "0.75rem", cursor: page > 1 ? "pointer" : "default",
+                    background: "none", border: "1px solid var(--border)", borderRadius: 4,
+                    color: "var(--text-muted)", opacity: page <= 1 ? 0.3 : 1,
+                  }}
+                >
+                  Prev
+                </button>
+                <span>Page {tableData.page} / {tableData.total_pages}</span>
+                <button
+                  disabled={page >= tableData.total_pages}
+                  onClick={() => setPage(p => p + 1)}
+                  style={{
+                    padding: "0.2rem 0.5rem", fontSize: "0.75rem",
+                    cursor: page < tableData.total_pages ? "pointer" : "default",
+                    background: "none", border: "1px solid var(--border)", borderRadius: 4,
+                    color: "var(--text-muted)", opacity: page >= tableData.total_pages ? 0.3 : 1,
+                  }}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -220,7 +299,7 @@ export function Monitoring() {
   const [data, setData] = useState<MetricsData | null>(null);
   const [grafana, setGrafana] = useState<GrafanaConfig | null>(null);
   const [grafanaReachable, setGrafanaReachable] = useState<boolean | null>(null);
-  const [useGrafana, setUseGrafana] = useState(false);
+  const [useGrafana, setUseGrafana] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const fetchMetrics = useCallback(() => {
@@ -293,6 +372,7 @@ export function Monitoring() {
             width: "100%", height: "calc(100vh - 180px)", border: "none", display: "block",
           }} />
         </div>
+        <DbExplorer />
       </div>
     );
   }
@@ -313,6 +393,7 @@ export function Monitoring() {
         )}
       </div>
       <BuiltInDashboard data={data} />
+      <DbExplorer />
     </div>
   );
 }

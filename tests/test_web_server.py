@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from web.server import app, set_bot
+from web.server import _ALLOWED_TABLES, app, set_bot
 
 # ── Fixtures ─────────────────────────────────────────────────────────
 
@@ -62,6 +63,11 @@ def mock_bot():
     bot.exchange = AsyncMock()
     bot.exchange.fetch_positions = AsyncMock(return_value=[])
     bot.intel = None
+    bot.news = MagicMock()
+    bot.news.enabled = False
+    bot.news._running = False
+    bot.news.start = AsyncMock()
+    bot.news.stop = AsyncMock()
     bot.scanner = MagicMock()
     bot.scanner.hot_movers = []
     bot._recent_news = []
@@ -153,6 +159,15 @@ class TestGetStatus:
         assert data["daily_pnl"] == 500.0
         assert data["strategies_count"] == 0
 
+    async def test_status_includes_total_growth_usd(self, client, mock_bot):
+        mock_bot.target._current_balance = 10000.0
+        mock_bot.target._initial_capital = 9000.0
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        r = await client.get("/api/status")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total_growth_usd"] == pytest.approx(1000.0)
+
 
 # ── GET /api/positions ────────────────────────────────────────────────
 
@@ -236,6 +251,50 @@ class TestGetTrades:
         assert data[0]["action"] == "open"
 
 
+# ── GET /api/trade-queue ────────────────────────────────────────────────
+
+
+class TestGetTradeQueue:
+    async def test_trade_queue_returns_list(self, client):
+        with patch("web.server.SharedState") as MockSharedState:
+            mock_state = MagicMock()
+            from shared.models import TradeQueue
+
+            mock_state.read_trade_queue.return_value = TradeQueue()
+            MockSharedState.return_value = mock_state
+            r = await client.get("/api/trade-queue")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    async def test_trade_queue_returns_pending_proposals(self, client):
+        from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        with patch("web.server.SharedState") as MockSharedState:
+            mock_state = MagicMock()
+            q = TradeQueue()
+            q.critical = [
+                TradeProposal(
+                    priority=SignalPriority.CRITICAL,
+                    symbol="BTC/USDT",
+                    side="long",
+                    strategy="momentum",
+                    strength=0.9,
+                    created_at=datetime.now(UTC).isoformat(),
+                ),
+            ]
+            mock_state.read_trade_queue.return_value = q
+            MockSharedState.return_value = mock_state
+            r = await client.get("/api/trade-queue")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) == 1
+        assert data[0]["symbol"] == "BTC/USDT"
+        assert data[0]["side"] == "long"
+        assert data[0]["strategy"] == "momentum"
+        assert data[0]["strength"] == 0.9
+        assert "age_seconds" in data[0]
+
+
 # ── GET /api/intel, /api/trending, /api/strategies ─────────────────────
 
 
@@ -301,6 +360,28 @@ class TestGetIntelTrendingStrategies:
         assert len(data) == 1
         assert data[0]["name"] == "rsi"
         assert data[0]["is_dynamic"] is False
+
+
+class TestGetStrategiesNoneStats:
+    """Strategies endpoint when get_strategy_stats returns None values (no 500)."""
+
+    async def test_strategies_none_stats_returns_zero(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        strat = MagicMock()
+        strat.name = "rsi"
+        strat.symbol = "BTC/USDT"
+        strat.market_type = "futures"
+        strat.leverage = 10
+        mock_bot._strategies = [strat]
+        mock_bot.trade_db.get_strategy_stats = MagicMock(return_value={"total": None, "winners": None, "losers": None})
+        mock_bot.orders.scaler.active_positions = {}
+        r = await client.get("/api/strategies")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) == 1
+        assert data[0]["applied_count"] == 0
+        assert data[0]["success_count"] == 0
+        assert data[0]["fail_count"] == 0
 
 
 # ── GET /api/modules, /api/daily-report, /api/analytics ─────────────────
@@ -430,46 +511,53 @@ class TestBotStartStop:
         mock_bot.stop.assert_awaited_once()
 
 
-# ── POST /api/position/{symbol}/close, take-profit, tighten-stop ───────
+# ── POST /api/position/close, take-profit, tighten-stop (body: symbol, pct) ─
 
 
 class TestPositionActions:
-    # Use symbol without slash (e.g. BTCUSDT) so path matches /api/position/{symbol}/close;
-    # %2F in path is decoded before routing and would break the route.
     async def test_close_position_no_bot(self, client):
         set_bot(None)  # type: ignore[arg-type]
-        r = await client.post("/api/position/BTCUSDT/close")
+        r = await client.post("/api/position/close", json={"symbol": "BTCUSDT"})
         assert r.status_code == 200
         assert r.json()["success"] is False
 
     async def test_close_position_ok(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
         mock_bot.orders.execute_signal = AsyncMock()
-        r = await client.post("/api/position/BTCUSDT/close")
+        r = await client.post("/api/position/close", json={"symbol": "BTCUSDT"})
         assert r.status_code == 200
         data = r.json()
         assert data["success"] is True
         assert "Closed" in data["message"]
         mock_bot.orders.execute_signal.assert_awaited_once()
 
+    async def test_close_position_with_slash_in_symbol(self, client, mock_bot):
+        """Symbols like BTC/USDT work when sent in request body (no path encoding issue)."""
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        mock_bot.orders.execute_signal = AsyncMock()
+        r = await client.post("/api/position/close", json={"symbol": "BTC/USDT"})
+        assert r.status_code == 200
+        assert r.json()["success"] is True
+        mock_bot.orders.execute_signal.assert_awaited_once()
+
     async def test_close_position_execute_fails(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
         mock_bot.orders.execute_signal = AsyncMock(side_effect=Exception("Exchange error"))
-        r = await client.post("/api/position/BTCUSDT/close")
+        r = await client.post("/api/position/close", json={"symbol": "BTCUSDT"})
         assert r.status_code == 200
         assert r.json()["success"] is False
         assert "Exchange error" in r.json()["message"]
 
     async def test_take_profit_no_bot(self, client):
         set_bot(None)  # type: ignore[arg-type]
-        r = await client.post("/api/position/BTCUSDT/take-profit?pct=50")
+        r = await client.post("/api/position/take-profit", json={"symbol": "BTCUSDT", "pct": 50})
         assert r.status_code == 200
         assert r.json()["success"] is False
 
     async def test_take_profit_no_position(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
         mock_bot.exchange.fetch_positions = AsyncMock(return_value=[])
-        r = await client.post("/api/position/BTCUSDT/take-profit?pct=50")
+        r = await client.post("/api/position/take-profit", json={"symbol": "BTCUSDT", "pct": 50})
         assert r.status_code == 200
         assert r.json()["success"] is False
         assert "No open position" in r.json()["message"]
@@ -490,20 +578,20 @@ class TestPositionActions:
         )
         mock_bot.exchange.fetch_positions = AsyncMock(return_value=[pos])
         mock_bot.exchange.place_order = AsyncMock(return_value=MagicMock())
-        r = await client.post("/api/position/BTCUSDT/take-profit?pct=50")
+        r = await client.post("/api/position/take-profit", json={"symbol": "BTCUSDT", "pct": 50})
         assert r.status_code == 200
         assert r.json()["success"] is True
 
     async def test_tighten_stop_no_bot(self, client):
         set_bot(None)  # type: ignore[arg-type]
-        r = await client.post("/api/position/BTCUSDT/tighten-stop?pct=2")
+        r = await client.post("/api/position/tighten-stop", json={"symbol": "BTCUSDT", "pct": 2})
         assert r.status_code == 200
         assert r.json()["success"] is False
 
     async def test_tighten_stop_no_trailing_stop(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
         mock_bot.orders.trailing.active_stops = {}
-        r = await client.post("/api/position/BTCUSDT/tighten-stop?pct=2")
+        r = await client.post("/api/position/tighten-stop", json={"symbol": "BTCUSDT", "pct": 2})
         assert r.status_code == 200
         assert r.json()["success"] is False
         assert "No trailing stop" in r.json()["message"]
@@ -533,7 +621,7 @@ class TestPositionActions:
             opened_at=datetime.now(UTC),
         )
         mock_bot.exchange.fetch_positions = AsyncMock(return_value=[pos])
-        r = await client.post("/api/position/BTCUSDT/tighten-stop?pct=2")
+        r = await client.post("/api/position/tighten-stop", json={"symbol": "BTCUSDT", "pct": 2})
         assert r.status_code == 200
         assert r.json()["success"] is True
         assert ts.current_stop != 47_500.0
@@ -617,6 +705,111 @@ class TestToggleModule:
         assert r.json()["success"] is True
         assert "disabled" in r.json()["message"].lower()
         intel_stop_mock.assert_awaited_once()
+
+
+# ── DB Explorer ─────────────────────────────────────────────────────────
+
+
+class TestDbExplorer:
+    async def test_db_tables_no_bot(self, client):
+        _ALLOWED_TABLES.clear()
+        set_bot(None)  # type: ignore[arg-type]
+        r = await client.get("/api/db/tables")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    async def test_db_tables_with_bot(self, client, mock_bot):
+        _ALLOWED_TABLES.clear()
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, symbol TEXT)")
+        conn.commit()
+        mock_bot.trade_db._conn = conn
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        r = await client.get("/api/db/tables")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "trades"
+        assert data[0]["row_count"] == 0
+
+    async def test_db_table_rows_empty(self, client, mock_bot):
+        _ALLOWED_TABLES.clear()
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, symbol TEXT)")
+        conn.commit()
+        mock_bot.trade_db._conn = conn
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        r = await client.get("/api/db/table/trades")
+        assert r.status_code == 200
+        data = r.json()
+        assert "id" in data["columns"]
+        assert "symbol" in data["columns"]
+        assert data["rows"] == []
+        assert data["total"] == 0
+
+    async def test_db_table_rows_with_data(self, client, mock_bot):
+        _ALLOWED_TABLES.clear()
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, symbol TEXT)")
+        for i in range(15):
+            conn.execute("INSERT INTO trades (id, symbol) VALUES (?, ?)", (i + 1, "BTC"))
+        conn.commit()
+        mock_bot.trade_db._conn = conn
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        r = await client.get("/api/db/table/trades?page=1&page_size=10")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["rows"]) == 10
+        assert data["total"] == 15
+        assert data["total_pages"] == 2
+
+    async def test_db_table_not_found(self, client, mock_bot):
+        _ALLOWED_TABLES.clear()
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, symbol TEXT)")
+        conn.commit()
+        mock_bot.trade_db._conn = conn
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        # Populate _ALLOWED_TABLES so "trades" exists but "nonexistent" does not
+        await client.get("/api/db/tables")
+        r = await client.get("/api/db/table/nonexistent")
+        assert r.status_code == 404
+
+    async def test_db_table_pagination(self, client, mock_bot):
+        _ALLOWED_TABLES.clear()
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, symbol TEXT)")
+        for i in range(25):
+            conn.execute("INSERT INTO trades (id, symbol) VALUES (?, ?)", (i + 1, "BTC"))
+        conn.commit()
+        mock_bot.trade_db._conn = conn
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        r = await client.get("/api/db/table/trades?page=2&page_size=10")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["rows"]) == 10
+        assert data["page"] == 2
+
+
+# ── System metrics (no trading block) ───────────────────────────────────
+
+
+class TestSystemMetricsNoTrading:
+    """System metrics / get_metrics_json must not expose trading state."""
+
+    def test_metrics_json_excludes_trading(self):
+        from web.metrics import get_metrics_json
+
+        data = get_metrics_json(None, 0.0)
+        assert "trading" not in data
+        assert "positions" not in data
+        assert "system" in data
+        assert "process" in data
 
 
 # ── Static /docs/summary ───────────────────────────────────────────────
