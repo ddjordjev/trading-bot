@@ -389,18 +389,18 @@ class TestLogStatus:
 
 class TestSharedStateHelpers:
     def test_read_shared_intel_returns_none_when_stale(self, bot):
-        bot.shared.intel_age_seconds = MagicMock(return_value=700)
+        bot.shared_intel.intel_age_seconds = MagicMock(return_value=700)
         assert bot._read_shared_intel() is None
 
     def test_read_shared_intel_returns_none_when_sources_inactive(self, bot):
-        bot.shared.intel_age_seconds = MagicMock(return_value=100)
+        bot.shared_intel.intel_age_seconds = MagicMock(return_value=100)
         snap = MagicMock()
         snap.sources_active = []
-        bot.shared.read_intel = MagicMock(return_value=snap)
+        bot.shared_intel.read_intel = MagicMock(return_value=snap)
         assert bot._read_shared_intel() is None
 
     def test_read_shared_intel_returns_condition_when_fresh(self, bot):
-        bot.shared.intel_age_seconds = MagicMock(return_value=100)
+        bot.shared_intel.intel_age_seconds = MagicMock(return_value=100)
         snap = MagicMock()
         snap.sources_active = ["fear_greed"]
         snap.regime = "normal"
@@ -420,13 +420,13 @@ class TestSharedStateHelpers:
         snap.position_size_multiplier = 1.0
         snap.should_reduce_exposure = False
         snap.preferred_direction = "neutral"
-        bot.shared.read_intel = MagicMock(return_value=snap)
+        bot.shared_intel.read_intel = MagicMock(return_value=snap)
         cond = bot._read_shared_intel()
         assert cond is not None
         assert cond.preferred_direction == "neutral"
 
     def test_read_shared_analytics_weight_fallback_to_engine(self, bot):
-        bot.shared.read_analytics = MagicMock(return_value=MagicMock(weights=[]))
+        bot.shared_intel.read_analytics = MagicMock(return_value=MagicMock(weights=[]))
         bot.analytics.get_weight = MagicMock(return_value=0.7)
         w = bot._read_shared_analytics_weight("compound_momentum")
         assert w == 0.7
@@ -472,12 +472,12 @@ class TestGetTVBoost:
         tv.signal_boost_short = 0.8
         snap = MagicMock()
         snap.tv_analyses = [tv]
-        bot.shared.read_intel = MagicMock(return_value=snap)
+        bot.shared_intel.read_intel = MagicMock(return_value=snap)
         assert bot._get_tv_boost("BTC/USDT", "long") == 1.2
         assert bot._get_tv_boost("BTC/USDT", "short") == 0.8
 
     def test_get_tv_boost_returns_one_when_no_match(self, bot):
-        bot.shared.read_intel = MagicMock(return_value=MagicMock(tv_analyses=[]))
+        bot.shared_intel.read_intel = MagicMock(return_value=MagicMock(tv_analyses=[]))
         bot.intel = None
         assert bot._get_tv_boost("BTC/USDT", "long") == 1.0
 
@@ -534,13 +534,13 @@ class TestProcessSignalAndQueue:
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_empty_returns_early(self, bot):
-        bot.shared.read_trade_queue = MagicMock(return_value=MagicMock(pending_count=0))
+        bot.shared_intel.read_trade_queue = MagicMock(return_value=MagicMock(pending_count=0))
         await bot._process_trade_queue()
         bot.exchange.fetch_positions.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_read_exception_returns_early(self, bot):
-        bot.shared.read_trade_queue = MagicMock(side_effect=RuntimeError("read failed"))
+        bot.shared_intel.read_trade_queue = MagicMock(side_effect=RuntimeError("read failed"))
         await bot._process_trade_queue()
         # no exception, early return
         bot.exchange.fetch_positions.assert_not_called()
@@ -550,9 +550,9 @@ class TestProcessSignalAndQueue:
         """Queue processing is skipped during warmup period."""
         bot._started_at = datetime.now(UTC)
         bot._warmup_minutes = 5
-        bot.shared.read_trade_queue = MagicMock()
+        bot.shared_intel.read_trade_queue = MagicMock()
         await bot._process_trade_queue()
-        bot.shared.read_trade_queue.assert_not_called()
+        bot.shared_intel.read_trade_queue.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_after_warmup_proceeds(self, bot):
@@ -561,9 +561,9 @@ class TestProcessSignalAndQueue:
 
         bot._started_at = datetime.now(UTC) - timedelta(minutes=10)
         bot._warmup_minutes = 3
-        bot.shared.read_trade_queue = MagicMock(return_value=MagicMock(pending_count=0))
+        bot.shared_intel.read_trade_queue = MagicMock(return_value=MagicMock(pending_count=0))
         await bot._process_trade_queue()
-        bot.shared.read_trade_queue.assert_called_once()
+        bot.shared_intel.read_trade_queue.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_respects_per_tick_cap(self, bot, mock_exchange):
@@ -595,8 +595,8 @@ class TestProcessSignalAndQueue:
         )
         queue = MagicMock(pending_count=2)
         queue.get_actionable = MagicMock(return_value=[p1, p2])
-        bot.shared.read_trade_queue = MagicMock(return_value=queue)
-        bot.shared.apply_trade_queue_updates = MagicMock()
+        bot.shared_intel.read_trade_queue = MagicMock(return_value=queue)
+        bot.shared_intel.apply_trade_queue_updates = MagicMock()
 
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot._execute_proposal = AsyncMock(return_value=True)
@@ -847,7 +847,7 @@ class TestProcessTradeQueueWithProposals:
 
         snap = MagicMock()
         snap.weights = [StrategyWeightEntry(strategy="compound_momentum", weight=0.6)]
-        bot.shared.read_analytics = MagicMock(return_value=snap)
+        bot.shared_intel.read_analytics = MagicMock(return_value=snap)
         w = bot._read_shared_analytics_weight("compound_momentum")
         assert w == 0.6
 
@@ -856,7 +856,7 @@ class TestProcessTradeQueueWithProposals:
 
         snap = MagicMock()
         snap.weights = [StrategyWeightEntry(strategy="other", weight=0.5)]
-        bot.shared.read_analytics = MagicMock(return_value=snap)
+        bot.shared_intel.read_analytics = MagicMock(return_value=snap)
         w = bot._read_shared_analytics_weight("compound_momentum")
         assert w == 1.0
 

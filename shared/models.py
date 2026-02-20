@@ -179,6 +179,7 @@ class TradeQueue(BaseModel):
 class BotDeploymentStatus(BaseModel):
     """Written by the bot every tick so the monitor knows how hard to work."""
 
+    bot_id: str = ""
     level: DeploymentLevel = DeploymentLevel.HUNTING
     open_positions: int = 0
     max_positions: int = 3

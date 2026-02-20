@@ -5,7 +5,15 @@ from typing import Any
 from pydantic import BaseModel
 
 
+class BotInstance(BaseModel):
+    bot_id: str
+    label: str
+    port: int
+    strategies: list[str] = []
+
+
 class BotStatus(BaseModel):
+    bot_id: str = ""
     running: bool = False
     trading_mode: str = "paper_local"
     exchange_name: str = ""

@@ -137,3 +137,30 @@ class TestSharedState:
         raw = (state._data_dir / "bot_status.json").read_text()
         data = json.loads(raw)
         assert data["level"] == "deployed"
+
+    def test_bot_id_in_status(self, state):
+        status = BotDeploymentStatus(bot_id="momentum", level=DeploymentLevel.ACTIVE)
+        state.write_bot_status(status)
+        read = state.read_bot_status()
+        assert read.bot_id == "momentum"
+
+    def test_multi_bot_data_isolation(self, tmp_path):
+        """Two bots write to separate subdirs under the same root."""
+        bot1 = SharedState(data_dir=tmp_path / "momentum")
+        bot2 = SharedState(data_dir=tmp_path / "swing")
+        bot1.write_bot_status(BotDeploymentStatus(bot_id="momentum", open_positions=3))
+        bot2.write_bot_status(BotDeploymentStatus(bot_id="swing", open_positions=1))
+        assert bot1.read_bot_status().open_positions == 3
+        assert bot2.read_bot_status().open_positions == 1
+        assert bot1.read_bot_status().bot_id == "momentum"
+        assert bot2.read_bot_status().bot_id == "swing"
+
+    def test_shared_intel_readable_from_bot_dir(self, tmp_path):
+        """Intel written to root data/ is readable by a bot-specific state."""
+        shared = SharedState(data_dir=tmp_path)
+        shared.write_intel(IntelSnapshot(regime="risk_on", fear_greed=75))
+        bot_state = SharedState(data_dir=tmp_path / "momentum")
+        root_intel = shared.read_intel()
+        assert root_intel.regime == "risk_on"
+        bot_intel = bot_state.read_intel()
+        assert bot_intel.regime == "normal"

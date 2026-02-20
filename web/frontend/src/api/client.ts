@@ -1,5 +1,19 @@
 const TOKEN = localStorage.getItem("dashboard_token") || "";
 
+let _baseUrl = "";
+let _wsBase = "";
+
+export function setBotPort(port: number | null) {
+  if (!port || port === Number(window.location.port)) {
+    _baseUrl = "";
+    _wsBase = "";
+  } else {
+    _baseUrl = `${window.location.protocol}//${window.location.hostname}:${port}`;
+    const wProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    _wsBase = `${wProto}//${window.location.hostname}:${port}`;
+  }
+}
+
 function headers(): HeadersInit {
   const h: HeadersInit = { "Content-Type": "application/json" };
   if (TOKEN) h["Authorization"] = `Bearer ${TOKEN}`;
@@ -7,7 +21,8 @@ function headers(): HeadersInit {
 }
 
 async function api<T>(path: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(path, { headers: headers(), ...opts });
+  const url = _baseUrl ? `${_baseUrl}${path}` : path;
+  const res = await fetch(url, { headers: headers(), ...opts });
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`${res.status}: ${body}`);
@@ -34,5 +49,8 @@ export function setToken(token: string) {
 export function wsUrl(): string {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const token = localStorage.getItem("dashboard_token") || "";
+  if (_wsBase) {
+    return `${_wsBase}/ws?token=${token}`;
+  }
   return `${proto}//${window.location.host}/ws?token=${token}`;
 }

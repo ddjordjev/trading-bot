@@ -21,6 +21,7 @@ def mock_bot():
     bot = MagicMock()
     bot._running = False
     bot.settings = MagicMock()
+    bot.settings.bot_id = ""
     bot.settings.trading_mode = "paper_local"
     bot.settings.exchange = "mexc"
     bot.settings.platform_url = "https://www.mexc.com"

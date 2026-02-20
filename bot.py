@@ -6,6 +6,7 @@ import signal
 import sys
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 from loguru import logger
 
@@ -103,10 +104,12 @@ class TradingBot:
             intel=self.intel,
         )
 
-        self.trade_db = TradeDB()
+        bot_data = Path(self.settings.data_dir)
+        self.trade_db = TradeDB(path=bot_data / "trades.db")
         self.trade_db.connect()
         self.analytics = AnalyticsEngine(self.trade_db)
-        self.shared = SharedState()
+        self.shared = SharedState(data_dir=bot_data)
+        self.shared_intel = SharedState(data_dir=Path("data"))
         self.pattern_detector = PatternDetector(
             structure=StructureAnalyzer(swing_lookback=5, zone_tolerance_pct=0.3),
             min_confidence=0.3,
@@ -649,7 +652,7 @@ class TradingBot:
                 return
 
         try:
-            queue = self.shared.read_trade_queue()
+            queue = self.shared_intel.read_trade_queue()
         except Exception as e:
             logger.warning("Failed to read trade queue: {}", e)
             return
@@ -764,7 +767,7 @@ class TradingBot:
                     rejected[proposal.id] = "swing execution failed"
 
         if consumed_ids or rejected:
-            self.shared.apply_trade_queue_updates(consumed_ids, rejected)
+            self.shared_intel.apply_trade_queue_updates(consumed_ids, rejected)
 
         if executed > 0:
             logger.info(
@@ -1059,6 +1062,7 @@ class TradingBot:
             level = DeploymentLevel.ACTIVE
 
         status = BotDeploymentStatus(
+            bot_id=self.settings.bot_id or "default",
             level=level,
             open_positions=len(active),
             max_positions=self.settings.effective_max_concurrent_positions,
@@ -1078,11 +1082,11 @@ class TradingBot:
         If the monitor is running, we use its data instead of running our
         own intel clients. Falls back to in-process intel if stale or missing.
         """
-        intel_age = self.shared.intel_age_seconds()
+        intel_age = self.shared_intel.intel_age_seconds()
         if intel_age > 600:  # stale after 10 minutes
             return None  # fall back to in-process
 
-        snap = self.shared.read_intel()
+        snap = self.shared_intel.read_intel()
         if not snap.sources_active:
             return None
 
@@ -1112,7 +1116,7 @@ class TradingBot:
         If the analytics service is running, use its weights.
         Falls back to in-process analytics engine.
         """
-        snap = self.shared.read_analytics()
+        snap = self.shared_intel.read_analytics()
         if not snap.weights:
             return self.analytics.get_weight(strategy)
 
@@ -1123,7 +1127,7 @@ class TradingBot:
 
     def _get_tv_boost(self, symbol: str, side: str) -> float:
         """Get TradingView signal boost, preferring shared state."""
-        snap = self.shared.read_intel()
+        snap = self.shared_intel.read_intel()
         for tv in snap.tv_analyses:
             if tv.symbol == symbol and tv.interval == "1h":
                 return tv.signal_boost_long if side == "long" else tv.signal_boost_short
@@ -1480,11 +1484,17 @@ def main() -> None:
         "mean_reversion",
         "grid",
     ]
+    allowed = settings.bot_strategy_list
+    active_strategies = [s for s in all_strategies if s in allowed] if allowed else all_strategies
     for symbol in settings.major_symbol_list:
-        for strat_name in all_strategies:
+        for strat_name in active_strategies:
             bot.add_strategy(strat_name, symbol, market_type=mkt)
+    bot_label = settings.bot_id or "default"
     logger.info(
-        "Registered {} strategies across {} major symbols", len(all_strategies), len(settings.major_symbol_list)
+        "Bot [{}]: registered {} strategies across {} major symbols",
+        bot_label,
+        len(active_strategies),
+        len(settings.major_symbol_list),
     )
 
     loop = asyncio.new_event_loop()

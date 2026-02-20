@@ -10,6 +10,7 @@ export interface FullSnapshot {
 }
 
 export interface BotStatus {
+  bot_id: string;
   running: boolean;
   trading_mode: string;
   exchange_name: string;
@@ -98,8 +99,10 @@ export function useWebSocket() {
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const retryRef = useRef<number>(0);
+  const mountedRef = useRef(true);
 
   const connect = useCallback(() => {
+    if (!mountedRef.current) return;
     const ws = new WebSocket(wsUrl());
     wsRef.current = ws;
 
@@ -112,6 +115,7 @@ export function useWebSocket() {
     };
     ws.onclose = () => {
       setConnected(false);
+      if (!mountedRef.current) return;
       const delay = Math.min(1000 * 2 ** retryRef.current, 15000);
       retryRef.current++;
       setTimeout(connect, delay);
@@ -119,10 +123,21 @@ export function useWebSocket() {
     ws.onerror = () => ws.close();
   }, []);
 
-  useEffect(() => {
-    connect();
-    return () => { wsRef.current?.close(); };
+  const reconnect = useCallback(() => {
+    retryRef.current = 0;
+    wsRef.current?.close();
+    setData(null);
+    setTimeout(connect, 100);
   }, [connect]);
 
-  return { data, connected };
+  useEffect(() => {
+    mountedRef.current = true;
+    connect();
+    return () => {
+      mountedRef.current = false;
+      wsRef.current?.close();
+    };
+  }, [connect]);
+
+  return { data, connected, reconnect };
 }

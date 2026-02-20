@@ -343,6 +343,27 @@ class TestSettingsUrls:
         assert settings.binance_api_key == "test_key"
         assert settings.binance_api_secret == "test_secret"
 
+    def test_bot_id_default_empty(self, settings):
+        assert settings.bot_id == ""
+
+    def test_bot_strategies_default_empty(self, settings):
+        assert settings.bot_strategy_list == []
+
+    def test_data_dir_default(self, settings):
+        assert settings.data_dir == "data"
+
+    def test_data_dir_with_bot_id(self, settings):
+        settings.bot_id = "momentum"
+        assert settings.data_dir == "data/momentum"
+
+    def test_bot_strategy_list_parses(self, settings):
+        settings.bot_strategies = "rsi,macd,bollinger"
+        assert settings.bot_strategy_list == ["rsi", "macd", "bollinger"]
+
+    def test_bot_strategy_list_strips_whitespace(self, settings):
+        settings.bot_strategies = " rsi , macd "
+        assert settings.bot_strategy_list == ["rsi", "macd"]
+
     def test_bybit_api_keys_paper(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "bybit")

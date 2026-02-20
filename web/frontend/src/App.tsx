@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { Dashboard } from "./pages/Dashboard";
 import { Intel } from "./pages/Intel";
@@ -8,7 +8,14 @@ import { Analytics } from "./pages/Analytics";
 import { Modules } from "./pages/Modules";
 import { Summary } from "./pages/Summary";
 import { Monitoring } from "./pages/Monitoring";
-import { setToken } from "./api/client";
+import { setToken, setBotPort, get } from "./api/client";
+
+interface BotInfo {
+  bot_id: string;
+  label: string;
+  port: number;
+  strategies: string[];
+}
 
 const TABS = [
   "Dashboard", "Intel", "Scanner", "Strategies", "Analytics", "Monitoring", "Modules", "Summary",
@@ -16,10 +23,34 @@ const TABS = [
 type Tab = typeof TABS[number];
 
 export function App() {
-  const { data, connected } = useWebSocket();
+  const [bots, setBots] = useState<BotInfo[]>([]);
+  const [activeBot, setActiveBot] = useState<string>("");
+  const { data, connected, reconnect } = useWebSocket();
   const [tab, setTab] = useState<Tab>("Dashboard");
   const [showTokenInput, setShowTokenInput] = useState(false);
   const [tokenValue, setTokenValue] = useState("");
+
+  useEffect(() => {
+    get<BotInfo[]>("/api/bots")
+      .then((list) => {
+        setBots(list);
+        if (list.length > 0 && !activeBot) {
+          setActiveBot(list[0].bot_id);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const switchBot = useCallback((botId: string) => {
+    const bot = bots.find((b) => b.bot_id === botId);
+    if (!bot) return;
+    setActiveBot(botId);
+    setBotPort(bot.port);
+    reconnect();
+  }, [bots, reconnect]);
+
+  const multiBot = bots.length > 1;
+  const activeBotLabel = bots.find((b) => b.bot_id === activeBot)?.label || activeBot;
 
   return (
     <div className="app-container">
@@ -27,10 +58,38 @@ export function App() {
         display: "flex", justifyContent: "space-between", alignItems: "center",
         marginBottom: "0.5rem",
       }}>
-        <h1 style={{ color: "var(--heading)", fontSize: "1.3rem", fontWeight: 600 }}>
-          Trading Bot
-        </h1>
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+          <h1 style={{ color: "var(--heading)", fontSize: "1.3rem", fontWeight: 600 }}>
+            Trading Bot
+          </h1>
+          {multiBot && (
+            <select
+              value={activeBot}
+              onChange={(e) => switchBot(e.target.value)}
+              style={{
+                padding: "0.25rem 0.5rem",
+                borderRadius: "var(--radius)",
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+                color: "var(--text)",
+                fontSize: "0.85rem",
+                cursor: "pointer",
+              }}
+            >
+              {bots.map((b) => (
+                <option key={b.bot_id} value={b.bot_id}>
+                  {b.label}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+          {multiBot && (
+            <span style={{ fontSize: "0.75rem", color: "var(--accent)", fontWeight: 500 }}>
+              {activeBotLabel}
+            </span>
+          )}
           <span style={{
             width: 8, height: 8, borderRadius: "50%",
             background: connected ? "var(--green)" : "var(--red)",

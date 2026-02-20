@@ -11,6 +11,12 @@ class Settings(BaseSettings):
 
     trading_mode: Literal["paper_local", "paper_live", "live"] = "paper_local"
 
+    # Multi-bot: each instance gets a unique ID and strategy filter.
+    # When BOT_ID is set, state goes to data/{bot_id}/ instead of data/.
+    # BOT_STRATEGIES is a comma-separated list; empty = all strategies.
+    bot_id: str = ""
+    bot_strategies: str = ""
+
     exchange: str = "mexc"
 
     # MEXC (no testnet — same keys for paper & live)
@@ -184,6 +190,16 @@ class Settings(BaseSettings):
     @property
     def notification_list(self) -> list[str]:
         return [n.strip() for n in self.notifications_enabled.split(",") if n.strip()]
+
+    @property
+    def bot_strategy_list(self) -> list[str]:
+        raw = getattr(self, "bot_strategies", "") or ""
+        return [s.strip() for s in raw.split(",") if s.strip()]
+
+    @property
+    def data_dir(self) -> str:
+        bid = getattr(self, "bot_id", "") or ""
+        return f"data/{bid}" if bid else "data"
 
     @property
     def major_symbol_list(self) -> list[str]:

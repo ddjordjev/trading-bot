@@ -3,7 +3,23 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: "trading-bot"
+  - job_name: "bot-momentum"
     metrics_path: /metrics
     static_configs:
-      - targets: ["trading-bot:9035"]
+      - targets: ["bot-momentum:9035"]
+        labels:
+          bot_id: "momentum"
+
+  - job_name: "bot-meanrev"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["bot-meanrev:9036"]
+        labels:
+          bot_id: "meanrev"
+
+  - job_name: "bot-swing"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["bot-swing:9037"]
+        labels:
+          bot_id: "swing"

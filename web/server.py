@@ -17,6 +17,7 @@ from web.auth import verify_token, verify_ws_token
 from web.schemas import (
     ActionResponse,
     AnalyticsSnapshot,
+    BotInstance,
     BotStatus,
     DailyReportData,
     FullSnapshot,
@@ -93,6 +94,7 @@ def _bot_status() -> BotStatus:
     for pos in _bot.orders.scaler.active_positions.values():
         margin_used += pos.avg_entry_price * pos.current_size / max(pos.current_leverage, 1)
     return BotStatus(
+        bot_id=_bot.settings.bot_id or "default",
         running=_bot._running,
         trading_mode=_bot.settings.trading_mode,
         exchange_name=_bot.settings.exchange.upper(),
@@ -252,6 +254,36 @@ async def metrics() -> Response:
 @app.get("/api/status", response_model=BotStatus)
 async def get_status(_: str = Depends(verify_token)) -> BotStatus:
     return _bot_status()
+
+
+@app.get("/api/bots", response_model=list[BotInstance])
+async def get_bots(_: str = Depends(verify_token)) -> list[BotInstance]:
+    """List all bot instances by scanning data/ subdirectories."""
+    bots: list[BotInstance] = []
+    data_root = Path("data")
+    port_map = {"momentum": 9035, "meanrev": 9036, "swing": 9037}
+    label_map = {"momentum": "Momentum", "meanrev": "Mean Reversion", "swing": "Swing"}
+    for sub in sorted(data_root.iterdir()):
+        if sub.is_dir() and (sub / "bot_status.json").exists():
+            bid = sub.name
+            bots.append(
+                BotInstance(
+                    bot_id=bid,
+                    label=label_map.get(bid, bid.title()),
+                    port=port_map.get(bid, 9035),
+                    strategies=_bot.settings.bot_strategy_list if _bot and _bot.settings.bot_id == bid else [],
+                )
+            )
+    if not bots and _bot:
+        bots.append(
+            BotInstance(
+                bot_id=_bot.settings.bot_id or "default",
+                label="Default",
+                port=_bot.settings.dashboard_port,
+                strategies=_bot.settings.bot_strategy_list,
+            )
+        )
+    return bots
 
 
 @app.get("/api/positions", response_model=list[PositionInfo])

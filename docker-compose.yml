@@ -4,37 +4,83 @@ volumes:
   grafana-data:
   prometheus-data:
 
+x-bot-common: &bot-common
+  build: .
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    - TZ=UTC
+  command: python bot.py
+  volumes:
+    - bot-logs:/app/logs
+    - bot-data:/app/data
+  depends_on:
+    monitor:
+      condition: service_started
+    analytics:
+      condition: service_started
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "5"
+
 services:
-  trading-bot:
-    build: .
-    container_name: trading-bot
-    restart: unless-stopped
-    env_file: .env
+  # ---- Bot 1: Momentum strategies ----
+  bot-momentum:
+    <<: *bot-common
+    container_name: bot-momentum
     environment:
       - TZ=UTC
-    command: python bot.py
+      - BOT_ID=momentum
+      - BOT_STRATEGIES=compound_momentum,market_open_volatility,rsi,macd
+      - DASHBOARD_PORT=9035
     ports:
       - "${DASHBOARD_PORT:-9035}:9035"
-    volumes:
-      - bot-logs:/app/logs
-      - bot-data:/app/data
-    depends_on:
-      monitor:
-        condition: service_started
-      analytics:
-        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
       interval: 30s
       timeout: 10s
       start_period: 90s
       retries: 3
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "5"
 
+  # ---- Bot 2: Mean reversion strategies ----
+  bot-meanrev:
+    <<: *bot-common
+    container_name: bot-meanrev
+    environment:
+      - TZ=UTC
+      - BOT_ID=meanrev
+      - BOT_STRATEGIES=bollinger,mean_reversion,grid
+      - DASHBOARD_PORT=9036
+    ports:
+      - "9036:9036"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9036/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
+  # ---- Bot 3: Swing / opportunity strategies ----
+  bot-swing:
+    <<: *bot-common
+    container_name: bot-swing
+    environment:
+      - TZ=UTC
+      - BOT_ID=swing
+      - BOT_STRATEGIES=swing_opportunity
+      - DASHBOARD_PORT=9037
+    ports:
+      - "9037:9037"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9037/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
+  # ---- Shared services (one instance each) ----
   monitor:
     build: .
     container_name: trading-bot-monitor
@@ -92,7 +138,7 @@ services:
     volumes:
       - prometheus-data:/prometheus
     depends_on:
-      trading-bot:
+      bot-momentum:
         condition: service_healthy
     logging:
       driver: "json-file"
