@@ -5,10 +5,9 @@ import { Intel } from "./pages/Intel";
 import { Scanner } from "./pages/Scanner";
 import { Strategies } from "./pages/Strategies";
 import { Analytics } from "./pages/Analytics";
-import { Modules } from "./pages/Modules";
-import { Summary } from "./pages/Summary";
 import { Monitoring } from "./pages/Monitoring";
-import { setToken, setBotPort, get } from "./api/client";
+import { Settings } from "./pages/Settings";
+import { setBotPort, get } from "./api/client";
 
 interface BotInfo {
   bot_id: string;
@@ -18,7 +17,7 @@ interface BotInfo {
 }
 
 const TABS = [
-  "Dashboard", "Intel", "Scanner", "Strategies", "Analytics", "Monitoring", "Modules", "Summary",
+  "Dashboard", "Intel", "Scanner", "Strategies", "Analytics", "Monitoring", "Settings",
 ] as const;
 type Tab = typeof TABS[number];
 
@@ -27,8 +26,6 @@ export function App() {
   const [activeBot, setActiveBot] = useState<string>("");
   const { data, connected, reconnect } = useWebSocket();
   const [tab, setTab] = useState<Tab>("Dashboard");
-  const [showTokenInput, setShowTokenInput] = useState(false);
-  const [tokenValue, setTokenValue] = useState("");
 
   useEffect(() => {
     get<BotInfo[]>("/api/bots")
@@ -60,7 +57,7 @@ export function App() {
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
           <h1 style={{ color: "var(--heading)", fontSize: "1.3rem", fontWeight: 600 }}>
-            Trading Bot
+            Botra
           </h1>
           {multiBot && (
             <select
@@ -98,33 +95,8 @@ export function App() {
           <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
             {connected ? "Connected" : "Disconnected"}
           </span>
-          <button
-            style={{ fontSize: "0.75rem", padding: "0.2rem 0.5rem" }}
-            onClick={() => setShowTokenInput(!showTokenInput)}
-            title="Set the dashboard authentication token. Required when DASHBOARD_TOKEN is configured in your .env file."
-          >
-            Auth
-          </button>
         </div>
       </div>
-
-      {showTokenInput && (
-        <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
-          <input
-            type="password"
-            placeholder="Dashboard token"
-            value={tokenValue}
-            onChange={(e) => setTokenValue(e.target.value)}
-            style={{
-              flex: 1, padding: "0.4rem 0.6rem", border: "1px solid var(--border)",
-              borderRadius: "var(--radius)", background: "var(--surface)", color: "var(--text)",
-              fontSize: "0.85rem",
-            }}
-            onKeyDown={(e) => { if (e.key === "Enter") setToken(tokenValue); }}
-          />
-          <button className="btn-primary" onClick={() => setToken(tokenValue)}>Save</button>
-        </div>
-      )}
 
       <nav className="tabs">
         {TABS.map((t) => (
@@ -144,8 +116,7 @@ export function App() {
       {tab === "Strategies" && <Strategies />}
       {tab === "Analytics" && <Analytics />}
       {tab === "Monitoring" && <Monitoring />}
-      {tab === "Modules" && <Modules />}
-      {tab === "Summary" && <Summary />}
+      {tab === "Settings" && <Settings />}
     </div>
   );
 }

@@ -74,7 +74,7 @@ def set_bot(bot: TradingBot) -> None:
 FRONTEND_DIR = Path(__file__).parent / "frontend" / "dist"
 DOCS_DIR = Path(__file__).parent.parent / "docs"
 
-app = FastAPI(title="Trading Bot Dashboard", version="1.0.0")
+app = FastAPI(title="Botra Dashboard", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
