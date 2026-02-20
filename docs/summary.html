@@ -980,5 +980,21 @@
   <tr><td>Startup data size check — warns if any dir &gt; 10 MB</td><td><span class="badge done">Done</span></td><td class="file">scripts/db_sync.py → _check_data_sizes(), bot.py → _check_data_dir_size()</td></tr>
 </table>
 
+<h3 id="s7-37">7.37 Centralized Log Analysis (Loki + Grafana)</h3>
+
+<div class="principle">
+  <strong>All container logs collected into Loki and searchable via Grafana.</strong> Zero changes to bot trading code — Promtail reads Docker json-file logs via the Docker socket and ships them to Loki. Grafana gets a pre-built "Trade Borg — Logs" dashboard with log volume, error rate, and full-text search filtered by service, level, and keywords. 30-day retention, ~50 MB RAM overhead.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Loki log aggregation service (30-day retention, TSDB storage)</td><td><span class="badge done">Done</span></td><td class="file">loki/loki-config.yml, docker-compose.yml → loki service</td></tr>
+  <tr><td>Promtail scrapes all container logs via Docker socket</td><td><span class="badge done">Done</span></td><td class="file">loki/promtail-config.yml, docker-compose.yml → promtail service</td></tr>
+  <tr><td>Auto-labels: service, container, bot_id, log level</td><td><span class="badge done">Done</span></td><td class="file">loki/promtail-config.yml → relabel_configs + pipeline_stages</td></tr>
+  <tr><td>Grafana Loki datasource auto-provisioned</td><td><span class="badge done">Done</span></td><td class="file">grafana/provisioning/datasources/loki.yml</td></tr>
+  <tr><td>Pre-built log dashboard: volume chart, error rate, warning rate, log viewer</td><td><span class="badge done">Done</span></td><td class="file">grafana/dashboards/logs.json</td></tr>
+  <tr><td>No changes to bot trading logic — pure observability layer</td><td><span class="badge done">Done</span></td><td class="file">N/A — Promtail reads Docker stdout logs externally</td></tr>
+</table>
+
 </body>
 </html>

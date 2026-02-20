@@ -1,0 +1,52 @@
+server:
+  http_listen_port: 9080
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      # Keep only containers from our compose project
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_project"]
+        regex: trading-bot
+        action: keep
+
+      # Use container name as the primary label
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: container
+
+      # Grab the compose service name
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_service"]
+        target_label: service
+
+      # Grab BOT_ID from env if present (bot-momentum, bot-meanrev, bot-swing)
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_service"]
+        regex: "bot-(.*)"
+        target_label: bot_id
+
+    pipeline_stages:
+      # Parse Docker json-file log format
+      - docker: {}
+
+      # Extract log level from Python logging format "YYYY-MM-DD HH:MM:SS | LEVEL | ..."
+      - regex:
+          expression: "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}.*\\| (?P<level>\\w+) +\\|"
+      - labels:
+          level:
+
+      # Also catch simpler "LEVEL    message" format
+      - regex:
+          expression: "^(?P<level2>DEBUG|INFO|WARNING|ERROR|CRITICAL)\\s+"
+      - template:
+          source: level
+          template: "{{ if .level }}{{ .level }}{{ else }}{{ .level2 }}{{ end }}"
+      - labels:
+          level:

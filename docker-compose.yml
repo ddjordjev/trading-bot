@@ -1,4 +1,7 @@
 volumes:
+  bot-data:
+  bot-logs:
+  loki-data:
   grafana-data:
   prometheus-data:
 
@@ -10,8 +13,8 @@ x-bot-common: &bot-common
     - TZ=UTC
   command: python bot.py
   volumes:
-    - ./persistent/logs:/app/logs
-    - ./persistent/data:/app/data
+    - bot-data:/app/data
+    - bot-logs:/app/logs
   depends_on:
     monitor:
       condition: service_started
@@ -88,7 +91,7 @@ services:
       - TZ=UTC
     command: python scripts/db_sync.py
     volumes:
-      - ./persistent/data:/app/data
+      - bot-data:/app/data
     depends_on:
       bot-momentum:
         condition: service_started
@@ -108,8 +111,8 @@ services:
       - TZ=UTC
     command: python run_monitor.py
     volumes:
-      - ./persistent/logs:/app/logs
-      - ./persistent/data:/app/data
+      - bot-data:/app/data
+      - bot-logs:/app/logs
     healthcheck:
       test: ["CMD", "python", "-c", "import os, time; f='data/intel_state.json'; exit(0) if not os.path.exists(f) else exit(0 if time.time()-os.stat(f).st_mtime<600 else 1)"]
       interval: 60s
@@ -131,8 +134,8 @@ services:
       - TZ=UTC
     command: python run_analytics.py
     volumes:
-      - ./persistent/logs:/app/logs
-      - ./persistent/data:/app/data
+      - bot-data:/app/data
+      - bot-logs:/app/logs
     healthcheck:
       test: ["CMD", "python", "-c", "import os, time; f='data/analytics_state.json'; exit(0) if not os.path.exists(f) else exit(0 if time.time()-os.stat(f).st_mtime<600 else 1)"]
       interval: 60s
@@ -144,6 +147,46 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # ---- Log aggregation (Loki + Promtail) ----
+  loki:
+    build:
+      context: ./loki
+      dockerfile: Dockerfile.loki
+    container_name: tradeborg-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - loki-data:/loki
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3100/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 45s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  promtail:
+    build:
+      context: ./loki
+      dockerfile: Dockerfile.promtail
+    container_name: tradeborg-promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      loki:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   prometheus:
     build: ./prometheus
@@ -181,6 +224,7 @@ services:
       - grafana-data:/var/lib/grafana
     depends_on:
       - prometheus
+      - loki
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
       interval: 30s

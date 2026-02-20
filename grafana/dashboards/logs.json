@@ -1,0 +1,129 @@
+{
+  "uid": "tradeborg-logs",
+  "title": "Trade Borg — Logs",
+  "tags": ["logs", "loki"],
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "" },
+        "query": { "label": "service", "stream": "{job=\"docker\"}", "type": 1 },
+        "current": { "text": "All", "value": "$__all" },
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "level",
+        "type": "custom",
+        "current": { "text": "All", "value": "$__all" },
+        "includeAll": true,
+        "multi": true,
+        "options": [
+          { "text": "DEBUG", "value": "DEBUG", "selected": false },
+          { "text": "INFO", "value": "INFO", "selected": false },
+          { "text": "WARNING", "value": "WARNING", "selected": false },
+          { "text": "ERROR", "value": "ERROR", "selected": false },
+          { "text": "CRITICAL", "value": "CRITICAL", "selected": false }
+        ],
+        "query": "DEBUG,INFO,WARNING,ERROR,CRITICAL"
+      },
+      {
+        "name": "search",
+        "type": "textbox",
+        "current": { "text": "", "value": "" },
+        "label": "Search"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Log Volume",
+      "type": "barchart",
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "loki", "uid": "" },
+      "targets": [
+        {
+          "expr": "sum by (service) (count_over_time({job=\"docker\", service=~\"$service\"} |~ \"$search\" [$__interval]))",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": {
+        "stacking": "normal"
+      }
+    },
+    {
+      "id": 2,
+      "title": "Error Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 5, "w": 12, "x": 0, "y": 5 },
+      "datasource": { "type": "loki", "uid": "" },
+      "targets": [
+        {
+          "expr": "sum by (service) (count_over_time({job=\"docker\", service=~\"$service\"} |~ \"ERROR|CRITICAL\" [$__interval]))",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 20 }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Warning Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 5, "w": 12, "x": 12, "y": 5 },
+      "datasource": { "type": "loki", "uid": "" },
+      "targets": [
+        {
+          "expr": "sum by (service) (count_over_time({job=\"docker\", service=~\"$service\"} |~ \"WARNING\" [$__interval]))",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 20 }
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "All Logs",
+      "type": "logs",
+      "gridPos": { "h": 18, "w": 24, "x": 0, "y": 10 },
+      "datasource": { "type": "loki", "uid": "" },
+      "targets": [
+        {
+          "expr": "{job=\"docker\", service=~\"$service\"} |~ \"$search\"",
+          "legendFormat": ""
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      }
+    }
+  ],
+  "schemaVersion": 39
+}
