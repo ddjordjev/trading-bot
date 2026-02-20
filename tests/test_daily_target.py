@@ -70,12 +70,16 @@ class TestShouldTrade:
         tracker.update_balance(1050.0)
         assert tracker.should_trade() is True
 
-    def test_deep_loss_blocks_trading(self, tracker: DailyTargetTracker):
-        tracker.update_balance(960.0)  # -4%, threshold is -3%
-        assert tracker.should_trade() is False
+    def test_deep_loss_still_allows_trading(self, tracker: DailyTargetTracker):
+        tracker.update_balance(960.0)  # -4% — no blanket sit-out, aggression is just reduced
+        assert tracker.should_trade() is True
 
     def test_moderate_loss_allows_trading(self, tracker: DailyTargetTracker):
         tracker.update_balance(985.0)
+        assert tracker.should_trade() is True
+
+    def test_losing_tier_never_blocks(self, tracker: DailyTargetTracker):
+        tracker.update_balance(900.0)  # -10%
         assert tracker.should_trade() is True
 
 
@@ -109,3 +113,78 @@ class TestPnLCalculation:
     def test_progress_at_target(self, tracker: DailyTargetTracker):
         tracker.update_balance(1100.0)
         assert tracker.progress_pct == pytest.approx(100.0)
+
+
+class TestPyramidExclusion:
+    """Pyramid unrealized PnL should not affect tier or aggression."""
+
+    def test_adjusted_pnl_excludes_pyramid(self, tracker: DailyTargetTracker):
+        tracker.update_balance(950.0)  # raw PnL = -50 (-5%)
+        tracker.update_pyramid_unrealized(-50.0)  # all of the loss is pyramid
+        assert tracker.adjusted_todays_pnl_pct == pytest.approx(0.0)
+
+    def test_tier_uses_adjusted_pnl(self, tracker: DailyTargetTracker):
+        tracker.update_balance(950.0)  # raw = -5%, would be LOSING
+        tracker.update_pyramid_unrealized(-50.0)
+        assert tracker.tier == DailyTier.BUILDING  # adjusted is 0%
+
+    def test_aggression_uses_adjusted_pnl(self, tracker: DailyTargetTracker):
+        tracker.update_balance(930.0)  # raw = -7%
+        tracker.update_pyramid_unrealized(-70.0)
+        assert tracker.aggression_multiplier() >= 0.8  # adjusted is 0% → BUILDING
+
+    def test_raw_pnl_still_correct(self, tracker: DailyTargetTracker):
+        tracker.update_balance(950.0)
+        tracker.update_pyramid_unrealized(-50.0)
+        assert tracker.todays_pnl_pct == pytest.approx(-5.0)
+
+    def test_pyramid_unrealized_resets_on_new_day(self, tracker: DailyTargetTracker):
+        tracker.update_pyramid_unrealized(-100.0)
+        tracker.reset_day(1000.0)
+        assert tracker._pyramid_unrealized_pnl == 0.0
+
+    def test_partial_pyramid_exclusion(self, tracker: DailyTargetTracker):
+        tracker.update_balance(940.0)  # raw = -60 (-6%)
+        tracker.update_pyramid_unrealized(-30.0)  # half is pyramid
+        assert tracker.adjusted_todays_pnl_pct == pytest.approx(-3.0)
+        assert tracker.tier == DailyTier.LOSING
+
+
+class TestProfitBuffer:
+    """Excess profits carry forward as a risk buffer."""
+
+    def test_buffer_from_big_day(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        t.update_balance(1500.0)  # +50%
+        t.reset_day(1500.0)
+        assert t.profit_buffer_pct == pytest.approx(20.0)  # (50-10)*0.5
+
+    def test_buffer_zero_when_below_target(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        t.update_balance(1050.0)  # +5%, below 10% target
+        t.reset_day(1050.0)
+        assert t.profit_buffer_pct == pytest.approx(0.0)
+
+    def test_buffer_resets_after_losing_day(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        t.update_balance(1500.0)  # +50% → buffer = 20
+        t.reset_day(1500.0)
+        assert t.profit_buffer_pct == pytest.approx(20.0)
+        t.update_balance(1400.0)  # -6.67% losing day
+        t.reset_day(1400.0)
+        assert t.profit_buffer_pct == pytest.approx(0.0)
+
+    def test_buffer_zero_on_first_day(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        assert t.profit_buffer_pct == pytest.approx(0.0)
+
+    def test_buffer_at_exactly_target(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        t.update_balance(1100.0)  # exactly 10%
+        t.reset_day(1100.0)
+        assert t.profit_buffer_pct == pytest.approx(0.0)  # no excess

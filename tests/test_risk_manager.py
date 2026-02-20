@@ -184,6 +184,36 @@ class TestPositionSizing:
         assert size_10x > size_1x
 
 
+class TestProfitBufferExpandsLimit:
+    """Profit buffer from a big day should expand the daily loss limit."""
+
+    @pytest.fixture
+    def live_risk(self, monkeypatch: pytest.MonkeyPatch) -> RiskManager:
+        monkeypatch.setenv("TRADING_MODE", "paper_live")
+        monkeypatch.setenv("EXCHANGE", "mexc")
+        monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")
+        s = Settings(_env_file=None)
+        rm = RiskManager(s)
+        rm.reset_daily(10000.0)
+        return rm
+
+    def test_no_buffer_uses_base(self, live_risk: RiskManager):
+        live_risk.reset_daily(10000.0, profit_buffer_pct=0.0)
+        assert live_risk.max_daily_loss_pct == pytest.approx(3.0)
+
+    def test_buffer_expands_limit(self, live_risk: RiskManager):
+        live_risk.reset_daily(10000.0, profit_buffer_pct=8.0)
+        assert live_risk.max_daily_loss_pct == pytest.approx(3.0 + 8.0 * 0.5)
+
+    def test_buffer_capped_at_2x_base(self, live_risk: RiskManager):
+        live_risk.reset_daily(10000.0, profit_buffer_pct=100.0)
+        assert live_risk.max_daily_loss_pct == pytest.approx(3.0 + 6.0)
+
+    def test_base_preserved(self, live_risk: RiskManager):
+        live_risk.reset_daily(10000.0, profit_buffer_pct=10.0)
+        assert live_risk._base_max_daily_loss_pct == pytest.approx(3.0)
+
+
 class TestLiquidationCheck:
     def test_detects_near_liquidation(self, risk: RiskManager):
         # 10x leverage: liq threshold = -100/10 * 0.9 = -9%

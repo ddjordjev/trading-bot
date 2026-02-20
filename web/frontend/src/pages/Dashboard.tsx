@@ -49,15 +49,6 @@ export function Dashboard({ data }: { data: FullSnapshot | null }) {
           </div>
         </div>
         <div className="stat-card">
-          <div className="label">Target Progress</div>
-          <div className="value">
-            {s.daily_pnl >= 0 ? "+" : ""}${s.daily_pnl.toFixed(2)}
-          </div>
-          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: 2 }}>
-            {s.tier_progress_pct.toFixed(0)}% of {s.daily_target_pct.toFixed(0)}% target
-          </div>
-        </div>
-        <div className="stat-card">
           <div className="label">Total Growth</div>
           <div className={`value ${s.total_growth_pct >= 0 ? "pnl-positive" : "pnl-negative"}`}>
             {s.total_growth_usd >= 0 ? "+" : ""}${s.total_growth_usd.toFixed(2)}

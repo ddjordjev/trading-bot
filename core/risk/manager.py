@@ -18,7 +18,8 @@ class RiskManager:
 
     def __init__(self, settings: Settings):
         self.max_position_pct = settings.effective_max_position_size_pct
-        self.max_daily_loss_pct = settings.effective_max_daily_loss_pct
+        self._base_max_daily_loss_pct = settings.effective_max_daily_loss_pct
+        self.max_daily_loss_pct = self._base_max_daily_loss_pct
         self.default_stop_loss_pct = settings.stop_loss_pct
         self.default_take_profit_pct = settings.take_profit_pct
         self.max_concurrent = settings.effective_max_concurrent_positions
@@ -34,7 +35,7 @@ class RiskManager:
         self._winning_trades_today: int = 0
         self._losing_trades_today: int = 0
 
-    def reset_daily(self, balance: float) -> None:
+    def reset_daily(self, balance: float, profit_buffer_pct: float = 0.0) -> None:
         self._daily_pnl = 0.0
         self._day_start_balance = balance
         self._last_reset = datetime.now(UTC)
@@ -43,7 +44,17 @@ class RiskManager:
         self._total_trades_today = 0
         self._winning_trades_today = 0
         self._losing_trades_today = 0
-        logger.info("Daily risk reset. Starting balance: {:.2f}", balance)
+
+        cap = self._base_max_daily_loss_pct * 2
+        buffer_contribution = min(profit_buffer_pct * 0.5, cap)
+        self.max_daily_loss_pct = self._base_max_daily_loss_pct + buffer_contribution
+        logger.info(
+            "Daily risk reset. Balance: {:.2f} | Loss limit: {:.1f}% (base {:.1f}% + buffer {:.1f}%)",
+            balance,
+            self.max_daily_loss_pct,
+            self._base_max_daily_loss_pct,
+            buffer_contribution,
+        )
 
     def record_pnl(self, pnl: float) -> None:
         self._daily_pnl += pnl

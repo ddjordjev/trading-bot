@@ -100,6 +100,8 @@ class Settings(BaseSettings):
     gambling_budget_pct: float = 2.0  # max % of balance for low-liq yolo bets
     min_liquidity_volume: float = 1_000_000  # 24h volume below this = "low liquidity"
 
+    short_term_max_hold_minutes: int = 60  # auto-cut non-pyramid losers after this
+
     # Pyramid / DCA mode (DEFAULT for all strategies)
     default_scale_mode: str = "pyramid"  # "pyramid" (DCA in) or "winners" (add to winners)
     dca_interval_pct: float = 2.0  # add every 2% the price drops

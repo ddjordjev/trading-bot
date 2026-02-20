@@ -17,6 +17,7 @@ from core.models import Candle, MarketType, Signal, SignalAction
 from core.models.order import Order, OrderSide
 from core.models.signal import TickUrgency
 from core.orders import OrderManager
+from core.orders.scaler import ScaleMode
 from core.risk import RiskManager
 from core.risk.daily_target import DailyTargetTracker, DailyTier
 from core.risk.market_filter import LiquidityTier, MarketQualityFilter
@@ -289,6 +290,13 @@ class TradingBot:
         balance = self.settings.cap_balance(raw_balance)
         self.target.update_balance(raw_balance)
 
+        pyramid_pnl = sum(
+            p.unrealized_pnl
+            for p in (await self.exchange.fetch_positions())
+            if p.amount > 0 and (sp := self.orders.scaler.get(p.symbol)) and sp.mode == ScaleMode.PYRAMID
+        )
+        self.target.update_pyramid_unrealized(pyramid_pnl)
+
         logger.debug(
             "=== TICK === bal=${:.2f} pnl={:+.2f}% tier={} aggr={:.2f} strats={} dynamic={} trade={}",
             balance,
@@ -442,6 +450,10 @@ class TradingBot:
         candles_map: dict[str, list[Candle]] = {}
         all_strategies = list(self._strategies) + list(self._dynamic_strategies.values())
         positions = await self.exchange.fetch_positions()
+
+        if self.orders.has_stale_losers(positions):
+            aggression *= 0.5
+            logger.info("Stale short-term losers detected — halving aggression to {:.3f}", aggression)
         pos_map = {p.symbol: p for p in positions if p.amount > 0}
         for strategy in all_strategies:
             try:
@@ -1375,7 +1387,7 @@ class TradingBot:
                 compound_report=compound_report,
                 target_hit=self.target.target_reached,
             )
-            self.risk.reset_daily(raw_balance)
+            self.risk.reset_daily(raw_balance, profit_buffer_pct=self.target.profit_buffer_pct)
             self.target.reset_day(raw_balance)
 
 

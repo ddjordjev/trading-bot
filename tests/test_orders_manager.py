@@ -482,6 +482,7 @@ def settings():
         hedge_min_profit_pct=3.0,
         hedge_stop_pct=1.0,
         max_hedges=2,
+        short_term_max_hold_minutes=60,
     )
 
 
@@ -1441,3 +1442,124 @@ class TestSubPositionClose:
         closed = await order_manager.check_stops()
         assert any(o.id == "h1" for o in closed)
         assert order_manager.trailing.get("BTC/USDT") is not None  # main stop preserved
+
+
+# ── Stale loser detection & auto-cut ────────────────────────────────
+
+
+class TestHasStaleLosers:
+    def test_no_positions_returns_false(self, order_manager):
+        assert order_manager.has_stale_losers([]) is False
+
+    def test_pyramid_position_ignored(self, order_manager):
+        from datetime import timedelta
+
+        sp = order_manager.scaler.create(
+            symbol="BTC/USDT", side="long", strategy="test", leverage=10, mode=ScaleMode.PYRAMID
+        )
+        sp.created_at = datetime.now(UTC) - timedelta(minutes=120)
+        pos = Position(
+            symbol="BTC/USDT", side=OrderSide.BUY, amount=0.1, entry_price=50000, current_price=48000, leverage=10
+        )
+        assert order_manager.has_stale_losers([pos]) is False
+
+    def test_young_loser_ignored(self, order_manager):
+        from datetime import timedelta
+
+        sp = order_manager.scaler.create(
+            symbol="ETH/USDT", side="long", strategy="test", leverage=10, mode=ScaleMode.WINNERS
+        )
+        sp.created_at = datetime.now(UTC) - timedelta(minutes=5)
+        pos = Position(
+            symbol="ETH/USDT", side=OrderSide.BUY, amount=1.0, entry_price=3000, current_price=2900, leverage=10
+        )
+        assert order_manager.has_stale_losers([pos]) is False
+
+    def test_stale_loser_detected(self, order_manager):
+        from datetime import timedelta
+
+        sp = order_manager.scaler.create(
+            symbol="ETH/USDT", side="long", strategy="test", leverage=10, mode=ScaleMode.WINNERS
+        )
+        sp.created_at = datetime.now(UTC) - timedelta(minutes=45)
+        pos = Position(
+            symbol="ETH/USDT", side=OrderSide.BUY, amount=1.0, entry_price=3000, current_price=2900, leverage=10
+        )
+        assert order_manager.has_stale_losers([pos]) is True
+
+    def test_stale_winner_not_flagged(self, order_manager):
+        from datetime import timedelta
+
+        sp = order_manager.scaler.create(
+            symbol="ETH/USDT", side="long", strategy="test", leverage=10, mode=ScaleMode.WINNERS
+        )
+        sp.created_at = datetime.now(UTC) - timedelta(minutes=45)
+        pos = Position(
+            symbol="ETH/USDT", side=OrderSide.BUY, amount=1.0, entry_price=3000, current_price=3100, leverage=10
+        )
+        assert order_manager.has_stale_losers([pos]) is False
+
+
+@pytest.mark.asyncio
+class TestAutoCloseStaleShortTermLosers:
+    async def test_stale_winners_mode_loser_gets_closed(self, order_manager, mock_exchange):
+        from datetime import timedelta
+
+        sp = order_manager.scaler.create(
+            symbol="ETH/USDT", side="long", strategy="test", leverage=10, mode=ScaleMode.WINNERS
+        )
+        sp.created_at = datetime.now(UTC) - timedelta(minutes=120)
+
+        mock_exchange.fetch_positions.return_value = [
+            Position(
+                symbol="ETH/USDT", side=OrderSide.BUY, amount=1.0, entry_price=3000, current_price=2900, leverage=10
+            )
+        ]
+        mock_exchange.place_order.return_value = Order(
+            id="close1",
+            symbol="ETH/USDT",
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            amount=1.0,
+            status=OrderStatus.FILLED,
+            filled=1.0,
+            average_price=2900.0,
+        )
+
+        closed = await order_manager.close_expired_quick_trades([])
+        assert len(closed) == 1
+        assert closed[0].id == "close1"
+
+    async def test_pyramid_position_not_auto_closed(self, order_manager, mock_exchange):
+        from datetime import timedelta
+
+        sp = order_manager.scaler.create(
+            symbol="BTC/USDT", side="long", strategy="test", leverage=10, mode=ScaleMode.PYRAMID
+        )
+        sp.created_at = datetime.now(UTC) - timedelta(minutes=120)
+
+        mock_exchange.fetch_positions.return_value = [
+            Position(
+                symbol="BTC/USDT", side=OrderSide.BUY, amount=0.01, entry_price=50000, current_price=48000, leverage=10
+            )
+        ]
+
+        closed = await order_manager.close_expired_quick_trades([])
+        assert len(closed) == 0
+
+    async def test_stale_but_profitable_not_closed(self, order_manager, mock_exchange):
+        from datetime import timedelta
+
+        sp = order_manager.scaler.create(
+            symbol="ETH/USDT", side="long", strategy="test", leverage=10, mode=ScaleMode.WINNERS
+        )
+        sp.created_at = datetime.now(UTC) - timedelta(minutes=120)
+
+        mock_exchange.fetch_positions.return_value = [
+            Position(
+                symbol="ETH/USDT", side=OrderSide.BUY, amount=1.0, entry_price=3000, current_price=3100, leverage=10
+            )
+        ]
+
+        closed = await order_manager.close_expired_quick_trades([])
+        assert len(closed) == 0

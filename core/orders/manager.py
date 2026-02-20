@@ -887,6 +887,28 @@ class OrderManager:
         return None
 
     # ------------------------------------------------------------------ #
+    #  Stale loser detection
+    # ------------------------------------------------------------------ #
+
+    def has_stale_losers(self, positions: list[Position]) -> bool:
+        """True if any non-pyramid position is losing AND older than half
+        the short-term max hold time.  Used by the bot to reduce aggression
+        for new entries so existing losers get resolved first."""
+        threshold = self.settings.short_term_max_hold_minutes / 2
+        now = datetime.now(UTC)
+        pos_map = {p.symbol: p for p in positions}
+        for sym, sp in self.scaler.active_positions.items():
+            if sp.mode == ScaleMode.PYRAMID:
+                continue
+            age_min = (now - sp.created_at).total_seconds() / 60
+            if age_min < threshold:
+                continue
+            pos = pos_map.get(sym)
+            if pos and pos.pnl_pct <= 0:
+                return True
+        return False
+
+    # ------------------------------------------------------------------ #
     #  Quick trade expiry
     # ------------------------------------------------------------------ #
 
@@ -897,6 +919,10 @@ class OrderManager:
         don't close it. Let the trailing stop handle the exit. The time
         limit exists to CUT LOSERS that are going nowhere, not to cap
         winners that are still running.
+
+        Also closes non-pyramid (WINNERS-mode) positions that have been
+        open longer than short_term_max_hold_minutes and are still in a
+        loss.  Pyramid positions are left alone — they recover via DCA.
         """
         closed: list[Order] = []
         now = datetime.now(UTC)
@@ -912,7 +938,6 @@ class OrderManager:
 
             pos = pos_map.get(signal.symbol)
             if pos and pos.pnl_pct > 1.0:
-                # In meaningful profit -- let the trailing stop ride it
                 logger.info(
                     "Quick trade {} expired but in profit ({:+.1f}%) -- letting trail ride", signal.symbol, pos.pnl_pct
                 )
@@ -929,6 +954,34 @@ class OrderManager:
             if order:
                 closed.append(order)
                 logger.info("Cut expired quick trade {} after {:.0f}m (not in profit)", signal.symbol, elapsed)
+
+        closed_symbols = {o.symbol for o in closed}
+        stale_max = self.settings.short_term_max_hold_minutes
+        for sym, sp in list(self.scaler.active_positions.items()):
+            if sym in closed_symbols or sp.mode == ScaleMode.PYRAMID:
+                continue
+            age_min = (now - sp.created_at).total_seconds() / 60
+            if age_min < stale_max:
+                continue
+            pos = pos_map.get(sym)
+            if pos and pos.pnl_pct > 1.0:
+                continue
+            close_signal = Signal(
+                symbol=sym,
+                action=SignalAction.CLOSE,
+                strategy=sp.strategy,
+                reason="short_term_max_hold_exceeded",
+                market_type=sp.market_type,
+            )
+            order = await self.execute_signal(close_signal)
+            if order:
+                closed.append(order)
+                logger.info(
+                    "Cut stale short-term position {} after {:.0f}m (mode={}, not in profit)",
+                    sym,
+                    age_min,
+                    sp.mode.value,
+                )
 
         return closed
 

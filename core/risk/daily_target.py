@@ -63,6 +63,8 @@ class DailyTargetTracker:
         self._history: list[DailyRecord] = []
         self._todays_trades: int = 0
         self._legendary_email_sent: bool = False
+        self._pyramid_unrealized_pnl: float = 0.0
+        self._profit_buffer_pct: float = 0.0
 
     def record_trade(self) -> None:
         self._todays_trades += 1
@@ -85,11 +87,16 @@ class DailyTargetTracker:
                 )
             )
 
+            self._compute_profit_buffer(day_pnl_pct)
+        else:
+            self._profit_buffer_pct = 0.0
+
         if self._initial_capital == 0:
             self._initial_capital = balance
 
         self._day_start_balance = balance
         self._current_balance = balance
+        self._pyramid_unrealized_pnl = 0.0
         self._day_number += 1
         self._todays_trades = 0
         self._last_reset = datetime.now(UTC)
@@ -106,6 +113,34 @@ class DailyTargetTracker:
     def update_balance(self, balance: float) -> None:
         self._current_balance = balance
 
+    def update_pyramid_unrealized(self, pnl: float) -> None:
+        """Store the combined unrealized PnL of all PYRAMID-mode positions.
+
+        This amount is subtracted from the raw daily PnL so that pyramid
+        drawdowns (which are expected by design) don't push the bot into
+        LOSING tier or reduce aggression.
+        """
+        self._pyramid_unrealized_pnl = pnl
+
+    def _compute_profit_buffer(self, day_pnl_pct: float) -> None:
+        """Carry forward excess profits as a risk buffer for the next day.
+
+        Only excess above daily_target_pct counts.  50% of the excess
+        carries forward, capped at 2x the base daily-loss limit (from
+        settings).  Resets to 0 after a losing day.
+        """
+        if day_pnl_pct <= 0:
+            self._profit_buffer_pct = 0.0
+            return
+        excess = max(0.0, day_pnl_pct - self.daily_target_pct)
+        self._profit_buffer_pct = excess * 0.5
+        logger.info(
+            "Profit buffer: yesterday {:+.1f}%, excess {:.1f}%, buffer carried forward {:.1f}%",
+            day_pnl_pct,
+            excess,
+            self._profit_buffer_pct,
+        )
+
     @property
     def todays_target_balance(self) -> float:
         return self._day_start_balance * (1 + self.daily_target_pct / 100)
@@ -119,6 +154,21 @@ class DailyTargetTracker:
         if self._day_start_balance == 0:
             return 0.0
         return self.todays_pnl / self._day_start_balance * 100
+
+    @property
+    def adjusted_todays_pnl(self) -> float:
+        """Daily PnL excluding unrealized losses from PYRAMID positions."""
+        return self.todays_pnl - self._pyramid_unrealized_pnl
+
+    @property
+    def adjusted_todays_pnl_pct(self) -> float:
+        if self._day_start_balance == 0:
+            return 0.0
+        return self.adjusted_todays_pnl / self._day_start_balance * 100
+
+    @property
+    def profit_buffer_pct(self) -> float:
+        return self._profit_buffer_pct
 
     @property
     def progress_pct(self) -> float:
@@ -150,7 +200,7 @@ class DailyTargetTracker:
 
     @property
     def tier(self) -> DailyTier:
-        pnl = self.todays_pnl_pct
+        pnl = self.adjusted_todays_pnl_pct
         if pnl < 0:
             return DailyTier.LOSING
         if pnl < 10:
@@ -194,7 +244,7 @@ class DailyTargetTracker:
         t = self.tier
 
         if t == DailyTier.LOSING:
-            return 0.5 if self.todays_pnl_pct < -3 else 0.7
+            return 0.5 if self.adjusted_todays_pnl_pct < -3 else 0.7
         if t == DailyTier.BUILDING:
             p = self.progress_pct
             if p < 50:
@@ -240,10 +290,6 @@ class DailyTargetTracker:
         if t == DailyTier.EXCELLENT:
             logger.info("EXCELLENT day ({:+.1f}%) -- reducing entries, protecting gains", self.todays_pnl_pct)
             return True  # aggression 0.3x
-
-        if t == DailyTier.LOSING and self.todays_pnl_pct < -self.daily_target_pct * 0.3:
-            logger.warning("Down {:.1f}% today -- sitting out to preserve capital", self.todays_pnl_pct)
-            return False
 
         return True
 
