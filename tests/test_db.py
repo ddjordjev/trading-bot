@@ -185,3 +185,150 @@ class TestTradeDB:
     def test_close(self, db):
         db.close()
         assert db._conn is None
+
+    def test_open_trade_inserts_row(self, db):
+        tr = TradeRecord(
+            symbol="BTC/USDT",
+            side="buy",
+            strategy="momentum",
+            action="open",
+            entry_price=50000,
+            amount=0.01,
+            leverage=5,
+            opened_at="2026-02-20T10:00:00",
+        )
+        row_id = db.open_trade(tr)
+        assert row_id > 0
+        found = db.find_open_trade("BTC/USDT")
+        assert found is not None
+        assert found.action == "open"
+        assert found.closed_at == ""
+
+    def test_close_trade_updates_row(self, db):
+        tr = TradeRecord(
+            symbol="ETH/USDT",
+            side="buy",
+            strategy="rsi",
+            action="open",
+            entry_price=3000,
+            amount=0.5,
+            leverage=3,
+            opened_at="2026-02-20T10:00:00",
+        )
+        row_id = db.open_trade(tr)
+
+        close_record = TradeRecord(
+            symbol="ETH/USDT",
+            side="buy",
+            strategy="rsi",
+            action="close",
+            entry_price=3000,
+            exit_price=3150,
+            amount=0.5,
+            leverage=3,
+            pnl_usd=75.0,
+            pnl_pct=5.0,
+            is_winner=True,
+            hold_minutes=120.5,
+            dca_count=1,
+            max_drawdown_pct=2.0,
+            opened_at="2026-02-20T10:00:00",
+            closed_at="2026-02-20T12:00:30",
+        )
+        db.close_trade(row_id, close_record)
+
+        trades = db.get_all_trades()
+        assert len(trades) == 1
+        t = trades[0]
+        assert t.action == "close"
+        assert t.exit_price == 3150
+        assert t.pnl_usd == 75.0
+        assert t.is_winner is True
+        assert t.hold_minutes == 120.5
+        assert t.closed_at == "2026-02-20T12:00:30"
+        assert t.opened_at == "2026-02-20T10:00:00"
+
+    def test_find_open_trade_returns_none_when_closed(self, db):
+        tr = TradeRecord(
+            symbol="SOL/USDT",
+            side="buy",
+            strategy="swing",
+            action="open",
+            entry_price=100,
+            amount=1,
+            opened_at="2026-02-20T10:00:00",
+        )
+        row_id = db.open_trade(tr)
+        close_record = TradeRecord(
+            symbol="SOL/USDT",
+            side="buy",
+            strategy="swing",
+            action="close",
+            exit_price=110,
+            amount=1,
+            pnl_usd=10,
+            pnl_pct=10,
+            is_winner=True,
+            closed_at="2026-02-20T11:00:00",
+        )
+        db.close_trade(row_id, close_record)
+        assert db.find_open_trade("SOL/USDT") is None
+
+    def test_find_open_trade_returns_most_recent(self, db):
+        tr1 = TradeRecord(
+            symbol="BTC/USDT",
+            side="buy",
+            strategy="rsi",
+            action="open",
+            entry_price=40000,
+            opened_at="2026-02-20T08:00:00",
+        )
+        db.open_trade(tr1)
+        tr2 = TradeRecord(
+            symbol="BTC/USDT",
+            side="buy",
+            strategy="macd",
+            action="open",
+            entry_price=41000,
+            opened_at="2026-02-20T09:00:00",
+        )
+        db.open_trade(tr2)
+        found = db.find_open_trade("BTC/USDT")
+        assert found is not None
+        assert found.entry_price == 41000
+        assert found.strategy == "macd"
+
+    def test_close_trade_preserves_open_fields(self, db):
+        """Verify that opening context (regime, fear_greed, etc.) survives close update."""
+        tr = TradeRecord(
+            symbol="DOGE/USDT",
+            side="buy",
+            strategy="grid",
+            action="open",
+            entry_price=0.15,
+            amount=100,
+            market_regime="risk_on",
+            fear_greed=80,
+            daily_tier="strong",
+            signal_strength=0.85,
+            opened_at="2026-02-20T10:00:00",
+        )
+        row_id = db.open_trade(tr)
+        close_record = TradeRecord(
+            symbol="DOGE/USDT",
+            side="buy",
+            strategy="grid",
+            action="close",
+            exit_price=0.16,
+            amount=100,
+            pnl_usd=1.0,
+            pnl_pct=6.67,
+            is_winner=True,
+            closed_at="2026-02-20T11:00:00",
+        )
+        db.close_trade(row_id, close_record)
+        t = db.get_all_trades()[0]
+        assert t.market_regime == "risk_on"
+        assert t.fear_greed == 80
+        assert t.daily_tier == "strong"
+        assert t.signal_strength == 0.85

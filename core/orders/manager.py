@@ -169,6 +169,7 @@ class OrderManager:
             return order
 
         if order.status == OrderStatus.FILLED:
+            order.strategy = signal.strategy
             sp.record_add(order.filled, order.average_price)
             self._log_trade(signal, order, "open")
             logger.info(
@@ -713,6 +714,7 @@ class OrderManager:
             )
 
             if order.status == OrderStatus.FILLED:
+                order.strategy = signal.strategy
                 pnl = pos.unrealized_pnl
                 self.risk.record_pnl(pnl)
                 self._log_trade(signal, order, "close", pnl)

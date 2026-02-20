@@ -118,6 +118,47 @@ class TradeDB:
         self._conn.commit()
         return cursor.lastrowid or 0
 
+    def open_trade(self, trade: TradeRecord) -> int:
+        """Insert a row when a position is first opened (no exit data yet)."""
+        return self.log_trade(trade)
+
+    def close_trade(self, trade_id: int, record: TradeRecord) -> None:
+        """Update an existing open-trade row with exit data."""
+        assert self._conn
+        self._conn.execute(
+            """
+            UPDATE trades SET
+                exit_price = ?, amount = ?, leverage = ?,
+                pnl_usd = ?, pnl_pct = ?, is_winner = ?,
+                hold_minutes = ?, dca_count = ?, max_drawdown_pct = ?,
+                action = 'close', closed_at = ?
+            WHERE id = ?
+        """,
+            (
+                record.exit_price,
+                record.amount,
+                record.leverage,
+                record.pnl_usd,
+                record.pnl_pct,
+                int(record.is_winner),
+                record.hold_minutes,
+                record.dca_count,
+                record.max_drawdown_pct,
+                record.closed_at,
+                trade_id,
+            ),
+        )
+        self._conn.commit()
+
+    def find_open_trade(self, symbol: str) -> TradeRecord | None:
+        """Find the most recent unclosed trade for a symbol."""
+        assert self._conn
+        row = self._conn.execute(
+            "SELECT * FROM trades WHERE symbol = ? AND closed_at = '' ORDER BY id DESC LIMIT 1",
+            (symbol,),
+        ).fetchone()
+        return self._row_to_trade(row) if row else None
+
     def get_all_trades(self, limit: int = 500) -> list[TradeRecord]:
         assert self._conn
         rows = self._conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,)).fetchall()

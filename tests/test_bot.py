@@ -262,7 +262,7 @@ class TestApplyIntelToSignal:
 
 
 class TestLogClosedTrade:
-    def test_log_closed_trade_writes_record(self, bot, mock_trade_db):
+    def test_log_closed_trade_updates_existing_row(self, bot, mock_trade_db):
         order = Order(
             symbol="BTC/USDT",
             side=OrderSide.BUY,
@@ -283,10 +283,14 @@ class TestLogClosedTrade:
         bot.orders.scaler.get = MagicMock(return_value=sp)
         bot.intel = None
 
+        bot._open_trade_ids["BTC/USDT"] = 42
+        mock_trade_db.find_open_trade.return_value = MagicMock(id=42, opened_at="2026-02-20T10:00:00+00:00")
         bot._log_closed_trade(order, "stop")
 
-        mock_trade_db.log_trade.assert_called_once()
-        record = mock_trade_db.log_trade.call_args[0][0]
+        mock_trade_db.close_trade.assert_called_once()
+        row_id = mock_trade_db.close_trade.call_args[0][0]
+        record = mock_trade_db.close_trade.call_args[0][1]
+        assert row_id == 42
         assert record.symbol == "BTC/USDT"
         assert record.strategy == "compound_momentum"
         assert record.action == "close"
@@ -296,6 +300,30 @@ class TestLogClosedTrade:
         assert record.exit_price == 50_100.0
         assert record.pnl_usd > 0
         assert record.is_winner is True
+        assert record.hold_minutes > 0
+
+    def test_log_closed_trade_fallback_insert_when_no_open_row(self, bot, mock_trade_db):
+        order = Order(
+            symbol="ETH/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.1,
+            price=3000.0,
+            average_price=3100.0,
+            filled=0.1,
+            status=OrderStatus.FILLED,
+            strategy="rsi",
+        )
+        bot.orders.scaler.get = MagicMock(return_value=None)
+        bot.intel = None
+        mock_trade_db.find_open_trade.return_value = None
+
+        bot._log_closed_trade(order, "stop")
+
+        mock_trade_db.log_trade.assert_called_once()
+        record = mock_trade_db.log_trade.call_args[0][0]
+        assert record.action == "close"
+        assert record.symbol == "ETH/USDT"
 
     def test_log_closed_trade_discards_whale_alerted(self, bot, mock_trade_db):
         bot._whale_alerted.add("BTC/USDT")
@@ -310,8 +338,47 @@ class TestLogClosedTrade:
             strategy="compound_momentum",
         )
         bot.orders.scaler.get = MagicMock(return_value=None)
+        mock_trade_db.find_open_trade.return_value = None
         bot._log_closed_trade(order, "stop")
         assert "BTC/USDT" not in bot._whale_alerted
+
+    def test_log_opened_trade_inserts_row(self, bot, mock_trade_db):
+        sig = Signal(
+            symbol="SOL/USDT",
+            action=SignalAction.BUY,
+            strength=0.75,
+            strategy="swing_opportunity",
+            reason="test",
+            market_type="futures",
+        )
+        order = Order(
+            symbol="SOL/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=1.0,
+            average_price=150.0,
+            filled=1.0,
+            status=OrderStatus.FILLED,
+            leverage=5,
+        )
+        sp = MagicMock()
+        sp.mode = ScaleMode.PYRAMID
+        sp.low_liquidity = False
+        sp.current_leverage = 5
+        bot.orders.scaler.get = MagicMock(return_value=sp)
+        bot.intel = None
+        mock_trade_db.open_trade.return_value = 99
+
+        bot._log_opened_trade(sig, order)
+
+        mock_trade_db.open_trade.assert_called_once()
+        record = mock_trade_db.open_trade.call_args[0][0]
+        assert record.symbol == "SOL/USDT"
+        assert record.strategy == "swing_opportunity"
+        assert record.action == "open"
+        assert record.entry_price == 150.0
+        assert record.opened_at != ""
+        assert bot._open_trade_ids["SOL/USDT"] == 99
 
 
 # ── _check_daily_reset ───────────────────────────────────────────────────────

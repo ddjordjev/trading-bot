@@ -119,7 +119,8 @@ class TradingBot:
         self._dynamic_strategies: dict[str, BaseStrategy] = {}
         self._active_signals: list[Signal] = []
         self._recent_news: list[NewsItem] = []
-        self._whale_alerted: set[str] = set()  # symbols already alerted for whale position
+        self._whale_alerted: set[str] = set()
+        self._open_trade_ids: dict[str, int] = {}
         self._running = False
         self._tick_interval = self.settings.tick_interval_idle
         self._status_interval = 300
@@ -375,7 +376,9 @@ class TradingBot:
             logger.error("Wick scalp error: {}", e)
 
         # 7. Close expired quick trades
-        await self.orders.close_expired_quick_trades(self._active_signals)
+        expired = await self.orders.close_expired_quick_trades(self._active_signals)
+        for order in expired:
+            self._log_closed_trade(order, "expired")
 
         await asyncio.sleep(0)
 
@@ -918,8 +921,40 @@ class TradingBot:
 
         return adjusted
 
+    def _log_opened_trade(self, signal: Signal, order: Order, *, low_liquidity: bool = False) -> None:
+        """INSERT a row into the DB when a position first opens."""
+        try:
+            now = datetime.now(UTC)
+            sp = self.orders.scaler.get(signal.symbol)
+            intel_cond = self.intel.condition if self.intel else None
+
+            record = TradeRecord(
+                symbol=signal.symbol,
+                side=order.side.value if hasattr(order.side, "value") else str(order.side),
+                strategy=signal.strategy,
+                action="open",
+                scale_mode=sp.mode.value if sp else "",
+                entry_price=order.average_price or order.price or 0,
+                amount=order.filled or order.amount,
+                leverage=order.leverage or (sp.current_leverage if sp else 1),
+                was_low_liquidity=low_liquidity or (sp.low_liquidity if sp else False),
+                market_regime=intel_cond.regime.value if intel_cond else "",
+                fear_greed=intel_cond.fear_greed if intel_cond else 50,
+                daily_tier=self.target.tier.value,
+                daily_pnl_at_entry=self.target.todays_pnl_pct,
+                signal_strength=signal.strength,
+                hour_utc=now.hour,
+                day_of_week=now.weekday(),
+                opened_at=now.isoformat(),
+            )
+            row_id = self.trade_db.open_trade(record)
+            self._open_trade_ids[signal.symbol] = row_id
+            logger.debug("DB: opened trade #{} for {}", row_id, signal.symbol)
+        except Exception as e:
+            logger.debug("Failed to log opened trade: {}", e)
+
     def _log_closed_trade(self, order: Order, close_reason: str = "") -> None:
-        """Log a completed trade to the analytics database."""
+        """Update the open DB row with exit data, or INSERT if no open row exists."""
         try:
             now = datetime.now(UTC)
             sp = self.orders.scaler.get(order.symbol)
@@ -944,6 +979,29 @@ class TradingBot:
                     pnl_usd = (entry_price - exit_price) * amount
                     pnl_pct = (entry_price - exit_price) / entry_price * 100
 
+            open_row_id = self._open_trade_ids.pop(order.symbol, 0)
+            opened_at = ""
+            hold_minutes = 0.0
+            if open_row_id:
+                existing = self.trade_db.find_open_trade(order.symbol)
+                if existing and existing.opened_at:
+                    opened_at = existing.opened_at
+
+            if not open_row_id:
+                existing = self.trade_db.find_open_trade(order.symbol)
+                if existing:
+                    open_row_id = existing.id
+                    opened_at = existing.opened_at
+
+            if opened_at:
+                try:
+                    from datetime import datetime as dt
+
+                    opened_dt = dt.fromisoformat(opened_at)
+                    hold_minutes = (now - opened_dt).total_seconds() / 60
+                except Exception:
+                    pass
+
             record = TradeRecord(
                 symbol=order.symbol,
                 side=side_str,
@@ -957,6 +1015,7 @@ class TradingBot:
                 pnl_usd=pnl_usd,
                 pnl_pct=pnl_pct,
                 is_winner=pnl_usd > 0,
+                hold_minutes=hold_minutes,
                 dca_count=sp.adds if sp else 0,
                 was_quick_trade=False,
                 was_low_liquidity=sp.low_liquidity if sp else False,
@@ -967,12 +1026,20 @@ class TradingBot:
                 signal_strength=0,
                 hour_utc=now.hour,
                 day_of_week=now.weekday(),
+                opened_at=opened_at,
                 closed_at=now.isoformat(),
             )
-            self.trade_db.log_trade(record)
+
+            if open_row_id:
+                self.trade_db.close_trade(open_row_id, record)
+                logger.debug("DB: closed trade #{} for {} PnL={:.2f}", open_row_id, order.symbol, pnl_usd)
+            else:
+                self.trade_db.log_trade(record)
+                logger.debug("DB: logged close (no open row) for {} PnL={:.2f}", order.symbol, pnl_usd)
+
             self._whale_alerted.discard(order.symbol)
         except Exception as e:
-            logger.debug("Failed to log trade: {}", e)
+            logger.debug("Failed to log closed trade: {}", e)
 
     async def _close_all_positions(self, reason: str) -> None:
         """Emergency close all open positions."""
@@ -988,7 +1055,9 @@ class TradingBot:
                 market_type=pos.market_type,
             )
             try:
-                await self.orders.execute_signal(signal)
+                order = await self.orders.execute_signal(signal)
+                if order:
+                    self._log_closed_trade(order, reason)
                 logger.info("Closed {} ({})", pos.symbol, reason)
             except Exception as e:
                 logger.error("Failed to close {}: {}", pos.symbol, e)
@@ -1300,12 +1369,17 @@ class TradingBot:
             logger.debug("Signal too weak ({:.2f}), skipping", sig.strength)
             return
 
+        is_close = sig.action == SignalAction.CLOSE
         order = await self.orders.execute_signal(
             sig,
             low_liquidity=low_liquidity,
             pyramid=pyramid,
         )
         if order:
+            if is_close:
+                self._log_closed_trade(order, sig.strategy)
+            else:
+                self._log_opened_trade(sig, order, low_liquidity=low_liquidity)
             self._active_signals.append(sig)
             self.target.record_trade()
             if len(self._active_signals) > 100:
