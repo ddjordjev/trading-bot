@@ -70,7 +70,7 @@ class TestPaperLocalAggressive:
 
     def test_aggressive_params_set(self, risk: RiskManager):
         assert risk.max_daily_loss_pct == 100.0
-        assert risk.max_concurrent == 10
+        assert risk.max_concurrent == 15
         assert risk.min_strength == 0.2
         assert risk.loss_cooldown_threshold == 999
 

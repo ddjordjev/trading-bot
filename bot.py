@@ -659,7 +659,7 @@ class TradingBot:
 
         positions = await self.exchange.fetch_positions()
         active_count = sum(1 for p in positions if p.amount > 0)
-        max_pos = self.settings.max_concurrent_positions
+        max_pos = self.settings.effective_max_concurrent_positions
         free_slots = max(0, max_pos - active_count)
 
         tier = self.target.tier
@@ -709,11 +709,10 @@ class TradingBot:
                 queue.mark_rejected(proposal.id, "execution failed")
                 rejected[proposal.id] = "execution failed"
 
-        # --- DAILY: only when idle with spare capacity and budget ---
-        idle_enough = free_slots >= 2 or (free_slots >= 1 and active_count == 0)
+        # --- DAILY: need at least 1 free slot and tier allows trading ---
         budget_ok = tier in (DailyTier.BUILDING, DailyTier.LOSING) or (tier == DailyTier.STRONG and positions_secured)
 
-        if allow_new and idle_enough and budget_ok:
+        if allow_new and free_slots >= 1 and budget_ok:
             for proposal in queue.get_actionable(SignalPriority.DAILY):
                 if executed >= tick_limit:
                     break
@@ -738,10 +737,10 @@ class TradingBot:
                     queue.mark_rejected(proposal.id, "execution failed")
                     rejected[proposal.id] = "execution failed"
 
-        # --- SWING: only when truly idle, positions secured, day is stable ---
-        genuinely_idle = active_count == 0 or (free_slots >= 2 and positions_secured and pnl_pct >= 0)
+        # --- SWING: need at least 1 free slot and not deeply in the red ---
+        swing_ok = free_slots >= 1 and pnl_pct >= -3.0
 
-        if allow_new and genuinely_idle:
+        if allow_new and swing_ok:
             for proposal in queue.get_actionable(SignalPriority.SWING):
                 if executed >= tick_limit:
                     break
@@ -1047,7 +1046,7 @@ class TradingBot:
             worst = min(pnls)
 
         # Determine deployment level
-        capacity = 1.0 - (len(active) / max(self.settings.max_concurrent_positions, 1))
+        capacity = 1.0 - (len(active) / max(self.settings.effective_max_concurrent_positions, 1))
         positions_healthy = avg_health > -1.0
 
         if len(active) == 0:
@@ -1062,7 +1061,7 @@ class TradingBot:
         status = BotDeploymentStatus(
             level=level,
             open_positions=len(active),
-            max_positions=self.settings.max_concurrent_positions,
+            max_positions=self.settings.effective_max_concurrent_positions,
             capacity_pct=capacity * 100,
             daily_pnl_pct=self.target.todays_pnl_pct,
             daily_tier=self.target.tier.value,
@@ -1471,15 +1470,22 @@ def main() -> None:
     bot = TradingBot(settings, daily_target_pct=10.0)
 
     mkt = "futures" if settings.futures_allowed else "spot"
-    for symbol in ("BTC/USDT", "ETH/USDT"):
-        bot.add_strategy("compound_momentum", symbol, market_type=mkt)
-        bot.add_strategy("market_open_volatility", symbol, market_type=mkt)
-        bot.add_strategy("swing_opportunity", symbol, market_type=mkt)
-        bot.add_strategy("rsi", symbol, market_type=mkt)
-        bot.add_strategy("macd", symbol, market_type=mkt)
-        bot.add_strategy("bollinger", symbol, market_type=mkt)
-        bot.add_strategy("mean_reversion", symbol, market_type=mkt)
-        bot.add_strategy("grid", symbol, market_type=mkt)
+    all_strategies = [
+        "compound_momentum",
+        "market_open_volatility",
+        "swing_opportunity",
+        "rsi",
+        "macd",
+        "bollinger",
+        "mean_reversion",
+        "grid",
+    ]
+    for symbol in settings.major_symbol_list:
+        for strat_name in all_strategies:
+            bot.add_strategy(strat_name, symbol, market_type=mkt)
+    logger.info(
+        "Registered {} strategies across {} major symbols", len(all_strategies), len(settings.major_symbol_list)
+    )
 
     loop = asyncio.new_event_loop()
     _background_tasks: list[asyncio.Task[None]] = []

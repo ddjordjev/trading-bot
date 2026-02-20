@@ -93,7 +93,10 @@ class MonitorService:
         )
 
         mkt = "futures" if self.settings.futures_allowed else "spot"
-        self.signal_gen = SignalGenerator(preferred_market_type=mkt)
+        self.signal_gen = SignalGenerator(
+            preferred_market_type=mkt,
+            major_symbols=set(self.settings.major_symbol_list),
+        )
 
         self._running = False
         self._current_level = DeploymentLevel.HUNTING

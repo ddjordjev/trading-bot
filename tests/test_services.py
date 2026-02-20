@@ -378,3 +378,115 @@ class TestSignalGenerator:
     def test_get_tv_analysis_returns_none_empty(self, gen):
         snap = IntelSnapshot()
         assert gen._get_tv_analysis(snap, "BTC/USDT") is None
+
+    # --- Major coin proposal tests ---
+
+    def test_major_momentum_lower_threshold(self, gen, empty_queue):
+        """Major coins get DAILY proposals at 2% move, not 5%."""
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(symbol="SOL", change_24h=3.0, volume_24h=50e6, is_low_liquidity=False),
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        daily = empty_queue.get_actionable(SignalPriority.DAILY)
+        assert any(p.strategy == "major_momentum" and "SOL" in p.symbol for p in daily)
+
+    def test_major_momentum_skips_below_2pct(self, gen, empty_queue):
+        """Major coins below 2% 24h move don't get trending proposals."""
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(symbol="BTC", change_24h=1.5, volume_24h=500e6, is_low_liquidity=False),
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        daily = empty_queue.get_actionable(SignalPriority.DAILY)
+        assert not any(p.strategy == "major_momentum" for p in daily)
+
+    def test_altcoin_not_in_major_momentum(self, gen, empty_queue):
+        """Altcoins don't get major_momentum proposals even at >2% move."""
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(symbol="PEPE", change_24h=4.0, volume_24h=10e6, is_low_liquidity=False),
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        daily = empty_queue.get_actionable(SignalPriority.DAILY)
+        assert not any(p.strategy == "major_momentum" for p in daily)
+
+    def test_major_intel_direction_proposals(self, gen, empty_queue):
+        """When intel has a direction, all majors get DAILY proposals."""
+        snap = IntelSnapshot(preferred_direction="long", regime="risk_on")
+        gen.generate(snap, empty_queue)
+        daily = empty_queue.get_actionable(SignalPriority.DAILY)
+        major_intel = [p for p in daily if p.strategy == "major_intel_direction"]
+        symbols = {p.symbol for p in major_intel}
+        assert "BTC/USDT" in symbols
+        assert "SOL/USDT" in symbols
+        assert "ETH/USDT" in symbols
+
+    def test_major_intel_direction_skipped_neutral(self, gen, empty_queue):
+        """Neutral direction produces no major_intel_direction proposals."""
+        snap = IntelSnapshot(preferred_direction="neutral")
+        gen.generate(snap, empty_queue)
+        daily = empty_queue.get_actionable(SignalPriority.DAILY)
+        assert not any(p.strategy == "major_intel_direction" for p in daily)
+
+    def test_major_swing_proposals_generated(self, gen, empty_queue):
+        """With regime + intel alignment, majors get SWING proposals."""
+        snap = IntelSnapshot(
+            preferred_direction="long",
+            regime="risk_on",
+            fear_greed_bias="long",
+            liquidation_bias="long",
+            whale_bias="long",
+            tv_btc_consensus="long",
+            fear_greed=30,
+        )
+        gen.generate(snap, empty_queue)
+        swing = empty_queue.get_actionable(SignalPriority.SWING)
+        major_swing = [p for p in swing if p.strategy == "major_swing"]
+        assert len(major_swing) >= 3
+        symbols = {p.symbol for p in major_swing}
+        assert "BTC/USDT" in symbols
+
+    def test_major_swing_not_generated_weak_alignment(self, gen, empty_queue):
+        """Fewer than 2 aligned sources = no major swing proposals."""
+        snap = IntelSnapshot(
+            preferred_direction="long",
+            regime="risk_on",
+            fear_greed_bias="short",
+            liquidation_bias="short",
+            whale_bias="short",
+            tv_btc_consensus="short",
+        )
+        gen.generate(snap, empty_queue)
+        swing = empty_queue.get_actionable(SignalPriority.SWING)
+        assert not any(p.strategy == "major_swing" for p in swing)
+
+    def test_major_swing_not_generated_wrong_regime(self, gen, empty_queue):
+        """Long direction + risk_off regime = no major swing."""
+        snap = IntelSnapshot(
+            preferred_direction="long",
+            regime="risk_off",
+            fear_greed_bias="long",
+            liquidation_bias="long",
+            whale_bias="long",
+        )
+        gen.generate(snap, empty_queue)
+        swing = empty_queue.get_actionable(SignalPriority.SWING)
+        assert not any(p.strategy == "major_swing" for p in swing)
+
+    def test_custom_major_symbols(self, empty_queue):
+        """SignalGenerator accepts custom major symbol set."""
+        from services.signal_generator import SignalGenerator
+
+        gen = SignalGenerator(major_symbols={"DOGE/USDT", "XRP/USDT"})
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(symbol="DOGE", change_24h=3.0, volume_24h=10e6, is_low_liquidity=False),
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        daily = empty_queue.get_actionable(SignalPriority.DAILY)
+        assert any(p.strategy == "major_momentum" and "DOGE" in p.symbol for p in daily)

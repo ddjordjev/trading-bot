@@ -25,12 +25,15 @@ from shared.models import (
     TrendingSnapshot,
 )
 
+MAJOR_SYMBOLS = {"BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT"}
+
 
 class SignalGenerator:
     """Stateful generator that avoids duplicate proposals via cooldowns."""
 
-    def __init__(self, preferred_market_type: str = "futures") -> None:
+    def __init__(self, preferred_market_type: str = "futures", major_symbols: set[str] | None = None) -> None:
         self._preferred_market_type = preferred_market_type
+        self._major_symbols = major_symbols or MAJOR_SYMBOLS
         self._recent_ids: dict[str, datetime] = {}
         self._cooldown_seconds = {
             SignalPriority.CRITICAL: 30,
@@ -195,6 +198,56 @@ class SignalGenerator:
                         ),
                     )
 
+        # Major coins momentum — lower threshold than altcoins (2% vs 5%)
+        for mover in self._merge_trending(snap):
+            sym = f"{mover.symbol.upper()}/USDT"
+            if sym not in self._major_symbols:
+                continue
+            if abs(mover.change_24h) < 2.0:
+                continue
+
+            side = "long" if mover.change_24h > 0 else "short"
+            strength = 0.50
+            if tv_direction == side:
+                strength += 0.15
+            if abs(mover.change_24h) > 5:
+                strength += 0.15
+            if snap.fear_greed_bias == side:
+                strength += 0.05
+
+            self._propose(
+                q,
+                TradeProposal(
+                    priority=SignalPriority.DAILY,
+                    symbol=sym,
+                    side=side,
+                    strategy="major_momentum",
+                    reason=f"{mover.symbol} 24h:{mover.change_24h:+.1f}% (major, lower threshold)",
+                    strength=min(0.85, strength),
+                    leverage=10,
+                    max_age_seconds=14400,
+                    source="monitor",
+                ),
+            )
+
+        # Major coins intel-driven daily — propose when intel agrees even without big moves
+        if snap.preferred_direction in ("long", "short"):
+            for sym in self._major_symbols:
+                self._propose(
+                    q,
+                    TradeProposal(
+                        priority=SignalPriority.DAILY,
+                        symbol=sym,
+                        side=snap.preferred_direction,
+                        strategy="major_intel_direction",
+                        reason=f"Intel direction {snap.preferred_direction} for {sym} (regime={snap.regime})",
+                        strength=0.45,
+                        leverage=5,
+                        max_age_seconds=7200,
+                        source="monitor",
+                    ),
+                )
+
         # Overleveraged fade — contrarian against crowded positioning
         if snap.overleveraged_side in ("longs", "shorts"):
             fade_side = "short" if snap.overleveraged_side == "longs" else "long"
@@ -309,6 +362,68 @@ class SignalGenerator:
                         source="monitor",
                     ),
                 )
+
+        # Major coins structural swing — always keep the SWING queue populated
+        # for majors based on broader market regime + technical confluence.
+        self._generate_major_swings(snap, q)
+
+    # ------------------------------------------------------------------
+    # Major Coin Swing Proposals
+    # ------------------------------------------------------------------
+
+    def _generate_major_swings(self, snap: IntelSnapshot, q: TradeQueue) -> None:
+        """Generate swing proposals for major coins based on regime + technicals.
+
+        Unlike the altcoin trending loop, this runs for all major symbols on
+        every cycle. Majors are steadier — they don't need 5%+ moves to be
+        tradeable; regime alignment and technical confluence are enough.
+        """
+        direction = snap.preferred_direction
+        if direction not in ("long", "short"):
+            return
+
+        regime_ok = (direction == "long" and snap.regime in ("risk_on", "neutral")) or (
+            direction == "short" and snap.regime in ("risk_off", "caution")
+        )
+        if not regime_ok:
+            return
+
+        aligned = self._count_directional_agreement(snap)
+        if aligned < 2:
+            return
+
+        strength = 0.40 + aligned * 0.08
+        fg = snap.fear_greed
+        if (direction == "long" and fg <= 35) or (direction == "short" and fg >= 65):
+            strength += 0.10
+
+        for sym in self._major_symbols:
+            tv = self._get_tv_analysis(snap, sym)
+            sym_aligned = tv and tv.consensus == direction
+            sym_strength = strength + (0.10 if sym_aligned else 0.0)
+
+            self._propose(
+                q,
+                TradeProposal(
+                    priority=SignalPriority.SWING,
+                    symbol=sym,
+                    side=direction,
+                    strategy="major_swing",
+                    reason=f"{sym} swing: {aligned} intel agree {direction}, regime={snap.regime}, F&G={fg}",
+                    strength=min(0.85, sym_strength),
+                    leverage=3,
+                    max_age_seconds=172800,
+                    entry_plan=EntryPlan(
+                        initial_leverage=3,
+                        max_leverage=8,
+                        scale_in_pct=2.0,
+                        notes=f"Major coin swing {direction}. Enter at support/resistance "
+                        f"confirmation. DCA on dips. Trail stop 3-4%. "
+                        f"Use PYRAMID mode for averaging.",
+                    ),
+                    source="monitor",
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Helpers

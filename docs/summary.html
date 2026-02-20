@@ -113,6 +113,7 @@
       <li><a href="#s7-27">Configurable Paper Risk Relaxation</a></li>
       <li><a href="#s7-28">Smart Risk Management</a></li>
       <li><a href="#s7-29">Chart Pattern Recognition &amp; Smart SL/TP</a></li>
+      <li><a href="#s7-31">Multi-Queue Trading &amp; Major Coin Coverage</a></li>
       <li><a href="#s7-30">Prometheus &amp; Grafana Monitoring</a></li>
       <li><a href="#s7-31">Multi-Queue Trading &amp; Major Coin Coverage</a></li>
     </ol>
@@ -882,6 +883,27 @@
     <td><span class="badge done">Done</span></td>
     <td class="file">web/frontend/src/pages/Monitoring.tsx, App.tsx</td>
   </tr>
+</table>
+
+<h3 id="s7-31">7.31 Multi-Queue Trading &amp; Major Coin Coverage</h3>
+
+<div class="principle">
+  <strong>The bot trades all three queue tiers simultaneously.</strong> Major coins (BTC, ETH, SOL, XRP, DOGE, ADA, AVAX, LINK) have dedicated strategy registrations and get regular DAILY/SWING proposals with lower thresholds than altcoins. The queue consumer no longer requires "genuinely idle" to process SWING trades — all three queues are active whenever there's a free slot.
+</div>
+
+<table>
+  <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Configurable MAJOR_SYMBOLS list (env-driven, default: 8 top coins)</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → major_symbols, major_symbol_list</td></tr>
+  <tr><td>All 8 strategies registered for every major coin (not just BTC/ETH)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → main() loops settings.major_symbol_list</td></tr>
+  <tr><td>Major coins get DAILY "major_momentum" proposals at 2% 24h move (vs 5% for alts)</td><td><span class="badge done">Done</span></td><td class="file">services/signal_generator.py → _generate_daily()</td></tr>
+  <tr><td>Major coins get DAILY "major_intel_direction" proposals when intel agrees on a direction</td><td><span class="badge done">Done</span></td><td class="file">services/signal_generator.py → _generate_daily()</td></tr>
+  <tr><td>Major coins get SWING "major_swing" proposals based on regime + 2+ intel source alignment</td><td><span class="badge done">Done</span></td><td class="file">services/signal_generator.py → _generate_major_swings()</td></tr>
+  <tr><td>DAILY queue gate relaxed: needs only 1 free slot (was: 2 free or 0 active)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _process_trade_queue()</td></tr>
+  <tr><td>SWING queue gate relaxed: needs 1 free slot + day not &gt;3% red (was: genuinely idle)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _process_trade_queue()</td></tr>
+  <tr><td>Max concurrent positions bumped: 5 production, 15 paper_local (from 3 / 10)</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py</td></tr>
+  <tr><td>Queue consumer uses effective_max_concurrent_positions (respects paper mode overrides)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _process_trade_queue()</td></tr>
+  <tr><td>SignalGenerator accepts custom major_symbols set from config</td><td><span class="badge done">Done</span></td><td class="file">services/signal_generator.py, services/monitor.py</td></tr>
+  <tr><td>10 new tests for major coin proposals, queue thresholds, swing generation</td><td><span class="badge done">Done</span></td><td class="file">tests/test_services.py → TestSignalGenerator</td></tr>
 </table>
 
 </body>

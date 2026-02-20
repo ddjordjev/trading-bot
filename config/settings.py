@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     max_daily_loss_pct: float = 3.0
     stop_loss_pct: float = 1.5
     take_profit_pct: float = 5.0
-    max_concurrent_positions: int = 3
+    max_concurrent_positions: int = 5
     min_signal_strength: float = 0.4  # ignore weak signals entirely
     consecutive_loss_cooldown: int = 3  # pause after N consecutive losses
 
@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     paper_risk_relaxed: bool = True
     paper_max_position_size_pct: float = 50.0
     paper_max_daily_loss_pct: float = 100.0
-    paper_max_concurrent_positions: int = 10
+    paper_max_concurrent_positions: int = 15
     paper_min_signal_strength: float = 0.2
     paper_consecutive_loss_cooldown: int = 999
 
@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     min_liquidity_volume: float = 1_000_000  # 24h volume below this = "low liquidity"
 
     short_term_max_hold_minutes: int = 60  # auto-cut non-pyramid losers after this
+
+    # Major coins always get static strategies + regular queue proposals.
+    # Separate from trending/scanner which only adds volatile movers.
+    major_symbols: str = "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,DOGE/USDT,ADA/USDT,AVAX/USDT,LINK/USDT"
 
     # Pyramid / DCA mode (DEFAULT for all strategies)
     default_scale_mode: str = "pyramid"  # "pyramid" (DCA in) or "winners" (add to winners)
@@ -180,6 +184,10 @@ class Settings(BaseSettings):
     @property
     def notification_list(self) -> list[str]:
         return [n.strip() for n in self.notifications_enabled.split(",") if n.strip()]
+
+    @property
+    def major_symbol_list(self) -> list[str]:
+        return [s.strip() for s in self.major_symbols.split(",") if s.strip()]
 
     @property
     def intel_symbol_list(self) -> list[str]:
