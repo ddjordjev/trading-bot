@@ -43,7 +43,12 @@ class TestLongStop:
         ts = self._make(entry=100.0)
         ts.update(105.1)
         assert ts.breakeven_locked is True
-        assert ts.current_stop >= 100.0
+        assert ts.current_stop > 100.0  # offset covers fees
+
+    def test_breakeven_offset_covers_fees(self):
+        ts = self._make(entry=100.0, activation_pct=10.0)
+        ts.update(105.1)  # triggers BE (5%) but not trailing (10%)
+        assert ts.current_stop == pytest.approx(101.0)  # one tick above entry
 
     def test_breakeven_does_not_lock_below_threshold(self):
         ts = self._make(entry=100.0)
@@ -98,7 +103,12 @@ class TestShortStop:
         ts = self._make(entry=100.0)
         ts.update(94.9)
         assert ts.breakeven_locked is True
-        assert ts.current_stop <= 100.0
+        assert ts.current_stop < 100.0  # offset below entry
+
+    def test_short_breakeven_offset(self):
+        ts = self._make(entry=100.0, activation_pct=10.0)
+        ts.update(94.9)  # triggers BE (5%) but not trailing (10%)
+        assert ts.current_stop == pytest.approx(99.0)  # one tick below entry
 
     def test_trail_follows_price_down(self):
         ts = self._make(entry=100.0)
@@ -114,6 +124,57 @@ class TestShortStop:
         low_stop = ts.current_stop
         ts.update(95.0)
         assert ts.current_stop == low_stop
+
+
+class TestBeWithFeeOffset:
+    """Verify _be_with_fee_offset nudges the stop past entry to cover fees."""
+
+    def test_long_high_price(self):
+        result = TrailingStop._be_with_fee_offset(100.0, long=True)
+        assert result == pytest.approx(101.0)
+
+    def test_short_high_price(self):
+        result = TrailingStop._be_with_fee_offset(100.0, long=False)
+        assert result == pytest.approx(99.0)
+
+    def test_long_10k_price(self):
+        result = TrailingStop._be_with_fee_offset(10564.0, long=True)
+        assert result == pytest.approx(10574.0)
+
+    def test_short_10k_price(self):
+        result = TrailingStop._be_with_fee_offset(10564.0, long=False)
+        assert result == pytest.approx(10554.0)
+
+    def test_long_mid_price(self):
+        result = TrailingStop._be_with_fee_offset(1.4545, long=True)
+        assert result == pytest.approx(1.455_5)  # +0.001
+
+    def test_short_mid_price(self):
+        result = TrailingStop._be_with_fee_offset(1.4545, long=False)
+        assert result == pytest.approx(1.453_5)  # -0.001
+
+    def test_long_sub_dollar(self):
+        result = TrailingStop._be_with_fee_offset(0.43, long=True)
+        assert result == pytest.approx(0.44)
+
+    def test_short_sub_dollar(self):
+        result = TrailingStop._be_with_fee_offset(0.43, long=False)
+        assert result == pytest.approx(0.42)
+
+    def test_long_micro_price(self):
+        result = TrailingStop._be_with_fee_offset(0.005, long=True)
+        assert result == pytest.approx(0.005005)  # 0.1% of price
+
+    def test_short_micro_price(self):
+        result = TrailingStop._be_with_fee_offset(0.005, long=False)
+        assert result == pytest.approx(0.004995)
+
+    def test_very_small_price(self):
+        result = TrailingStop._be_with_fee_offset(0.00025, long=True)
+        assert result > 0.00025
+
+    def test_zero_entry(self):
+        assert TrailingStop._be_with_fee_offset(0, long=True) == 0
 
 
 class TestPnlFromStop:

@@ -23,6 +23,7 @@ from web.schemas import (
     IntelSnapshot,
     LivePositionInfo,
     LogEntry,
+    MacroEventInfo,
     ModificationSuggestionInfo,
     ModuleStatus,
     PatternInsightInfo,
@@ -157,6 +158,21 @@ def _intel_snapshot() -> IntelSnapshot | None:
     c = _bot.intel.condition
     if c is None:
         return None
+    macro_events_raw = []
+    try:
+        upcoming = _bot.intel.macro.upcoming_high_impact
+        macro_events_raw = [
+            MacroEventInfo(
+                title=ev.title,
+                impact=ev.impact.value,
+                hours_until=round(ev.hours_until, 1),
+                date_iso=ev.date.isoformat(),
+            )
+            for ev in upcoming[:15]
+        ]
+    except Exception:
+        pass
+
     return IntelSnapshot(
         regime=c.regime.value,
         fear_greed=c.fear_greed,
@@ -168,6 +184,7 @@ def _intel_snapshot() -> IntelSnapshot | None:
         macro_exposure_mult=c.macro_exposure_mult,
         macro_spike_opportunity=c.macro_spike_opportunity,
         next_macro_event=c.next_macro_event,
+        macro_events=macro_events_raw,
         whale_bias=c.whale_bias,
         overleveraged_side=c.overleveraged_side,
         position_size_multiplier=c.position_size_multiplier,

@@ -318,6 +318,44 @@ class TestGetIntelTrendingStrategies:
         assert r.status_code == 200
         assert r.json() is None
 
+    async def test_intel_includes_macro_events(self, client, mock_bot):
+        from intel.macro_calendar import EventImpact, MacroEvent
+
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        cond = MagicMock()
+        cond.regime = MagicMock(value="normal")
+        cond.fear_greed = 45
+        cond.fear_greed_bias = "fear"
+        cond.liquidation_24h = 0
+        cond.mass_liquidation = False
+        cond.liquidation_bias = "neutral"
+        cond.macro_event_imminent = True
+        cond.macro_exposure_mult = 0.5
+        cond.macro_spike_opportunity = False
+        cond.next_macro_event = "FOMC in 1.5h"
+        cond.whale_bias = "neutral"
+        cond.overleveraged_side = ""
+        cond.position_size_multiplier = 1.0
+        cond.should_reduce_exposure = True
+        cond.preferred_direction = "neutral"
+        mock_bot.intel = MagicMock()
+        mock_bot.intel.condition = cond
+        mock_bot.intel.macro = MagicMock()
+        mock_bot.intel.macro.upcoming_high_impact = [
+            MacroEvent(
+                title="FOMC Statement",
+                date=datetime(2026, 3, 1, 18, 0, tzinfo=UTC),
+                impact=EventImpact.CRITICAL,
+            ),
+        ]
+        r = await client.get("/api/intel")
+        assert r.status_code == 200
+        data = r.json()
+        assert data is not None
+        assert len(data["macro_events"]) == 1
+        assert data["macro_events"][0]["title"] == "FOMC Statement"
+        assert data["macro_events"][0]["impact"] == "critical"
+
     async def test_trending_no_bot(self, client):
         set_bot(None)  # type: ignore[arg-type]
         r = await client.get("/api/trending")

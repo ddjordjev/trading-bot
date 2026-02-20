@@ -68,6 +68,13 @@ class TradeQueueItem(BaseModel):
     age_seconds: float
 
 
+class MacroEventInfo(BaseModel):
+    title: str
+    impact: str
+    hours_until: float
+    date_iso: str = ""
+
+
 class IntelSnapshot(BaseModel):
     regime: str = "normal"
     fear_greed: int = 50
@@ -79,6 +86,7 @@ class IntelSnapshot(BaseModel):
     macro_exposure_mult: float = 1.0
     macro_spike_opportunity: bool = False
     next_macro_event: str = ""
+    macro_events: list[MacroEventInfo] = []
     whale_bias: str = "neutral"
     overleveraged_side: str = ""
     position_size_multiplier: float = 1.0

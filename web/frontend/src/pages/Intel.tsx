@@ -105,6 +105,48 @@ export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
               Next: {intel.next_macro_event}
             </div>
           )}
+          {intel.macro_events && intel.macro_events.length > 0 && (
+            <div style={{ marginTop: "0.8rem" }}>
+              <h4 style={{ color: "var(--heading)", fontSize: "0.8rem", marginBottom: "0.4rem" }}>
+                Upcoming High-Impact ({intel.macro_events.length})
+              </h4>
+              <div style={{ maxHeight: "220px", overflowY: "auto" }}>
+                <table style={{ width: "100%", fontSize: "0.75rem", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ color: "var(--text-muted)", borderBottom: "1px solid var(--border)" }}>
+                      <th style={{ textAlign: "left", padding: "0.3rem 0.4rem" }}>Event</th>
+                      <th style={{ textAlign: "center", padding: "0.3rem 0.4rem" }}>Impact</th>
+                      <th style={{ textAlign: "right", padding: "0.3rem 0.4rem" }}>When</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {intel.macro_events.map((ev, i) => {
+                      const impactColor = ev.impact === "critical" ? "var(--red)"
+                        : ev.impact === "high" ? "var(--yellow)" : "var(--text-muted)";
+                      const h = ev.hours_until;
+                      const when = h > 0
+                        ? (h >= 24 ? `in ${(h / 24).toFixed(0)}d` : `in ${h.toFixed(0)}h`)
+                        : (h > -1 ? "NOW" : `${Math.abs(h).toFixed(0)}h ago`);
+                      const rowBg = h > -1 && h <= 2 ? "rgba(248,81,73,0.08)" : "transparent";
+                      return (
+                        <tr key={i} style={{ background: rowBg, borderBottom: "1px solid var(--border)" }}>
+                          <td style={{ padding: "0.3rem 0.4rem" }}>{ev.title}</td>
+                          <td style={{ padding: "0.3rem 0.4rem", textAlign: "center" }}>
+                            <span style={{ color: impactColor, fontWeight: 600, textTransform: "uppercase", fontSize: "0.65rem" }}>
+                              {ev.impact}
+                            </span>
+                          </td>
+                          <td style={{ padding: "0.3rem 0.4rem", textAlign: "right", fontWeight: h > -1 && h <= 2 ? 700 : 400, color: h > -1 && h <= 2 ? "var(--red)" : "var(--text)" }}>
+                            {when}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="card">

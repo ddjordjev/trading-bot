@@ -161,6 +161,8 @@
   <tr><td>Start with fixed $50 initial risk, not a percentage</td><td><span class="badge done">Done</span></td><td class="file">config → initial_risk_amount=50</td></tr>
   <tr><td>No hard limit on number of adds — stop at $100K notional</td><td><span class="badge done">Done</span></td><td class="file">core/orders/scaler.py → max_notional</td></tr>
   <tr><td>Break-even stop lock at +5% profit</td><td><span class="badge done">Done</span></td><td class="file">core/orders/trailing.py → breakeven_trigger_pct</td></tr>
+  <tr><td>BE offset: always add one tick past entry to cover fees when locking breakeven</td><td><span class="badge done">Done</span></td><td class="file">core/orders/trailing.py → _be_with_fee_offset()</td></tr>
+  <tr><td>SL label: PR (profit-lock), LO (loss), BE (true breakeven) in Dashboard</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/components/PositionRow.tsx</td></tr>
 </table>
 
 <h3>2.8 Pyramid / DCA as the DEFAULT Mode</h3>
@@ -332,6 +334,7 @@
   <tr><td>Real-time positions with PnL, close/take-profit/tighten actions</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Dashboard.tsx</td></tr>
   <tr><td>Start/stop bot, halt trading, resume, close all</td><td><span class="badge done">Done</span></td><td class="file">web/server.py REST endpoints</td></tr>
   <tr><td>Intel tab: F&amp;G gauge, liquidations, macro, whale</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Intel.tsx</td></tr>
+  <tr><td>Intel: macro calendar events table — upcoming high-impact events with title, impact level, and countdown</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Intel.tsx, web/schemas.py → MacroEventInfo</td></tr>
   <tr><td>Scanner tab: trending coins</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Scanner.tsx</td></tr>
   <tr><td>Strategies tab: static + dynamic</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Strategies.tsx</td></tr>
   <tr><td>Analytics tab: PnL history, compound report, projections</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Analytics.tsx</td></tr>

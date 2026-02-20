@@ -85,13 +85,16 @@ class TrailingStop(BaseModel):
         if not self.breakeven_locked and profit_pct >= self.breakeven_trigger_pct:
             self.breakeven_locked = True
             if self.entry_price > self.current_stop:
-                self.current_stop = self.entry_price
-                logger.info(
-                    "BREAK-EVEN locked for {} at {:.2f}% profit (stop -> {:.6f})",
-                    self.symbol,
-                    profit_pct,
-                    self.entry_price,
-                )
+                be_stop = self._be_with_fee_offset(self.entry_price, long=True)
+                if be_stop > self.current_stop:
+                    self.current_stop = be_stop
+                    logger.info(
+                        "BREAK-EVEN locked for {} at {:.2f}% profit (stop -> {:.6f}, entry was {:.6f})",
+                        self.symbol,
+                        profit_pct,
+                        be_stop,
+                        self.entry_price,
+                    )
 
         # Trailing activation
         if not self.activated and profit_pct >= self.activation_pct:
@@ -141,13 +144,16 @@ class TrailingStop(BaseModel):
         if not self.breakeven_locked and profit_pct >= self.breakeven_trigger_pct:
             self.breakeven_locked = True
             if self.entry_price < self.current_stop:
-                self.current_stop = self.entry_price
-                logger.info(
-                    "BREAK-EVEN locked for {} at {:.2f}% profit (stop -> {:.6f})",
-                    self.symbol,
-                    profit_pct,
-                    self.entry_price,
-                )
+                be_stop = self._be_with_fee_offset(self.entry_price, long=False)
+                if be_stop < self.current_stop:
+                    self.current_stop = be_stop
+                    logger.info(
+                        "BREAK-EVEN locked for {} at {:.2f}% profit (stop -> {:.6f}, entry was {:.6f})",
+                        self.symbol,
+                        profit_pct,
+                        be_stop,
+                        self.entry_price,
+                    )
 
         if not self.activated and profit_pct >= self.activation_pct:
             self.activated = True
@@ -163,6 +169,34 @@ class TrailingStop(BaseModel):
                     logger.debug("Trail lowered {}: {:.6f} -> {:.6f} (peak: {:.6f})", self.symbol, old, new_stop, price)
 
         return False
+
+    @staticmethod
+    def _be_with_fee_offset(entry: float, long: bool) -> float:
+        """Nudge the BE stop slightly past entry to cover trading fees.
+
+        Uses the smallest meaningful tick for the price magnitude so we
+        don't set the stop at the exact entry price (which would guarantee
+        a tiny loss after fees).  For a long: stop goes one tick above
+        entry.  For a short: one tick below.
+        """
+        if entry <= 0:
+            return entry
+        tick: float
+        if entry >= 10000:
+            tick = 10.0
+        elif entry >= 100:
+            tick = 1.0
+        elif entry >= 10:
+            tick = 0.1
+        elif entry >= 1:
+            tick = 0.001
+        elif entry >= 0.1:
+            tick = 0.01
+        elif entry >= 0.01:
+            tick = 0.001
+        else:
+            tick = entry * 0.001
+        return entry + tick if long else entry - tick
 
     @property
     def pnl_from_stop(self) -> float:

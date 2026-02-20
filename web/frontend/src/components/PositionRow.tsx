@@ -56,11 +56,18 @@ export function PositionRow({ position: p, onAction }: Props) {
       </td>
       <td>
         {p.stop_loss ? p.stop_loss.toFixed(p.stop_loss < 1 ? 6 : 2) : "—"}
-        {p.breakeven_locked && (
-          <span className="badge" style={{ background: "var(--green)22", color: "var(--green)", marginLeft: 4, fontSize: "0.65rem" }}>
-            BE
-          </span>
-        )}
+        {p.breakeven_locked && p.stop_loss != null && (() => {
+          const isLong = p.side.toLowerCase() === "buy" || p.side.toLowerCase() === "long";
+          const inProfit = isLong ? p.stop_loss > p.entry_price : p.stop_loss < p.entry_price;
+          const inLoss = isLong ? p.stop_loss < p.entry_price : p.stop_loss > p.entry_price;
+          const label = inProfit ? "PR" : inLoss ? "LO" : "BE";
+          const color = inProfit ? "var(--green)" : inLoss ? "var(--red)" : "var(--yellow)";
+          return (
+            <span className="badge" style={{ background: color + "22", color, marginLeft: 4, fontSize: "0.65rem" }}>
+              {label}
+            </span>
+          );
+        })()}
       </td>
       <td>
         <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>

@@ -51,6 +51,13 @@ export interface PositionInfo {
   trade_url: string;
 }
 
+export interface MacroEventInfo {
+  title: string;
+  impact: string;
+  hours_until: number;
+  date_iso: string;
+}
+
 export interface IntelSnapshot {
   regime: string;
   fear_greed: number;
@@ -62,6 +69,7 @@ export interface IntelSnapshot {
   macro_exposure_mult: number;
   macro_spike_opportunity: boolean;
   next_macro_event: string;
+  macro_events: MacroEventInfo[];
   whale_bias: string;
   overleveraged_side: string;
   position_size_multiplier: number;
