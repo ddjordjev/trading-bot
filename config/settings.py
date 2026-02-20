@@ -187,7 +187,8 @@ class Settings(BaseSettings):
 
     @property
     def major_symbol_list(self) -> list[str]:
-        return [s.strip() for s in self.major_symbols.split(",") if s.strip()]
+        raw = getattr(self, "major_symbols", "") or ""
+        return [s.strip() for s in raw.split(",") if s.strip()]
 
     @property
     def intel_symbol_list(self) -> list[str]:

@@ -287,20 +287,19 @@ class SignalGenerator:
                     f"${snap.liquidation_24h / 1e9:.1f}B + RSI {rsi:.0f} — "
                     f"potential generational bottom",
                     strength=0.9,
-                    leverage=3,
+                    leverage=10,
                     max_age_seconds=259200,  # 3 days
                     entry_plan=EntryPlan(
-                        entry_zone_low=0,  # bot fills from current price
-                        entry_zone_high=0,  # bot calculates from live ticker
-                        stop_loss=0,  # wide — 15% below entry zone (PYRAMID will DCA)
+                        entry_zone_low=0,
+                        entry_zone_high=0,
+                        stop_loss=0,
                         take_profit_targets=[],
-                        dca_levels=[],  # bot auto-DCA via PYRAMID mode
-                        initial_leverage=3,
+                        dca_levels=[],
+                        initial_leverage=5,
                         max_leverage=10,
                         scale_in_pct=3.0,
-                        notes="Capitulation event. PYRAMID mode: start tiny, DCA into "
-                        "wicks, lever up on recovery. Do NOT risk more than 3% "
-                        "of portfolio on initial entry. Add at -5%, -10%, -15%. "
+                        notes="Capitulation event. PYRAMID mode: start small, DCA into "
+                        "wicks, lever up on recovery. Add at -3%, -5%, -8%. "
                         "Move stop to break-even at +5%. Let it ride.",
                     ),
                     source="monitor",
@@ -411,15 +410,14 @@ class SignalGenerator:
                     strategy="major_swing",
                     reason=f"{sym} swing: {aligned} intel agree {direction}, regime={snap.regime}, F&G={fg}",
                     strength=min(0.85, sym_strength),
-                    leverage=3,
+                    leverage=10,
                     max_age_seconds=172800,
                     entry_plan=EntryPlan(
-                        initial_leverage=3,
-                        max_leverage=8,
+                        initial_leverage=5,
+                        max_leverage=10,
                         scale_in_pct=2.0,
                         notes=f"Major coin swing {direction}. Enter at support/resistance "
-                        f"confirmation. DCA on dips. Trail stop 3-4%. "
-                        f"Use PYRAMID mode for averaging.",
+                        f"confirmation. DCA on dips. Trail stop 3-4%.",
                     ),
                     source="monitor",
                 ),
