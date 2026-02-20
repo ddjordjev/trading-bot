@@ -93,7 +93,7 @@ async def run_checks() -> bool:
     # 5. Market data
     try:
         ticker = await exchange.fetch_ticker("BTC/USDT")
-        check("Market data (BTC/USDT)", ticker.last > 0, f"last=${ticker.last:,.2f}")
+        check("Market data (BTC/USDT)", ticker.last is not None and ticker.last > 0, f"last=${ticker.last or 0:,.2f}")
     except Exception as e:
         check("Market data", False, str(e))
 

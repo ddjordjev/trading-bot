@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import ta
@@ -69,6 +70,8 @@ class CompoundMomentumStrategy(BaseStrategy):
             return None
 
         price = df["close"].iloc[-1]
+        if not math.isfinite(price) or price <= 0:
+            return None
 
         if self._in_position:
             exit_signal = self._check_exit(df, price)
@@ -150,6 +153,8 @@ class CompoundMomentumStrategy(BaseStrategy):
 
         rsi = ta.momentum.RSIIndicator(df["close"], window=self.rsi_period).rsi()
         current_rsi = rsi.iloc[-1]
+        if math.isnan(current_rsi):
+            return None
 
         avg_vol = df["volume"].iloc[-20:].mean()
         current_vol = df["volume"].iloc[-1]
@@ -217,6 +222,8 @@ class CompoundMomentumStrategy(BaseStrategy):
 
         rsi = ta.momentum.RSIIndicator(df["close"], window=self.rsi_period).rsi()
         current_rsi = rsi.iloc[-1]
+        if math.isnan(current_rsi):
+            return None
 
         avg_vol = df["volume"].iloc[-20:].mean()
         recent_vol = df["volume"].iloc[-3:].mean()

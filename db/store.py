@@ -258,33 +258,44 @@ class TradeDB:
 
     @staticmethod
     def _row_to_trade(row: sqlite3.Row) -> TradeRecord:
+        """Build TradeRecord from row; coerce NULLs to type-safe defaults."""
+
+        def _str(v: Any) -> str:
+            return str(v) if v is not None else ""
+
+        def _float(v: Any) -> float:
+            return float(v) if v is not None else 0.0
+
+        def _int(v: Any) -> int:
+            return int(v) if v is not None else 0
+
         return TradeRecord(
-            id=row["id"],
-            symbol=row["symbol"],
-            side=row["side"],
-            strategy=row["strategy"],
-            action=row["action"],
-            scale_mode=row["scale_mode"],
-            entry_price=row["entry_price"],
-            exit_price=row["exit_price"],
-            amount=row["amount"],
-            leverage=row["leverage"],
-            pnl_usd=row["pnl_usd"],
-            pnl_pct=row["pnl_pct"],
+            id=_int(row["id"]),
+            symbol=_str(row["symbol"]),
+            side=_str(row["side"]),
+            strategy=_str(row["strategy"]),
+            action=_str(row["action"]),
+            scale_mode=_str(row["scale_mode"]),
+            entry_price=_float(row["entry_price"]),
+            exit_price=_float(row["exit_price"]),
+            amount=_float(row["amount"]),
+            leverage=_int(row["leverage"]),
+            pnl_usd=_float(row["pnl_usd"]),
+            pnl_pct=_float(row["pnl_pct"]),
             is_winner=bool(row["is_winner"]),
-            hold_minutes=row["hold_minutes"],
+            hold_minutes=_float(row["hold_minutes"]),
             was_quick_trade=bool(row["was_quick_trade"]),
             was_low_liquidity=bool(row["was_low_liquidity"]),
-            dca_count=row["dca_count"],
-            max_drawdown_pct=row["max_drawdown_pct"],
-            market_regime=row["market_regime"],
-            fear_greed=row["fear_greed"],
-            daily_tier=row["daily_tier"],
-            daily_pnl_at_entry=row["daily_pnl_at_entry"],
-            signal_strength=row["signal_strength"],
-            hour_utc=row["hour_utc"],
-            day_of_week=row["day_of_week"],
-            volatility_pct=row["volatility_pct"],
-            opened_at=row["opened_at"],
-            closed_at=row["closed_at"],
+            dca_count=_int(row["dca_count"]),
+            max_drawdown_pct=_float(row["max_drawdown_pct"]),
+            market_regime=_str(row["market_regime"]),
+            fear_greed=_int(row["fear_greed"]),
+            daily_tier=_str(row["daily_tier"]),
+            daily_pnl_at_entry=_float(row["daily_pnl_at_entry"]),
+            signal_strength=_float(row["signal_strength"]),
+            hour_utc=_int(row["hour_utc"]),
+            day_of_week=_int(row["day_of_week"]),
+            volatility_pct=_float(row["volatility_pct"]),
+            opened_at=_str(row["opened_at"]),
+            closed_at=_str(row["closed_at"]),
         )

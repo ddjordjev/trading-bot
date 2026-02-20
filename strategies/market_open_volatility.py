@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import ta
@@ -51,6 +52,8 @@ class MarketOpenVolatilityStrategy(BaseStrategy):
             df["high"], df["low"], df["close"], window=self.atr_period
         ).average_true_range()
         current_atr = atr.iloc[-1]
+        if math.isnan(current_atr):
+            return None
         avg_atr = atr.iloc[-self.atr_period :].mean()
 
         avg_volume = df["volume"].iloc[-20:].mean()
@@ -63,6 +66,8 @@ class MarketOpenVolatilityStrategy(BaseStrategy):
             return None
 
         price = df["close"].iloc[-1]
+        if not math.isfinite(price) or price <= 0:
+            return None
         prev_price = df["close"].iloc[-2]
         direction_up = price > prev_price
 

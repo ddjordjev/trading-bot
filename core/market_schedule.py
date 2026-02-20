@@ -158,7 +158,11 @@ async def _fetch_holidays_fmp(
                 logger.warning("FMP holidays API returned {} for {}", resp.status, exchange)
                 return []
             data = await resp.json()
+            if not isinstance(data, list):
+                return []
             for entry in data:
+                if not isinstance(entry, dict):
+                    continue
                 raw = entry.get("date", "")
                 with contextlib.suppress(ValueError):
                     d = date.fromisoformat(raw)

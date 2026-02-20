@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -103,9 +104,34 @@ class PaperExchange(BaseExchange):
     ) -> Order:
         order_id = str(uuid.uuid4())[:8]
 
+        if amount <= 0:
+            logger.warning("[PAPER] Invalid amount {} for {}", amount, symbol)
+            return Order(
+                id=order_id,
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                amount=amount,
+                price=0,
+                status=OrderStatus.FAILED,
+                market_type=market_type.value,
+            )
+
         try:
             ticker = await self.fetch_ticker(symbol)
             fill_price = price if price and order_type != OrderType.MARKET else ticker.last
+            if not fill_price or fill_price <= 0 or not math.isfinite(fill_price):
+                logger.error("[PAPER] Invalid fill price {} for {}", fill_price, symbol)
+                return Order(
+                    id=order_id,
+                    symbol=symbol,
+                    side=side,
+                    order_type=order_type,
+                    amount=amount,
+                    price=0,
+                    status=OrderStatus.FAILED,
+                    market_type=market_type.value,
+                )
         except Exception as e:
             logger.error("[PAPER] Failed to fetch price for {}: {}", symbol, e)
             return Order(
@@ -176,9 +202,9 @@ class PaperExchange(BaseExchange):
 
         logger.info(
             "[PAPER] {} {} {} {} @ {:.6f} (leverage={}x)",
-            "FILLED",
+            order.status.value.upper(),
             side.value.upper(),
-            amount,
+            order.amount,
             symbol,
             fill_price,
             leverage,
@@ -225,6 +251,7 @@ class PaperExchange(BaseExchange):
                     )
                     order.filled = close_amount
                     order.amount = close_amount
+                    order.status = OrderStatus.PARTIALLY_FILLED
                     return True
                 self._balances["USDT"] -= margin_needed
                 self._positions.append(
@@ -241,12 +268,15 @@ class PaperExchange(BaseExchange):
             return True
 
         if existing and existing.side == order.side:
+            total_amount = existing.amount + order.amount
+            if total_amount <= 0:
+                logger.warning("[PAPER] DCA total amount is 0 for {}", order.symbol)
+                return False
             margin_needed = fill_price * order.amount / order.leverage
             if self._balances.get("USDT", 0) < margin_needed:
                 logger.warning("[PAPER] Insufficient margin for DCA {} {}", order.amount, order.symbol)
                 return False
             self._balances["USDT"] -= margin_needed
-            total_amount = existing.amount + order.amount
             avg_entry = (existing.entry_price * existing.amount + fill_price * order.amount) / total_amount
             existing.amount = total_amount
             existing.entry_price = avg_entry

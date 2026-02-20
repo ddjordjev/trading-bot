@@ -110,19 +110,30 @@ class FearGreedClient:
                 return
             data = await resp.json()
 
+        if not isinstance(data, dict):
+            return
+
         entries = data.get("data", [])
-        if not entries:
+        if not isinstance(entries, list) or not entries:
             return
 
         current = entries[0]
-        previous = entries[1] if len(entries) > 1 else {}
+        if not isinstance(current, dict):
+            return
+        previous = entries[1] if len(entries) > 1 and isinstance(entries[1], dict) else {}
+
+        try:
+            val = int(current.get("value", 50) or 50)
+            ts = int(current.get("timestamp", 0) or 0)
+        except (TypeError, ValueError):
+            return
 
         self._latest = FearGreedReading(
-            value=int(current.get("value", 50)),
-            classification=current.get("value_classification", "Neutral"),
-            timestamp=datetime.fromtimestamp(int(current.get("timestamp", 0)), tz=UTC),
-            previous_value=int(previous.get("value", 0)) if previous else 0,
-            previous_classification=previous.get("value_classification", "") if previous else "",
+            value=val,
+            classification=str(current.get("value_classification", "Neutral")),
+            timestamp=datetime.fromtimestamp(ts, tz=UTC),
+            previous_value=int(previous.get("value", 0) or 0) if previous else 0,
+            previous_classification=str(previous.get("value_classification", "")) if previous else "",
         )
 
         logger.info(

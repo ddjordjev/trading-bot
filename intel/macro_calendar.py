@@ -127,7 +127,12 @@ class MacroCalendar:
         return self.has_event_now()
 
     def exposure_multiplier(self) -> float:
-        """Reduce position sizing before high-impact events."""
+        """Reduce position sizing before high-impact events.
+
+        Returns the most restrictive (minimum) multiplier across all
+        imminent high-impact events, not just the first match.
+        """
+        mult = 1.0
         for e in self._events:
             if not e.is_crypto_mover:
                 continue
@@ -136,17 +141,17 @@ class MacroCalendar:
                 continue
             if e.impact == EventImpact.CRITICAL:
                 if h <= 1:
-                    return 0.3  # FOMC imminent: minimal exposure
-                if h <= 2:
-                    return 0.5
-                if h <= 4:
-                    return 0.7
+                    mult = min(mult, 0.3)  # FOMC imminent: minimal exposure
+                elif h <= 2:
+                    mult = min(mult, 0.5)
+                elif h <= 4:
+                    mult = min(mult, 0.7)
             elif e.impact == EventImpact.HIGH:
                 if h <= 1:
-                    return 0.5
-                if h <= 2:
-                    return 0.7
-        return 1.0
+                    mult = min(mult, 0.5)
+                elif h <= 2:
+                    mult = min(mult, 0.7)
+        return mult
 
     def next_event_info(self) -> str | None:
         events = self.upcoming_high_impact
@@ -177,6 +182,10 @@ class MacroCalendar:
             logger.warning("ForexFactory fetch failed: {}", e)
             return
 
+        if not isinstance(data, list):
+            logger.warning("ForexFactory calendar returned non-list: {}", type(data).__name__)
+            return
+
         events: list[MacroEvent] = []
         for item in data:
             try:
@@ -192,7 +201,7 @@ class MacroCalendar:
                 dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=UTC)
-                impact = self._classify_impact(title, item.get("impact", ""))
+                impact = self._classify_impact(title, str(item.get("impact", "")))
 
                 events.append(
                     MacroEvent(

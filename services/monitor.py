@@ -19,6 +19,7 @@ there's no need to hammer APIs for new opportunities.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 
 from loguru import logger
@@ -100,7 +101,6 @@ class MonitorService:
         self._tv_symbols: list[str] = ["BTC/USDT", "ETH/USDT"]
         self._last_tv_refresh = 0.0
         self._last_scanner_refresh = 0.0
-        self._last_intel_refresh = 0.0
 
     async def start(self) -> None:
         logger.info("=" * 50)
@@ -142,7 +142,7 @@ class MonitorService:
                 self._update_intensity(bot_status)
 
                 multipliers = INTENSITY_TABLE[self._current_level]
-                now = asyncio.get_event_loop().time()
+                now = time.monotonic()
 
                 # TradingView: refresh active symbols
                 tv_interval = self.settings.tv_poll_interval * multipliers["tv"]

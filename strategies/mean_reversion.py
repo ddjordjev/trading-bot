@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from core.models import Candle, Signal, SignalAction, Ticker
@@ -30,6 +31,8 @@ class MeanReversionStrategy(BaseStrategy):
         ma = df["close"].rolling(self.ma_period).mean().iloc[-1]
         price = df["close"].iloc[-1]
 
+        if math.isnan(ma) or math.isnan(price):
+            return None
         if ma == 0:
             return None
 

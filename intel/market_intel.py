@@ -247,9 +247,12 @@ class MarketIntel:
 
         # -- Preferred direction --
         votes = {"long": 0, "short": 0, "neutral": 0}
-        votes[c.fear_greed_bias] += 2
-        votes[c.liquidation_bias] += 2 if c.mass_liquidation else 1
-        votes[c.whale_bias] += 1
+        if c.fear_greed_bias in votes:
+            votes[c.fear_greed_bias] += 2
+        if c.liquidation_bias in votes:
+            votes[c.liquidation_bias] += 2 if c.mass_liquidation else 1
+        if c.whale_bias in votes:
+            votes[c.whale_bias] += 1
 
         tv_dir = c.tv_btc_consensus
         if tv_dir in votes:
@@ -295,15 +298,15 @@ class MarketIntel:
         return self._condition
 
     async def analyze_symbol(self, symbol: str) -> float | None:
-        """Run TradingView analysis for a symbol.
+        """Run TradingView analysis for a symbol (1h and 4h).
 
-        Returns signal_boost multiplier (0.7-1.3) or None if no data.
+        Always returns None; signal boost is obtained via tv_signal_boost(symbol, side) per signal.
         """
         analysis = await self.tradingview.analyze(symbol, "1h")
         if not analysis:
             return None
         await self.tradingview.analyze(symbol, "4h")
-        return None  # boost is fetched via tradingview.signal_boost() per signal
+        return None
 
     def tv_signal_boost(self, symbol: str, side: str) -> float:
         """Get TradingView signal alignment boost for a proposed trade."""

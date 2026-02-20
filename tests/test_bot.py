@@ -596,7 +596,7 @@ class TestProcessSignalAndQueue:
         queue = MagicMock(pending_count=2)
         queue.get_actionable = MagicMock(return_value=[p1, p2])
         bot.shared.read_trade_queue = MagicMock(return_value=queue)
-        bot.shared.write_trade_queue = MagicMock()
+        bot.shared.apply_trade_queue_updates = MagicMock()
 
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot._execute_proposal = AsyncMock(return_value=True)

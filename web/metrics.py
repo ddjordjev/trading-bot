@@ -263,7 +263,7 @@ def _collect_trading(bot: TradingBot | None) -> None:
     _win_rate.set(bot.risk.win_rate_today)
     _strategies_count.set(len(bot._strategies) + len(bot._dynamic_strategies))
 
-    if bot.intel:
+    if bot.intel and bot.intel.condition:
         _fear_greed.set(bot.intel.condition.fear_greed)
     else:
         _fear_greed.set(50)

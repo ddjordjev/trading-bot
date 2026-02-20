@@ -617,7 +617,8 @@ class TradingBot:
 
         executed = 0
         tick_limit = self.MAX_QUEUE_EXECUTIONS_PER_TICK
-        modified = False
+        consumed_ids: list[str] = []
+        rejected: dict[str, str] = {}
 
         # --- CRITICAL: time-sensitive, but still respect capacity + tick cap ---
         for proposal in queue.get_actionable(SignalPriority.CRITICAL):
@@ -625,29 +626,30 @@ class TradingBot:
                 break
             if not self.settings.is_market_type_allowed(proposal.market_type):
                 queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
-                modified = True
+                rejected[proposal.id] = f"market type '{proposal.market_type}' not allowed"
                 continue
             if free_slots <= 0:
                 queue.mark_rejected(proposal.id, "no free slots")
-                modified = True
+                rejected[proposal.id] = "no free slots"
                 continue
             if not allow_new:
                 queue.mark_rejected(proposal.id, f"tier={tier.value} — not trading")
-                modified = True
+                rejected[proposal.id] = f"tier={tier.value} — not trading"
                 continue
             if proposal.strength * aggression < 0.2:
                 queue.mark_rejected(proposal.id, "strength too low after aggression")
-                modified = True
+                rejected[proposal.id] = "strength too low after aggression"
                 continue
 
             ok = await self._execute_proposal(proposal, aggression)
             if ok:
                 queue.mark_consumed(proposal.id)
+                consumed_ids.append(proposal.id)
                 free_slots -= 1
                 executed += 1
             else:
                 queue.mark_rejected(proposal.id, "execution failed")
-            modified = True
+                rejected[proposal.id] = "execution failed"
 
         # --- DAILY: only when idle with spare capacity and budget ---
         idle_enough = free_slots >= 2 or (free_slots >= 1 and active_count == 0)
@@ -659,23 +661,24 @@ class TradingBot:
                     break
                 if not self.settings.is_market_type_allowed(proposal.market_type):
                     queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
-                    modified = True
+                    rejected[proposal.id] = f"market type '{proposal.market_type}' not allowed"
                     continue
                 if free_slots <= 0:
                     break
                 if proposal.strength * aggression < 0.3:
                     queue.mark_rejected(proposal.id, "daily: strength too low")
-                    modified = True
+                    rejected[proposal.id] = "daily: strength too low"
                     continue
 
                 ok = await self._execute_proposal(proposal, aggression)
                 if ok:
                     queue.mark_consumed(proposal.id)
+                    consumed_ids.append(proposal.id)
                     free_slots -= 1
                     executed += 1
                 else:
                     queue.mark_rejected(proposal.id, "execution failed")
-                modified = True
+                    rejected[proposal.id] = "execution failed"
 
         # --- SWING: only when truly idle, positions secured, day is stable ---
         genuinely_idle = active_count == 0 or (free_slots >= 2 and positions_secured and pnl_pct >= 0)
@@ -686,7 +689,7 @@ class TradingBot:
                     break
                 if not self.settings.is_market_type_allowed(proposal.market_type):
                     queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
-                    modified = True
+                    rejected[proposal.id] = f"market type '{proposal.market_type}' not allowed"
                     continue
                 if free_slots <= 0:
                     break
@@ -696,14 +699,15 @@ class TradingBot:
                 ok = await self._execute_swing_proposal(proposal, aggression)
                 if ok:
                     queue.mark_consumed(proposal.id)
+                    consumed_ids.append(proposal.id)
                     free_slots -= 1
                     executed += 1
                 else:
                     queue.mark_rejected(proposal.id, "swing execution failed")
-                modified = True
+                    rejected[proposal.id] = "swing execution failed"
 
-        if modified:
-            self.shared.write_trade_queue(queue)
+        if consumed_ids or rejected:
+            self.shared.apply_trade_queue_updates(consumed_ids, rejected)
 
         if executed > 0:
             logger.info(

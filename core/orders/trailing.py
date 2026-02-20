@@ -47,6 +47,8 @@ class TrailingStop(BaseModel):
 
     def update(self, current_price: float) -> bool:
         """Update with latest price. Returns True if stop was hit."""
+        if current_price <= 0:
+            return False
         if self.side == OrderSide.BUY:
             return self._update_long(current_price)
         return self._update_short(current_price)

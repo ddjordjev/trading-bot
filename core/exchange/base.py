@@ -13,10 +13,12 @@ def parse_order_status(status: str) -> OrderStatus:
     mapping = {
         "open": OrderStatus.OPEN,
         "closed": OrderStatus.FILLED,
+        "filled": OrderStatus.FILLED,
         "canceled": OrderStatus.CANCELLED,
         "cancelled": OrderStatus.CANCELLED,
         "expired": OrderStatus.CANCELLED,
         "rejected": OrderStatus.FAILED,
+        "partially_filled": OrderStatus.PARTIALLY_FILLED,
     }
     return mapping.get(status, OrderStatus.PENDING)
 
@@ -25,7 +27,10 @@ def ts_to_dt(ts: Any) -> datetime:
     """Convert a millisecond timestamp (from ccxt) to a timezone-aware datetime."""
     if ts is None:
         return datetime.now(UTC)
-    return datetime.fromtimestamp(ts / 1000, tz=UTC)
+    try:
+        return datetime.fromtimestamp(float(ts) / 1000, tz=UTC)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return datetime.now(UTC)
 
 
 class BaseExchange(ABC):
@@ -44,6 +49,8 @@ class BaseExchange(ABC):
     def name(self) -> str: ...
 
     def supports(self, market_type: str) -> bool:
+        if not market_type:
+            return False
         return market_type.lower() in self.SUPPORTED_MARKET_TYPES
 
     @abstractmethod

@@ -170,11 +170,16 @@ class TradingViewClient:
             logger.debug("TV fetch error for {}: {}", symbol, e)
             return None
 
+        if not isinstance(data, dict):
+            return None
         rows = data.get("data", [])
-        if not rows:
+        if not rows or not isinstance(rows, list):
             return None
 
-        vals = rows[0].get("d", [])
+        first = rows[0]
+        if not isinstance(first, dict):
+            return None
+        vals = first.get("d", [])
         if len(vals) < 14:
             return None
 

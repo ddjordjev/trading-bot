@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import ta
@@ -35,6 +36,8 @@ class BollingerStrategy(BaseStrategy):
         _middle = bb.bollinger_mavg().iloc[-1]
         price = df["close"].iloc[-1]
 
+        if math.isnan(price) or math.isnan(upper) or math.isnan(lower):
+            return None
         band_width = upper - lower
         if band_width == 0:
             return None

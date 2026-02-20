@@ -135,6 +135,8 @@ class CoinMarketCapClient:
             logger.debug("CMC trending error: {}", e)
             return
 
+        if not isinstance(data, dict):
+            return
         coins: list[CMCCoin] = []
         for item in data.get("data", {}).get("cryptoTopSearchRanks", [])[:30]:
             try:
@@ -181,6 +183,8 @@ class CoinMarketCapClient:
         except Exception:
             return
 
+        if not isinstance(data, dict):
+            return
         gainers: list[CMCCoin] = []
         losers: list[CMCCoin] = []
 
@@ -216,6 +220,8 @@ class CoinMarketCapClient:
         except Exception:
             return
 
+        if not isinstance(data, dict):
+            return
         gainers: list[CMCCoin] = []
         losers: list[CMCCoin] = []
         for item in data.get("data", []):
@@ -249,6 +255,8 @@ class CoinMarketCapClient:
         except Exception:
             return
 
+        if not isinstance(data, dict):
+            return
         coins: list[CMCCoin] = []
         for item in data.get("data", {}).get("cryptoCurrencyList", []):
             try:

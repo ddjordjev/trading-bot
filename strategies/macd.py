@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import ta
@@ -40,6 +41,8 @@ class MACDStrategy(BaseStrategy):
         curr_hist = histogram.iloc[-1]
         prev_hist = histogram.iloc[-2]
         price = df["close"].iloc[-1]
+        if math.isnan(curr_hist) or math.isnan(prev_hist) or math.isnan(price):
+            return None
         if price <= 0:
             return None
 

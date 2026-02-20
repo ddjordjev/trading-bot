@@ -87,17 +87,6 @@ class DeFiLlamaClient:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             chains = await self._fetch_chains(session)
             if chains:
-                total = sum(float(c.get("tvl", 0) or 0) for c in chains)
-                sorted_chains = sorted(
-                    chains,
-                    key=lambda c: float(c.get("change_1d", 0) or 0),
-                    reverse=True,
-                )
-
-                change_pct = 0.0
-                if self._prev_tvl > 0:
-                    change_pct = ((total - self._prev_tvl) / self._prev_tvl) * 100
-                self._prev_tvl = total
 
                 def _change_1d(c: dict[str, Any]) -> float:
                     v = c.get("change_1d")
@@ -108,8 +97,20 @@ class DeFiLlamaClient:
                     except (TypeError, ValueError):
                         return 0.0
 
-                gainers = [c["name"] for c in sorted_chains[:5] if _change_1d(c) > 0]
-                losers = [c["name"] for c in sorted_chains[-5:] if _change_1d(c) < 0]
+                total = sum(float(c.get("tvl", 0) or 0) for c in chains)
+                sorted_chains = sorted(
+                    chains,
+                    key=_change_1d,
+                    reverse=True,
+                )
+
+                change_pct = 0.0
+                if self._prev_tvl > 0:
+                    change_pct = ((total - self._prev_tvl) / self._prev_tvl) * 100
+                self._prev_tvl = total
+
+                gainers = [c.get("name", "?") for c in sorted_chains[:5] if _change_1d(c) > 0]
+                losers = [c.get("name", "?") for c in sorted_chains[-5:] if _change_1d(c) < 0]
 
                 self._data = TVLSnapshot(
                     total_tvl=total,
@@ -123,8 +124,9 @@ class DeFiLlamaClient:
         try:
             async with session.get(f"{self.BASE_URL}/v2/chains") as resp:
                 if resp.status == 200:
-                    data: list[dict[str, Any]] = await resp.json()
-                    return data
+                    data = await resp.json()
+                    if isinstance(data, list):
+                        return [c for c in data if isinstance(c, dict)]
         except Exception:
             pass
         return []

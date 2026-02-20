@@ -136,9 +136,9 @@ class SantimentClient:
                 async with session.post(self.GRAPHQL_URL, json={"query": query}, headers=headers) as resp:
                     if resp.status == 200:
                         result = await resp.json()
-                        ts = result.get("data", {}).get("getMetric", {}).get("timeseriesData", [])
-                        if ts:
-                            values = [p["value"] for p in ts if p.get("value")]
+                        ts = (result or {}).get("data", {}).get("getMetric", {}).get("timeseriesData", [])
+                        if ts and isinstance(ts, list):
+                            values = [p["value"] for p in ts if isinstance(p, dict) and p.get("value")]
                             if values:
                                 data.social_volume = values[-1]
                                 data.social_volume_avg = sum(values) / len(values)

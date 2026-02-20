@@ -127,7 +127,7 @@ async def _positions() -> list[PositionInfo]:
                 strategy=pos.strategy,
                 stop_loss=ts.current_stop if ts else pos.stop_loss,
                 notional_value=pos.notional_value,
-                age_minutes=(time.time() - pos.opened_at.timestamp()) / 60,
+                age_minutes=(time.time() - pos.opened_at.timestamp()) / 60 if pos.opened_at else 0,
                 breakeven_locked=ts.breakeven_locked if ts else False,
                 scale_mode=sp.mode.value if sp else "",
                 scale_phase=sp.phase.value if sp else "",
@@ -142,6 +142,8 @@ def _intel_snapshot() -> IntelSnapshot | None:
     if not _bot or not _bot.intel:
         return None
     c = _bot.intel.condition
+    if c is None:
+        return None
     return IntelSnapshot(
         regime=c.regime.value,
         fear_greed=c.fear_greed,
@@ -192,13 +194,13 @@ async def health() -> dict[str, Any]:
 
 
 @app.get("/api/grafana-url", response_model=None)
-async def grafana_url() -> dict[str, Any]:
+async def grafana_url(_: str = Depends(verify_token)) -> dict[str, Any]:
     port = _bot.settings.grafana_port if _bot else 3001
     return {"port": port, "dashboard_uid": "trading-bot"}
 
 
 @app.get("/api/system-metrics", response_model=None)
-async def system_metrics() -> dict[str, Any]:
+async def system_metrics(_: str = Depends(verify_token)) -> dict[str, Any]:
     from web.metrics import get_metrics_json
 
     uptime = time.time() - _start_time if _start_time else 0
@@ -317,7 +319,7 @@ async def get_modules(_: str = Depends(verify_token)) -> list[ModuleStatus]:
             display_name="Market Intelligence",
             enabled=_bot.intel is not None and _bot.settings.intel_enabled,
             description="Fear & Greed, liquidations, macro calendar, whale sentiment",
-            stats={"regime": _bot.intel.condition.regime.value if _bot.intel else "off"},
+            stats={"regime": _bot.intel.condition.regime.value if _bot.intel and _bot.intel.condition else "off"},
         ),
         ModuleStatus(
             name="scanner",
@@ -482,6 +484,8 @@ async def tighten_stop(
     pos = next((p for p in positions if p.symbol == symbol), None)
     if not pos:
         return ActionResponse(success=False, message=f"No position for {symbol}")
+    if not pos.current_price:
+        return ActionResponse(success=False, message="No current price available")
     new_stop = pos.current_price * (1 - pct / 100) if pos.side.value == "buy" else pos.current_price * (1 + pct / 100)
     ts.current_stop = new_stop
     return ActionResponse(success=True, message=f"Stop tightened to {new_stop:.6f} ({pct}% from current)")
@@ -580,7 +584,7 @@ if FRONTEND_DIR.exists():
 
     @app.get("/{full_path:path}", response_model=None)
     async def serve_spa(full_path: str) -> FileResponse:
-        file_path = FRONTEND_DIR / full_path
-        if file_path.exists() and file_path.is_file():
+        file_path = (FRONTEND_DIR / full_path).resolve()
+        if file_path.is_relative_to(FRONTEND_DIR) and file_path.is_file():
             return FileResponse(file_path)
         return FileResponse(FRONTEND_DIR / "index.html")

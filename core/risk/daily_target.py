@@ -68,6 +68,9 @@ class DailyTargetTracker:
 
     def reset_day(self, balance: float) -> None:
         if self._day_number > 0:
+            day_pnl_pct = (
+                (balance - self._day_start_balance) / self._day_start_balance * 100 if self._day_start_balance else 0.0
+            )
             self._history.append(
                 DailyRecord(
                     day=self._day_number,
@@ -75,10 +78,8 @@ class DailyTargetTracker:
                     start_balance=self._day_start_balance,
                     end_balance=balance,
                     pnl=balance - self._day_start_balance,
-                    pnl_pct=(balance - self._day_start_balance) / self._day_start_balance * 100
-                    if self._day_start_balance
-                    else 0,
-                    target_hit=self.target_reached,
+                    pnl_pct=day_pnl_pct,
+                    target_hit=day_pnl_pct >= self.daily_target_pct,
                     trades=self._todays_trades,
                 )
             )

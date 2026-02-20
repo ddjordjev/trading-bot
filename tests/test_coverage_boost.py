@@ -932,6 +932,23 @@ class TestSharedStateExtended:
         q = state.read_trade_queue()
         assert q.total == 0
 
+    def test_apply_trade_queue_updates(self, state):
+        from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        q = TradeQueue()
+        p1 = TradeProposal(priority=SignalPriority.CRITICAL, symbol="BTC/USDT", side="long", strategy="x")
+        p2 = TradeProposal(priority=SignalPriority.DAILY, symbol="ETH/USDT", side="short", strategy="y")
+        q.add(p1)
+        q.add(p2)
+        state.write_trade_queue(q)
+        state.apply_trade_queue_updates(consumed_ids=[p1.id], rejected={p2.id: "no slots"})
+        read = state.read_trade_queue()
+        assert read.total == 2
+        consumed = next(x for x in read.critical + read.daily + read.swing if x.id == p1.id)
+        assert consumed.consumed
+        rejected = next(x for x in read.critical + read.daily + read.swing if x.id == p2.id)
+        assert rejected.rejected
+
 
 # ── Santiment Client ─────────────────────────────────────────────────────────
 

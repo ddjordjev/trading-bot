@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from typing import Any
 
@@ -59,6 +60,10 @@ class OrderManager:
         self._active_orders: list[Order] = []
         self._trade_log: list[dict[str, Any]] = []
         self._closed_scalers: dict[str, list[ScaledPosition]] = {}  # stashed before removal for logging
+        self._scale_in_cooldowns: dict[str, datetime] = {}
+        self._partial_take_cooldowns: dict[str, datetime] = {}
+        self._hedge_cooldowns: dict[str, datetime] = {}
+        self._ORDER_COOLDOWN_SECS = 60
 
     # ------------------------------------------------------------------ #
     #  Signal execution
@@ -86,8 +91,8 @@ class OrderManager:
         self, signal: Signal, balance: float, low_liquidity: bool = False, pyramid: bool = False
     ) -> Order | None:
         price = signal.suggested_price or 0
-        if price <= 0:
-            logger.warning("No price for {}, skipping", signal.symbol)
+        if not (price > 0 and math.isfinite(price)):
+            logger.warning("No valid price for {} (got {!r}), skipping", signal.symbol, signal.suggested_price)
             return None
 
         target_leverage = signal.leverage or self.settings.default_leverage
@@ -146,6 +151,7 @@ class OrderManager:
             )
 
         if amount <= 0:
+            self.scaler.remove(signal.symbol)
             return None
 
         order = await self.exchange.place_order(
@@ -156,6 +162,11 @@ class OrderManager:
             leverage=actual_leverage,
             market_type=market_type,
         )
+
+        if order.status != OrderStatus.FILLED:
+            self.scaler.remove(signal.symbol)
+            self._active_orders.append(order)
+            return order
 
         if order.status == OrderStatus.FILLED:
             sp.record_add(order.filled, order.average_price)
@@ -219,6 +230,11 @@ class OrderManager:
         for symbol, amount in to_add:
             if len(added) >= self.MAX_DCA_ADDS_PER_TICK:
                 break
+
+            cd = self._scale_in_cooldowns.get(symbol)
+            if cd and (datetime.now(UTC) - cd).total_seconds() < self._ORDER_COOLDOWN_SECS:
+                continue
+
             sp = self.scaler.get(symbol)
             if not sp:
                 continue
@@ -251,6 +267,7 @@ class OrderManager:
             )
 
             if order.status == OrderStatus.FILLED:
+                self._scale_in_cooldowns.pop(symbol, None)
                 sp.record_add(order.filled, order.average_price)
                 self._log_trade(
                     Signal(
@@ -270,6 +287,8 @@ class OrderManager:
                     logger.info("Updated trail entry for {} to avg: {:.6f}", symbol, sp.avg_entry_price)
 
                 added.append(order)
+            else:
+                self._scale_in_cooldowns[symbol] = datetime.now(UTC)
 
         return added
 
@@ -338,6 +357,10 @@ class OrderManager:
 
         to_take = self.scaler.get_symbols_for_partial_take(prices)
         for symbol, amount in to_take:
+            cd = self._partial_take_cooldowns.get(symbol)
+            if cd and (datetime.now(UTC) - cd).total_seconds() < self._ORDER_COOLDOWN_SECS:
+                continue
+
             sp = self.scaler.get(symbol)
             if not sp:
                 continue
@@ -367,6 +390,7 @@ class OrderManager:
             )
 
             if order.status == OrderStatus.FILLED:
+                self._partial_take_cooldowns.pop(symbol, None)
                 pnl_portion = pos.unrealized_pnl * (amount / pos.amount) if pos.amount > 0 else 0
                 self.risk.record_pnl(pnl_portion)
                 sp.record_partial_close(order.filled)
@@ -383,6 +407,8 @@ class OrderManager:
                     pnl_portion,
                 )
                 taken.append(order)
+            else:
+                self._partial_take_cooldowns[symbol] = datetime.now(UTC)
 
         return taken
 
@@ -413,6 +439,10 @@ class OrderManager:
 
         for symbol in ready:
             if self.hedger.has_active_hedge(symbol):
+                continue
+
+            cd = self._hedge_cooldowns.get(symbol)
+            if cd and (datetime.now(UTC) - cd).total_seconds() < self._ORDER_COOLDOWN_SECS:
                 continue
 
             main_pos = next((p for p in positions if p.symbol == symbol), None)
@@ -468,6 +498,7 @@ class OrderManager:
             )
 
             if order.status == OrderStatus.FILLED:
+                self._hedge_cooldowns.pop(symbol, None)
                 self.hedger.activate(symbol, order.average_price, order.filled, order.id)
 
                 hedge_side = params["side"]
@@ -499,6 +530,8 @@ class OrderManager:
                     "hedge_open",
                 )
                 opened.append(order)
+            else:
+                self._hedge_cooldowns[symbol] = datetime.now(UTC)
 
         # Clean up closed main positions
         active_symbols = {p.symbol for p in positions if p.amount > 0}
@@ -671,12 +704,15 @@ class OrderManager:
             if sp:
                 self._closed_scalers.setdefault(signal.symbol, []).append(sp)
             self.scaler.remove(signal.symbol)
-            # Full close: clean up trailing stops (main + hedge/wick) and related state
+            # Full close: clean up trailing stops (main + hedge/wick), related state, and cooldowns
             self.trailing.remove(signal.symbol)
             self.trailing.remove(f"{signal.symbol}:hedge")
             self.trailing.remove(f"{signal.symbol}:wick")
             self.hedger.remove(signal.symbol)
             self.wick_scalper.close(signal.symbol)
+            self._scale_in_cooldowns.pop(signal.symbol, None)
+            self._partial_take_cooldowns.pop(signal.symbol, None)
+            self._hedge_cooldowns.pop(signal.symbol, None)
 
         return order
 
@@ -859,7 +895,6 @@ class OrderManager:
             order = await self.execute_signal(close_signal)
             if order:
                 closed.append(order)
-                self.scaler.remove(signal.symbol)
                 logger.info("Cut expired quick trade {} after {:.0f}m (not in profit)", signal.symbol, elapsed)
 
         return closed

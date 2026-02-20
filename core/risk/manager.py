@@ -194,7 +194,7 @@ class RiskManager:
         pct = risk_pct or self.max_position_pct
         original_pct = pct
 
-        if self.daily_loss_pct > 0:
+        if self.daily_loss_pct > 0 and self.max_daily_loss_pct > 0:
             loss_ratio = self.daily_loss_pct / self.max_daily_loss_pct
             scale = max(0.3, 1.0 - loss_ratio * 0.7)
             pct *= scale

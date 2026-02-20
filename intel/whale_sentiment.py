@@ -177,7 +177,12 @@ class WhaleSentiment:
                         funding_data = json_data.get("data", [])
                         if funding_data and isinstance(funding_data, list):
                             for item in funding_data:
-                                rate = item.get("rate") or item.get("uMarginList", [{}])[0].get("rate", 0)
+                                if not isinstance(item, dict):
+                                    continue
+                                uml = item.get("uMarginList")
+                                uml = uml if isinstance(uml, list) and uml else [{}]
+                                first_uml = uml[0] if isinstance(uml[0], dict) else {}
+                                rate = item.get("rate") or first_uml.get("rate", 0)
                                 if rate:
                                     data.funding_rate = float(rate)
                                     break
@@ -202,7 +207,7 @@ class WhaleSentiment:
                             oi_snap.total_oi_usd = cur_oi
                             if prev_oi > 0:
                                 oi_snap.oi_change_1h_pct = ((cur_oi - prev_oi) / prev_oi) * 100
-                            data.open_interest_24h_change_pct = oi_snap.oi_change_1h_pct
+                            # open_interest_24h_change_pct left 0 — API gives 1h buckets only
             except Exception:
                 pass
 

@@ -122,6 +122,7 @@ class SharedState:
         return self._data_dir / "trade_queue.lock"
 
     def write_trade_queue(self, queue: TradeQueue) -> None:
+        """Overwrite queue file (used by monitor). Holds exclusive lock."""
         queue.updated_at = datetime.now(UTC).isoformat()
         lock_path = self._queue_lock_path()
         lock_path.touch(exist_ok=True)
@@ -129,6 +130,33 @@ class SharedState:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
                 self._write(self._data_dir / "trade_queue.json", queue)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
+    def apply_trade_queue_updates(
+        self,
+        consumed_ids: list[str],
+        rejected: dict[str, str],
+    ) -> None:
+        """Apply consumed/rejected updates under exclusive lock to avoid losing monitor's new proposals.
+
+        Bot uses this instead of read-modify-write so it never overwrites
+        proposals added by the monitor after the bot's read.
+        """
+        if not consumed_ids and not rejected:
+            return
+        lock_path = self._queue_lock_path()
+        lock_path.touch(exist_ok=True)
+        with open(lock_path) as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                q = self._read(self._data_dir / "trade_queue.json", TradeQueue) or TradeQueue()
+                for pid in consumed_ids:
+                    q.mark_consumed(pid)
+                for pid, reason in rejected.items():
+                    q.mark_rejected(pid, reason)
+                q.updated_at = datetime.now(UTC).isoformat()
+                self._write(self._data_dir / "trade_queue.json", q)
             finally:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
 

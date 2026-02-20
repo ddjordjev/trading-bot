@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import ta
@@ -32,6 +33,8 @@ class RSIStrategy(BaseStrategy):
         rsi = ta.momentum.RSIIndicator(df["close"], window=self.period).rsi()
         current_rsi = rsi.iloc[-1]
         price = df["close"].iloc[-1]
+        if math.isnan(current_rsi) or not math.isfinite(price) or price <= 0:
+            return None
 
         if current_rsi <= self.oversold:
             raw = (self.oversold - current_rsi) / self.oversold if self.oversold else 0

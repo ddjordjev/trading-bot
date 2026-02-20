@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from core.models import Candle, Signal, SignalAction, Ticker
@@ -39,6 +40,8 @@ class GridStrategy(BaseStrategy):
             return None
 
         price = df["close"].iloc[-1]
+        if math.isnan(price):
+            return None
 
         if self._center_price is None:
             self._center_price = price
@@ -51,6 +54,8 @@ class GridStrategy(BaseStrategy):
 
         grid_step = self._center_price * (self.grid_size_pct / 100)
         if grid_step == 0:
+            return None
+        if self.num_grids <= 0:
             return None
 
         current_level = int((price - self._center_price) / grid_step)

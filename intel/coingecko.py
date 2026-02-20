@@ -9,6 +9,18 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 
+def _pct_24h(raw: Any) -> float:
+    """Parse 24h change from API: may be a number or a dict with 'usd' key."""
+    if raw is None:
+        return 0.0
+    if isinstance(raw, dict):
+        return float(raw.get("usd", 0) or 0)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class GeckoCoin(BaseModel):
     """Coin data from CoinGecko."""
 
@@ -153,6 +165,8 @@ class CoinGeckoClient:
             logger.debug("CoinGecko trending error: {}", e)
             return
 
+        if not isinstance(data, dict):
+            return
         coins_raw = data.get("coins", [])
         if not isinstance(coins_raw, list):
             logger.debug("CoinGecko trending returned non-list coins: {}", type(coins_raw).__name__)
@@ -160,29 +174,31 @@ class CoinGeckoClient:
 
         coins: list[GeckoCoin] = []
         for item in coins_raw:
+            if not isinstance(item, dict):
+                continue
             coin_data = item.get("item", {})
+            if not isinstance(coin_data, dict):
+                coin_data = {}
+            data_inner = coin_data.get("data")
+            data_inner = data_inner if isinstance(data_inner, dict) else {}
             try:
                 coins.append(
                     GeckoCoin(
                         id=coin_data.get("id", ""),
                         symbol=coin_data.get("symbol", ""),
                         name=coin_data.get("name", ""),
-                        price=float(coin_data.get("data", {}).get("price", 0) or 0),
-                        market_cap=float(
-                            coin_data.get("data", {}).get("market_cap", "0").replace(",", "").replace("$", "") or 0
-                        )
-                        if isinstance(coin_data.get("data", {}).get("market_cap"), str)
-                        else float(coin_data.get("data", {}).get("market_cap", 0) or 0),
-                        change_24h=float(
-                            coin_data.get("data", {}).get("price_change_percentage_24h", {}).get("usd", 0) or 0
-                        ),
-                        volume_24h=float(
-                            coin_data.get("data", {}).get("total_volume", "0").replace(",", "").replace("$", "") or 0
-                        )
-                        if isinstance(coin_data.get("data", {}).get("total_volume"), str)
-                        else float(coin_data.get("data", {}).get("total_volume", 0) or 0),
+                        price=float(data_inner.get("price", 0) or 0),
+                        market_cap=float(data_inner.get("market_cap", "0").replace(",", "").replace("$", "") or 0)
+                        if isinstance(data_inner.get("market_cap"), str)
+                        else float(data_inner.get("market_cap", 0) or 0),
+                        change_24h=_pct_24h(data_inner.get("price_change_percentage_24h")),
+                        volume_24h=float(data_inner.get("total_volume", "0").replace(",", "").replace("$", "") or 0)
+                        if isinstance(data_inner.get("total_volume"), str)
+                        else float(data_inner.get("total_volume", 0) or 0),
                         market_cap_rank=coin_data.get("market_cap_rank", 0) or 0,
-                        sparkline_7d=coin_data.get("data", {}).get("sparkline", []),
+                        sparkline_7d=data_inner.get("sparkline", [])
+                        if isinstance(data_inner.get("sparkline"), list)
+                        else [],
                     )
                 )
             except (ValueError, TypeError, KeyError):
@@ -231,12 +247,20 @@ class CoinGeckoClient:
 
         coins: list[GeckoCoin] = []
         for item in data:
+            if not isinstance(item, dict):
+                continue
             try:
                 sym = item.get("symbol", "").lower()
                 if sym in stablecoins:
                     continue
 
-                sparkline = item.get("sparkline_in_7d", {}).get("price", [])
+                si7 = item.get("sparkline_in_7d")
+                if isinstance(si7, list):
+                    sparkline = si7
+                elif isinstance(si7, dict):
+                    sparkline = si7.get("price", []) or []
+                else:
+                    sparkline = []
 
                 coins.append(
                     GeckoCoin(

@@ -173,13 +173,20 @@ class Notifier:
         while self._running:
             try:
                 subject, body = await asyncio.wait_for(self._queue.get(), timeout=5.0)
-                await self._send_email(subject, body)
+                ok = await self._send_email(subject, body)
+                if not ok:
+                    # Re-queue once on failure so transient errors can recover
+                    try:
+                        self._queue.put_nowait((subject, body))
+                    except asyncio.QueueFull:
+                        logger.warning("Notification dropped after send failure (queue full): {}", subject)
             except TimeoutError:
                 continue
             except Exception as e:
                 logger.error("Failed to send notification: {}", e)
 
-    async def _send_email(self, subject: str, body: str) -> None:
+    async def _send_email(self, subject: str, body: str) -> bool:
+        """Send one email. Returns True on success, False on failure (caller may re-queue)."""
         msg = MIMEMultipart()
         msg["From"] = self.smtp_user
         msg["To"] = self.notify_email
@@ -196,5 +203,7 @@ class Notifier:
                 start_tls=True,
             )
             logger.info("Email sent: {}", subject)
+            return True
         except Exception as e:
             logger.error("Email send failed: {}", e)
+            return False

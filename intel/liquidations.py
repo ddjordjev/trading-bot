@@ -131,6 +131,8 @@ class LiquidationMonitor:
             return
 
         try:
+            if not isinstance(data, dict):
+                return
             info = data.get("data", {})
 
             if isinstance(info, list):

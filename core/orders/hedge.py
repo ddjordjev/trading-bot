@@ -201,6 +201,9 @@ class ReversalDetector:
         if len(candles) < 10:
             return False
 
+        if candles[-3].close == 0 or candles[-7].close == 0:
+            return False
+
         recent_roc = (candles[-1].close - candles[-3].close) / candles[-3].close * 100
         earlier_roc = (candles[-4].close - candles[-7].close) / candles[-7].close * 100
 
@@ -310,7 +313,7 @@ class HedgeManager:
             return None
 
         notional = pair.hedge_notional
-        if current_price == 0:
+        if current_price == 0 or notional <= 0:
             return None
 
         amount = notional / current_price

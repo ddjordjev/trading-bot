@@ -18,7 +18,7 @@ err()  { echo -e "${RED}[BOT]${NC} $1"; }
 
 cmd_preflight() {
     log "Running preflight checks..."
-    python scripts/preflight_check.py
+    "$ROOT/.venv/bin/python" scripts/preflight_check.py
 }
 
 cmd_build() {

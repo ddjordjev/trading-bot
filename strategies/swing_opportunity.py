@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import ta
@@ -64,6 +65,8 @@ class SwingOpportunityStrategy(BaseStrategy):
             return None
 
         price = df["close"].iloc[-1]
+        if not math.isfinite(price) or price <= 0:
+            return None
 
         crash_buy = self._detect_crash_buy(df, price)
         if crash_buy:
@@ -95,7 +98,7 @@ class SwingOpportunityStrategy(BaseStrategy):
         # Check RSI is at extreme oversold
         rsi = ta.momentum.RSIIndicator(df["close"], window=self.rsi_period).rsi()
         current_rsi = rsi.iloc[-1]
-        if current_rsi > self.rsi_extreme_oversold:
+        if math.isnan(current_rsi) or current_rsi > self.rsi_extreme_oversold:
             return None
 
         # Check volume spike (capitulation volume)
@@ -109,7 +112,8 @@ class SwingOpportunityStrategy(BaseStrategy):
         ma = df["close"].rolling(min(self.ma_period, len(df))).mean().iloc[-1]
         near_support = price <= ma * 1.02  # within 2% of MA
 
-        # Determine signal strength based on severity
+        if self.extreme_crash_pct <= 0:
+            return None
         severity = abs(drop_pct) / self.extreme_crash_pct
         strength = min(1.0, severity)
 
@@ -153,7 +157,7 @@ class SwingOpportunityStrategy(BaseStrategy):
 
         rsi = ta.momentum.RSIIndicator(df["close"], window=self.rsi_period).rsi()
         current_rsi = rsi.iloc[-1]
-        if current_rsi < self.rsi_extreme_overbought:
+        if math.isnan(current_rsi) or current_rsi < self.rsi_extreme_overbought:
             return None
 
         avg_vol = df["volume"].iloc[-60:].mean()
@@ -168,6 +172,8 @@ class SwingOpportunityStrategy(BaseStrategy):
         if above_ma_pct < 10:
             return None
 
+        if self.extreme_crash_pct <= 0:
+            return None
         severity = rally_pct / self.extreme_crash_pct
         strength = min(1.0, severity)
 
