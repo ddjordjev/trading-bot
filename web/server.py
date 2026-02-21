@@ -349,7 +349,7 @@ async def get_bots(_: str = Depends(verify_token)) -> list[BotInstance]:
         if bid == "hub":
             continue
         profile = PROFILES_BY_ID.get(bid)
-        if not enabled_map.get(bid, profile.is_default if profile else False):
+        if not enabled_map.get(bid, profile.is_default if profile else True):
             continue
         strat_names = [s.get("name", "") for s in rpt.get("strategies", [])]
         bots.append(
@@ -1281,7 +1281,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
         if bid == "hub":
             continue
         profile = PROFILES_BY_ID.get(bid)
-        if not enabled_map.get(bid, profile.is_default if profile else False):
+        if not enabled_map.get(bid, profile.is_default if profile else True):
             continue
 
         if not first_status:
@@ -1409,7 +1409,7 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
         from config.bot_profiles import PROFILES_BY_ID
 
         profile = PROFILES_BY_ID.get(bot_id)
-        default_enabled = profile.is_default if profile else False
+        default_enabled = profile.is_default if profile else True
         enabled = hub.is_bot_enabled(bot_id, default=default_enabled)
     else:
         enabled = True
