@@ -308,19 +308,19 @@ class Settings(BaseSettings):
 
     @property
     def binance_api_key(self) -> str:
-        return self.binance_test_api_key if self.is_paper() else self.binance_prod_api_key
+        return self.binance_test_api_key if self.is_paper_live() else self.binance_prod_api_key
 
     @property
     def binance_api_secret(self) -> str:
-        return self.binance_test_api_secret if self.is_paper() else self.binance_prod_api_secret
+        return self.binance_test_api_secret if self.is_paper_live() else self.binance_prod_api_secret
 
     @property
     def bybit_api_key(self) -> str:
-        return self.bybit_test_api_key if self.is_paper() else self.bybit_prod_api_key
+        return self.bybit_test_api_key if self.is_paper_live() else self.bybit_prod_api_key
 
     @property
     def bybit_api_secret(self) -> str:
-        return self.bybit_test_api_secret if self.is_paper() else self.bybit_prod_api_secret
+        return self.bybit_test_api_secret if self.is_paper_live() else self.bybit_prod_api_secret
 
 
 @lru_cache

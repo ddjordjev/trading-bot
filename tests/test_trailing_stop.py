@@ -131,7 +131,7 @@ class TestBeWithFeeOffset:
 
     def test_long_high_price(self):
         result = TrailingStop._be_with_fee_offset(100.0, long=True)
-        assert result == pytest.approx(101.0)
+        assert result == pytest.approx(101.0)  # >= 100 → tick = 1.0
 
     def test_short_high_price(self):
         result = TrailingStop._be_with_fee_offset(100.0, long=False)
@@ -139,7 +139,7 @@ class TestBeWithFeeOffset:
 
     def test_long_10k_price(self):
         result = TrailingStop._be_with_fee_offset(10564.0, long=True)
-        assert result == pytest.approx(10574.0)
+        assert result == pytest.approx(10574.0)  # >= 10000 → tick = 10
 
     def test_short_10k_price(self):
         result = TrailingStop._be_with_fee_offset(10564.0, long=False)
@@ -147,27 +147,27 @@ class TestBeWithFeeOffset:
 
     def test_long_mid_price(self):
         result = TrailingStop._be_with_fee_offset(1.4545, long=True)
-        assert result == pytest.approx(1.455_5)  # +0.001
+        assert result == pytest.approx(1.4555)  # >= 1 → tick = 0.001
 
     def test_short_mid_price(self):
         result = TrailingStop._be_with_fee_offset(1.4545, long=False)
-        assert result == pytest.approx(1.453_5)  # -0.001
+        assert result == pytest.approx(1.4535)
 
     def test_long_sub_dollar(self):
         result = TrailingStop._be_with_fee_offset(0.43, long=True)
-        assert result == pytest.approx(0.44)
+        assert result == pytest.approx(0.473)  # < 1 → tick = 10% of entry
 
     def test_short_sub_dollar(self):
         result = TrailingStop._be_with_fee_offset(0.43, long=False)
-        assert result == pytest.approx(0.42)
+        assert result == pytest.approx(0.387)
 
     def test_long_micro_price(self):
         result = TrailingStop._be_with_fee_offset(0.005, long=True)
-        assert result == pytest.approx(0.005005)  # 0.1% of price
+        assert result == pytest.approx(0.0055)  # < 1 → tick = 10% of entry
 
     def test_short_micro_price(self):
         result = TrailingStop._be_with_fee_offset(0.005, long=False)
-        assert result == pytest.approx(0.004995)
+        assert result == pytest.approx(0.0045)
 
     def test_very_small_price(self):
         result = TrailingStop._be_with_fee_offset(0.00025, long=True)

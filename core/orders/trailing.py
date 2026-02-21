@@ -222,12 +222,8 @@ class TrailingStop(BaseModel):
             tick = 0.1
         elif entry >= 1:
             tick = 0.001
-        elif entry >= 0.1:
-            tick = 0.01
-        elif entry >= 0.01:
-            tick = 0.001
         else:
-            tick = entry * 0.001
+            tick = entry * 0.1
         return entry + tick if long else entry - tick
 
     @property

@@ -337,11 +337,20 @@ class TestSettingsUrls:
         url = s.symbol_platform_url("BTC/USDT")
         assert "mexc" in url.lower() or url == ""
 
-    def test_binance_api_keys_paper(self, settings):
-        settings.binance_test_api_key = "test_key"
-        settings.binance_test_api_secret = "test_secret"
-        assert settings.binance_api_key == "test_key"
-        assert settings.binance_api_secret == "test_secret"
+    def test_binance_api_keys_paper_live(self, monkeypatch):
+        monkeypatch.setenv("TRADING_MODE", "paper_live")
+        monkeypatch.setenv("EXCHANGE", "binance")
+        s = Settings(_env_file=None)
+        s.binance_test_api_key = "test_key"
+        s.binance_test_api_secret = "test_secret"
+        assert s.binance_api_key == "test_key"
+        assert s.binance_api_secret == "test_secret"
+
+    def test_binance_api_keys_paper_local_uses_prod(self, settings):
+        settings.binance_prod_api_key = "prod_key"
+        settings.binance_prod_api_secret = "prod_secret"
+        assert settings.binance_api_key == "prod_key"
+        assert settings.binance_api_secret == "prod_secret"
 
     def test_bot_id_default_empty(self, settings):
         assert settings.bot_id == ""
@@ -364,14 +373,23 @@ class TestSettingsUrls:
         settings.bot_strategies = " rsi , macd "
         assert settings.bot_strategy_list == ["rsi", "macd"]
 
-    def test_bybit_api_keys_paper(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper_local")
+    def test_bybit_api_keys_paper_live(self, monkeypatch):
+        monkeypatch.setenv("TRADING_MODE", "paper_live")
         monkeypatch.setenv("EXCHANGE", "bybit")
         s = Settings(_env_file=None)
         s.bybit_test_api_key = "bkey"
         s.bybit_test_api_secret = "bsecret"
         assert s.bybit_api_key == "bkey"
         assert s.bybit_api_secret == "bsecret"
+
+    def test_bybit_api_keys_paper_local_uses_prod(self, monkeypatch):
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
+        monkeypatch.setenv("EXCHANGE", "bybit")
+        s = Settings(_env_file=None)
+        s.bybit_prod_api_key = "bprod"
+        s.bybit_prod_api_secret = "bprod_secret"
+        assert s.bybit_api_key == "bprod"
+        assert s.bybit_api_secret == "bprod_secret"
 
 
 # ── Analytics Service ────────────────────────────────────────────────────────
