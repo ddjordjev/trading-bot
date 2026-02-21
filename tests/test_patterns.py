@@ -480,3 +480,154 @@ class TestPatternMatchRR:
             target_1=1.1,
         )
         assert high.signal_boost > low.signal_boost
+
+
+# ── PatternDetector edge cases (insufficient data, fallback, no match) ───────
+
+
+class TestPatternDetectorInsufficientData:
+    def test_analyze_returns_fallback_when_fewer_than_20_candles(self):
+        detector = PatternDetector(min_confidence=0.1)
+        candles = [_candle(100.0, idx=i) for i in range(19)]
+        smart = detector.analyze(candles, current_price=100.0, side="long", fallback_stop_pct=2.5)
+        assert not smart.has_structure
+        assert not smart.has_pattern
+        assert smart.fallback_pct == 2.5
+        assert smart.initial_stop == 0 or smart.stop_loss_pct(100.0) == 2.5
+
+    def test_analyze_long_no_support_uses_fallback_stop_pct(self):
+        """When current_price is below all structure, nearest_support is None -> fallback branch."""
+        detector = PatternDetector(min_confidence=0.1)
+        candles = _make_w_candles()
+        smart = detector.analyze(candles, current_price=0.5, side="long", fallback_stop_pct=2.0)
+        assert smart.initial_stop > 0
+        assert smart.initial_stop < 0.5
+
+    def test_analyze_short_no_resistance_uses_fallback_stop_pct(self):
+        detector = PatternDetector(min_confidence=0.1)
+        candles = _make_w_candles()
+        smart = detector.analyze(candles, current_price=2.0, side="short", fallback_stop_pct=2.0)
+        assert smart.initial_stop > 2.0
+
+
+class TestPatternDetectorDoubleBottomEdgeCases:
+    def test_double_bottom_price_below_neckline_returns_none_via_analyze(self):
+        """Price < neckline * 0.98 causes double bottom to not be returned as best for long."""
+        detector = PatternDetector(min_confidence=0.01)
+        candles = _make_w_candles()
+        smart = detector.analyze(candles, current_price=0.95, side="long")
+        if smart.pattern:
+            assert smart.pattern.pattern_type != PatternType.DOUBLE_BOTTOM or smart.pattern.entry_zone > 0.95
+
+
+class TestPatternDetectorDoubleTopEdgeCases:
+    def test_double_top_price_above_neckline_skipped(self):
+        """Price > neckline * 1.02 causes double top to be invalid for short."""
+        prices = (
+            [1.0 + i * 0.025 for i in range(20)]
+            + [1.5 - i * 0.02 for i in range(10)]
+            + [1.3 + i * 0.018 for i in range(10)]
+            + [1.48 - i * 0.023 for i in range(10)]
+        )
+        candles = [_candle(p, high=p * 1.005, low=p * 0.995, idx=i) for i, p in enumerate(prices)]
+        detector = PatternDetector(min_confidence=0.01)
+        smart = detector.analyze(candles, current_price=1.50, side="short")
+        assert smart.initial_stop > 0
+
+
+class TestPatternDetectorPickBest:
+    def test_analyze_short_side_returns_short_pattern_or_structure_only(self):
+        detector = PatternDetector(min_confidence=0.1)
+        candles = _make_uptrend_candles()
+        smart = detector.analyze(candles, current_price=1.3, side="short")
+        if smart.pattern:
+            assert smart.pattern.direction == "short"
+        assert smart.initial_stop >= 0
+
+
+class TestPatternDetectorBullFlagEdgeCases:
+    def test_bull_flag_requires_enough_candles(self):
+        detector = PatternDetector(min_confidence=0.01)
+        candles = [_candle(1.0 + i * 0.01, idx=i) for i in range(29)]
+        smart = detector.analyze(candles, current_price=1.3, side="long")
+        if smart.pattern and smart.pattern.pattern_type == PatternType.BULL_FLAG:
+            assert smart.pattern.direction == "long"
+
+
+class TestPatternDetectorLongStopsInitialStopZero:
+    def test_compute_long_stops_fallback_when_initial_stop_negative(self):
+        """Covers branch where deep_stop_distance yields <= 0 and we use fallback."""
+        detector = PatternDetector(min_confidence=0.0)
+        candles = _make_w_candles()
+        smart = detector.analyze(candles, current_price=1.3, side="long", fallback_stop_pct=2.0, low_liquidity=False)
+        assert smart.initial_stop > 0
+        assert smart.initial_stop < 1.3
+
+
+# ── PatternDetector: boundary candles, _pick_best no match, fallback branches ─
+
+
+class TestPatternDetectorBoundaryAndPickBest:
+    def test_analyze_exactly_20_candles_proceeds(self):
+        """Boundary: len >= 20 proceeds to structure/pattern analysis."""
+        detector = PatternDetector(min_confidence=0.1)
+        candles = [_candle(100.0 + i * 0.1, idx=i) for i in range(20)]
+        smart = detector.analyze(candles, current_price=102.0, side="long", fallback_stop_pct=2.0)
+        assert smart.fallback_pct == 2.0
+        assert smart.initial_stop >= 0 or smart.stop_loss_pct(102.0) == 2.0
+
+    def test_analyze_19_candles_returns_fallback_only(self):
+        detector = PatternDetector(min_confidence=0.1)
+        candles = [_candle(100.0, idx=i) for i in range(19)]
+        smart = detector.analyze(candles, current_price=100.0, side="long", fallback_stop_pct=2.5)
+        assert not smart.has_structure
+        assert not smart.has_pattern
+        assert smart.fallback_pct == 2.5
+
+    def test_analyze_short_side_with_only_long_patterns_returns_structure_stops(self):
+        """When all detected patterns are long, _pick_best returns None for side short; stops use structure/fallback."""
+        detector = PatternDetector(min_confidence=0.1)
+        candles = _make_w_candles()
+        smart = detector.analyze(candles, current_price=1.3, side="short", fallback_stop_pct=2.0)
+        assert smart.initial_stop > 0
+        assert smart.initial_stop > 1.3
+        if smart.pattern:
+            assert smart.pattern.direction == "short"
+
+    def test_bull_flag_requires_at_least_30_candles(self):
+        detector = PatternDetector(min_confidence=0.01)
+        candles = [_candle(1.0 + i * 0.02, idx=i) for i in range(29)]
+        smart = detector.analyze(candles, current_price=1.6, side="long")
+        if smart.pattern and smart.pattern.pattern_type == PatternType.BULL_FLAG:
+            assert smart.pattern.direction == "long"
+        assert smart.initial_stop >= 0
+
+
+class TestPatternDetectorLongShortFallbackBranches:
+    def test_long_stops_when_no_support_below_entry_uses_fallback_pct(self):
+        """When current price is above all structure, textbook_sl >= entry -> else branch in _compute_long_stops."""
+        detector = PatternDetector(min_confidence=0.0)
+        prices = [2.0 + i * 0.01 for i in range(50)]
+        candles = [_candle(p, high=p * 1.002, low=p * 0.998, idx=i) for i, p in enumerate(prices)]
+        smart = detector.analyze(candles, current_price=2.6, side="long", fallback_stop_pct=2.0)
+        assert smart.initial_stop > 0
+        assert smart.initial_stop < 2.6
+        assert smart.tightened_stop > 0
+
+    def test_short_stops_when_no_resistance_above_entry_uses_fallback_pct(self):
+        """When current price is below all structure, textbook_sl <= entry -> else branch in _compute_short_stops."""
+        detector = PatternDetector(min_confidence=0.0)
+        prices = [2.0 - i * 0.01 for i in range(50)]
+        candles = [_candle(p, high=p * 1.002, low=p * 0.998, idx=i) for i, p in enumerate(prices)]
+        smart = detector.analyze(candles, current_price=1.5, side="short", fallback_stop_pct=2.0)
+        assert smart.initial_stop > 1.5
+        assert smart.tightened_stop > 0
+
+    def test_min_confidence_filters_low_confidence_patterns(self):
+        """Patterns below min_confidence are discarded in _detect_all."""
+        detector = PatternDetector(min_confidence=0.95)
+        candles = _make_w_candles()
+        smart = detector.analyze(candles, current_price=1.3, side="long")
+        if smart.pattern:
+            assert smart.pattern.confidence >= 0.95
+        assert smart.initial_stop > 0

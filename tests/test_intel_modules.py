@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1331,3 +1332,1128 @@ class TestMarketIntel:
         ):
             result = await intel.analyze_symbol("BTC/USDT")
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_start_and_stop(self, intel):
+        for attr in (
+            "fear_greed",
+            "liquidations",
+            "macro",
+            "whales",
+            "tradingview",
+            "coinmarketcap",
+            "coingecko",
+            "defillama",
+            "santiment",
+        ):
+            getattr(intel, attr).start = AsyncMock()
+            getattr(intel, attr).stop = AsyncMock()
+        await intel.start()
+        intel.fear_greed.start.assert_awaited_once()
+        intel.tradingview.start.assert_awaited_once()
+        intel.defillama.start.assert_awaited_once()
+        await intel.stop()
+        intel.fear_greed.stop.assert_awaited_once()
+        intel.santiment.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_skips_defillama_when_disabled(self):
+        intel = MarketIntel(coinglass_key="", symbols=["BTC"], defillama_enabled=False)
+        for attr in (
+            "fear_greed",
+            "liquidations",
+            "macro",
+            "whales",
+            "tradingview",
+            "coinmarketcap",
+            "coingecko",
+            "defillama",
+            "santiment",
+        ):
+            getattr(intel, attr).start = AsyncMock()
+            getattr(intel, attr).stop = AsyncMock()
+        await intel.start()
+        intel.defillama.start.assert_not_awaited()
+
+
+# ── WhaleSentiment _fetch_symbol ─────────────────────────────────────
+
+
+class TestWhaleSentimentFetchSymbol:
+    """Tests for WhaleSentiment._fetch_symbol with mocked HTTP responses."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_symbol_parses_long_short_ratio(self):
+        ws = WhaleSentiment(symbols=["BTC"], coinglass_key="test-key")
+        ls_json = {"data": [{"longRate": 60, "shortRate": 40}]}
+        funding_json = {"data": [{"rate": 0.001, "uMarginList": [{"rate": 0.001}]}]}
+        oi_json = {"data": [{"y": 1e10}, {"y": 1.1e10}]}
+        top_json = {"data": [{"longRate": 55}]}
+
+        def make_mock_resp(data):
+            resp = AsyncMock()
+            resp.status = 200
+            resp.json = AsyncMock(return_value=data)
+            cm = MagicMock()
+            cm.__aenter__ = AsyncMock(return_value=resp)
+            cm.__aexit__ = AsyncMock(return_value=None)
+            return cm
+
+        responses = [
+            make_mock_resp(ls_json),
+            make_mock_resp(funding_json),
+            make_mock_resp(oi_json),
+            make_mock_resp(top_json),
+        ]
+
+        mock_session = MagicMock()
+        call_idx = {"i": 0}
+
+        def get_side_effect(*args, **kwargs):
+            idx = call_idx["i"]
+            call_idx["i"] += 1
+            return responses[idx] if idx < len(responses) else make_mock_resp({})
+
+        mock_session.get = MagicMock(side_effect=get_side_effect)
+        mock_session_cm = MagicMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("intel.whale_sentiment.aiohttp.ClientSession", return_value=mock_session_cm):
+            await ws._fetch_symbol("BTC")
+
+        data = ws._data.get("BTC")
+        assert data is not None
+        assert data.long_short_ratio == pytest.approx(60.0 / 40.0)
+        assert data.funding_rate == 0.001
+        assert data.oi_snapshot is not None
+        assert data.oi_snapshot.total_oi_usd == 1.1e10
+        assert data.oi_snapshot.oi_change_1h_pct == pytest.approx(10.0)
+        assert data.oi_snapshot.top_trader_long_ratio == pytest.approx(0.55)
+
+    @pytest.mark.asyncio
+    async def test_fetch_symbol_handles_api_errors(self):
+        ws = WhaleSentiment(symbols=["ETH"])
+
+        def make_error_resp():
+            resp = AsyncMock()
+            resp.status = 500
+            cm = MagicMock()
+            cm.__aenter__ = AsyncMock(return_value=resp)
+            cm.__aexit__ = AsyncMock(return_value=None)
+            return cm
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=make_error_resp())
+        mock_session_cm = MagicMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("intel.whale_sentiment.aiohttp.ClientSession", return_value=mock_session_cm):
+            await ws._fetch_symbol("ETH")
+
+        data = ws._data.get("ETH")
+        assert data is not None
+        assert data.long_short_ratio == 1.0
+        assert data.funding_rate == 0.0
+
+    def test_summary_overleveraged_longs(self):
+        ws = WhaleSentiment(symbols=["BTC"])
+        ws._data["BTC"] = WhaleSentimentData(funding_rate=0.001, long_short_ratio=1.6)
+        out = ws.summary()
+        assert "OVER-LONG" in out
+
+    def test_summary_overleveraged_shorts(self):
+        ws = WhaleSentiment(symbols=["BTC"])
+        ws._data["BTC"] = WhaleSentimentData(funding_rate=-0.001, long_short_ratio=0.5)
+        out = ws.summary()
+        assert "OVER-SHORT" in out
+
+
+# ── Santiment _fetch_symbol ──────────────────────────────────────────
+
+
+class TestSantimentFetchSymbol:
+    @pytest.mark.asyncio
+    async def test_fetch_symbol_parses_social_volume(self):
+        client = SantimentClient(symbols=["bitcoin"], api_key="test-key")
+        graphql_resp = {
+            "data": {
+                "getMetric": {
+                    "timeseriesData": [
+                        {"datetime": "2026-02-14", "value": 100},
+                        {"datetime": "2026-02-15", "value": 150},
+                        {"datetime": "2026-02-16", "value": 200},
+                        {"datetime": "2026-02-17", "value": 120},
+                        {"datetime": "2026-02-18", "value": 180},
+                        {"datetime": "2026-02-19", "value": 160},
+                        {"datetime": "2026-02-20", "value": 300},
+                    ]
+                }
+            }
+        }
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value=graphql_resp)
+        mock_post_cm = MagicMock()
+        mock_post_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_post_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_post_cm)
+        mock_session_cm = MagicMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("intel.santiment.aiohttp.ClientSession", return_value=mock_session_cm):
+            await client._fetch_symbol("bitcoin")
+
+        data = client._data.get("bitcoin")
+        assert data is not None
+        assert data.social_volume == 300
+        assert data.social_volume_avg == pytest.approx(sum([100, 150, 200, 120, 180, 160, 300]) / 7)
+
+    @pytest.mark.asyncio
+    async def test_fetch_symbol_handles_empty_response(self):
+        client = SantimentClient(symbols=["bitcoin"])
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"data": {"getMetric": {"timeseriesData": []}}})
+        mock_post_cm = MagicMock()
+        mock_post_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_post_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_post_cm)
+        mock_session_cm = MagicMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("intel.santiment.aiohttp.ClientSession", return_value=mock_session_cm):
+            await client._fetch_symbol("bitcoin")
+
+        data = client._data.get("bitcoin")
+        assert data is not None
+        assert data.social_volume == 0.0
+
+    @pytest.mark.asyncio
+    async def test_fetch_symbol_handles_network_error(self):
+        client = SantimentClient(symbols=["bitcoin"])
+        mock_post_cm = MagicMock()
+        mock_post_cm.__aenter__ = AsyncMock(side_effect=ConnectionError("offline"))
+        mock_post_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=mock_post_cm)
+        mock_session_cm = MagicMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("intel.santiment.aiohttp.ClientSession", return_value=mock_session_cm):
+            await client._fetch_symbol("bitcoin")
+
+        data = client._data.get("bitcoin")
+        assert data is not None
+        assert data.social_volume == 0.0
+
+    def test_summary_with_social_spike(self):
+        client = SantimentClient(symbols=["bitcoin"])
+        client._data["bitcoin"] = SocialData(social_volume=250, social_volume_avg=100)
+        out = client.summary()
+        assert "SPIKE" in out
+
+
+# ── TradingView full_analysis, analyze_multi, poll_loop ──────────────
+
+
+class TestTradingViewAnalyzeMulti:
+    @pytest.mark.asyncio
+    async def test_analyze_multi_returns_results(self):
+        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        a1 = TVAnalysis(symbol="BTC/USDT", summary_rating=TVRating.BUY)
+        a2 = TVAnalysis(symbol="ETH/USDT", summary_rating=TVRating.SELL)
+        with patch.object(client, "analyze", new_callable=AsyncMock, side_effect=[a1, a2]):
+            results = await client.analyze_multi(["BTC/USDT", "ETH/USDT"], "1h")
+        assert "BTC/USDT" in results
+        assert "ETH/USDT" in results
+        assert results["BTC/USDT"].summary_rating == TVRating.BUY
+
+    @pytest.mark.asyncio
+    async def test_analyze_multi_skips_exceptions(self):
+        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        a1 = TVAnalysis(symbol="BTC/USDT")
+        with patch.object(client, "analyze", new_callable=AsyncMock, side_effect=[a1, RuntimeError("fail")]):
+            results = await client.analyze_multi(["BTC/USDT", "ETH/USDT"], "1h")
+        assert "BTC/USDT" in results
+        assert "ETH/USDT" not in results
+
+
+class TestTradingViewFullAnalysis:
+    @pytest.mark.asyncio
+    async def test_full_analysis_all_intervals(self):
+        client = TradingViewClient(exchange="MEXC", intervals=["1h", "4h"])
+        a1 = TVAnalysis(symbol="BTC", summary_rating=TVRating.BUY)
+        a4 = TVAnalysis(symbol="BTC", summary_rating=TVRating.SELL)
+        with patch.object(client, "analyze", new_callable=AsyncMock, side_effect=[a1, a4]):
+            results = await client.full_analysis("BTC")
+        assert "1h" in results
+        assert "4h" in results
+
+    @pytest.mark.asyncio
+    async def test_full_analysis_skips_none(self):
+        client = TradingViewClient(exchange="MEXC", intervals=["1h", "4h"])
+        a1 = TVAnalysis(symbol="BTC")
+        with patch.object(client, "analyze", new_callable=AsyncMock, side_effect=[a1, None]):
+            results = await client.full_analysis("BTC")
+        assert "1h" in results
+        assert "4h" not in results
+
+
+class TestTradingViewStartStop:
+    @pytest.mark.asyncio
+    async def test_start_creates_poll_task(self):
+        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        with patch.object(client, "_poll_loop", new_callable=AsyncMock):
+            await client.start()
+            assert client._running is True
+            assert client._poll_task is not None
+            import asyncio
+
+            await asyncio.sleep(0)
+        await client.stop()
+        assert client._running is False
+        assert client._poll_task is None
+
+    @pytest.mark.asyncio
+    async def test_stop_when_not_started(self):
+        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        await client.stop()
+        assert client._running is False
+
+
+class TestTradingViewPollLoop:
+    @pytest.mark.asyncio
+    async def test_poll_loop_iterates_symbols(self):
+        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        client._running = True
+        client._poll_symbols = ["BTC/USDT", "ETH/USDT"]
+
+        call_count = {"n": 0}
+
+        async def fake_analysis(sym):
+            call_count["n"] += 1
+
+        async def stop_after_sleep(sec):
+            client._running = False
+
+        with patch.object(client, "full_analysis", new_callable=AsyncMock, side_effect=fake_analysis):
+            with patch("intel.tradingview.asyncio.sleep", side_effect=stop_after_sleep):
+                await client._poll_loop()
+
+        assert call_count["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_analyze_non_200(self):
+        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        mock_resp = AsyncMock()
+        mock_resp.status = 500
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_sess = MagicMock()
+        mock_sess.post.return_value = mock_cm
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("intel.tradingview.aiohttp.ClientSession", return_value=mock_session):
+            result = await client.analyze("BTC/USDT", "1h")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_analyze_non_dict_response(self):
+        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value="not a dict")
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_sess = MagicMock()
+        mock_sess.post.return_value = mock_cm
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("intel.tradingview.aiohttp.ClientSession", return_value=mock_session):
+            result = await client.analyze("BTC/USDT", "1h")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_analyze_too_few_values(self):
+        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"data": [{"d": [0.1, 0.2]}]})
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_sess = MagicMock()
+        mock_sess.post.return_value = mock_cm
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("intel.tradingview.aiohttp.ClientSession", return_value=mock_session):
+            result = await client.analyze("BTC/USDT", "1h")
+        assert result is None
+
+
+# ── CoinMarketCap HTTP fetch, poll_loop, start/stop ──────────────────
+
+
+def _make_cmc_get_mock(resp_status: int, json_data: dict | list):
+    mock_resp = AsyncMock()
+    mock_resp.status = resp_status
+    mock_resp.json = AsyncMock(return_value=json_data)
+    mock_get = MagicMock()
+    mock_get.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_get.__aexit__ = AsyncMock(return_value=None)
+    return mock_get
+
+
+class TestCoinMarketCapClientFetch:
+    """HTTP fetch methods for CoinMarketCapClient (mocked aiohttp)."""
+
+    @pytest.fixture
+    def client(self):
+        return CoinMarketCapClient(api_key="", poll_interval=300)
+
+    @pytest.mark.asyncio
+    @patch("intel.coinmarketcap.aiohttp.ClientSession")
+    async def test_fetch_trending_success(self, mock_session_class, client):
+        data = {
+            "data": {
+                "cryptoTopSearchRanks": [
+                    {
+                        "id": 1,
+                        "symbol": "BTC",
+                        "name": "Bitcoin",
+                        "slug": "bitcoin",
+                        "priceChange": {
+                            "price": 50000,
+                            "priceChange24h": 2.5,
+                            "volume24h": 1e9,
+                            "marketCap": 1e12,
+                        },
+                    },
+                ]
+            }
+        }
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_cmc_get_mock(200, data)
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_trending()
+
+        assert len(client._trending) == 1
+        assert client._trending[0].symbol == "BTC"
+        assert client._trending[0].change_24h == 2.5
+
+    @pytest.mark.asyncio
+    @patch("intel.coinmarketcap.aiohttp.ClientSession")
+    async def test_fetch_trending_non_200(self, mock_session_class, client):
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_cmc_get_mock(404, {})
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_trending()
+
+        assert client._trending == []
+
+    @pytest.mark.asyncio
+    @patch("intel.coinmarketcap.aiohttp.ClientSession")
+    async def test_fetch_trending_exception(self, mock_session_class, client):
+        mock_sess = AsyncMock()
+        mock_get = MagicMock()
+        mock_get.__aenter__ = AsyncMock(side_effect=ConnectionError("offline"))
+        mock_get.__aexit__ = AsyncMock(return_value=None)
+        mock_sess.get.return_value = mock_get
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_trending()
+
+        assert client._trending == []
+
+    @pytest.mark.asyncio
+    @patch("intel.coinmarketcap.aiohttp.ClientSession")
+    async def test_fetch_trending_non_dict(self, mock_session_class, client):
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_cmc_get_mock(200, [])
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_trending()
+
+        assert client._trending == []
+
+    @pytest.mark.asyncio
+    @patch("intel.coinmarketcap.aiohttp.ClientSession")
+    async def test_fetch_gainers_losers_spotlight_success(self, mock_session_class, client):
+        data = {
+            "data": {
+                "gainerList": [
+                    {
+                        "id": 1,
+                        "symbol": "PEPE",
+                        "name": "Pepe",
+                        "slug": "pepe",
+                        "priceChange": {"price": 0.01, "priceChange24h": 15.0, "volume24h": 2e6, "marketCap": 5e9},
+                        "cmcRank": 50,
+                    }
+                ],
+                "loserList": [
+                    {
+                        "id": 2,
+                        "symbol": "DOGE",
+                        "name": "Dogecoin",
+                        "slug": "dogecoin",
+                        "priceChange": {"price": 0.08, "priceChange24h": -10.0, "volume24h": 1e9, "marketCap": 10e9},
+                        "cmcRank": 8,
+                    }
+                ],
+            }
+        }
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_cmc_get_mock(200, data)
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_gainers_losers()
+
+        assert len(client._gainers) == 1
+        assert client._gainers[0].symbol == "PEPE"
+        assert client._gainers[0].change_24h == 15.0
+        assert len(client._losers) == 1
+        assert client._losers[0].symbol == "DOGE"
+        assert client._losers[0].change_24h == -10.0
+
+    @pytest.mark.asyncio
+    @patch("intel.coinmarketcap.aiohttp.ClientSession")
+    async def test_fetch_gainers_losers_non_200(self, mock_session_class, client):
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_cmc_get_mock(500, {})
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_gainers_losers()
+
+        assert client._gainers == []
+        assert client._losers == []
+
+    @pytest.mark.asyncio
+    @patch("intel.coinmarketcap.aiohttp.ClientSession")
+    async def test_fetch_gainers_api_with_key_success(self, mock_session_class):
+        client = CoinMarketCapClient(api_key="key", poll_interval=300)
+        data = {
+            "data": [
+                {
+                    "id": 1,
+                    "symbol": "BTC",
+                    "name": "Bitcoin",
+                    "slug": "bitcoin",
+                    "quote": {
+                        "USD": {"price": 50000, "volume_24h": 1e9, "market_cap": 1e12, "percent_change_24h": 3.0}
+                    },
+                    "cmc_rank": 1,
+                },
+                {
+                    "id": 2,
+                    "symbol": "SOL",
+                    "name": "Solana",
+                    "slug": "solana",
+                    "quote": {"USD": {"price": 100, "volume_24h": 5e8, "market_cap": 50e9, "percent_change_24h": -5.0}},
+                    "cmc_rank": 5,
+                },
+            ]
+        }
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_cmc_get_mock(200, data)
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_gainers_api()
+
+        assert len(client._gainers) == 1
+        assert client._gainers[0].symbol == "BTC"
+        assert len(client._losers) == 1
+        assert client._losers[0].symbol == "SOL"
+
+    @pytest.mark.asyncio
+    @patch("intel.coinmarketcap.aiohttp.ClientSession")
+    async def test_fetch_recently_added_success(self, mock_session_class, client):
+        data = {
+            "data": {
+                "cryptoCurrencyList": [
+                    {
+                        "id": 999,
+                        "symbol": "NEW",
+                        "name": "NewCoin",
+                        "slug": "newcoin",
+                        "quotes": [
+                            {
+                                "price": 1.0,
+                                "volume24h": 2e6,
+                                "marketCap": 20e6,
+                                "percentChange24h": 0,
+                                "percentChange1h": 0,
+                                "percentChange7d": 0,
+                            }
+                        ],
+                        "cmcRank": 100,
+                    }
+                ]
+            }
+        }
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_cmc_get_mock(200, data)
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_recently_added()
+
+        assert len(client._recently_added) == 1
+        assert client._recently_added[0].symbol == "NEW"
+
+    @pytest.mark.asyncio
+    @patch("intel.coinmarketcap.aiohttp.ClientSession")
+    async def test_fetch_recently_added_non_200(self, mock_session_class, client):
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_cmc_get_mock(403, {})
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_recently_added()
+
+        assert client._recently_added == []
+
+
+class TestCoinMarketCapClientPollLoopAndLifecycle:
+    @pytest.mark.asyncio
+    async def test_poll_loop_calls_fetch_all_once(self):
+        client = CoinMarketCapClient(api_key="", poll_interval=300)
+        client._running = True
+        fetch_all_called = {"n": 0}
+
+        async def stop_after_sleep(sec):
+            client._running = False
+
+        async def count_fetch():
+            fetch_all_called["n"] += 1
+            await asyncio.sleep(0)
+
+        with patch.object(client, "_fetch_all", new_callable=AsyncMock, side_effect=count_fetch):
+            with patch("intel.coinmarketcap.asyncio.sleep", side_effect=stop_after_sleep):
+                await client._poll_loop()
+
+        assert fetch_all_called["n"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_start_sets_running_and_creates_task(self):
+        client = CoinMarketCapClient(api_key="", poll_interval=300)
+        with patch.object(client, "_poll_loop", new_callable=AsyncMock):
+            await client.start()
+        assert client._running is True
+        assert len(client._background_tasks) == 1
+        await client.stop()
+        assert client._running is False
+
+    @pytest.mark.asyncio
+    async def test_stop_clears_running(self):
+        client = CoinMarketCapClient(api_key="", poll_interval=300)
+        client._running = True
+        await client.stop()
+        assert client._running is False
+
+
+# ── CoinGecko HTTP fetch, poll_loop, start/stop ──────────────────────
+
+
+def _make_gecko_get_mock(resp_status: int, json_data: dict | list):
+    mock_resp = AsyncMock()
+    mock_resp.status = resp_status
+    mock_resp.json = AsyncMock(return_value=json_data)
+    mock_get = MagicMock()
+    mock_get.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_get.__aexit__ = AsyncMock(return_value=None)
+    return mock_get
+
+
+class TestCoinGeckoClientFetch:
+    """HTTP fetch methods for CoinGeckoClient (mocked aiohttp)."""
+
+    @pytest.fixture
+    def client(self):
+        return CoinGeckoClient(api_key="", poll_interval=300)
+
+    @pytest.mark.asyncio
+    @patch("intel.coingecko.aiohttp.ClientSession")
+    async def test_fetch_trending_success(self, mock_session_class, client):
+        data = {
+            "coins": [
+                {
+                    "item": {
+                        "id": "bitcoin",
+                        "symbol": "btc",
+                        "name": "Bitcoin",
+                        "data": {
+                            "price": 50000,
+                            "market_cap": "1,000,000,000,000",
+                            "price_change_percentage_24h": {"usd": 2.5},
+                            "total_volume": "50,000,000,000",
+                            "sparkline": [1.0] * 7,
+                        },
+                        "market_cap_rank": 1,
+                    }
+                },
+            ]
+        }
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_gecko_get_mock(200, data)
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_trending()
+
+        assert len(client._trending) == 1
+        assert client._trending[0].symbol == "btc"
+        assert client._trending[0].change_24h == 2.5
+
+    @pytest.mark.asyncio
+    @patch("intel.coingecko.aiohttp.ClientSession")
+    async def test_fetch_trending_non_200(self, mock_session_class, client):
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_gecko_get_mock(429, {})
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_trending()
+
+        assert client._trending == []
+
+    @pytest.mark.asyncio
+    @patch("intel.coingecko.aiohttp.ClientSession")
+    async def test_fetch_trending_exception(self, mock_session_class, client):
+        mock_sess = AsyncMock()
+        mock_get = MagicMock()
+        mock_get.__aenter__ = AsyncMock(side_effect=ConnectionError("offline"))
+        mock_get.__aexit__ = AsyncMock(return_value=None)
+        mock_sess.get.return_value = mock_get
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_trending()
+
+        assert client._trending == []
+
+    @pytest.mark.asyncio
+    @patch("intel.coingecko.aiohttp.ClientSession")
+    async def test_fetch_trending_non_list_coins(self, mock_session_class, client):
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_gecko_get_mock(200, {"coins": "not a list"})
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_trending()
+
+        assert client._trending == []
+
+    @pytest.mark.asyncio
+    @patch("intel.coingecko.aiohttp.ClientSession")
+    async def test_fetch_market_data_success(self, mock_session_class, client):
+        data = [
+            {
+                "id": "bitcoin",
+                "symbol": "btc",
+                "name": "Bitcoin",
+                "current_price": 50000,
+                "market_cap": 1e12,
+                "market_cap_rank": 1,
+                "total_volume": 50e9,
+                "price_change_percentage_1h_in_currency": 0.5,
+                "price_change_percentage_24h": 2.0,
+                "price_change_percentage_7d_in_currency": 5.0,
+                "ath": 70000,
+                "ath_change_percentage": -28.0,
+                "sparkline_in_7d": {"price": [49000, 50000, 51000]},
+            },
+            {
+                "id": "ethereum",
+                "symbol": "eth",
+                "name": "Ethereum",
+                "current_price": 3000,
+                "market_cap": 400e9,
+                "market_cap_rank": 2,
+                "total_volume": 20e9,
+                "price_change_percentage_1h_in_currency": 0.2,
+                "price_change_percentage_24h": 8.0,
+                "price_change_percentage_7d_in_currency": 10.0,
+                "ath": 4000,
+                "ath_change_percentage": -25.0,
+                "sparkline_in_7d": [2900, 3000, 3100],
+            },
+        ]
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_gecko_get_mock(200, data)
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_market_data()
+
+        assert len(client._top_by_volume) >= 1
+        assert any(c.symbol == "btc" for c in client._top_by_volume)
+        assert len(client._top_gainers) >= 1
+
+    @pytest.mark.asyncio
+    @patch("intel.coingecko.aiohttp.ClientSession")
+    async def test_fetch_market_data_non_200(self, mock_session_class, client):
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_gecko_get_mock(503, [])
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_market_data()
+
+        assert client._top_by_volume == []
+        assert client._top_gainers == []
+
+    @pytest.mark.asyncio
+    @patch("intel.coingecko.aiohttp.ClientSession")
+    async def test_fetch_market_data_non_list(self, mock_session_class, client):
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_gecko_get_mock(200, {"data": []})
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await client._fetch_market_data()
+
+        assert client._top_by_volume == []
+
+
+class TestCoinGeckoClientPollLoopAndLifecycle:
+    @pytest.mark.asyncio
+    async def test_poll_loop_calls_fetch_all_once(self):
+        client = CoinGeckoClient(api_key="", poll_interval=300)
+        client._running = True
+        fetch_all_called = {"n": 0}
+
+        async def stop_after_sleep(sec):
+            client._running = False
+
+        async def count_fetch():
+            fetch_all_called["n"] += 1
+            await asyncio.sleep(0)
+
+        with patch.object(client, "_fetch_all", new_callable=AsyncMock, side_effect=count_fetch):
+            with patch("intel.coingecko.asyncio.sleep", side_effect=stop_after_sleep):
+                await client._poll_loop()
+
+        assert fetch_all_called["n"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_start_sets_running_and_creates_task(self):
+        client = CoinGeckoClient(api_key="", poll_interval=300)
+        with patch.object(client, "_poll_loop", new_callable=AsyncMock):
+            await client.start()
+        assert client._running is True
+        assert len(client._background_tasks) == 1
+        await client.stop()
+        assert client._running is False
+
+    @pytest.mark.asyncio
+    async def test_stop_clears_running(self):
+        client = CoinGeckoClient(api_key="", poll_interval=300)
+        client._running = True
+        await client.stop()
+        assert client._running is False
+
+
+# ── LiquidationMonitor HTTP fetch, poll_loop, start/stop ──────────────
+
+
+def _make_liq_get_mock(resp_status: int, json_data: dict):
+    mock_resp = AsyncMock()
+    mock_resp.status = resp_status
+    mock_resp.json = AsyncMock(return_value=json_data)
+    mock_get = MagicMock()
+    mock_get.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_get.__aexit__ = AsyncMock(return_value=None)
+    return mock_get
+
+
+class TestLiquidationMonitorFetch:
+    """HTTP _fetch for LiquidationMonitor (mocked aiohttp)."""
+
+    @pytest.fixture
+    def monitor(self):
+        return LiquidationMonitor(poll_interval=300, api_key="")
+
+    @pytest.mark.asyncio
+    @patch("intel.liquidations.aiohttp.ClientSession")
+    async def test_fetch_success_list_format(self, mock_session_class, monitor):
+        data = {
+            "data": [
+                {"volUsd": 100_000_000, "longVolUsd": 60_000_000, "shortVolUsd": 40_000_000},
+                {"volUsd": 50_000_000, "longVolUsd": 30_000_000, "shortVolUsd": 20_000_000},
+            ]
+        }
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_liq_get_mock(200, data)
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await monitor._fetch()
+
+        assert monitor._latest is not None
+        assert monitor._latest.total_24h == 150_000_000
+        assert monitor._latest.long_24h == 90_000_000
+        assert monitor._latest.short_24h == 60_000_000
+
+    @pytest.mark.asyncio
+    @patch("intel.liquidations.aiohttp.ClientSession")
+    async def test_fetch_success_dict_format(self, mock_session_class, monitor):
+        data = {
+            "data": {
+                "totalVolUsd": 500_000_000,
+                "longVolUsd": 300_000_000,
+                "shortVolUsd": 200_000_000,
+            }
+        }
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_liq_get_mock(200, data)
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await monitor._fetch()
+
+        assert monitor._latest is not None
+        assert monitor._latest.total_24h == 500_000_000
+        assert monitor._latest.long_24h == 300_000_000
+        assert monitor._latest.short_24h == 200_000_000
+
+    @pytest.mark.asyncio
+    @patch("intel.liquidations.aiohttp.ClientSession")
+    async def test_fetch_non_200(self, mock_session_class, monitor):
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_liq_get_mock(403, {})
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await monitor._fetch()
+
+        assert monitor._latest is None
+
+    @pytest.mark.asyncio
+    @patch("intel.liquidations.aiohttp.ClientSession")
+    async def test_fetch_exception(self, mock_session_class, monitor):
+        mock_sess = AsyncMock()
+        mock_get = MagicMock()
+        mock_get.__aenter__ = AsyncMock(side_effect=ConnectionError("offline"))
+        mock_get.__aexit__ = AsyncMock(return_value=None)
+        mock_sess.get.return_value = mock_get
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await monitor._fetch()
+
+        assert monitor._latest is None
+
+    @pytest.mark.asyncio
+    @patch("intel.liquidations.aiohttp.ClientSession")
+    async def test_fetch_non_dict_data(self, mock_session_class, monitor):
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_liq_get_mock(200, [])
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await monitor._fetch()
+
+        assert monitor._latest is None
+
+
+class TestLiquidationMonitorPollLoopAndLifecycle:
+    @pytest.mark.asyncio
+    async def test_poll_loop_calls_fetch_once(self):
+        monitor = LiquidationMonitor(poll_interval=300)
+        monitor._running = True
+        fetch_called = {"n": 0}
+
+        async def stop_after_sleep(sec):
+            monitor._running = False
+
+        async def count_fetch():
+            fetch_called["n"] += 1
+            await asyncio.sleep(0)
+
+        with patch.object(monitor, "_fetch", new_callable=AsyncMock, side_effect=count_fetch):
+            with patch("intel.liquidations.asyncio.sleep", side_effect=stop_after_sleep):
+                await monitor._poll_loop()
+
+        assert fetch_called["n"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_start_sets_running_and_creates_task(self):
+        monitor = LiquidationMonitor(poll_interval=300)
+        with patch.object(monitor, "_poll_loop", new_callable=AsyncMock):
+            await monitor.start()
+        assert monitor._running is True
+        assert len(monitor._background_tasks) == 1
+        await monitor.stop()
+        assert monitor._running is False
+
+    @pytest.mark.asyncio
+    async def test_stop_clears_running(self):
+        monitor = LiquidationMonitor(poll_interval=300)
+        monitor._running = True
+        await monitor.stop()
+        assert monitor._running is False
+
+
+# ── MacroCalendar HTTP fetch, poll_loop, start/stop ────────────────────
+
+
+def _make_macro_get_mock(resp_status: int, json_data: list | dict):
+    mock_resp = AsyncMock()
+    mock_resp.status = resp_status
+    mock_resp.json = AsyncMock(return_value=json_data)
+    mock_get = MagicMock()
+    mock_get.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_get.__aexit__ = AsyncMock(return_value=None)
+    return mock_get
+
+
+class TestMacroCalendarFetch:
+    """HTTP _fetch for MacroCalendar (mocked aiohttp)."""
+
+    @pytest.fixture
+    def cal(self):
+        return MacroCalendar(poll_interval=1800)
+
+    @pytest.mark.asyncio
+    @patch("intel.macro_calendar.aiohttp.ClientSession")
+    async def test_fetch_success(self, mock_session_class, cal):
+        later = (datetime.now(UTC) + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+        data = [
+            {
+                "title": "CPI Release",
+                "country": "USD",
+                "date": later,
+                "impact": "high",
+                "forecast": "3.2",
+                "previous": "3.1",
+                "actual": "",
+            },
+            {
+                "title": "Housing Starts",
+                "country": "EUR",
+                "date": later,
+                "impact": "low",
+                "forecast": "",
+                "previous": "",
+                "actual": "",
+            },
+        ]
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_macro_get_mock(200, data)
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await cal._fetch()
+
+        assert len(cal._events) == 1
+        assert cal._events[0].title == "CPI Release"
+        assert cal._events[0].impact == EventImpact.HIGH
+
+    @pytest.mark.asyncio
+    @patch("intel.macro_calendar.aiohttp.ClientSession")
+    async def test_fetch_non_200(self, mock_session_class, cal):
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_macro_get_mock(503, [])
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await cal._fetch()
+
+        assert cal._events == []
+
+    @pytest.mark.asyncio
+    @patch("intel.macro_calendar.aiohttp.ClientSession")
+    async def test_fetch_exception(self, mock_session_class, cal):
+        mock_session_class.return_value.__aenter__ = AsyncMock(side_effect=ConnectionError("offline"))
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await cal._fetch()
+
+        assert cal._events == []
+
+    @pytest.mark.asyncio
+    @patch("intel.macro_calendar.aiohttp.ClientSession")
+    async def test_fetch_non_list(self, mock_session_class, cal):
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_macro_get_mock(200, {"events": []})
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await cal._fetch()
+
+        assert cal._events == []
+
+    @pytest.mark.asyncio
+    @patch("intel.macro_calendar.aiohttp.ClientSession")
+    async def test_fetch_empty_list(self, mock_session_class, cal):
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_macro_get_mock(200, [])
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await cal._fetch()
+
+        assert cal._events == []
+
+
+class TestMacroCalendarPollLoopAndLifecycle:
+    @pytest.mark.asyncio
+    async def test_poll_loop_calls_fetch_once(self):
+        cal = MacroCalendar(poll_interval=1800)
+        cal._running = True
+        fetch_called = {"n": 0}
+
+        async def stop_after_sleep(sec):
+            cal._running = False
+
+        async def count_fetch():
+            fetch_called["n"] += 1
+            await asyncio.sleep(0)
+
+        with patch.object(cal, "_fetch", new_callable=AsyncMock, side_effect=count_fetch):
+            with patch("intel.macro_calendar.asyncio.sleep", side_effect=stop_after_sleep):
+                await cal._poll_loop()
+
+        assert fetch_called["n"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_start_sets_running_and_creates_task(self):
+        cal = MacroCalendar(poll_interval=1800)
+        with patch.object(cal, "_poll_loop", new_callable=AsyncMock):
+            await cal.start()
+        assert cal._running is True
+        assert len(cal._background_tasks) == 1
+        await cal.stop()
+        assert cal._running is False
+
+    @pytest.mark.asyncio
+    async def test_stop_clears_running(self):
+        cal = MacroCalendar(poll_interval=1800)
+        cal._running = True
+        await cal.stop()
+        assert cal._running is False

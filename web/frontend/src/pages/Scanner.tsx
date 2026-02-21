@@ -20,6 +20,8 @@ interface TradeQueueItem {
   strategy: string;
   strength: number;
   age_seconds: number;
+  status: string;
+  reason: string;
 }
 
 export function Scanner() {
@@ -49,9 +51,14 @@ export function Scanner() {
     <div>
       <h3 style={{ color: "var(--heading)", marginBottom: "0.5rem" }}>
         Trade Queue ({tradeQueue.length})
+        {tradeQueue.length > 0 && (
+          <span style={{ fontSize: "0.8rem", fontWeight: 400, color: "var(--text-muted)", marginLeft: 8 }}>
+            {tradeQueue.filter(p => p.status === "pending").length} pending · {tradeQueue.filter(p => p.status === "consumed").length} consumed · {tradeQueue.filter(p => p.status === "rejected").length} rejected
+          </span>
+        )}
       </h3>
       {tradeQueue.length === 0 ? (
-        <div className="empty-state" style={{ marginBottom: "1.5rem" }}>No pending proposals</div>
+        <div className="empty-state" style={{ marginBottom: "1.5rem" }}>No proposals yet</div>
       ) : (
         <div style={{ overflowX: "auto", marginBottom: "1.5rem" }}>
           <table>
@@ -62,18 +69,35 @@ export function Scanner() {
                 <th>Strategy</th>
                 <th>Strength</th>
                 <th>Age</th>
+                <th>Status</th>
               </tr>
             </thead>
             <tbody>
-              {tradeQueue.map((p) => (
-                <tr key={`${p.symbol}-${p.side}-${p.age_seconds}`}>
-                  <td style={{ fontWeight: 600 }}>{p.symbol}</td>
-                  <td style={{ color: p.side === "long" || p.side === "buy" ? "var(--green)" : "var(--red)" }}>{p.side === "buy" ? "LONG" : p.side === "sell" ? "SHORT" : p.side.toUpperCase()}</td>
-                  <td>{p.strategy || "—"}</td>
-                  <td>{p.strength.toFixed(2)}</td>
-                  <td>{p.age_seconds < 60 ? `${Math.round(p.age_seconds)}s` : `${(p.age_seconds / 60).toFixed(1)}m`}</td>
-                </tr>
-              ))}
+              {tradeQueue.map((p, i) => {
+                const statusStyle: Record<string, { bg: string; fg: string }> = {
+                  pending:  { bg: "rgba(88,166,255,0.15)", fg: "var(--accent)" },
+                  consumed: { bg: "rgba(63,185,80,0.15)",  fg: "var(--green)" },
+                  rejected: { bg: "rgba(248,81,73,0.15)",  fg: "var(--red)" },
+                  expired:  { bg: "rgba(139,148,158,0.15)", fg: "var(--text-muted)" },
+                };
+                const st = statusStyle[p.status] || statusStyle.expired;
+                const rowOpacity = p.status === "expired" || p.status === "rejected" ? 0.55 : 1;
+                return (
+                  <tr key={`${p.symbol}-${p.side}-${i}`} style={{ opacity: rowOpacity }}>
+                    <td style={{ fontWeight: 600 }}>{p.symbol}</td>
+                    <td style={{ color: p.side === "long" || p.side === "buy" ? "var(--green)" : "var(--red)" }}>
+                      {p.side === "buy" ? "LONG" : p.side === "sell" ? "SHORT" : p.side.toUpperCase()}
+                    </td>
+                    <td>{p.strategy || "—"}</td>
+                    <td>{p.strength.toFixed(2)}</td>
+                    <td>{p.age_seconds < 60 ? `${Math.round(p.age_seconds)}s` : `${(p.age_seconds / 60).toFixed(1)}m`}</td>
+                    <td>
+                      <span className="badge" style={{ background: st.bg, color: st.fg }}
+                        title={p.reason || ""}>{p.status.toUpperCase()}</span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

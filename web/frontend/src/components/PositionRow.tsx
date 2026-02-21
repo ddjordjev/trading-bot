@@ -133,7 +133,7 @@ export function PositionRow({ position: p, onAction, showBot = false }: Props) {
             className="btn-danger"
             title="Close this position at market."
             disabled={loading === "close"}
-            onClick={() => act("close", () => postBody("/api/position/close", { symbol: p.symbol }))}
+            onClick={() => act("close", () => postBody("/api/position/close", { symbol: p.symbol, bot_id: botId }))}
           >
             Close
           </button>
@@ -143,7 +143,7 @@ export function PositionRow({ position: p, onAction, showBot = false }: Props) {
             style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
             disabled={loading === "tp25"}
             onClick={() =>
-              act("tp25", () => postBody("/api/position/take-profit", { symbol: p.symbol, pct: 25 }))
+              act("tp25", () => postBody("/api/position/take-profit", { symbol: p.symbol, pct: 25, bot_id: botId }))
             }
           >
             25%
@@ -154,7 +154,7 @@ export function PositionRow({ position: p, onAction, showBot = false }: Props) {
             style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
             disabled={loading === "stop"}
             onClick={() =>
-              act("stop", () => postBody("/api/position/tighten-stop", { symbol: p.symbol, pct: 2 }))
+              act("stop", () => postBody("/api/position/tighten-stop", { symbol: p.symbol, pct: 2, bot_id: botId }))
             }
           >
             Tighten

@@ -164,3 +164,136 @@ class TestSharedState:
         assert root_intel.regime == "risk_on"
         bot_intel = bot_state.read_intel()
         assert bot_intel.regime == "normal"
+
+
+class TestSharedStateTradeQueue:
+    @pytest.fixture
+    def state(self, tmp_path):
+        return SharedState(data_dir=tmp_path)
+
+    def test_write_and_read_trade_queue(self, state):
+        from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        q = TradeQueue()
+        q.add(TradeProposal(priority=SignalPriority.DAILY, symbol="BTC/USDT", side="long", strength=0.8))
+        q.add(TradeProposal(priority=SignalPriority.CRITICAL, symbol="ETH/USDT", side="short", strength=0.9))
+        state.write_trade_queue(q)
+        read_back = state.read_trade_queue()
+        assert len(read_back.daily) == 1
+        assert len(read_back.critical) == 1
+        assert read_back.daily[0].symbol == "BTC/USDT"
+        assert read_back.critical[0].symbol == "ETH/USDT"
+
+    def test_write_bot_trade_queue_creates_subdir(self, state):
+        from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        q = TradeQueue()
+        q.add(TradeProposal(priority=SignalPriority.DAILY, symbol="SOL/USDT", side="long", strength=0.7))
+        state.write_bot_trade_queue("momentum", q)
+        bot_file = state._data_dir / "momentum" / "trade_queue.json"
+        assert bot_file.exists()
+        data = json.loads(bot_file.read_text())
+        assert len(data["daily"]) == 1
+        assert data["daily"][0]["symbol"] == "SOL/USDT"
+
+    def test_apply_trade_queue_updates_marks_consumed(self, state):
+        from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        q = TradeQueue()
+        p = TradeProposal(priority=SignalPriority.DAILY, symbol="BTC/USDT", side="long", strength=0.8)
+        q.add(p)
+        state.write_trade_queue(q)
+
+        state.apply_trade_queue_updates(consumed_ids=[p.id], rejected={})
+        updated = state.read_trade_queue()
+        assert updated.daily[0].consumed is True
+
+    def test_apply_trade_queue_updates_marks_rejected(self, state):
+        from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        q = TradeQueue()
+        p = TradeProposal(priority=SignalPriority.DAILY, symbol="ETH/USDT", side="short", strength=0.6)
+        q.add(p)
+        state.write_trade_queue(q)
+
+        state.apply_trade_queue_updates(consumed_ids=[], rejected={p.id: "risk limit"})
+        updated = state.read_trade_queue()
+        assert updated.daily[0].rejected is True
+        assert updated.daily[0].reject_reason == "risk limit"
+
+    def test_apply_empty_updates_is_noop(self, state):
+        from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        q = TradeQueue()
+        q.add(TradeProposal(priority=SignalPriority.DAILY, symbol="X/USDT", side="long", strength=0.5))
+        state.write_trade_queue(q)
+        state.apply_trade_queue_updates(consumed_ids=[], rejected={})
+        updated = state.read_trade_queue()
+        assert not updated.daily[0].consumed
+        assert not updated.daily[0].rejected
+
+
+class TestSharedStateBotDiscovery:
+    def test_read_all_bot_statuses_discovers_bots(self, tmp_path):
+        root = SharedState(data_dir=tmp_path)
+        for name in ("momentum", "meanrev", "swing"):
+            sub = SharedState(data_dir=tmp_path / name)
+            sub.write_bot_status(BotDeploymentStatus(bot_id=name, open_positions=1))
+
+        statuses = root.read_all_bot_statuses()
+        ids = {s.bot_id for s in statuses}
+        assert ids == {"momentum", "meanrev", "swing"}
+
+    def test_read_all_bot_statuses_ignores_files(self, tmp_path):
+        root = SharedState(data_dir=tmp_path)
+        (tmp_path / "random_file.txt").write_text("hi")
+        sub = SharedState(data_dir=tmp_path / "momentum")
+        sub.write_bot_status(BotDeploymentStatus(bot_id="momentum"))
+        statuses = root.read_all_bot_statuses()
+        assert len(statuses) == 1
+
+    def test_read_all_bot_statuses_skips_empty_id(self, tmp_path):
+        root = SharedState(data_dir=tmp_path)
+        sub = SharedState(data_dir=tmp_path / "broken")
+        sub.write_bot_status(BotDeploymentStatus(bot_id=""))
+        statuses = root.read_all_bot_statuses()
+        assert len(statuses) == 0
+
+
+class TestSharedStateIntelAge:
+    def test_intel_age_missing_file(self, tmp_path):
+        state = SharedState(data_dir=tmp_path)
+        assert state.intel_age_seconds() > 999998
+
+    def test_intel_age_fresh(self, tmp_path):
+        from datetime import UTC, datetime
+
+        state = SharedState(data_dir=tmp_path)
+        snap = IntelSnapshot(regime="normal")
+        snap.updated_at = datetime.now(UTC).isoformat()
+        state.write_intel(snap)
+        age = state.intel_age_seconds()
+        assert age < 5
+
+    def test_intel_age_no_updated_at(self, tmp_path):
+        state = SharedState(data_dir=tmp_path)
+        path = tmp_path / "intel_state.json"
+        path.write_text(json.dumps({"regime": "normal", "updated_at": ""}))
+        age = state.intel_age_seconds()
+        assert age > 999998
+
+
+class TestSharedStateAnalytics:
+    def test_write_and_read_analytics(self, tmp_path):
+        state = SharedState(data_dir=tmp_path)
+        snap = AnalyticsSnapshot(weights=[StrategyWeightEntry(strategy="momentum", weight=1.2)])
+        state.write_analytics(snap)
+        read = state.read_analytics()
+        assert len(read.weights) == 1
+        assert read.weights[0].strategy == "momentum"
+        assert read.weights[0].weight == 1.2
+
+    def test_read_analytics_missing_returns_default(self, tmp_path):
+        state = SharedState(data_dir=tmp_path)
+        read = state.read_analytics()
+        assert read.weights == []

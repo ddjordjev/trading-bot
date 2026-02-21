@@ -48,6 +48,32 @@ _start_time: float = 0.0
 _log_buffer: deque[dict[str, Any]] = deque(maxlen=200)
 _background_tasks: list[asyncio.Task[None]] = []
 _bot_reports: dict[str, dict[str, Any]] = {}
+_BOT_REGISTRY = Path("data/bot_registry.json")
+_bot_urls: dict[str, str] = {}  # bot_id -> base URL (e.g. "http://bot-meanrev:9035")
+
+
+def _load_bot_registry() -> None:
+    """Load persisted bot URLs from disk on startup."""
+    import contextlib
+    import json
+
+    if _BOT_REGISTRY.exists():
+        with contextlib.suppress(Exception):
+            _bot_urls.update(json.loads(_BOT_REGISTRY.read_text()))
+
+
+def _save_bot_registry() -> None:
+    """Persist bot URLs to disk so they survive restarts."""
+    import json
+
+    try:
+        _BOT_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        _BOT_REGISTRY.write_text(json.dumps(_bot_urls, indent=2))
+    except Exception:
+        pass
+
+
+_load_bot_registry()
 
 
 def _log_sink(message: object) -> None:
@@ -70,6 +96,11 @@ def set_bot(bot: TradingBot) -> None:
     global _bot, _start_time
     _bot = bot
     _start_time = time.time()
+    if bot:
+        local_id = bot.settings.bot_id or "default"
+        if local_id not in _bot_urls:
+            _bot_urls[local_id] = f"http://bot-{local_id}:9035"
+            _save_bot_registry()
 
 
 FRONTEND_DIR = Path(__file__).parent / "frontend" / "dist"
@@ -366,49 +397,53 @@ async def get_news(_: str = Depends(verify_token)) -> list[NewsItemInfo]:
 
 @app.get("/api/trade-queue", response_model=list[TradeQueueItem])
 async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem]:
-    """Return pending trade proposals across all bot queues."""
-    state = SharedState()
-    all_pending = []
+    """Return all recent trade proposals across all bot queues with lifecycle status."""
+    from shared.models import TradeQueue as TQ
 
-    # Multibot: each bot has data/<bot_id>/trade_queue.json
+    state = SharedState()
+    all_proposals: list[Any] = []
+
     data_dir = state._data_dir
+    found_bot_dirs = False
     for child in sorted(data_dir.iterdir()):
         if not child.is_dir():
             continue
         qf = child / "trade_queue.json"
         if not qf.exists():
             continue
+        found_bot_dirs = True
         try:
-            from shared.models import TradeQueue as TQ
-
             q = TQ.model_validate_json(qf.read_text())
-            for p in (
-                p
-                for bucket in (q.critical, q.daily, q.swing)
-                for p in bucket
-                if not p.consumed and not p.rejected and not p.is_expired
-            ):
-                all_pending.append(p)
+            for bucket in (q.critical, q.daily, q.swing):
+                for p in bucket:
+                    all_proposals.append(p)
         except Exception:
             continue
 
-    # Fallback: root-level queue (single-bot mode)
-    if not all_pending:
+    if not found_bot_dirs:
         queue = state.read_trade_queue()
-        all_pending = [
-            p
-            for bucket in (queue.critical, queue.daily, queue.swing)
-            for p in bucket
-            if not p.consumed and not p.rejected and not p.is_expired
-        ]
+        for bucket in (queue.critical, queue.daily, queue.swing):
+            for p in bucket:
+                all_proposals.append(p)
 
-    seen = set()
+    def _status(p: Any) -> str:
+        if p.consumed:
+            return "consumed"
+        if p.rejected:
+            return "rejected"
+        if p.is_expired:
+            return "expired"
+        return "pending"
+
+    seen: set[tuple[str, ...]] = set()
     unique = []
-    for p in all_pending:
-        key = (p.symbol, p.side, p.strategy or "")
+    for p in all_proposals:
+        key = (p.symbol, p.side, p.strategy or "", _status(p))
         if key not in seen:
             seen.add(key)
             unique.append(p)
+
+    unique.sort(key=lambda p: p.created_at, reverse=True)
 
     return [
         TradeQueueItem(
@@ -417,6 +452,8 @@ async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem
             strategy=p.strategy or "",
             strength=p.strength,
             age_seconds=p.age_seconds,
+            status=_status(p),
+            reason=p.reject_reason if p.rejected else (p.reason or ""),
         )
         for p in unique
     ]
@@ -711,6 +748,8 @@ async def bot_stop(_: str = Depends(verify_token)) -> ActionResponse:
 async def close_position(body: PositionCloseBody, _: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
+    if not _is_local_bot(body.bot_id):
+        return await _forward_to_bot(body.bot_id, "/api/position/close", {"symbol": body.symbol})
     from core.models import Signal, SignalAction
 
     symbol = body.symbol
@@ -731,6 +770,8 @@ async def close_position(body: PositionCloseBody, _: str = Depends(verify_token)
 async def take_profit(body: PositionTakeProfitBody, _: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
+    if not _is_local_bot(body.bot_id):
+        return await _forward_to_bot(body.bot_id, "/api/position/take-profit", {"symbol": body.symbol, "pct": body.pct})
     symbol = body.symbol
     pct = max(1, min(100, body.pct))
     try:
@@ -760,6 +801,10 @@ async def take_profit(body: PositionTakeProfitBody, _: str = Depends(verify_toke
 async def tighten_stop(body: PositionTightenStopBody, _: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
+    if not _is_local_bot(body.bot_id):
+        return await _forward_to_bot(
+            body.bot_id, "/api/position/tighten-stop", {"symbol": body.symbol, "pct": body.pct}
+        )
     symbol = body.symbol
     pct = max(0.1, min(50, body.pct))
     ts = _bot.orders.trailing.active_stops.get(symbol)
@@ -781,7 +826,9 @@ async def close_all(_: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     await _bot._close_all_positions("Dashboard: close all")
-    return ActionResponse(success=True, message="All positions closed")
+    results = await _broadcast_to_remote_bots("/api/close-all", {})
+    msg = "All positions closed" + (f" ({results})" if results else "")
+    return ActionResponse(success=True, message=msg)
 
 
 @app.post("/api/stop-trading", response_model=ActionResponse)
@@ -789,7 +836,8 @@ async def stop_trading(_: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     _bot.target.STOP_FILE.touch()
-    return ActionResponse(success=True, message="Trading halted (STOP file created)")
+    await _broadcast_to_remote_bots("/api/stop-trading", {})
+    return ActionResponse(success=True, message="Trading halted on all bots")
 
 
 @app.post("/api/resume-trading", response_model=ActionResponse)
@@ -797,7 +845,8 @@ async def resume_trading(_: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     _bot.target.STOP_FILE.unlink(missing_ok=True)
-    return ActionResponse(success=True, message="Trading resumed (STOP file removed)")
+    await _broadcast_to_remote_bots("/api/resume-trading", {})
+    return ActionResponse(success=True, message="Trading resumed on all bots")
 
 
 @app.post("/api/reset-profit-buffer", response_model=ActionResponse)
@@ -924,6 +973,45 @@ def report_bot_snapshot(data: dict[str, Any]) -> None:
         _bot_reports[bot_id] = data
 
 
+async def _forward_to_bot(bot_id: str, path: str, body: dict[str, Any]) -> ActionResponse:
+    """Forward an action to a remote bot's API and return its response."""
+    import aiohttp
+
+    base = _bot_urls.get(bot_id)
+    if not base:
+        return ActionResponse(success=False, message=f"Bot '{bot_id}' not registered")
+    url = f"{base}{path}"
+    try:
+        async with (
+            aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as sess,
+            sess.post(url, json=body) as resp,
+        ):
+            data = await resp.json()
+            return ActionResponse(success=data.get("success", False), message=data.get("message", ""))
+    except Exception as e:
+        return ActionResponse(success=False, message=f"Forward to {bot_id} failed: {e}")
+
+
+async def _broadcast_to_remote_bots(path: str, body: dict[str, Any]) -> str:
+    """Send an action to all registered remote bots. Returns summary."""
+    local_id = (_bot.settings.bot_id or "default") if _bot else ""
+    results = []
+    for bid in _bot_urls:
+        if bid == local_id:
+            continue
+        resp = await _forward_to_bot(bid, path, body)
+        results.append(f"{bid}: {'ok' if resp.success else resp.message}")
+    return "; ".join(results)
+
+
+def _is_local_bot(bot_id: str) -> bool:
+    """True when bot_id refers to the bot running on this process."""
+    if not _bot:
+        return False
+    local_id = _bot.settings.bot_id or "default"
+    return not bot_id or bot_id == local_id
+
+
 def _build_merged_snapshot() -> dict[str, Any]:
     """Merge all bot reports into a single dashboard payload."""
     reports = list(_bot_reports.values())
@@ -1033,6 +1121,12 @@ def _build_merged_snapshot() -> dict[str, Any]:
 async def receive_bot_report(request: Request) -> dict[str, str]:
     """Bots POST their dashboard snapshots here. No auth — internal network only."""
     data = await request.json()
+    bot_id = data.get("bot_id", "")
+    if bot_id:
+        url = f"http://bot-{bot_id}:9035"
+        if _bot_urls.get(bot_id) != url:
+            _bot_urls[bot_id] = url
+            _save_bot_registry()
     report_bot_snapshot(data)
     return {"status": "ok"}
 

@@ -1358,6 +1358,20 @@ class TradingBot:
                 except Exception:
                     pass
 
+        if self._multibot and snap.hot_movers:
+            movers = [
+                TrendingCoin(
+                    symbol=m.symbol,
+                    name=m.name,
+                    volume_24h=m.volume_24h,
+                    market_cap=m.market_cap,
+                    change_1h=m.change_1h,
+                    change_24h=m.change_24h,
+                )
+                for m in snap.hot_movers
+            ]
+            self._trending_task = asyncio.ensure_future(self._on_trending(movers))
+
         return MarketCondition(
             regime=MarketRegime(snap.regime),
             fear_greed=snap.fear_greed,

@@ -1061,3 +1061,662 @@ class TestServeSummary:
             r = await client.get("/api/summary-html")
             assert r.status_code == 404
             assert "not found" in r.text.lower()
+
+
+# ── Bot Registry Persistence ────────────────────────────────────────────
+
+
+class TestBotRegistry:
+    def test_save_and_load_registry(self, tmp_path):
+        import json
+
+        from web.server import _BOT_REGISTRY, _bot_urls, _load_bot_registry, _save_bot_registry
+
+        original_path = _BOT_REGISTRY
+        test_path = tmp_path / "bot_registry.json"
+        try:
+            import web.server
+
+            web.server._BOT_REGISTRY = test_path
+            _bot_urls.clear()
+            _bot_urls["momentum"] = "http://bot-momentum:9035"
+            _bot_urls["meanrev"] = "http://bot-meanrev:9035"
+            _save_bot_registry()
+
+            assert test_path.exists()
+            saved = json.loads(test_path.read_text())
+            assert saved["momentum"] == "http://bot-momentum:9035"
+            assert saved["meanrev"] == "http://bot-meanrev:9035"
+
+            _bot_urls.clear()
+            assert len(_bot_urls) == 0
+            _load_bot_registry()
+            assert _bot_urls["momentum"] == "http://bot-momentum:9035"
+            assert _bot_urls["meanrev"] == "http://bot-meanrev:9035"
+        finally:
+            web.server._BOT_REGISTRY = original_path
+            _bot_urls.clear()
+
+    def test_load_registry_handles_missing_file(self, tmp_path):
+        import web.server
+        from web.server import _BOT_REGISTRY, _bot_urls, _load_bot_registry
+
+        original_path = _BOT_REGISTRY
+        try:
+            web.server._BOT_REGISTRY = tmp_path / "nonexistent.json"
+            _bot_urls.clear()
+            _load_bot_registry()
+            assert len(_bot_urls) == 0
+        finally:
+            web.server._BOT_REGISTRY = original_path
+
+    def test_load_registry_handles_corrupt_file(self, tmp_path):
+        import web.server
+        from web.server import _BOT_REGISTRY, _bot_urls, _load_bot_registry
+
+        original_path = _BOT_REGISTRY
+        try:
+            corrupt = tmp_path / "corrupt.json"
+            corrupt.write_text("{bad json")
+            web.server._BOT_REGISTRY = corrupt
+            _bot_urls.clear()
+            _load_bot_registry()
+            assert len(_bot_urls) == 0
+        finally:
+            web.server._BOT_REGISTRY = original_path
+
+    def test_set_bot_registers_local_bot(self, mock_bot, tmp_path):
+        import web.server
+        from web.server import _bot_urls
+
+        original_path = web.server._BOT_REGISTRY
+        try:
+            web.server._BOT_REGISTRY = tmp_path / "reg.json"
+            _bot_urls.clear()
+            mock_bot.settings.bot_id = "momentum"
+            set_bot(mock_bot)  # type: ignore[arg-type]
+            assert "momentum" in _bot_urls
+            assert _bot_urls["momentum"] == "http://bot-momentum:9035"
+        finally:
+            web.server._BOT_REGISTRY = original_path
+            _bot_urls.clear()
+
+
+# ── Action Forwarding ───────────────────────────────────────────────────
+
+
+class TestActionForwarding:
+    async def test_close_forwards_to_remote_bot(self, client, mock_bot):
+        from web.server import _bot_urls
+
+        mock_bot.settings.bot_id = "momentum"
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_urls["meanrev"] = "http://bot-meanrev:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=True, message="Closed remotely")
+                r = await client.post("/api/position/close", json={"symbol": "ETH/USDT", "bot_id": "meanrev"})
+                assert r.status_code == 200
+                assert r.json()["success"] is True
+                assert "remotely" in r.json()["message"]
+                fwd.assert_awaited_once_with("meanrev", "/api/position/close", {"symbol": "ETH/USDT"})
+        finally:
+            _bot_urls.clear()
+
+    async def test_take_profit_forwards_to_remote_bot(self, client, mock_bot):
+        from web.server import _bot_urls
+
+        mock_bot.settings.bot_id = "momentum"
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_urls["swing"] = "http://bot-swing:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=True, message="Took 25%")
+                r = await client.post(
+                    "/api/position/take-profit", json={"symbol": "SOL/USDT", "pct": 25, "bot_id": "swing"}
+                )
+                assert r.status_code == 200
+                assert r.json()["success"] is True
+                fwd.assert_awaited_once_with("swing", "/api/position/take-profit", {"symbol": "SOL/USDT", "pct": 25})
+        finally:
+            _bot_urls.clear()
+
+    async def test_tighten_forwards_to_remote_bot(self, client, mock_bot):
+        from web.server import _bot_urls
+
+        mock_bot.settings.bot_id = "momentum"
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_urls["meanrev"] = "http://bot-meanrev:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=True, message="Tightened")
+                r = await client.post(
+                    "/api/position/tighten-stop", json={"symbol": "BTC/USDT", "pct": 3, "bot_id": "meanrev"}
+                )
+                assert r.status_code == 200
+                assert r.json()["success"] is True
+                fwd.assert_awaited_once_with("meanrev", "/api/position/tighten-stop", {"symbol": "BTC/USDT", "pct": 3})
+        finally:
+            _bot_urls.clear()
+
+    async def test_local_bot_action_not_forwarded(self, client, mock_bot):
+        """Actions for the local bot execute locally, not forwarded."""
+        mock_bot.settings.bot_id = "momentum"
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        mock_bot.orders.execute_signal = AsyncMock()
+        r = await client.post("/api/position/close", json={"symbol": "BTC/USDT", "bot_id": "momentum"})
+        assert r.status_code == 200
+        assert r.json()["success"] is True
+        mock_bot.orders.execute_signal.assert_awaited_once()
+
+    async def test_empty_bot_id_defaults_to_local(self, client, mock_bot):
+        mock_bot.settings.bot_id = "momentum"
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        mock_bot.orders.execute_signal = AsyncMock()
+        r = await client.post("/api/position/close", json={"symbol": "BTC/USDT", "bot_id": ""})
+        assert r.status_code == 200
+        assert r.json()["success"] is True
+        mock_bot.orders.execute_signal.assert_awaited_once()
+
+
+# ── Broadcast Actions ───────────────────────────────────────────────────
+
+
+class TestBroadcastActions:
+    async def test_close_all_broadcasts_to_remote_bots(self, client, mock_bot):
+        from web.server import _bot_urls
+
+        mock_bot.settings.bot_id = "momentum"
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_urls["meanrev"] = "http://bot-meanrev:9035"
+        _bot_urls["momentum"] = "http://bot-momentum:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=True, message="ok")
+                r = await client.post("/api/close-all")
+                assert r.status_code == 200
+                assert r.json()["success"] is True
+                mock_bot._close_all_positions.assert_awaited_once()
+                fwd.assert_awaited_once_with("meanrev", "/api/close-all", {})
+        finally:
+            _bot_urls.clear()
+
+    async def test_stop_trading_broadcasts(self, client, mock_bot):
+        from web.server import _bot_urls
+
+        mock_bot.settings.bot_id = "momentum"
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_urls["swing"] = "http://bot-swing:9035"
+        _bot_urls["momentum"] = "http://bot-momentum:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=True, message="ok")
+                r = await client.post("/api/stop-trading")
+                assert r.status_code == 200
+                fwd.assert_awaited_once_with("swing", "/api/stop-trading", {})
+        finally:
+            _bot_urls.clear()
+            mock_bot.target.STOP_FILE.unlink(missing_ok=True)
+
+
+# ── Trade Queue Lifecycle Statuses ──────────────────────────────────────
+
+
+class TestTradeQueueLifecycle:
+    async def test_trade_queue_shows_all_statuses(self, client):
+        from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        with patch("web.server.SharedState") as MockSharedState:
+            mock_state = MagicMock()
+            q = TradeQueue()
+            now = datetime.now(UTC).isoformat()
+            q.daily = [
+                TradeProposal(
+                    priority=SignalPriority.DAILY,
+                    symbol="BTC/USDT",
+                    side="long",
+                    strategy="mom",
+                    strength=0.8,
+                    created_at=now,
+                    max_age_seconds=14400,
+                ),
+                TradeProposal(
+                    priority=SignalPriority.DAILY,
+                    symbol="ETH/USDT",
+                    side="short",
+                    strategy="fade",
+                    strength=0.6,
+                    created_at=now,
+                    consumed=True,
+                    consumed_at=now,
+                ),
+                TradeProposal(
+                    priority=SignalPriority.DAILY,
+                    symbol="SOL/USDT",
+                    side="long",
+                    strategy="intel",
+                    strength=0.5,
+                    created_at=now,
+                    rejected=True,
+                    reject_reason="size too big",
+                ),
+            ]
+            mock_state.read_trade_queue.return_value = q
+            mock_state._data_dir = MagicMock()
+            mock_state._data_dir.iterdir.return_value = []
+            MockSharedState.return_value = mock_state
+            r = await client.get("/api/trade-queue")
+
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) == 3
+        statuses = {d["symbol"]: d["status"] for d in data}
+        assert statuses["BTC/USDT"] == "pending"
+        assert statuses["ETH/USDT"] == "consumed"
+        assert statuses["SOL/USDT"] == "rejected"
+
+        rejected_item = next(d for d in data if d["symbol"] == "SOL/USDT")
+        assert rejected_item["reason"] == "size too big"
+
+
+# ── Analytics with Multibot Positions ───────────────────────────────────
+
+
+class TestAnalyticsMultibot:
+    async def test_analytics_aggregates_positions_from_reports(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports["meanrev"] = {
+            "bot_id": "meanrev",
+            "positions": [
+                {
+                    "symbol": "ETH/USDT",
+                    "side": "buy",
+                    "entry_price": 3000.0,
+                    "current_price": 3100.0,
+                    "pnl_pct": 3.33,
+                    "pnl_usd": 33.0,
+                    "notional_value": 1000.0,
+                    "leverage": 10,
+                    "strategy": "bollinger",
+                    "age_minutes": 15,
+                    "dca_count": 0,
+                },
+            ],
+        }
+        try:
+            r = await client.get("/api/analytics")
+            assert r.status_code == 200
+            data = r.json()
+            positions = data.get("live_positions", [])
+            assert len(positions) >= 1
+            eth_pos = next((p for p in positions if p["symbol"] == "ETH/USDT"), None)
+            assert eth_pos is not None
+            assert eth_pos["side"] == "long"
+            assert eth_pos["pnl_pct"] == 3.33
+        finally:
+            _bot_reports.clear()
+
+
+# ── Closed Trades Endpoint ──────────────────────────────────────────────
+
+
+class TestClosedTrades:
+    async def test_closed_trades_no_bot(self, client):
+        set_bot(None)  # type: ignore[arg-type]
+        r = await client.get("/api/closed-trades")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    async def test_closed_trades_from_local_db(self, client, mock_bot):
+        from db.models import TradeRecord
+
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        record = TradeRecord(
+            symbol="BTC/USDT",
+            side="buy",
+            action="close",
+            strategy="momentum",
+            amount=0.01,
+            entry_price=50000.0,
+            exit_price=52000.0,
+            pnl_usd=20.0,
+            pnl_pct=4.0,
+            leverage=10,
+            opened_at="2026-02-20T10:00:00",
+            closed_at="2026-02-20T11:00:00",
+        )
+        mock_bot.trade_db.get_all_trades = MagicMock(return_value=[record])
+        r = await client.get("/api/closed-trades?limit=10")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) == 1
+        assert data[0]["symbol"] == "BTC/USDT"
+        assert data[0]["pnl_usd"] == 20.0
+
+
+# ── Module Toggle in Multibot Mode ─────────────────────────────────────
+
+
+class TestModuleToggleMultibot:
+    async def test_intel_toggle_rejected_in_multibot(self, client, mock_bot):
+        mock_bot._multibot = True
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        r = await client.post("/api/module/intel/toggle")
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+        assert "monitor" in r.json()["message"].lower()
+
+    async def test_news_toggle_rejected_in_multibot(self, client, mock_bot):
+        mock_bot._multibot = True
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        r = await client.post("/api/module/news/toggle")
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+        assert "monitor" in r.json()["message"].lower()
+
+    async def test_unknown_module_rejected(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        r = await client.post("/api/module/fakething/toggle")
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+        assert "Unknown" in r.json()["message"]
+
+
+# ── Internal Report Registers Bot URL ───────────────────────────────────
+
+
+class TestInternalReportRegistersUrl:
+    async def test_report_registers_bot_url(self, client, tmp_path):
+        import web.server
+        from web.server import _bot_urls
+
+        original_path = web.server._BOT_REGISTRY
+        web.server._BOT_REGISTRY = tmp_path / "reg.json"
+        _bot_urls.clear()
+        try:
+            r = await client.post(
+                "/internal/report",
+                json={"bot_id": "swing", "positions": [], "strategies": []},
+            )
+            assert r.status_code == 200
+            assert _bot_urls.get("swing") == "http://bot-swing:9035"
+        finally:
+            web.server._BOT_REGISTRY = original_path
+            _bot_urls.clear()
+
+    async def test_report_without_bot_id_skipped(self, client):
+        from web.server import _bot_urls
+
+        _bot_urls.clear()
+        r = await client.post("/internal/report", json={"positions": []})
+        assert r.status_code == 200
+        assert len(_bot_urls) == 0
+
+
+# ── Merged Snapshot ─────────────────────────────────────────────────────
+
+
+class TestBuildMergedSnapshot:
+    async def test_merged_snapshot_aggregates_bots(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        mock_bot.intel = None
+        mock_bot.shared_intel = MagicMock()
+        mock_bot.shared_intel.read_intel = MagicMock(return_value=MagicMock(sources_active=[]))
+        _bot_reports["m1"] = {
+            "bot_id": "m1",
+            "exchange": "MEXC",
+            "status": {
+                "balance": 1000,
+                "available_margin": 500,
+                "daily_pnl": 50,
+                "daily_pnl_pct": 5,
+                "total_growth_usd": 100,
+                "total_growth_pct": 10,
+                "running": True,
+                "strategies_count": 10,
+                "dynamic_strategies_count": 2,
+                "uptime_seconds": 3600,
+                "trading_mode": "paper_local",
+                "exchange_name": "MEXC",
+                "exchange_url": "",
+                "tier": "strong",
+                "tier_progress_pct": 50,
+                "daily_target_pct": 10,
+                "manual_stop_active": False,
+                "profit_buffer_pct": 2.0,
+            },
+            "positions": [
+                {
+                    "symbol": "BTC/USDT",
+                    "side": "buy",
+                    "entry_price": 50000,
+                    "current_price": 51000,
+                    "pnl_pct": 2,
+                    "pnl_usd": 20,
+                    "notional_value": 1000,
+                    "leverage": 10,
+                    "strategy": "rsi",
+                    "age_minutes": 5,
+                    "dca_count": 0,
+                }
+            ],
+            "wick_scalps": [
+                {
+                    "symbol": "ETH/USDT",
+                    "scalp_side": "buy",
+                    "entry_price": 3000,
+                    "amount": 0.1,
+                    "age_minutes": 2,
+                    "max_hold_minutes": 30,
+                }
+            ],
+            "strategies": [],
+        }
+        _bot_reports["m2"] = {
+            "bot_id": "m2",
+            "exchange": "Binance",
+            "status": {
+                "balance": 2000,
+                "available_margin": 1000,
+                "daily_pnl": 100,
+                "daily_pnl_pct": 5,
+                "total_growth_usd": 200,
+                "total_growth_pct": 10,
+                "running": True,
+                "strategies_count": 8,
+                "dynamic_strategies_count": 1,
+                "uptime_seconds": 7200,
+                "trading_mode": "paper_local",
+                "exchange_name": "Binance",
+                "exchange_url": "",
+                "tier": "building",
+                "tier_progress_pct": 30,
+                "daily_target_pct": 10,
+                "manual_stop_active": False,
+                "profit_buffer_pct": 1.5,
+            },
+            "positions": [],
+            "wick_scalps": [],
+            "strategies": [],
+        }
+        try:
+            from web.server import _build_merged_snapshot
+
+            snap = _build_merged_snapshot()
+            assert snap["status"]["balance"] == 3000
+            assert snap["status"]["running"] is True
+            assert snap["status"]["strategies_count"] == 18
+            assert len(snap["positions"]) == 1
+            assert snap["positions"][0]["bot_id"] == "m1"
+            assert len(snap["wick_scalps"]) == 1
+            assert len(snap["bots"]) == 2
+        finally:
+            _bot_reports.clear()
+
+
+# ── Wick Scalps Endpoint ────────────────────────────────────────────────
+
+
+class TestWickScalps:
+    def test_wick_scalps_helper_returns_data(self, mock_bot):
+        from web.server import _wick_scalps
+
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        ws = MagicMock()
+        ws.scalp_side = "buy"
+        ws.entry_price = 50000
+        ws.amount = 0.01
+        ws.age_minutes = 5
+        ws.max_hold_minutes = 30
+        mock_bot.orders.wick_scalper.active_scalps = {"BTC/USDT": ws}
+        result = _wick_scalps()
+        assert len(result) == 1
+        assert result[0].symbol == "BTC/USDT"
+        assert result[0].scalp_side == "buy"
+        assert result[0].entry_price == 50000
+
+    def test_wick_scalps_no_bot(self):
+        from web.server import _wick_scalps
+
+        set_bot(None)  # type: ignore[arg-type]
+        result = _wick_scalps()
+        assert result == []
+
+
+# ── News Endpoint ───────────────────────────────────────────────────────
+
+
+class TestNewsEndpoint:
+    async def test_news_no_bot(self, client):
+        set_bot(None)  # type: ignore[arg-type]
+        r = await client.get("/api/news")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    async def test_news_with_items(self, client, mock_bot):
+        from datetime import UTC, datetime
+
+        from news.monitor import NewsItem
+
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        mock_bot._recent_news = [
+            NewsItem(
+                headline="BTC surges",
+                source="coindesk",
+                url="https://example.com/1",
+                published=datetime.now(UTC),
+                matched_symbols=["BTC/USDT"],
+                sentiment="bullish",
+                sentiment_score=0.8,
+            ),
+        ]
+        r = await client.get("/api/news")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) == 1
+        assert data[0]["headline"] == "BTC surges"
+        assert data[0]["sentiment"] == "bullish"
+
+
+# ── Grafana URL ─────────────────────────────────────────────────────────
+
+
+class TestGrafanaUrl:
+    async def test_grafana_url(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        mock_bot.settings.grafana_port = 3001
+        r = await client.get("/api/grafana-url")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["port"] == 3001
+        assert "dashboard_uid" in data
+
+
+# ── System Metrics & Prometheus ─────────────────────────────────────────
+
+
+class TestSystemMetricsAndPrometheus:
+    async def test_system_metrics_returns_json(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        with patch("web.metrics.get_metrics_json", return_value={"cpu": 10, "memory": 50}):
+            r = await client.get("/api/system-metrics")
+        assert r.status_code == 200
+        assert r.json()["cpu"] == 10
+
+    async def test_prometheus_metrics_returns_text(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        with patch("web.metrics.collect_metrics", return_value="bot_uptime 100\n"):
+            r = await client.get("/metrics")
+        assert r.status_code == 200
+        assert "bot_uptime" in r.text
+
+
+# ── Analytics Fallback (local positions) ────────────────────────────────
+
+
+class TestAnalyticsFallbackPositions:
+    async def test_analytics_local_fallback_when_no_reports(self, client, mock_bot):
+        from core.models import OrderSide, Position
+        from core.orders.scaler import ScaledPosition
+
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports.clear()
+        sp = MagicMock(spec=ScaledPosition)
+        sp.side = "long"
+        sp.strategy = "rsi"
+        sp.avg_entry_price = 50000.0
+        sp.last_add_price = 50000.0
+        sp.current_size = 0.01
+        sp.current_leverage = 10
+        sp.adds = 0
+        sp.opened_at = 0
+        mock_bot.orders.scaler.active_positions = {"BTC/USDT": sp}
+        mock_bot.exchange.fetch_positions = AsyncMock(
+            return_value=[
+                Position(
+                    symbol="BTC/USDT",
+                    side=OrderSide.BUY,
+                    amount=0.01,
+                    entry_price=50000.0,
+                    current_price=51000.0,
+                    leverage=10,
+                    market_type="futures",
+                    opened_at=datetime.now(UTC),
+                ),
+            ]
+        )
+        r = await client.get("/api/analytics")
+        assert r.status_code == 200
+        data = r.json()
+        positions = data.get("live_positions", [])
+        assert len(positions) >= 1
+        btc = next((p for p in positions if p["symbol"] == "BTC/USDT"), None)
+        assert btc is not None
+        assert btc["side"] == "long"
+
+
+# ── Resume Trading ──────────────────────────────────────────────────────
+
+
+class TestResumeTrading:
+    async def test_resume_trading(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        mock_bot.target.STOP_FILE = Path("/tmp/test_stop_file")
+        mock_bot.target.STOP_FILE.write_text("stopped")
+        try:
+            r = await client.post("/api/resume-trading")
+            assert r.status_code == 200
+            assert r.json()["success"] is True
+            assert mock_bot.target.manual_stop is False
+        finally:
+            mock_bot.target.STOP_FILE.unlink(missing_ok=True)

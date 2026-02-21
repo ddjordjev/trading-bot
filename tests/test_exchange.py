@@ -251,6 +251,190 @@ class TestPaperExchange:
         assert len(positions) == 1
         assert positions[0].amount == 2.0
 
+    # ── PaperExchange coverage: edge cases, margin, partial close, DCA, errors ──
+
+    @pytest.mark.asyncio
+    async def test_place_order_zero_amount_returns_failed(self, paper):
+        order = await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 0)
+        assert order.status == OrderStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_place_order_negative_amount_returns_failed(self, paper):
+        order = await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, -0.1)
+        assert order.status == OrderStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_place_order_invalid_fill_price_zero_returns_failed(self):
+        real = _mock_real_exchange(0.0)
+        paper = PaperExchange(real, starting_balance=10000.0)
+        order = await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0)
+        assert order.status == OrderStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_place_order_invalid_fill_price_nan_returns_failed(self):
+
+        real = _mock_real_exchange(100.0)
+        real.fetch_ticker = AsyncMock(
+            return_value=Ticker(
+                symbol="BTC/USDT",
+                bid=99.5,
+                ask=100.5,
+                last=float("nan"),
+                volume_24h=1e6,
+                change_pct_24h=1.0,
+                timestamp=datetime.now(UTC),
+            )
+        )
+        paper = PaperExchange(real, starting_balance=10000.0)
+        order = await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0)
+        assert order.status == OrderStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_fetch_balance_uses_unrealized_pnl_on_ticker_exception(self):
+        real = _mock_real_exchange(100.0)
+        paper = PaperExchange(real, starting_balance=10000.0)
+        await paper.place_order(
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 0.1, leverage=10, market_type=MarketType.FUTURES
+        )
+        real.fetch_ticker = AsyncMock(side_effect=Exception("network error"))
+        paper._positions[0].unrealized_pnl = 50.0
+        bal = await paper.fetch_balance()
+        assert "USDT" in bal
+        assert bal["USDT"] > 0
+
+    @pytest.mark.asyncio
+    async def test_fetch_positions_ticker_exception_skips_price_update(self):
+        real = _mock_real_exchange(100.0)
+        paper = PaperExchange(real, starting_balance=10000.0)
+        await paper.place_order(
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 0.1, leverage=10, market_type=MarketType.FUTURES
+        )
+        real.fetch_ticker = AsyncMock(side_effect=Exception("ticker error"))
+        positions = await paper.fetch_positions()
+        assert len(positions) == 1
+
+    @pytest.mark.asyncio
+    async def test_futures_invalid_leverage_clamped_to_one(self):
+        real = _mock_real_exchange(100.0)
+        paper = PaperExchange(real, starting_balance=10000.0)
+        order = await paper.place_order(
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 0.1, leverage=0, market_type=MarketType.FUTURES
+        )
+        assert order.status == OrderStatus.FILLED
+        positions = await paper.fetch_positions()
+        assert len(positions) == 1
+        assert positions[0].leverage >= 1
+
+    @pytest.mark.asyncio
+    async def test_futures_dca_insufficient_margin_returns_failed(self):
+        real = _mock_real_exchange(100.0)
+        paper = PaperExchange(real, starting_balance=20.0)
+        await paper.place_order(
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.5, leverage=10, market_type=MarketType.FUTURES
+        )
+        order = await paper.place_order(
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0, leverage=10, market_type=MarketType.FUTURES
+        )
+        assert order.status == OrderStatus.FAILED
+        positions = await paper.fetch_positions()
+        assert len(positions) == 1
+        assert positions[0].amount == 1.5
+
+    @pytest.mark.asyncio
+    async def test_futures_partial_close_then_insufficient_margin_for_remainder_partially_filled(self):
+        real = _mock_real_exchange(100.0)
+        paper = PaperExchange(real, starting_balance=100.0)
+        await paper.place_order(
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 2.0, leverage=10, market_type=MarketType.FUTURES
+        )
+        real.fetch_ticker = AsyncMock(return_value=_make_ticker(50.0))
+        order = await paper.place_order(
+            "BTC/USDT", OrderSide.SELL, OrderType.MARKET, 2.5, leverage=10, market_type=MarketType.FUTURES
+        )
+        assert order.status == OrderStatus.PARTIALLY_FILLED
+        assert order.filled == 2.0
+        positions = await paper.fetch_positions()
+        assert len(positions) == 0
+
+    @pytest.mark.asyncio
+    async def test_cancel_order_with_market_type(self, paper):
+        order = await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 0.1)
+        cancelled = await paper.cancel_order(order.id, "BTC/USDT", market_type=MarketType.SPOT)
+        assert cancelled.status == OrderStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_fetch_open_orders_with_symbol_filter(self, paper):
+        await paper.place_order("BTC/USDT", OrderSide.BUY, OrderType.MARKET, 0.1)
+        orders = await paper.fetch_open_orders(symbol="ETH/USDT")
+        assert orders == []
+
+    @pytest.mark.asyncio
+    async def test_get_available_symbols_passes_market_type(self, paper):
+        paper._real.get_available_symbols = AsyncMock(return_value=["BTC/USDT", "ETH/USDT"])
+        syms = await paper.get_available_symbols(market_type=MarketType.FUTURES)
+        assert syms == ["BTC/USDT", "ETH/USDT"]
+        paper._real.get_available_symbols.assert_awaited_once_with(MarketType.FUTURES)
+
+    # ── PaperExchange coverage: margin edge cases, full close, balance filter ──
+
+    @pytest.mark.asyncio
+    async def test_fetch_balance_omits_zero_balances(self):
+        real = _mock_real_exchange(100.0)
+        paper = PaperExchange(real, starting_balance=0.0)
+        paper._balances["USDT"] = 0.0
+        bal = await paper.fetch_balance()
+        assert "USDT" not in bal or bal.get("USDT", 0) > 0
+
+    @pytest.mark.asyncio
+    async def test_futures_new_position_insufficient_margin_returns_failed(self):
+        real = _mock_real_exchange(100.0)
+        paper = PaperExchange(real, starting_balance=5.0)
+        order = await paper.place_order(
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0, leverage=10, market_type=MarketType.FUTURES
+        )
+        assert order.status == OrderStatus.FAILED
+        assert len(paper._positions) == 0
+
+    @pytest.mark.asyncio
+    async def test_futures_full_close_credits_margin_and_pnl(self):
+        real = _mock_real_exchange(100.0)
+        paper = PaperExchange(real, starting_balance=1000.0)
+        await paper.place_order(
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 1.0, leverage=10, market_type=MarketType.FUTURES
+        )
+        bal_before = paper._balances["USDT"]
+        real.fetch_ticker = AsyncMock(return_value=_make_ticker(110.0))
+        await paper.place_order(
+            "BTC/USDT", OrderSide.SELL, OrderType.MARKET, 1.0, leverage=10, market_type=MarketType.FUTURES
+        )
+        bal_after = paper._balances["USDT"]
+        assert bal_after > bal_before
+        assert len(paper._positions) == 0
+
+    @pytest.mark.asyncio
+    async def test_place_order_futures_leverage_zero_clamped_in_update_position(self):
+        real = _mock_real_exchange(100.0)
+        paper = PaperExchange(real, starting_balance=10000.0)
+        order = await paper.place_order(
+            "BTC/USDT", OrderSide.BUY, OrderType.MARKET, 0.01, leverage=0, market_type=MarketType.FUTURES
+        )
+        assert order.status == OrderStatus.FILLED
+        positions = await paper.fetch_positions()
+        assert len(positions) == 1
+        assert positions[0].leverage >= 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_open_orders_empty_by_default(self, paper):
+        orders = await paper.fetch_open_orders()
+        assert orders == []
+        orders_with_symbol = await paper.fetch_open_orders(symbol="BTC/USDT")
+        assert orders_with_symbol == []
+
+    @pytest.mark.asyncio
+    async def test_place_order_spot_sell_zero_holdings_failed(self, paper):
+        order = await paper.place_order("ETH/USDT", OrderSide.SELL, OrderType.MARKET, 1.0)
+        assert order.status == OrderStatus.FAILED
+
 
 # ── Factory ─────────────────────────────────────────────────────────
 

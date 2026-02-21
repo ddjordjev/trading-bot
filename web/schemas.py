@@ -68,13 +68,15 @@ class TradeRecord(BaseModel):
 
 
 class TradeQueueItem(BaseModel):
-    """Pending proposal in the trade queue (symbol, side, strategy, strength, age)."""
+    """Trade proposal in the queue with lifecycle status."""
 
     symbol: str
     side: str
     strategy: str
     strength: float
     age_seconds: float
+    status: str = "pending"
+    reason: str = ""
 
 
 class MacroEventInfo(BaseModel):
@@ -260,13 +262,16 @@ class ActionResponse(BaseModel):
 
 class PositionCloseBody(BaseModel):
     symbol: str
+    bot_id: str = ""
 
 
 class PositionTakeProfitBody(BaseModel):
     symbol: str
     pct: float = 50.0
+    bot_id: str = ""
 
 
 class PositionTightenStopBody(BaseModel):
     symbol: str
     pct: float = 2.0
+    bot_id: str = ""

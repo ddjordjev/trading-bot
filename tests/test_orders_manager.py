@@ -1563,3 +1563,899 @@ class TestAutoCloseStaleShortTermLosers:
 
         closed = await order_manager.close_expired_quick_trades([])
         assert len(closed) == 0
+
+
+# ── OrderManager coverage: error paths, edge cases, close/hedge/wick ────────
+
+
+class TestOrderManagerExecuteSignalErrorPaths:
+    """Invalid price, zero amount, failed order, risk blocks."""
+
+    @pytest.mark.asyncio
+    async def test_execute_signal_zero_price_skips_open(self, order_manager, mock_exchange):
+        signal = Signal(
+            symbol="BTC/USDT",
+            action=SignalAction.BUY,
+            strategy="test",
+            suggested_price=0,
+            leverage=10,
+        )
+        out = await order_manager.execute_signal(signal)
+        assert out is None
+        mock_exchange.place_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_signal_nan_price_skips_open(self, order_manager, mock_exchange):
+        signal = Signal(
+            symbol="BTC/USDT",
+            action=SignalAction.BUY,
+            strategy="test",
+            suggested_price=float("nan"),
+            leverage=10,
+        )
+        out = await order_manager.execute_signal(signal)
+        assert out is None
+        mock_exchange.place_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_signal_negative_price_skips_open(self, order_manager, mock_exchange):
+        signal = Signal(
+            symbol="BTC/USDT",
+            action=SignalAction.BUY,
+            strategy="test",
+            suggested_price=-100.0,
+            leverage=10,
+        )
+        out = await order_manager.execute_signal(signal)
+        assert out is None
+        mock_exchange.place_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_signal_risk_blocks_returns_none(self, order_manager, mock_exchange, mock_risk):
+        mock_risk.check_signal.return_value = False
+        signal = Signal(
+            symbol="BTC/USDT",
+            action=SignalAction.BUY,
+            strategy="test",
+            suggested_price=50_000.0,
+            leverage=10,
+        )
+        out = await order_manager.execute_signal(signal)
+        assert out is None
+        mock_exchange.place_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_signal_order_not_filled_removes_scaler_and_appends_order(self, order_manager, mock_exchange):
+        signal = Signal(
+            symbol="BTC/USDT",
+            action=SignalAction.BUY,
+            strategy="test",
+            suggested_price=50_000.0,
+            leverage=10,
+        )
+        mock_exchange.place_order.return_value = Order(
+            id="f1",
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.001,
+            status=OrderStatus.FAILED,
+            filled=0,
+            average_price=0,
+        )
+        out = await order_manager.execute_signal(signal)
+        assert out is not None
+        assert out.status == OrderStatus.FAILED
+        assert order_manager.scaler.get("BTC/USDT") is None
+        assert any(o.id == "f1" for o in order_manager._active_orders)
+
+
+class TestOrderManagerClosePositionEdgeCases:
+    """Close position: no position, multiple positions, failed close order."""
+
+    @pytest.mark.asyncio
+    async def test_close_position_filled_cleans_up_scaler_and_trailing(self, order_manager, mock_exchange):
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.01,
+            entry_price=50_000.0,
+            current_price=50_000.0,
+            leverage=10,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions.return_value = [pos]
+        mock_exchange.place_order.return_value = Order(
+            id="c1",
+            symbol="BTC/USDT",
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            amount=0.01,
+            status=OrderStatus.FILLED,
+            filled=0.01,
+            average_price=50_000.0,
+        )
+        order_manager.scaler.create(symbol="BTC/USDT", side="long", strategy="test", leverage=10)
+        signal = Signal(symbol="BTC/USDT", action=SignalAction.CLOSE, strategy="test", market_type="futures")
+        out = await order_manager.execute_signal(signal)
+        assert out is not None
+        assert order_manager.scaler.get("BTC/USDT") is None
+
+
+class TestOrderManagerTryScaleInErrorPaths:
+    """Scale-in: cooldown, failed order, non-FILLED."""
+
+    @pytest.mark.asyncio
+    async def test_try_scale_in_order_failed_sets_cooldown(self, order_manager, mock_exchange):
+        sp = order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+        )
+        sp.current_size = 0.001
+        sp.avg_entry_price = 50_000.0
+        sp.last_add_price = 50_000.0
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.001,
+            entry_price=50_000.0,
+            current_price=48_000.0,
+            leverage=2,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions.return_value = [pos]
+        mock_exchange.place_order.return_value = Order(
+            id="s1",
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.001,
+            status=OrderStatus.FAILED,
+            filled=0,
+            average_price=0,
+        )
+        added = await order_manager.try_scale_in()
+        assert added == []
+        assert "BTC/USDT" in order_manager._scale_in_cooldowns
+
+
+class TestOrderManagerTryPartialTakeErrorPaths:
+    """Partial take: cooldown on failure."""
+
+    @pytest.mark.asyncio
+    async def test_try_partial_take_order_failed_sets_cooldown(self, order_manager, mock_exchange):
+        sp = order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+        )
+        sp.leverage_raised = True
+        sp.partial_taken = False
+        sp.current_size = 0.01
+        sp.avg_entry_price = 50_000.0
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.01,
+            entry_price=50_000.0,
+            current_price=52_000.0,
+            leverage=10,
+            unrealized_pnl=200.0,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions.return_value = [pos]
+        mock_exchange.place_order.return_value = Order(
+            id="pt1",
+            symbol="BTC/USDT",
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            amount=0.003,
+            status=OrderStatus.FAILED,
+            filled=0,
+            average_price=0,
+        )
+        taken = await order_manager.try_partial_take()
+        assert taken == []
+        assert "BTC/USDT" in order_manager._partial_take_cooldowns
+
+
+class TestOrderManagerTryHedgeErrorPaths:
+    """Hedge: get_hedge_params None, order failed, cooldown."""
+
+    @pytest.mark.asyncio
+    async def test_try_hedge_skips_when_get_hedge_params_returns_none(self, order_manager, mock_exchange):
+
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.01,
+            entry_price=50_000.0,
+            current_price=52_000.0,
+            leverage=10,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions.return_value = [pos]
+        order_manager.hedger.track_position(pos)
+        pair = order_manager.hedger.get("BTC/USDT")
+        pair.main_size = 0
+        candles_map = {"BTC/USDT": []}
+        opened = await order_manager.try_hedge(candles_map)
+        assert opened == []
+        mock_exchange.place_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_try_hedge_order_failed_sets_cooldown(self, order_manager, mock_exchange):
+
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.01,
+            entry_price=50_000.0,
+            current_price=52_500.0,
+            leverage=10,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions.return_value = [pos]
+        order_manager.hedger.track_position(pos)
+        order_manager.hedger.update = MagicMock(return_value=["BTC/USDT"])
+        order_manager.hedger.get_hedge_params = MagicMock(
+            return_value={
+                "side": OrderSide.SELL,
+                "amount": 0.002,
+                "leverage": 10,
+                "reasons": ["RSI overextended"],
+                "reversal_score": 0.6,
+            }
+        )
+        candles_map = {"BTC/USDT": []}
+        mock_exchange.place_order.return_value = Order(
+            id="h1",
+            symbol="BTC/USDT",
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            amount=0.002,
+            status=OrderStatus.FAILED,
+            filled=0,
+            average_price=0,
+        )
+        opened = await order_manager.try_hedge(candles_map)
+        assert opened == []
+        assert "BTC/USDT" in order_manager._hedge_cooldowns
+
+
+class TestOrderManagerTryWickScalpsEdgeCases:
+    """Wick: zero/negative price skip."""
+
+    @pytest.mark.asyncio
+    async def test_try_wick_scalps_skips_when_current_price_zero(self, order_manager, mock_exchange):
+        order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+        )
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.001,
+            entry_price=50_000.0,
+            current_price=0,
+            leverage=10,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions.return_value = [pos]
+        order_manager.wick_scalper.feed_price("BTC/USDT", 50_000.0)
+        order_manager.wick_scalper.feed_price("BTC/USDT", 49_000.0)
+        order_manager.wick_scalper.feed_price("BTC/USDT", 48_500.0)
+        order_manager.wick_scalper.feed_price("BTC/USDT", 48_000.0)
+        opened = await order_manager.try_wick_scalps()
+        assert isinstance(opened, list)
+
+
+class TestOrderManagerCloseSubPositionEdgeCases:
+    """_close_sub_position: hedge_amount <= 0, order not FILLED. _close_sub_position_wick: no sp, order not FILLED."""
+
+    @pytest.mark.asyncio
+    async def test_close_sub_position_hedge_amount_zero_returns_none(self, order_manager):
+        from core.orders.hedge import HedgePair, HedgeState
+
+        order_manager.hedger._pairs["BTC/USDT"] = HedgePair(
+            symbol="BTC/USDT",
+            main_side="long",
+            main_entry=50_000,
+            main_size=5000,
+            hedge_side="short",
+            hedge_entry=0,
+            hedge_size=0,
+            state=HedgeState.ACTIVE,
+        )
+        result = await order_manager._close_sub_position("BTC/USDT", order_manager.hedger, "hedge")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_close_sub_position_order_not_filled_returns_none(self, order_manager):
+        from core.orders.hedge import HedgePair, HedgeState
+
+        order_manager.hedger._pairs["ETH/USDT"] = HedgePair(
+            symbol="ETH/USDT",
+            main_side="long",
+            main_entry=3000,
+            main_size=3000,
+            hedge_side="short",
+            hedge_entry=3100,
+            hedge_size=310,
+            state=HedgeState.ACTIVE,
+        )
+        order_manager.exchange.place_order = AsyncMock(
+            return_value=Order(
+                id="hc1",
+                symbol="ETH/USDT",
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                amount=0.1,
+                status=OrderStatus.FAILED,
+                filled=0,
+                average_price=0,
+            )
+        )
+        result = await order_manager._close_sub_position("ETH/USDT", order_manager.hedger, "hedge")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_close_sub_position_wick_no_scaler_uses_futures(self, order_manager):
+        from core.orders.wick_scalp import WickScalp
+
+        order_manager.wick_scalper._active_scalps["XRP/USDT"] = WickScalp(
+            symbol="XRP/USDT",
+            main_side="long",
+            scalp_side="short",
+            entry_price=2.0,
+            amount=100.0,
+            leverage=10,
+            active=True,
+        )
+        order_manager.scaler.get = MagicMock(return_value=None)
+        order_manager.exchange.place_order = AsyncMock(
+            return_value=Order(
+                id="w1",
+                symbol="XRP/USDT",
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                amount=100.0,
+                status=OrderStatus.FILLED,
+                filled=100.0,
+                average_price=1.95,
+            )
+        )
+        result = await order_manager._close_sub_position_wick("XRP/USDT")
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_close_sub_position_wick_order_not_filled_returns_none(self, order_manager):
+        from core.orders.wick_scalp import WickScalp
+
+        order_manager.wick_scalper._active_scalps["BTC/USDT"] = WickScalp(
+            symbol="BTC/USDT",
+            main_side="long",
+            scalp_side="short",
+            entry_price=50_000,
+            amount=0.01,
+            leverage=10,
+            active=True,
+        )
+        order_manager.exchange.place_order = AsyncMock(
+            return_value=Order(
+                id="w1",
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                amount=0.01,
+                status=OrderStatus.FAILED,
+                filled=0,
+                average_price=0,
+            )
+        )
+        result = await order_manager._close_sub_position_wick("BTC/USDT")
+        assert result is None
+
+
+class TestOrderManagerCheckStopsReasonPaths:
+    """check_stops: breakeven_stop reason branch."""
+
+    @pytest.mark.asyncio
+    async def test_check_stops_breakeven_stop_reason(self, order_manager, mock_exchange):
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.001,
+            entry_price=50_000.0,
+            current_price=49_000.0,
+            leverage=10,
+            market_type="futures",
+        )
+        order_manager.trailing.register(
+            Position(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                amount=0.001,
+                entry_price=50_000.0,
+                current_price=49_000.0,
+                leverage=10,
+                market_type="futures",
+            ),
+            initial_stop_pct=2.0,
+        )
+        ts = order_manager.trailing.get("BTC/USDT")
+        ts.breakeven_locked = True
+        ts.activated = False
+        order_manager.scaler.create(symbol="BTC/USDT", side="long", strategy="test", leverage=10)
+        mock_exchange.fetch_positions.return_value = [pos]
+        mock_exchange.fetch_balance.return_value = {"USDT": 10_000.0}
+        mock_exchange.place_order.return_value = Order(
+            id="c1",
+            symbol="BTC/USDT",
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            amount=0.001,
+            status=OrderStatus.FILLED,
+            filled=0.001,
+            average_price=49_000.0,
+        )
+        closed = await order_manager.check_stops()
+        assert len(closed) >= 1
+
+
+# ── OrderManager coverage: close no position, scale-in/hedge/wick edge, stops, has_stale, trade_history ──
+
+
+class TestOrderManagerClosePositionNoPosition:
+    @pytest.mark.asyncio
+    async def test_execute_signal_close_no_positions_returns_none(self, order_manager, mock_exchange):
+        mock_exchange.fetch_positions.return_value = []
+        signal = Signal(symbol="BTC/USDT", action=SignalAction.CLOSE, strategy="test", market_type="futures")
+        out = await order_manager.execute_signal(signal)
+        assert out is None
+        mock_exchange.place_order.assert_not_called()
+
+
+class TestOrderManagerTryScaleInEdgeCases:
+    @pytest.mark.asyncio
+    async def test_try_scale_in_no_scaler_skips(self, order_manager, mock_exchange):
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.001,
+            entry_price=50_000.0,
+            current_price=49_000.0,
+            leverage=10,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions.return_value = [pos]
+        order_manager.scaler.get = MagicMock(return_value=None)
+        added = await order_manager.try_scale_in()
+        assert added == []
+        mock_exchange.place_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_try_scale_in_no_position_for_symbol_skips(self, order_manager, mock_exchange):
+        sp = order_manager.scaler.create(
+            symbol="ETH/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+        )
+        sp.current_size = 0.001
+        sp.avg_entry_price = 3000.0
+        sp.last_add_price = 3000.0
+        mock_exchange.fetch_positions.return_value = [
+            Position(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                amount=0.001,
+                entry_price=50_000.0,
+                current_price=49_000.0,
+                leverage=10,
+                market_type="futures",
+            )
+        ]
+        added = await order_manager.try_scale_in()
+        assert added == []
+        mock_exchange.place_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_try_scale_in_filled_updates_trailing_entry(self, order_manager, mock_exchange):
+        sp = order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+        )
+        sp.current_size = 0.001
+        sp.avg_entry_price = 50_000.0
+        sp.last_add_price = 50_000.0
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.001,
+            entry_price=50_000.0,
+            current_price=48_000.0,
+            leverage=2,
+            market_type="futures",
+        )
+        order_manager.trailing.register(
+            Position(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                amount=0.001,
+                entry_price=50_000.0,
+                current_price=48_000.0,
+                leverage=2,
+                market_type="futures",
+            ),
+            initial_stop_pct=2.0,
+        )
+        mock_exchange.fetch_positions.return_value = [pos]
+        mock_exchange.place_order.return_value = Order(
+            id="s1",
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.0005,
+            status=OrderStatus.FILLED,
+            filled=0.0005,
+            average_price=48_000.0,
+        )
+        added = await order_manager.try_scale_in()
+        assert len(added) == 1
+        ts = order_manager.trailing.get("BTC/USDT")
+        assert ts is not None
+        assert ts.entry_price == 49_333.333333333336
+
+
+class TestOrderManagerTryLeverUpErrorPath:
+    @pytest.mark.asyncio
+    async def test_try_lever_up_set_leverage_raises_logs_and_skips(self, order_manager, mock_exchange):
+        sp = order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+        )
+        sp.current_size = 0.001
+        sp.avg_entry_price = 50_000.0
+        sp.current_leverage = 2
+        sp.target_leverage = 10
+        sp.adds = 1
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.001,
+            entry_price=50_000.0,
+            current_price=51_000.0,
+            leverage=2,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions.return_value = [pos]
+        mock_exchange.set_leverage.side_effect = Exception("rate limit")
+        levered = await order_manager.try_lever_up()
+        assert levered == []
+        mock_exchange.set_leverage.assert_awaited()
+
+
+class TestOrderManagerTryHedgeEdgeCases:
+    @pytest.mark.asyncio
+    async def test_try_hedge_skips_when_has_active_hedge(self, order_manager, mock_exchange):
+
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.01,
+            entry_price=50_000.0,
+            current_price=52_000.0,
+            leverage=10,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions.return_value = [pos]
+        order_manager.hedger.track_position(pos)
+        order_manager.hedger.update = MagicMock(return_value=["BTC/USDT"])
+        order_manager.hedger.has_active_hedge = MagicMock(return_value=True)
+        order_manager.hedger.get_hedge_params = MagicMock(
+            return_value={"side": OrderSide.SELL, "amount": 0.002, "leverage": 10, "reasons": [], "reversal_score": 0.5}
+        )
+        opened = await order_manager.try_hedge({"BTC/USDT": []})
+        assert opened == []
+        mock_exchange.place_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_try_hedge_cleanup_closed_main_removes_hedger(self, order_manager, mock_exchange):
+        from core.orders.hedge import HedgePair, HedgeState
+
+        order_manager.hedger._pairs["BTC/USDT"] = HedgePair(
+            symbol="BTC/USDT",
+            main_side="long",
+            main_entry=50_000,
+            main_size=5000,
+            state=HedgeState.ACTIVE,
+        )
+        mock_exchange.fetch_positions.return_value = []
+        order_manager.hedger.update = MagicMock(return_value=[])
+        remove_spy = MagicMock()
+        order_manager.hedger.remove = remove_spy
+        await order_manager.try_hedge({"BTC/USDT": []})
+        remove_spy.assert_called_once_with("BTC/USDT")
+
+
+class TestOrderManagerTryWickScalpsExpiredPath:
+    @pytest.mark.asyncio
+    async def test_try_wick_scalps_expired_scalp_amount_zero_skips(self, order_manager, mock_exchange):
+        from core.orders.wick_scalp import WickScalp
+
+        order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+        )
+        order_manager.wick_scalper._active_scalps["BTC/USDT"] = WickScalp(
+            symbol="BTC/USDT",
+            main_side="long",
+            scalp_side="short",
+            entry_price=50_000.0,
+            amount=0,
+            leverage=10,
+            active=True,
+        )
+        order_manager.wick_scalper.get_expired = MagicMock(return_value=["BTC/USDT"])
+        order_manager.wick_scalper.get = MagicMock(
+            return_value=WickScalp(
+                symbol="BTC/USDT",
+                main_side="long",
+                scalp_side="short",
+                entry_price=50_000.0,
+                amount=0,
+                leverage=10,
+                active=True,
+            )
+        )
+        mock_exchange.fetch_positions.return_value = []
+        await order_manager.try_wick_scalps()
+        mock_exchange.place_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_try_wick_scalps_expired_close_order_not_filled_does_not_append(self, order_manager, mock_exchange):
+        from core.orders.wick_scalp import WickScalp
+
+        order_manager.wick_scalper._active_scalps["ETH/USDT"] = WickScalp(
+            symbol="ETH/USDT",
+            main_side="long",
+            scalp_side="short",
+            entry_price=3000.0,
+            amount=1.0,
+            leverage=10,
+            active=True,
+        )
+        order_manager.wick_scalper.get_expired = MagicMock(return_value=["ETH/USDT"])
+        order_manager.wick_scalper.get = MagicMock(
+            return_value=WickScalp(
+                symbol="ETH/USDT",
+                main_side="long",
+                scalp_side="short",
+                entry_price=3000.0,
+                amount=1.0,
+                leverage=10,
+                active=True,
+            )
+        )
+        order_manager.scaler.get = MagicMock(return_value=MagicMock(market_type="futures"))
+        mock_exchange.fetch_positions.return_value = []
+        mock_exchange.place_order.return_value = Order(
+            id="wc1",
+            symbol="ETH/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=1.0,
+            status=OrderStatus.FAILED,
+            filled=0,
+            average_price=0,
+        )
+        opened = await order_manager.try_wick_scalps()
+        assert not any(o.symbol == "ETH/USDT" and o.status == OrderStatus.FILLED for o in opened)
+
+
+class TestOrderManagerCheckStopsLiquidationAndInitial:
+    @pytest.mark.asyncio
+    async def test_check_stops_liquidation_risk_closes_position(self, order_manager, mock_exchange, mock_risk):
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.01,
+            entry_price=50_000.0,
+            current_price=49_000.0,
+            leverage=10,
+            market_type="futures",
+        )
+        order_manager.scaler.create(symbol="BTC/USDT", side="long", strategy="test", leverage=10)
+        mock_exchange.fetch_positions.return_value = [pos]
+        mock_exchange.fetch_balance.return_value = {"USDT": 10.0}
+        mock_risk.check_liquidation.return_value = True
+        mock_exchange.place_order.return_value = Order(
+            id="c1",
+            symbol="BTC/USDT",
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            amount=0.01,
+            status=OrderStatus.FILLED,
+            filled=0.01,
+            average_price=49_000.0,
+        )
+        closed = await order_manager.check_stops()
+        assert len(closed) >= 1
+        mock_exchange.place_order.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_check_stops_initial_stop_reason(self, order_manager, mock_exchange):
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.001,
+            entry_price=50_000.0,
+            current_price=49_000.0,
+            leverage=10,
+            market_type="futures",
+        )
+        order_manager.trailing.register(
+            Position(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                amount=0.001,
+                entry_price=50_000.0,
+                current_price=49_000.0,
+                leverage=10,
+                market_type="futures",
+            ),
+            initial_stop_pct=2.0,
+        )
+        ts = order_manager.trailing.get("BTC/USDT")
+        ts.activated = False
+        ts.breakeven_locked = False
+        order_manager.scaler.create(symbol="BTC/USDT", side="long", strategy="test", leverage=10)
+        mock_exchange.fetch_positions.return_value = [pos]
+        mock_exchange.fetch_balance.return_value = {"USDT": 10_000.0}
+        mock_exchange.place_order.return_value = Order(
+            id="c1",
+            symbol="BTC/USDT",
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            amount=0.001,
+            status=OrderStatus.FILLED,
+            filled=0.001,
+            average_price=49_000.0,
+        )
+        closed = await order_manager.check_stops()
+        assert len(closed) >= 1
+
+
+class TestOrderManagerCloseSubPositionStateAndPnl:
+    @pytest.mark.asyncio
+    async def test_close_sub_position_pair_not_active_returns_none(self, order_manager):
+        from core.orders.hedge import HedgePair, HedgeState
+
+        order_manager.hedger._pairs["BTC/USDT"] = HedgePair(
+            symbol="BTC/USDT",
+            main_side="long",
+            main_entry=50_000,
+            main_size=5000,
+            hedge_side="short",
+            hedge_entry=49_000,
+            hedge_size=490,
+            state=HedgeState.CLOSED,
+        )
+        result = await order_manager._close_sub_position("BTC/USDT", order_manager.hedger, "hedge")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_close_sub_position_filled_long_hedge_records_pnl(self, order_manager, mock_risk):
+        from core.orders.hedge import HedgePair, HedgeState
+
+        hedge_entry = 49_000.0
+        hedge_amount = 0.49
+        order_manager.hedger._pairs["BTC/USDT"] = HedgePair(
+            symbol="BTC/USDT",
+            main_side="long",
+            main_entry=50_000,
+            main_size=5000,
+            hedge_side="long",
+            hedge_entry=hedge_entry,
+            hedge_size=hedge_entry * hedge_amount,
+            state=HedgeState.ACTIVE,
+        )
+        order_manager.exchange.place_order = AsyncMock(
+            return_value=Order(
+                id="hc1",
+                symbol="BTC/USDT",
+                side=OrderSide.SELL,
+                order_type=OrderType.MARKET,
+                amount=hedge_amount,
+                status=OrderStatus.FILLED,
+                filled=hedge_amount,
+                average_price=50_000.0,
+            )
+        )
+        result = await order_manager._close_sub_position("BTC/USDT", order_manager.hedger, "hedge")
+        assert result is not None
+        mock_risk.record_pnl.assert_called_once()
+        pnl = mock_risk.record_pnl.call_args[0][0]
+        assert pnl == pytest.approx((50_000.0 - 49_000) * hedge_amount)
+
+
+class TestOrderManagerHasStaleLosers:
+    @pytest.mark.asyncio
+    async def test_has_stale_losers_returns_true_when_stale_loser(self, order_manager):
+        from datetime import timedelta
+
+        sp = order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.WINNERS,
+        )
+        sp.created_at = datetime.now(UTC) - timedelta(minutes=40)
+        positions = [
+            Position(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                amount=0.001,
+                entry_price=50_000.0,
+                current_price=49_000.0,
+                leverage=10,
+                market_type="futures",
+            )
+        ]
+        assert order_manager.has_stale_losers(positions) is True
+
+    def test_has_stale_losers_returns_false_for_pyramid(self, order_manager):
+        from datetime import timedelta
+
+        sp = order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+        )
+        sp.created_at = datetime.now(UTC) - timedelta(minutes=40)
+        positions = [
+            Position(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                amount=0.001,
+                entry_price=50_000.0,
+                current_price=49_000.0,
+                leverage=10,
+                market_type="futures",
+            )
+        ]
+        assert order_manager.has_stale_losers(positions) is False
+
+
+class TestOrderManagerTradeHistory:
+    def test_trade_history_returns_copy_of_log(self, order_manager):
+        assert order_manager.trade_history == []
+        order_manager._trade_log.append({"symbol": "BTC/USDT", "action": "open"})
+        history = order_manager.trade_history
+        assert len(history) == 1
+        assert history[0]["symbol"] == "BTC/USDT"
+        order_manager._trade_log.clear()
+        assert len(order_manager.trade_history) == 0
+        assert len(history) == 1

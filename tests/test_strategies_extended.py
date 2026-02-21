@@ -29,6 +29,14 @@ def _make_candles_flat(n: int, price: float = 100, volume: float = 1000) -> list
     return [_make_candle(price, volume=volume) for _ in range(n)]
 
 
+def _make_candles_rising(n: int, start: float = 100, step: float = 1.0, volume: float = 1000) -> list[Candle]:
+    return [_make_candle(start + i * step, volume=volume) for i in range(n)]
+
+
+def _make_candles_falling(n: int, start: float = 200, step: float = 1.0, volume: float = 1000) -> list[Candle]:
+    return [_make_candle(start - i * step, volume=volume) for i in range(n)]
+
+
 # ── Compound Momentum ─────────────────────────────────────────────────────
 
 
@@ -383,3 +391,175 @@ class MyCustomStrategy(BaseStrategy):
             result = custom_loader.load_custom_strategies()
         assert "broken" not in result
         assert isinstance(result, dict)
+
+
+# ── Grid Strategy Edge Cases ────────────────────────────────────────────
+
+
+class TestGridStrategyEdgeCases:
+    def test_grid_nan_price(self):
+        from strategies.grid import GridStrategy
+
+        s = GridStrategy("BTC/USDT", num_grids=5, grid_size_pct=1.0)
+        candles = [_make_candle(100), _make_candle(float("nan"))]
+        assert s.analyze(candles) is None
+
+    def test_grid_zero_grid_size(self):
+        from strategies.grid import GridStrategy
+
+        s = GridStrategy("BTC/USDT", num_grids=5, grid_size_pct=0.0)
+        candles = _make_candles_flat(5, 100)
+        s.analyze(candles)
+        signal = s.analyze([*candles, _make_candle(105)])
+        assert signal is None
+
+    def test_grid_zero_num_grids(self):
+        from strategies.grid import GridStrategy
+
+        s = GridStrategy("BTC/USDT", num_grids=0, grid_size_pct=1.0)
+        candles = _make_candles_flat(5, 100)
+        s.analyze(candles)
+        signal = s.analyze([*candles, _make_candle(105)])
+        assert signal is None
+
+    def test_grid_recenter_on_drift(self):
+        from strategies.grid import GridStrategy
+
+        s = GridStrategy("BTC/USDT", num_grids=3, grid_size_pct=1.0, recenter_threshold=3)
+        candles = _make_candles_flat(5, 100)
+        s.analyze(candles)
+        assert s._center_price == 100
+        far_candles = [*candles, _make_candle(115)]
+        signal = s.analyze(far_candles)
+        assert s._center_price == 115
+        assert signal is None
+
+    def test_grid_buy_on_move_down(self):
+        from core.models import SignalAction
+        from strategies.grid import GridStrategy
+
+        s = GridStrategy("BTC/USDT", num_grids=5, grid_size_pct=2.0)
+        candles = _make_candles_flat(5, 100)
+        s.analyze(candles)
+        down_candles = [*candles, _make_candle(96)]
+        signal = s.analyze(down_candles)
+        assert signal is not None
+        assert signal.action == SignalAction.BUY
+
+    def test_grid_sell_on_move_up(self):
+        from core.models import SignalAction
+        from strategies.grid import GridStrategy
+
+        s = GridStrategy("BTC/USDT", num_grids=5, grid_size_pct=2.0)
+        candles = _make_candles_flat(5, 100)
+        s.analyze(candles)
+        up_candles = [*candles, _make_candle(104)]
+        signal = s.analyze(up_candles)
+        assert signal is not None
+        assert signal.action == SignalAction.SELL
+
+    def test_grid_same_level_returns_none(self):
+        from strategies.grid import GridStrategy
+
+        s = GridStrategy("BTC/USDT", num_grids=5, grid_size_pct=2.0)
+        candles = _make_candles_flat(5, 100)
+        s.analyze(candles)
+        signal = s.analyze([*candles, _make_candle(100.5)])
+        assert signal is None
+
+
+# ── MACD Strategy Edge Cases ────────────────────────────────────────────
+
+
+class TestMACDStrategyEdgeCases:
+    def test_macd_needs_enough_candles(self):
+        from strategies.macd import MACDStrategy
+
+        s = MACDStrategy("BTC/USDT")
+        candles = _make_candles_flat(10, 100)
+        assert s.analyze(candles) is None
+
+    def test_macd_bullish_crossover(self):
+        from strategies.macd import MACDStrategy
+
+        s = MACDStrategy("BTC/USDT")
+        candles = _make_candles_flat(30, 100) + _make_candles_falling(10, 105, 0.5) + _make_candles_rising(10, 98, 1.0)
+        signal = s.analyze(candles)
+        if signal:
+            from core.models import SignalAction
+
+            assert signal.action == SignalAction.BUY
+
+    def test_macd_nan_histogram(self):
+        from strategies.macd import MACDStrategy
+
+        s = MACDStrategy("BTC/USDT")
+        candles = [_make_candle(float("nan"))] * 40
+        signal = s.analyze(candles)
+        assert signal is None
+
+    def test_macd_zero_price(self):
+        from strategies.macd import MACDStrategy
+
+        s = MACDStrategy("BTC/USDT")
+        candles = [*_make_candles_flat(40, 100), _make_candle(0)]
+        signal = s.analyze(candles)
+        assert signal is None
+
+
+# ── Swing Opportunity Edge Cases ────────────────────────────────────────
+
+
+class TestSwingOpportunityEdgeCases:
+    def test_too_few_candles(self):
+        from strategies.swing_opportunity import SwingOpportunityStrategy
+
+        s = SwingOpportunityStrategy("BTC/USDT")
+        candles = _make_candles_flat(5, 100)
+        assert s.analyze(candles) is None
+
+    def test_non_finite_price(self):
+        from strategies.swing_opportunity import SwingOpportunityStrategy
+
+        s = SwingOpportunityStrategy("BTC/USDT")
+        candles = [*_make_candles_flat(200, 100), _make_candle(float("inf"))]
+        assert s.analyze(candles) is None
+
+    def test_cooldown_blocks_signal(self):
+        from strategies.swing_opportunity import SwingOpportunityStrategy
+
+        s = SwingOpportunityStrategy("BTC/USDT")
+        s._cooldown_candles = 10
+        candles = _make_candles_flat(200, 100)
+        signal = s.analyze(candles)
+        assert signal is None
+        assert s._cooldown_candles == 9
+
+
+# ── CompoundMomentum Edge Cases ─────────────────────────────────────────
+
+
+class TestCompoundMomentumEdgeCases:
+    def test_not_enough_candles(self):
+        from strategies.compound_momentum import CompoundMomentumStrategy
+
+        s = CompoundMomentumStrategy("BTC/USDT")
+        candles = _make_candles_flat(5, 100)
+        assert s.analyze(candles) is None
+
+    def test_nan_price_returns_none(self):
+        from strategies.compound_momentum import CompoundMomentumStrategy
+
+        s = CompoundMomentumStrategy("BTC/USDT")
+        candles = [*_make_candles_flat(50, 100), _make_candle(float("nan"))]
+        signal = s.analyze(candles)
+        assert signal is None
+
+    def test_in_position_checks_exit(self):
+        from strategies.compound_momentum import CompoundMomentumStrategy
+
+        s = CompoundMomentumStrategy("BTC/USDT")
+        s.set_position_state(True, "long")
+        candles = _make_candles_flat(50, 100)
+        signal = s.analyze(candles)
+        assert signal is None or signal.action.value in ("buy", "sell", "close")

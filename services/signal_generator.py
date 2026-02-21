@@ -31,14 +31,16 @@ MAJOR_SYMBOLS = {"BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT", "A
 class SignalGenerator:
     """Stateful generator that avoids duplicate proposals via cooldowns."""
 
+    MIN_QUEUE_SIZE = 10
+
     def __init__(self, preferred_market_type: str = "futures", major_symbols: set[str] | None = None) -> None:
         self._preferred_market_type = preferred_market_type
         self._major_symbols = major_symbols or MAJOR_SYMBOLS
         self._recent_ids: dict[str, datetime] = {}
         self._cooldown_seconds = {
             SignalPriority.CRITICAL: 30,
-            SignalPriority.DAILY: 3600,
-            SignalPriority.SWING: 86400,
+            SignalPriority.DAILY: 900,
+            SignalPriority.SWING: 14400,
         }
 
     def generate(self, snap: IntelSnapshot, queue: TradeQueue) -> TradeQueue:
@@ -49,6 +51,7 @@ class SignalGenerator:
         self._generate_critical(snap, queue)
         self._generate_daily(snap, queue)
         self._generate_swing(snap, queue)
+        self._generate_filler(snap, queue)
 
         return queue
 
@@ -131,18 +134,20 @@ class SignalGenerator:
         for mover in self._merge_trending(snap):
             if mover.is_low_liquidity:
                 continue
-            if abs(mover.change_24h) < 5.0:
+            if abs(mover.change_24h) < 2.0:
                 continue
 
             side = "long" if mover.change_24h > 0 else "short"
             sym = f"{mover.symbol.upper()}/USDT"
 
             tv_aligned = (tv_direction == side) or tv_direction == "neutral"
-            strength = 0.55
+            strength = 0.40
+            if abs(mover.change_24h) >= 5.0:
+                strength += 0.10
             if tv_aligned:
                 strength += 0.15
             if abs(mover.change_24h) > 10:
-                strength += 0.1
+                strength += 0.10
 
             self._propose(
                 q,
@@ -424,6 +429,93 @@ class SignalGenerator:
             )
 
     # ------------------------------------------------------------------
+    # Filler — keep queue populated with best-available opportunities
+    # ------------------------------------------------------------------
+
+    def _generate_filler(self, snap: IntelSnapshot, q: TradeQueue) -> None:
+        """Ensure at least MIN_QUEUE_SIZE pending proposals exist.
+
+        Runs after all other generators.  Picks the best trending coins
+        that weren't already proposed, using lower strength values so
+        bots can decide whether to act.
+        """
+        pending = q.pending_count
+        if pending >= self.MIN_QUEUE_SIZE:
+            return
+
+        needed = self.MIN_QUEUE_SIZE - pending
+        tv_direction = snap.tv_btc_consensus
+        candidates = self._merge_trending(snap)
+        candidates.sort(key=lambda m: abs(m.change_24h), reverse=True)
+
+        existing_syms = {
+            p.symbol
+            for bucket in (q.critical, q.daily, q.swing)
+            for p in bucket
+            if not p.consumed and not p.rejected and not p.is_expired
+        }
+
+        added = 0
+        for mover in candidates:
+            if added >= needed:
+                break
+            sym = f"{mover.symbol.upper()}/USDT"
+            if sym in existing_syms:
+                continue
+            if mover.is_low_liquidity:
+                continue
+
+            side = "long" if mover.change_24h > 0 else "short"
+            strength = 0.30 + min(0.25, abs(mover.change_24h) / 40.0)
+            if tv_direction == side:
+                strength += 0.10
+
+            self._propose(
+                q,
+                TradeProposal(
+                    priority=SignalPriority.DAILY,
+                    symbol=sym,
+                    side=side,
+                    strategy="trending_filler",
+                    reason=f"{mover.symbol} 24h:{mover.change_24h:+.1f}% vol:${mover.volume_24h / 1e6:.0f}M"
+                    f" (best available)",
+                    strength=min(0.65, strength),
+                    leverage=5,
+                    max_age_seconds=7200,
+                    source="monitor",
+                ),
+            )
+            existing_syms.add(sym)
+            added += 1
+
+        if added < needed:
+            for sym in self._major_symbols:
+                if added >= needed:
+                    break
+                if sym in existing_syms:
+                    continue
+                direction = snap.preferred_direction
+                if direction not in ("long", "short"):
+                    direction = "long" if snap.fear_greed < 50 else "short"
+
+                self._propose(
+                    q,
+                    TradeProposal(
+                        priority=SignalPriority.DAILY,
+                        symbol=sym,
+                        side=direction,
+                        strategy="major_filler",
+                        reason=f"{sym} regime={snap.regime} F&G={snap.fear_greed} (best available major)",
+                        strength=0.35,
+                        leverage=5,
+                        max_age_seconds=7200,
+                        source="monitor",
+                    ),
+                )
+                existing_syms.add(sym)
+                added += 1
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -437,7 +529,7 @@ class SignalGenerator:
         return "momentum"
 
     def _propose(self, queue: TradeQueue, proposal: TradeProposal) -> None:
-        """Add proposal if not on cooldown and not a duplicate."""
+        """Add proposal if not on cooldown and not a live duplicate."""
         if not proposal.target_bot:
             proposal.target_bot = self._route_target(proposal)
         if proposal.market_type == "futures" and self._preferred_market_type != "futures":
@@ -450,8 +542,7 @@ class SignalGenerator:
             if elapsed < cooldown:
                 return
 
-        existing = queue.get_actionable(proposal.priority)
-        for ex in existing:
+        for ex in queue.get_actionable(proposal.priority):
             if ex.symbol == proposal.symbol and ex.strategy == proposal.strategy:
                 return
 

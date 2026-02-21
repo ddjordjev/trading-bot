@@ -235,8 +235,8 @@ class TestSignalGenerator:
 
     def test_init_cooldowns(self, gen):
         assert gen._cooldown_seconds[SignalPriority.CRITICAL] == 30
-        assert gen._cooldown_seconds[SignalPriority.DAILY] == 3600
-        assert gen._cooldown_seconds[SignalPriority.SWING] == 86400
+        assert gen._cooldown_seconds[SignalPriority.DAILY] == 900
+        assert gen._cooldown_seconds[SignalPriority.SWING] == 14400
 
     def test_generate_returns_same_queue(self, gen, empty_snap, empty_queue):
         out = gen.generate(empty_snap, empty_queue)
@@ -490,3 +490,84 @@ class TestSignalGenerator:
         gen.generate(snap, empty_queue)
         daily = empty_queue.get_actionable(SignalPriority.DAILY)
         assert any(p.strategy == "major_momentum" and "DOGE" in p.symbol for p in daily)
+
+    def test_filler_populates_queue_to_minimum(self, gen, empty_queue):
+        """Filler ensures at least MIN_QUEUE_SIZE pending proposals."""
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(symbol=f"COIN{i}", change_24h=float(i + 1), volume_24h=10e6, is_low_liquidity=False)
+                for i in range(15)
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        assert empty_queue.pending_count >= gen.MIN_QUEUE_SIZE
+
+    def test_filler_skips_low_liquidity(self, gen, empty_queue):
+        """Filler does not propose low-liquidity coins."""
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(symbol="JUNK", change_24h=5.0, volume_24h=1e3, is_low_liquidity=True),
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        daily = empty_queue.get_actionable(SignalPriority.DAILY)
+        assert not any("JUNK" in p.symbol for p in daily)
+
+    def test_filler_not_needed_when_queue_full(self, gen, empty_queue):
+        """No filler proposals when queue already has enough pending."""
+        for i in range(12):
+            empty_queue.add(
+                TradeProposal(
+                    priority=SignalPriority.DAILY,
+                    symbol=f"PRE{i}/USDT",
+                    side="long",
+                    strategy="pre_existing",
+                    strength=0.7,
+                    max_age_seconds=7200,
+                )
+            )
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(symbol="NEW", change_24h=3.0, volume_24h=10e6, is_low_liquidity=False),
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        daily = empty_queue.get_actionable(SignalPriority.DAILY)
+        assert not any(p.strategy == "trending_filler" for p in daily)
+
+    def test_filler_uses_majors_as_fallback(self, empty_queue):
+        """Filler falls back to major symbols when trending coins insufficient."""
+        from services.signal_generator import SignalGenerator
+
+        gen = SignalGenerator(
+            major_symbols={
+                "BTC/USDT",
+                "ETH/USDT",
+                "SOL/USDT",
+                "XRP/USDT",
+                "DOGE/USDT",
+                "ADA/USDT",
+                "AVAX/USDT",
+                "LINK/USDT",
+            }
+        )
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(symbol="ONLY", change_24h=3.0, volume_24h=10e6, is_low_liquidity=False),
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        daily = empty_queue.get_actionable(SignalPriority.DAILY)
+        has_major_filler = any(p.strategy == "major_filler" for p in daily)
+        assert has_major_filler
+
+    def test_trending_momentum_lower_threshold(self, gen, empty_queue):
+        """Trending momentum now triggers at 2% instead of 5%."""
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(symbol="LOW", change_24h=2.5, volume_24h=10e6, is_low_liquidity=False),
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        daily = empty_queue.get_actionable(SignalPriority.DAILY)
+        assert any(p.strategy == "trending_momentum" and "LOW" in p.symbol for p in daily)

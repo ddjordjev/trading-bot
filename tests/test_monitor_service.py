@@ -296,3 +296,198 @@ def test_compute_size_mult_uses_fear_greed_and_macro(monitor):
     snap = IntelSnapshot(macro_exposure_mult=0.5)
     mult = monitor._compute_size_mult(snap)
     assert mult == 0.4
+
+
+# ── _aggregate_bot_statuses ────────────────────────────────────────────
+
+
+class TestAggregateBotStatuses:
+    def test_empty_returns_default(self, monitor):
+        from services.monitor import MonitorService
+
+        result = MonitorService._aggregate_bot_statuses([])
+        assert result.level == DeploymentLevel.HUNTING
+
+    def test_single_bot(self, monitor):
+        from services.monitor import MonitorService
+
+        statuses = [BotDeploymentStatus(bot_id="m", level=DeploymentLevel.DEPLOYED, open_positions=2, max_positions=5)]
+        result = MonitorService._aggregate_bot_statuses(statuses)
+        assert result.level == DeploymentLevel.DEPLOYED
+        assert result.open_positions == 2
+
+    def test_picks_worst_level(self, monitor):
+        from services.monitor import MonitorService
+
+        statuses = [
+            BotDeploymentStatus(level=DeploymentLevel.HUNTING, open_positions=0),
+            BotDeploymentStatus(level=DeploymentLevel.STRESSED, open_positions=5),
+        ]
+        result = MonitorService._aggregate_bot_statuses(statuses)
+        assert result.level == DeploymentLevel.STRESSED
+
+    def test_sums_positions(self, monitor):
+        from services.monitor import MonitorService
+
+        statuses = [
+            BotDeploymentStatus(open_positions=3, max_positions=5),
+            BotDeploymentStatus(open_positions=2, max_positions=5),
+        ]
+        result = MonitorService._aggregate_bot_statuses(statuses)
+        assert result.open_positions == 5
+        assert result.max_positions == 10
+
+    def test_averages_daily_pnl(self, monitor):
+        from services.monitor import MonitorService
+
+        statuses = [
+            BotDeploymentStatus(daily_pnl_pct=4.0),
+            BotDeploymentStatus(daily_pnl_pct=6.0),
+        ]
+        result = MonitorService._aggregate_bot_statuses(statuses)
+        assert result.daily_pnl_pct == pytest.approx(5.0)
+
+
+# ── _route_to_bots ────────────────────────────────────────────────────
+
+
+class TestRouteToBotsMonitor:
+    def test_routes_by_style(self, monitor, tmp_path):
+        from shared.models import SignalPriority, TradeProposal
+
+        monitor.state._data_dir = tmp_path
+        staging = TradeQueue()
+        p = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="BTC/USDT",
+            side="long",
+            strength=0.8,
+            target_bot="momentum",
+        )
+        staging.add(p)
+        statuses = [
+            BotDeploymentStatus(bot_id="bot-momentum", bot_style="momentum", should_trade=True, has_capacity=True),
+        ]
+        monitor._route_to_bots(staging, statuses)
+        monitor.state.write_bot_trade_queue.assert_called()
+
+    def test_skips_consumed_proposals(self, monitor, tmp_path):
+        from shared.models import SignalPriority, TradeProposal
+
+        monitor.state._data_dir = tmp_path
+        staging = TradeQueue()
+        p = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="BTC/USDT",
+            side="long",
+            strength=0.8,
+            consumed=True,
+        )
+        staging.add(p)
+        monitor._route_to_bots(staging, [])
+        monitor.state.write_bot_trade_queue.assert_not_called()
+
+    def test_skips_bot_without_capacity(self, monitor, tmp_path):
+        from shared.models import SignalPriority, TradeProposal
+
+        monitor.state._data_dir = tmp_path
+        staging = TradeQueue()
+        p = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="BTC/USDT",
+            side="long",
+            strength=0.8,
+            target_bot="momentum",
+        )
+        staging.add(p)
+        statuses = [
+            BotDeploymentStatus(
+                bot_id="bot-momentum", bot_style="momentum", should_trade=True, open_positions=10, max_positions=10
+            ),
+        ]
+        monitor._route_to_bots(staging, statuses)
+        monitor.state.write_bot_trade_queue.assert_not_called()
+
+
+# ── _read_bot_queue ──────────────────────────────────────────────────
+
+
+class TestReadBotQueue:
+    def test_read_nonexistent_returns_empty(self, monitor, tmp_path):
+        monitor.state._data_dir = tmp_path
+        result = monitor._read_bot_queue("nonexistent")
+        assert result.pending_count == 0
+
+    def test_read_existing_queue(self, monitor, tmp_path):
+        from shared.models import SignalPriority, TradeProposal
+
+        monitor.state._data_dir = tmp_path
+        bot_dir = tmp_path / "momentum"
+        bot_dir.mkdir()
+        q = TradeQueue()
+        q.add(TradeProposal(priority=SignalPriority.DAILY, symbol="BTC/USDT", side="long", strength=0.8))
+        (bot_dir / "trade_queue.json").write_text(q.model_dump_json())
+        result = monitor._read_bot_queue("momentum")
+        assert len(result.daily) == 1
+
+    def test_read_corrupt_queue_returns_empty(self, monitor, tmp_path):
+        monitor.state._data_dir = tmp_path
+        bot_dir = tmp_path / "broken"
+        bot_dir.mkdir()
+        (bot_dir / "trade_queue.json").write_text("{bad json")
+        result = monitor._read_bot_queue("broken")
+        assert result.pending_count == 0
+
+
+# ── _on_news ─────────────────────────────────────────────────────────
+
+
+class TestOnNews:
+    @pytest.mark.asyncio
+    async def test_on_news_appends(self, monitor):
+        from news.monitor import NewsItem
+
+        item = NewsItem(headline="BTC pumps", source="coindesk", matched_symbols=["BTC/USDT"], sentiment_score=0.5)
+        await monitor._on_news(item)
+        assert len(monitor._recent_news) == 1
+        assert monitor._recent_news[0].headline == "BTC pumps"
+
+    @pytest.mark.asyncio
+    async def test_on_news_trims_to_200(self, monitor):
+        from news.monitor import NewsItem
+
+        for i in range(210):
+            await monitor._on_news(NewsItem(headline=f"News {i}", source="test"))
+        assert len(monitor._recent_news) == 200
+
+
+# ── _run_loop one successful iteration ────────────────────────────────
+
+
+class TestRunLoopIteration:
+    @pytest.mark.asyncio
+    async def test_run_loop_one_tick_writes_intel_and_routes(self, monitor):
+
+        monitor._running = True
+        monitor._last_tv_refresh = 0
+        monitor._last_scanner_refresh = 0
+
+        monitor.state.read_all_bot_statuses.return_value = [
+            BotDeploymentStatus(bot_id="m", level=DeploymentLevel.HUNTING)
+        ]
+        monitor._build_snapshot = MagicMock(return_value=IntelSnapshot(regime="normal"))
+        monitor._refresh_tv = AsyncMock()
+        monitor._refresh_scanner_symbols = MagicMock()
+        monitor.signal_gen = MagicMock()
+        monitor.signal_gen.generate = MagicMock(return_value=TradeQueue())
+        monitor._route_to_bots = MagicMock()
+
+        async def stop_on_sleep(sec):
+            monitor._running = False
+
+        with patch("asyncio.sleep", side_effect=stop_on_sleep):
+            with patch("time.monotonic", return_value=99999):
+                await monitor._run_loop()
+
+        monitor.state.write_intel.assert_called_once()
+        monitor.signal_gen.generate.assert_called_once()
