@@ -10,7 +10,13 @@ export function Summary() {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.text();
       })
-      .then(setHtml)
+      .then((raw) => {
+        const bodyMatch = raw.match(/<body[^>]*>([\s\S]*)<\/body>/i);
+        const styleMatch = raw.match(/<style[^>]*>([\s\S]*?)<\/style>/gi);
+        const styles = styleMatch ? styleMatch.join("\n") : "";
+        const body = bodyMatch ? bodyMatch[1] : raw;
+        setHtml(styles + body);
+      })
       .catch((e) => setError(e.message));
   }, []);
 
@@ -30,31 +36,17 @@ export function Summary() {
     );
   }
 
-  const patched = html.replace(
-    /<head>/i,
-    "<head><base target='_self'>"
-  );
-
   return (
     <div
+      className="summary-embed"
       style={{
         height: "calc(100vh - 120px)",
         overflow: "auto",
         border: "1px solid var(--border)",
         borderRadius: "var(--radius)",
+        padding: "1rem",
       }}
-    >
-      <iframe
-        srcDoc={patched}
-        sandbox="allow-same-origin"
-        style={{
-          width: "100%",
-          height: "100%",
-          border: "none",
-          display: "block",
-        }}
-        title="Requirements Summary"
-      />
-    </div>
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
   );
 }

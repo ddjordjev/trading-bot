@@ -638,6 +638,7 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
             udb = TradeDB(path=unified_path)
             udb.connect()
             total_logged = max(total_logged, udb.trade_count())
+            udb.close()
         except Exception:
             pass
 
@@ -652,22 +653,26 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
     )
 
 
-@app.get("/api/closed-trades", response_model=list[TradeRecord])
-async def get_closed_trades(limit: int = 100, _: str = Depends(verify_token)) -> list[TradeRecord]:
+@app.get("/api/closed-trades")
+async def get_closed_trades(limit: int = 100, _: str = Depends(verify_token)) -> list[dict[str, Any]]:
     if not _bot:
         return []
     # Prefer unified DB (all bots merged by db-sync service)
     unified_path = Path("data/trades_all.db")
     if unified_path.exists():
-        from db.store import TradeDB
+        try:
+            from db.store import TradeDB
 
-        unified = TradeDB(path=unified_path)
-        unified.connect()
-        rows = unified.get_all_trades(limit=limit)
-        if rows:
-            return [TradeRecord(**r.model_dump()) for r in rows if r.closed_at]
+            unified = TradeDB(path=unified_path)
+            unified.connect()
+            rows = unified.get_all_trades(limit=limit)
+            unified.close()
+            if rows:
+                return [r.model_dump() for r in rows if r.closed_at]
+        except Exception:
+            pass
     rows = _bot.trade_db.get_all_trades(limit=limit)
-    return [TradeRecord(**r.model_dump()) for r in rows if r.closed_at]
+    return [r.model_dump() for r in rows if r.closed_at]
 
 
 @app.post("/api/analytics/refresh", response_model=ActionResponse)

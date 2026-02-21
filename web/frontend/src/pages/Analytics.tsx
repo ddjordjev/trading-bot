@@ -132,16 +132,14 @@ export function Analytics({ bots = [] }: { bots?: { bot_id: string }[] }) {
 
   const refresh = async () => {
     setLoading(true);
-    try {
-      const [a, r, ct] = await Promise.all([
-        get<AnalyticsData>("/api/analytics"),
-        get<DailyReport>("/api/daily-report"),
-        get<ClosedTrade[]>("/api/closed-trades?limit=200"),
-      ]);
-      setAnalytics(a);
-      setReport(r);
-      setClosedTrades(ct);
-    } catch {}
+    const [aRes, rRes, ctRes] = await Promise.allSettled([
+      get<AnalyticsData>("/api/analytics"),
+      get<DailyReport>("/api/daily-report"),
+      get<ClosedTrade[]>("/api/closed-trades?limit=200"),
+    ]);
+    if (aRes.status === "fulfilled") setAnalytics(aRes.value);
+    if (rRes.status === "fulfilled") setReport(rRes.value);
+    if (ctRes.status === "fulfilled") setClosedTrades(ctRes.value);
     setLoading(false);
   };
 
