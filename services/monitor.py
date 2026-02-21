@@ -38,6 +38,8 @@ from services.signal_generator import SignalGenerator
 from shared.models import (
     BotDeploymentStatus,
     DeploymentLevel,
+    ExtremeCandidate,
+    ExtremeWatchlist,
     IntelSnapshot,
     TradeQueue,
     TrendingSnapshot,
@@ -182,6 +184,12 @@ class MonitorService:
                 # Build and write intel snapshot
                 snapshot = self._build_snapshot(multipliers)
                 self.state.write_intel(snapshot)
+
+                # Build extreme watchlist from scanner data
+                try:
+                    self._build_extreme_watchlist()
+                except Exception as e:
+                    logger.debug("Extreme watchlist error: {}", e)
 
                 # Generate proposals into a staging queue, then route to per-bot queues
                 try:
@@ -545,3 +553,49 @@ class MonitorService:
         if votes["short"] > votes["long"] and votes["short"] > votes["neutral"]:
             return "short"
         return "neutral"
+
+    def _build_extreme_watchlist(self) -> None:
+        """Filter scanner data for extreme movers and write to shared state."""
+        min_hourly = self.settings.extreme_min_hourly_move_pct
+        min_vol = self.settings.extreme_min_volume_24h
+        max_candidates = self.settings.extreme_max_candidates
+
+        all_coins = self.scanner.latest_scan
+        if not all_coins:
+            return
+
+        extreme: list[ExtremeCandidate] = []
+        for coin in all_coins:
+            hourly_abs = abs(coin.change_1h)
+            if hourly_abs < min_hourly:
+                continue
+            if coin.volume_24h < min_vol:
+                continue
+
+            direction = "bull" if coin.change_1h > 0 else "bear"
+            score = hourly_abs * (coin.volume_24h / 1e6) ** 0.5
+
+            reasons: list[str] = []
+            reasons.append(f"1h: {coin.change_1h:+.1f}%")
+            if abs(coin.change_5m) > 1.0:
+                reasons.append(f"5m: {coin.change_5m:+.1f}%")
+            reasons.append(f"vol: ${coin.volume_24h / 1e6:.0f}M")
+
+            extreme.append(
+                ExtremeCandidate(
+                    symbol=coin.trading_pair,
+                    direction=direction,
+                    change_1h=coin.change_1h,
+                    change_5m=coin.change_5m,
+                    volume_24h=coin.volume_24h,
+                    momentum_score=score,
+                    reason=" | ".join(reasons),
+                )
+            )
+
+        extreme.sort(key=lambda c: c.momentum_score, reverse=True)
+        watchlist = ExtremeWatchlist(candidates=extreme[:max_candidates])
+        self.state.write_extreme_watchlist(watchlist)
+
+        if extreme:
+            logger.debug("Extreme watchlist: {} candidates (top: {})", len(extreme[:max_candidates]), extreme[0].symbol)

@@ -684,7 +684,8 @@ class TestBotStartStop:
     async def test_start_already_running(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
         mock_bot._running = True
-        r = await client.post("/api/bot/start")
+        mock_bot.settings.bot_id = "testbot"
+        r = await client.post("/api/bot/start", json={"bot_id": "testbot"})
         assert r.status_code == 200
         assert r.json()["success"] is False
         assert "already running" in r.json()["message"]
@@ -705,9 +706,10 @@ class TestBotStartStop:
     async def test_stop_not_running(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
         mock_bot._running = False
-        r = await client.post("/api/bot/stop")
+        mock_bot.settings.bot_id = "testbot"
+        r = await client.post("/api/bot/stop", json={"bot_id": "testbot"})
         assert r.status_code == 200
-        assert r.json()["success"] is False
+        assert "already stopped" in r.json()["message"]
 
     async def test_stop_ok(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]

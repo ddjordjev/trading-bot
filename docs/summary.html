@@ -182,6 +182,7 @@
   <tr><td><code>core/orders/scaler.py</code></td><td>Position scaling: $50 initial → add to winners → cap at $100K notional</td></tr>
   <tr><td><code>core/orders/hedge.py</code></td><td>HedgeManager + ReversalDetector — counter-positions on reversal</td></tr>
   <tr><td><code>core/orders/wick_scalp.py</code></td><td>WickScalpDetector — counter-trade wicks while PYRAMID DCA-s</td></tr>
+  <tr><td><code>core/extreme/watcher.py</code></td><td>ExtremeWatcher — WS subscription manager, price buffer, entry pattern detection for extreme movers</td></tr>
   <tr><td><code>core/patterns/structure.py</code></td><td>Swing point detection, S/R zone clustering</td></tr>
   <tr><td><code>core/patterns/detector.py</code></td><td>Chart pattern recognition (W-bottom, H&amp;S, flags, etc.)</td></tr>
   <tr><td><code>core/patterns/library.py</code></td><td>Pattern catalog with Bulkowski-derived reliability stats</td></tr>
@@ -215,7 +216,7 @@
   <tr><td><code>db/models.py</code></td><td>TradeRecord, StrategyScore, PatternInsight, ModificationSuggestion</td></tr>
   <tr><td><code>analytics/engine.py</code></td><td>Pattern detection, strategy scoring, weight factors, modification suggestions</td></tr>
   <tr><td><code>shared/state.py</code></td><td>Atomic JSON read/write with fcntl file locking for inter-process communication</td></tr>
-  <tr><td><code>shared/models.py</code></td><td>BotDeploymentStatus, BotDashboardSnapshot, IntelSnapshot, AnalyticsSnapshot, TradeQueue, TradeProposal</td></tr>
+  <tr><td><code>shared/models.py</code></td><td>BotDeploymentStatus, BotDashboardSnapshot, IntelSnapshot, AnalyticsSnapshot, TradeQueue, TradeProposal, ExtremeCandidate, ExtremeWatchlist</td></tr>
   <tr><td><code>services/monitor.py</code></td><td>Standalone monitoring service with adaptive intensity + signal generation</td></tr>
   <tr><td><code>services/signal_generator.py</code></td><td>Converts intel snapshots into CRITICAL/DAILY/SWING trade proposals</td></tr>
   <tr><td><code>services/analytics_service.py</code></td><td>Standalone analytics service (reads trades.db, writes scores)</td></tr>
@@ -242,6 +243,38 @@
   <tr><td><code>docs/execution_logs/</code></td><td>Container logs from each bot run, timestamped YYYYMMDDHHmmss.log</td></tr>
   <tr><td><code>tests/</code></td><td>1100+ tests across 15+ files covering all modules (80%+ coverage)</td></tr>
 </table>
+
+<h3>3.1 Runtime Data Directory (<code>data/</code>)</h3>
+
+<p>All runtime state lives under <code>data/</code>. In Docker this is the <code>bot-data</code> volume mounted at <code>/app/data</code>.
+Each bot writes to <code>data/{bot_id}/</code>; shared (hub-level) files live in <code>data/</code> root.</p>
+
+<table>
+  <tr><th>Path</th><th>Created By</th><th>Purpose</th></tr>
+  <tr><td><code>data/hub.db</code></td><td>Hub dashboard (<code>db/hub_store.py</code>)</td><td>SQLite — merged trade history for all bots (analytics dashboard)</td></tr>
+  <tr><td><code>data/bot_registry.json</code></td><td>Hub dashboard (<code>web/server.py</code>)</td><td>Known bot IDs and their command-server URLs</td></tr>
+  <tr><td><code>data/trade_queue.json</code></td><td>Monitor (<code>shared/state.py</code>)</td><td>Shared trade proposals from signal generator to bots</td></tr>
+  <tr><td><code>data/trade_queue.lock</code></td><td>Monitor / bots (<code>shared/state.py</code>)</td><td>fcntl lock file for trade queue atomic access</td></tr>
+  <tr><td><code>data/intel_state.json</code></td><td>Monitor (<code>shared/state.py</code>)</td><td>Latest intel snapshot (fear/greed, liquidations, whale, etc.)</td></tr>
+  <tr><td><code>data/extreme_watchlist.json</code></td><td>Monitor (<code>shared/state.py</code>)</td><td>Current extreme mover candidates for bot evaluation</td></tr>
+  <tr><td><code>data/analytics_state.json</code></td><td>Analytics service (<code>shared/state.py</code>)</td><td>Strategy scores, hourly performance, regime stats</td></tr>
+  <tr><td><code>data/{bot_id}/trades.db</code></td><td>Each bot (<code>db/store.py</code>)</td><td>Per-bot SQLite trade history</td></tr>
+  <tr><td><code>data/{bot_id}/bot_status.json</code></td><td>Each bot (<code>shared/state.py</code>)</td><td>Bot status: level, open positions, should_trade flag</td></tr>
+  <tr><td><code>data/{bot_id}/trade_queue.json</code></td><td>Hub → bot (<code>shared/state.py</code>)</td><td>Per-bot trade queue (hub copies relevant proposals here)</td></tr>
+  <tr><td><code>data/{bot_id}/trade_queue.lock</code></td><td>Bot (<code>shared/state.py</code>)</td><td>fcntl lock for per-bot queue</td></tr>
+  <tr><td><code>logs/bot_*.log</code></td><td>Each bot (<code>bot.py</code>)</td><td>Rotated daily, 30-day retention (Docker: <code>bot-logs</code> volume)</td></tr>
+</table>
+
+<h4>Reset to clean state</h4>
+<pre>
+# Stop everything
+docker compose down -v          # -v removes named volumes (bot-data, bot-logs, prometheus-data, grafana-data, loki-data)
+
+# Remove local state (if running outside Docker)
+rm -rf data/                    # all DBs, JSON state, per-bot dirs
+rm -rf logs/                    # all log files
+</pre>
+<p>On next <code>docker compose up</code> (or local run), all directories and files are recreated automatically.</p>
 
 <!-- ============================================================ -->
 <h2 id="s4">4. Key Configuration</h2>
@@ -352,10 +385,18 @@
   <p><strong>Status:</strong> Under review. Would run as a 6th Docker service with read-only access to <code>trades.db</code> and state files. Scheduled hourly to keep LLM costs low.</p>
 </div>
 
-<h3>6.5 High-Intensity Ultra-Fast Strategy</h3>
+<h3>6.5 High-Intensity Ultra-Fast Strategy ✅ IMPLEMENTED</h3>
 <div class="section-card">
   <p>In/out within 1 second to 1 minute max. Picks extreme movers and rides the momentum. Ultra-fast scalping with aggressive ticker (100ms-1s).</p>
-  <p><strong>Status:</strong> Under review. Needs sub-second price monitoring and fast execution path.</p>
+  <p><strong>Status:</strong> Implemented. Full pipeline: monitor identifies 5–10 extreme movers (5%+ hourly, $10M+ volume), bot evaluates candidates every 30s (including correlated exposure check), subscribes to WebSocket ticker feeds for approved symbols, detects entry patterns (momentum continuation, pullback entry) in real-time, and executes via the fast monitor loop.</p>
+  <p><strong>Key behaviors:</strong></p>
+  <ul>
+    <li>Existing positions promoted to WS are exit-watch only (no new entry, just real-time stop management)</li>
+    <li>No hard time kill on profitable trades — aggressive 0.5% trailing stop is the exit, 1-min timeout only kills flat/losers</li>
+    <li>Correlated asset detection: if holding ETH and BTC spikes, immediately subscribes + tightens/adjusts stops</li>
+    <li>Settings: 1.5% initial stop, 0.5% trail, 3% position size, max 3 extreme positions</li>
+  </ul>
+  <p><strong>Files:</strong> <code>core/extreme/watcher.py</code>, <code>bot.py</code> (evaluate + wire), <code>services/monitor.py</code> (extreme watchlist builder), <code>shared/models.py</code>, <code>shared/state.py</code>, <code>config/settings.py</code></p>
 </div>
 
 <h3>6.6 Manual Trade Ideas &amp; Price Alerts</h3>
@@ -364,15 +405,48 @@
   <p><strong>Status:</strong> Under review. Would need a new dashboard form, alarm/watchlist system, and limit-order-like execution logic.</p>
 </div>
 
+<h3>6.7 AMD — Accumulation Manipulation Distribution</h3>
+<div class="section-card">
+  <p>Detects the classic AMD pattern that occurs frequently in crypto. Price accumulates in a tight range (consolidation), then spikes up briefly (manipulation / fake-out), then dumps below the accumulation zone (distribution / true move).</p>
+  <p><strong>How it works:</strong></p>
+  <ul>
+    <li><strong>Accumulation:</strong> Identify a range-bound zone (low volatility, tight Bollinger bands, multiple touches of support/resistance)</li>
+    <li><strong>Manipulation:</strong> Detect a sudden spike above the range (wick or brief close above) — this is the trap, NOT the entry</li>
+    <li><strong>Distribution:</strong> Price drops back into and then BELOW the accumulation zone — this is the signal</li>
+    <li><strong>Entry:</strong> Short when price breaks below accumulation zone after the manipulation spike. SL above the manipulation high.</li>
+    <li>Works in reverse for bullish AMD (accumulation, dump below to trap shorts, then rally above).</li>
+  </ul>
+  <p><strong>Status:</strong> Not started. Would work as a new pattern in <code>core/patterns/</code> or a dedicated strategy. Needs range detection + spike classification + breakdown confirmation. High frequency pattern in crypto — very valuable.</p>
+</div>
+
+<h3>6.8 Multi-Timeframe Reversal Signals (Fefe Demeny Method)</h3>
+<div class="section-card">
+  <p>Watches 5m, 15m, 1h, 4h, and daily timeframes for reversal confirmations using consecutive candle structure. Each timeframe confirmation strengthens the signal. Inspired by Fefe Demeny's reversal detection method.</p>
+  <p><strong>How it works (LONG example, SHORT is mirrored):</strong></p>
+  <ul>
+    <li>Price is in a downtrend (making lower lows)</li>
+    <li>On the 5m chart: identify a cluster of 3 consecutive candles (a "base")</li>
+    <li>Price drops below that base (new lower low) — this marks the base as a "reversal reference"</li>
+    <li>When price CLOSES back above the 3-candle base on the 5m — <strong>minimal signal</strong> ("5m reversal confirmed")</li>
+    <li>Now watch 15m: same logic. When 15m confirms — <strong>entry-grade signal</strong> (SL under the lowest point, start trailing + pyramiding)</li>
+    <li>1h confirmation strengthens conviction; 4h and daily are macro-level confirmations</li>
+    <li>The more timeframes confirm, the stronger the reversal and the larger the position / wider the stop</li>
+  </ul>
+  <p><strong>Integration:</strong> Multi-TF data already available via TradingView client (supports 5m, 15m, 1h, 4h, 1D). Would need a dedicated detector that tracks "reversal bases" per symbol per timeframe, and a scoring system (5m = 1pt, 15m = 2pt, 1h = 3pt, 4h = 4pt, daily = 5pt).</p>
+  <p><strong>Status:</strong> Not started. High potential — multi-TF alignment is one of the strongest reversal confirmation methods. Could work as a standalone strategy or as a signal booster for existing strategies.</p>
+</div>
+
 <h3>Suggested Implementation Order</h3>
 <table>
   <tr><th>#</th><th>Idea</th><th>Priority</th><th>Rationale</th></tr>
-  <tr><td>1</td><td>Don't Fight the Trend</td><td style="color:var(--red);">Highest</td><td>Reinforces core philosophy, clean integration into existing gate system</td></tr>
-  <tr><td>2</td><td>AI Background Agent</td><td style="color:var(--yellow);">High</td><td>Read-only, low risk, useful during 10-day paper run</td></tr>
-  <tr><td>3</td><td>Manual Trade Ideas &amp; Alerts</td><td style="color:var(--yellow);">High</td><td>User control, complements automated strategies</td></tr>
-  <tr><td>4</td><td>Ultra-Fast Strategy</td><td style="color:var(--accent);">Medium</td><td>New strategy, needs fast tick infrastructure</td></tr>
-  <tr><td>5</td><td>Volatility Straddle</td><td style="color:var(--accent);">Medium</td><td>Needs fee/whipsaw logic, pairs with market-open windows</td></tr>
-  <tr><td>6</td><td>Super Scalp</td><td style="color:#8b949e;">Lower</td><td>Most architectural work (tick loop speed, fee tracking, order throughput)</td></tr>
+  <tr><td>1</td><td>Don't Fight the Trend (6.3)</td><td style="color:var(--red);">Highest</td><td>Reinforces core philosophy, clean integration into existing gate system</td></tr>
+  <tr><td>2</td><td>Multi-TF Reversal Signals (6.8)</td><td style="color:var(--red);">Highest</td><td>Multi-TF alignment is one of the strongest confirmation methods; TradingView infra already exists</td></tr>
+  <tr><td>3</td><td>AMD Pattern (6.7)</td><td style="color:var(--yellow);">High</td><td>Very frequent in crypto, high win rate when correctly identified; works as pattern or strategy</td></tr>
+  <tr><td>4</td><td>AI Background Agent (6.4)</td><td style="color:var(--yellow);">High</td><td>Read-only, low risk, useful during 10-day paper run</td></tr>
+  <tr><td>5</td><td>Manual Trade Ideas &amp; Alerts (6.6)</td><td style="color:var(--yellow);">High</td><td>User control, complements automated strategies</td></tr>
+  <tr><td>6</td><td>Volatility Straddle (6.1)</td><td style="color:var(--accent);">Medium</td><td>Needs fee/whipsaw logic, pairs with market-open windows</td></tr>
+  <tr><td>7</td><td>Super Scalp (6.2)</td><td style="color:#8b949e;">Lower</td><td>Most architectural work (tick loop speed, fee tracking, order throughput)</td></tr>
+  <tr><td>—</td><td>Ultra-Fast Strategy (6.5)</td><td style="color:var(--green);">✅ Done</td><td>Implemented: WS subscription, extreme mover detection, fast execution path</td></tr>
 </table>
 
 <!-- ============================================================ -->
@@ -410,6 +484,12 @@
   <tr><td>Position management &amp; tracking</td><td><span class="badge done">Done</span></td><td class="file">core/models/order.py (Position model)</td></tr>
   <tr><td>PnL tracking</td><td><span class="badge done">Done</span></td><td class="file">core/risk/manager.py, core/risk/daily_target.py</td></tr>
   <tr><td>Trailing stop-loss</td><td><span class="badge done">Done</span></td><td class="file">core/orders/trailing.py</td></tr>
+  <tr><td>Fast monitor loop (sub-second stop checks for scalp/momentum)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _fast_monitor_loop() + asyncio.Lock</td></tr>
+  <tr><td>Ticker cache (0.8s TTL, avoids redundant API calls within a tick)</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/paper.py → _ticker_cache (bypassed for order execution)</td></tr>
+  <tr><td>Adaptive tick interval (SCALP 1s / ACTIVE 60s / SWING 300s / IDLE 60s)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _update_tick_interval(), config/settings.py</td></tr>
+  <tr><td>Extreme mover detection + WebSocket subscription</td><td><span class="badge done">Done</span></td><td class="file">core/extreme/watcher.py, services/monitor.py → _build_extreme_watchlist()</td></tr>
+  <tr><td>Correlated asset exposure detection + stop tightening</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _evaluate_extreme_candidates(), CORRELATION_MAP</td></tr>
+  <tr><td>Pattern detection (momentum continuation, pullback entry, swing structure)</td><td><span class="badge done">Done</span></td><td class="file">core/extreme/watcher.py, core/patterns/detector.py</td></tr>
 </table>
 
 <h3 id="s7-4">7.4 Strategy Layer</h3>
@@ -422,6 +502,7 @@
   <tr><td>Market-open volatility strategy (US &amp; Asia opens)</td><td><span class="badge done">Done</span></td><td class="file">strategies/market_open_volatility.py</td></tr>
   <tr><td>Compound momentum (spike scalping &amp; breakout)</td><td><span class="badge done">Done</span></td><td class="file">strategies/compound_momentum.py</td></tr>
   <tr><td>Swing opportunity (rare "opportunity of a lifetime" events only)</td><td><span class="badge done">Done</span></td><td class="file">strategies/swing_opportunity.py</td></tr>
+  <tr><td>Ultra-fast extreme mover strategy (6.5) — WS-based sub-minute scalps on 5%+ movers</td><td><span class="badge done">Done</span></td><td class="file">core/extreme/watcher.py, bot.py (evaluate + wire)</td></tr>
 </table>
 
 <h3 id="s7-5">7.5 Risk Management &amp; Capital Preservation</h3>

@@ -150,8 +150,8 @@ class Notifier:
         pnl_pct: float,
         trades: int,
         open_positions: int,
-        compound_report: str,
-        target_hit: bool,
+        compound_report: str = "",
+        target_hit: bool = False,
     ) -> None:
         status = "TARGET HIT" if target_hit else "TARGET MISSED"
         subject = f"Daily Report - PnL: {pnl:+.2f} ({pnl_pct:+.1f}%) - {status}"
@@ -165,7 +165,6 @@ class Notifier:
             f"  Trades today:    {trades}\n"
             f"  Open positions:  {open_positions}\n"
             f"  Status:          {status}\n"
-            f"\n\n{compound_report}"
         )
 
         await self.send(NotificationType.DAILY_SUMMARY, subject, body)

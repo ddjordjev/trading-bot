@@ -10,16 +10,23 @@ scrape_configs:
         labels:
           bot_id: "momentum"
 
+  - job_name: "bot-indicators"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["bot-indicators:9035"]
+        labels:
+          bot_id: "indicators"
+
   - job_name: "bot-meanrev"
     metrics_path: /metrics
     static_configs:
-      - targets: ["bot-meanrev:9036"]
+      - targets: ["bot-meanrev:9035"]
         labels:
           bot_id: "meanrev"
 
   - job_name: "bot-swing"
     metrics_path: /metrics
     static_configs:
-      - targets: ["bot-swing:9037"]
+      - targets: ["bot-swing:9035"]
         labels:
           bot_id: "swing"

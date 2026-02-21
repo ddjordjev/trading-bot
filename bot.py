@@ -15,6 +15,7 @@ from loguru import logger
 from analytics import AnalyticsEngine
 from config.settings import Settings, get_settings
 from core.exchange import BaseExchange, create_exchange
+from core.extreme import ExtremeWatcher
 from core.market_schedule import get_market_schedule
 from core.models import Candle, MarketType, Signal, SignalAction
 from core.models.order import Order, OrderSide
@@ -139,6 +140,11 @@ class TradingBot:
         self._warmup_minutes = 3  # no queue processing for first N minutes
         self._hub_session: aiohttp.ClientSession | None = None
         self._hub_tasks: set[asyncio.Task[None]] = set()
+        self._stop_check_lock = asyncio.Lock()
+        self._monitor_task: asyncio.Task[None] | None = None
+
+        self.extreme_watcher = ExtremeWatcher(self.exchange, self.settings)
+        self._last_extreme_eval: float = 0.0
 
     # -- Strategy Management --
 
@@ -255,12 +261,19 @@ class TradingBot:
 
         self._running = True
         self._started_at = datetime.now(UTC)
+        self._monitor_task = asyncio.create_task(self._fast_monitor_loop())
         await self._run_loop()
 
     async def stop(self) -> None:
         logger.info("Shutting down...")
         logger.info("Final status: {}", self.target.status_report())
         self._running = False
+        if self._monitor_task and not self._monitor_task.done():
+            self._monitor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._monitor_task
+            self._monitor_task = None
+        await self.extreme_watcher.stop()
         if self.intel:
             await self.intel.stop()
         if self.scanner:
@@ -292,6 +305,72 @@ class TradingBot:
             except Exception as e:
                 logger.exception("Error in main loop: {}", e)
                 await asyncio.sleep(10)
+
+    async def _fast_monitor_loop(self) -> None:
+        """Sub-second stop-loss monitor for scalp and momentum positions.
+
+        Runs concurrently with the main tick loop. Only checks trailing
+        stops and expires quick trades — never runs strategies or fetches
+        candles, so each iteration completes in <1s.
+        """
+        while self._running:
+            try:
+                if not self.orders.trailing.active_stops and not self.orders.wick_scalper.active_scalps:
+                    await asyncio.sleep(2)
+                    continue
+
+                async with self._stop_check_lock:
+                    closed = await self.orders.check_stops()
+                    for order in closed:
+                        sp = self.orders.scaler.get(order.symbol)
+                        stashed = self.orders._closed_scalers.get(order.symbol, [])
+                        sp = sp or (stashed[0] if stashed else None)
+                        entry_price = sp.avg_entry_price if sp and sp.avg_entry_price > 0 else 0
+                        exit_price = order.average_price or order.price or 0
+                        pnl = 0.0
+                        if entry_price > 0 and exit_price > 0:
+                            pos_side = (
+                                sp.side
+                                if sp
+                                else (
+                                    "long"
+                                    if (order.side.value if hasattr(order.side, "value") else str(order.side))
+                                    in ("buy", "long")
+                                    else "short"
+                                )
+                            )
+                            if pos_side == "long":
+                                pnl = (exit_price - entry_price) * (order.filled or order.amount)
+                            else:
+                                pnl = (entry_price - exit_price) * (order.filled or order.amount)
+                        await self.notifier.alert_stop_loss(order.symbol, entry_price, exit_price, pnl)
+                        self._log_closed_trade(order, "stop")
+                        self.target.record_trade(realized_pnl=pnl)
+
+                    expired = await self.orders.close_expired_quick_trades(self._active_signals)
+                    for order in expired:
+                        self._log_closed_trade(order, "expired")
+                        realized_pnl = self._calc_realized_pnl(order)
+                        self.target.record_trade(realized_pnl=realized_pnl)
+
+                extreme_signals = self.extreme_watcher.drain_signals()
+                for sig in extreme_signals:
+                    if not self.target.should_trade():
+                        break
+                    if len(self.orders.scaler.active_positions) >= self.settings.effective_max_concurrent_positions:
+                        break
+                    try:
+                        await self._process_signal(sig, pyramid=False)
+                        logger.info("Extreme entry: {} {} via {}", sig.action.value, sig.symbol, sig.strategy)
+                    except Exception as e:
+                        logger.error("Extreme signal error for {}: {}", sig.symbol, e)
+
+                await asyncio.sleep(self.settings.tick_interval_scalp)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug("Fast monitor error: {}", e)
+                await asyncio.sleep(2)
 
     def _update_tick_interval(self) -> None:
         """Adapt tick speed based on the most urgent open position.
@@ -355,31 +434,35 @@ class TradingBot:
             self.target.clear_close_all()
             return
 
-        # 1. Check trailing stops and liquidation
-        closed = await self.orders.check_stops()
-        for order in closed:
-            sp = self.orders.scaler.get(order.symbol)
-            stashed = self.orders._closed_scalers.get(order.symbol, [])
-            sp = sp or (stashed[0] if stashed else None)
-            entry_price = sp.avg_entry_price if sp and sp.avg_entry_price > 0 else 0
-            exit_price = order.average_price or order.price or 0
-            pnl = 0.0
-            if entry_price > 0 and exit_price > 0:
-                pos_side = (
-                    sp.side
-                    if sp
-                    else (
-                        "long"
-                        if (order.side.value if hasattr(order.side, "value") else str(order.side)) in ("buy", "long")
-                        else "short"
+        # 1. Check trailing stops and liquidation (fast monitor handles sub-second
+        #    checks; this is the fallback that also covers liquidation risk)
+        async with self._stop_check_lock:
+            closed = await self.orders.check_stops()
+            for order in closed:
+                sp = self.orders.scaler.get(order.symbol)
+                stashed = self.orders._closed_scalers.get(order.symbol, [])
+                sp = sp or (stashed[0] if stashed else None)
+                entry_price = sp.avg_entry_price if sp and sp.avg_entry_price > 0 else 0
+                exit_price = order.average_price or order.price or 0
+                pnl = 0.0
+                if entry_price > 0 and exit_price > 0:
+                    pos_side = (
+                        sp.side
+                        if sp
+                        else (
+                            "long"
+                            if (order.side.value if hasattr(order.side, "value") else str(order.side))
+                            in ("buy", "long")
+                            else "short"
+                        )
                     )
-                )
-                if pos_side == "long":
-                    pnl = (exit_price - entry_price) * (order.filled or order.amount)
-                else:
-                    pnl = (entry_price - exit_price) * (order.filled or order.amount)
-            await self.notifier.alert_stop_loss(order.symbol, entry_price, exit_price, pnl)
-            self._log_closed_trade(order, "stop")
+                    if pos_side == "long":
+                        pnl = (exit_price - entry_price) * (order.filled or order.amount)
+                    else:
+                        pnl = (entry_price - exit_price) * (order.filled or order.amount)
+                await self.notifier.alert_stop_loss(order.symbol, entry_price, exit_price, pnl)
+                self._log_closed_trade(order, "stop")
+                self.target.record_trade(realized_pnl=pnl)
 
         await asyncio.sleep(0)  # yield to event loop (dashboard, etc.)
 
@@ -421,6 +504,8 @@ class TradingBot:
         expired = await self.orders.close_expired_quick_trades(self._active_signals)
         for order in expired:
             self._log_closed_trade(order, "expired")
+            realized_pnl = self._calc_realized_pnl(order)
+            self.target.record_trade(realized_pnl=realized_pnl)
 
         await asyncio.sleep(0)
 
@@ -659,6 +744,15 @@ class TradingBot:
                     logger.info("Opened {} hedge position(s)", len(hedges))
             except Exception as e:
                 logger.error("Hedge tick error: {}", e)
+
+        # 13.5 Extreme mover evaluation (every ~30s)
+        now_mono = time.monotonic()
+        if self.settings.extreme_enabled and now_mono - self._last_extreme_eval >= self.settings.extreme_eval_interval:
+            try:
+                await self._evaluate_extreme_candidates()
+                self._last_extreme_eval = now_mono
+            except Exception as e:
+                logger.error("Extreme eval error: {}", e)
 
         # 14. Write deployment status for monitor service
         try:
@@ -1139,6 +1233,8 @@ class TradingBot:
                 order = await self.orders.execute_signal(signal)
                 if order:
                     self._log_closed_trade(order, reason)
+                    realized_pnl = self._calc_realized_pnl(order)
+                    self.target.record_trade(realized_pnl=realized_pnl)
                 logger.info("Closed {} ({})", pos.symbol, reason)
             except Exception as e:
                 logger.error("Failed to close {}: {}", pos.symbol, e)
@@ -1822,6 +1918,125 @@ class TradingBot:
                     "  Wick scalp {}: {} @ {:.6f} ({:.0f}m old)", sym, ws.scalp_side, ws.entry_price, ws.age_minutes
                 )
 
+    # -- Extreme Mover Strategy (6.5) -- #
+
+    CORRELATION_MAP: dict[str, list[str]] = {
+        "BTC/USDT": ["ETH/USDT", "SOL/USDT"],
+        "ETH/USDT": ["BTC/USDT", "SOL/USDT", "LINK/USDT", "AVAX/USDT"],
+        "SOL/USDT": ["BTC/USDT", "ETH/USDT"],
+        "DOGE/USDT": ["SHIB/USDT", "PEPE/USDT", "FLOKI/USDT"],
+        "SHIB/USDT": ["DOGE/USDT", "PEPE/USDT"],
+        "PEPE/USDT": ["DOGE/USDT", "SHIB/USDT"],
+        "XRP/USDT": ["ADA/USDT", "XLM/USDT"],
+        "ADA/USDT": ["XRP/USDT", "DOT/USDT"],
+        "AVAX/USDT": ["ETH/USDT", "SOL/USDT"],
+        "LINK/USDT": ["ETH/USDT"],
+    }
+
+    async def _evaluate_extreme_candidates(self) -> None:
+        """Read extreme watchlist from shared state, approve candidates for WS subscription."""
+        watchlist = self.shared_intel.read_extreme_watchlist()
+        if not watchlist.candidates:
+            if self.extreme_watcher.active_count > 0:
+                await self.extreme_watcher.sync_watchlist({})
+            return
+
+        stale_cutoff = self.settings.extreme_stale_seconds
+        now_ts = time.time()
+        approved: dict[str, str] = {}
+        existing_position_symbols: set[str] = set()
+
+        open_symbols = set(self.orders.scaler.active_positions.keys())
+        extreme_positions = sum(1 for s in self._active_signals if s.strategy.startswith("extreme_"))
+
+        for candidate in watchlist.candidates:
+            try:
+                detected = datetime.fromisoformat(candidate.detected_at.replace("Z", "+00:00"))
+                age = now_ts - detected.timestamp()
+                if age > stale_cutoff:
+                    continue
+            except (ValueError, AttributeError):
+                continue
+
+            # Correlation check: if we hold a correlated asset, promote immediately
+            correlated = self.CORRELATION_MAP.get(candidate.symbol, [])
+            has_correlated_exposure = candidate.symbol in open_symbols or any(c in open_symbols for c in correlated)
+
+            if candidate.symbol in open_symbols:
+                existing_position_symbols.add(candidate.symbol)
+                approved[candidate.symbol] = candidate.direction
+                logger.info(
+                    "Extreme: promoting {} to WS exit-watch (already open)",
+                    candidate.symbol,
+                )
+                continue
+
+            if has_correlated_exposure:
+                existing_position_symbols.add(candidate.symbol)
+                approved[candidate.symbol] = candidate.direction
+                exposed_via = [c for c in correlated if c in open_symbols]
+                logger.info(
+                    "Extreme: promoting {} to WS (correlated with open: {})",
+                    candidate.symbol,
+                    ", ".join(exposed_via),
+                )
+                self._tighten_correlated_stops(candidate.symbol, candidate.direction, exposed_via)
+                continue
+
+            if extreme_positions >= self.settings.extreme_max_positions:
+                continue
+            if not self.target.should_trade():
+                continue
+            if len(self.orders.scaler.active_positions) >= self.settings.effective_max_concurrent_positions:
+                continue
+
+            approved[candidate.symbol] = candidate.direction
+
+        await self.extreme_watcher.sync_watchlist(approved, existing_position_symbols)
+
+        if approved:
+            logger.debug(
+                "Extreme eval: {} approved ({} exit-watch, {} entry-hunt)",
+                len(approved),
+                len(existing_position_symbols),
+                len(approved) - len(existing_position_symbols),
+            )
+
+    def _tighten_correlated_stops(self, extreme_symbol: str, direction: str, exposed_symbols: list[str]) -> None:
+        """When an extreme move happens in a correlated asset, tighten stops on our exposure."""
+        for sym in exposed_symbols:
+            ts = self.orders.trailing.get(sym)
+            if not ts:
+                continue
+            sp = self.orders.scaler.get(sym)
+            if not sp:
+                continue
+
+            pos_is_long = sp.side == "long"
+            move_is_bullish = direction == "bull"
+            is_same_direction = (pos_is_long and move_is_bullish) or (not pos_is_long and not move_is_bullish)
+
+            if is_same_direction:
+                logger.info(
+                    "Extreme move in {} aligns with {} {} — letting trailing ride",
+                    extreme_symbol,
+                    sym,
+                    sp.side,
+                )
+            else:
+                entry = sp.avg_entry_price
+                if entry > 0 and ts.current_stop > 0:
+                    if not ts.breakeven_locked:
+                        ts.current_stop = entry
+                        ts.breakeven_locked = True
+                    logger.warning(
+                        "Extreme move in {} AGAINST {} {} — tightened stop to entry {:.6f}",
+                        extreme_symbol,
+                        sym,
+                        sp.side,
+                        entry,
+                    )
+
     async def _check_daily_reset(self) -> None:
         now = datetime.now(UTC)
         if now.hour == 0 and now.minute < 2:
@@ -1840,11 +2055,6 @@ class TradingBot:
             logger.info("Total growth since start: {:.1f}%", self.target.total_growth_pct)
 
             self.analytics.refresh()
-            compound_report = self.target.compound_report()
-            compound_report += "\n\n" + self.analytics.summary()
-            if self.intel:
-                compound_report += "\n\n" + self.intel.full_summary()
-            logger.info("\n{}", compound_report)
 
             await self.notifier.send_daily_summary(
                 balance=raw_balance,
@@ -1852,7 +2062,6 @@ class TradingBot:
                 pnl_pct=self.target.todays_pnl_pct,
                 trades=self.target._todays_trades,
                 open_positions=len(positions),
-                compound_report=compound_report,
                 target_hit=self.target.target_reached,
             )
             self.risk.reset_daily(raw_balance, profit_buffer_pct=self.target.profit_buffer_pct)
@@ -1931,6 +2140,22 @@ def main() -> None:
 
         try:
             loop.run_until_complete(_run_all())
+        except KeyboardInterrupt:
+            loop.run_until_complete(bot.stop())
+        finally:
+            loop.close()
+    elif settings.dashboard_hub_url:
+        from web.command_server import start_command_server
+
+        async def _run_with_cmd_server() -> None:
+            runner = await start_command_server(bot, settings.dashboard_host, settings.dashboard_port)
+            try:
+                await bot.start()
+            finally:
+                await runner.cleanup()
+
+        try:
+            loop.run_until_complete(_run_with_cmd_server())
         except KeyboardInterrupt:
             loop.run_until_complete(bot.stop())
         finally:

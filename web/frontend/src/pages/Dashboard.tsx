@@ -1,26 +1,47 @@
 import type { FullSnapshot } from "../hooks/useWebSocket";
-import { post } from "../api/client";
+import { postBody } from "../api/client";
 import { PositionRow } from "../components/PositionRow";
 import { LogViewer } from "../components/LogViewer";
 import { useState } from "react";
 
-export function Dashboard({ data, showBotColumn = false }: { data: FullSnapshot | null; showBotColumn?: boolean }) {
+interface Props {
+  data: FullSnapshot | null;
+  showBotColumn?: boolean;
+  bots?: { bot_id: string; label: string }[];
+}
+
+export function Dashboard({ data, showBotColumn = false, bots = [] }: Props) {
   const [actionMsg, setActionMsg] = useState("");
   const [logsExpanded, setLogsExpanded] = useState(true);
+  const [actionTarget, setActionTarget] = useState("-");
+  const [bulkAction, setBulkAction] = useState("");
 
   if (!data) return <div className="empty-state">Connecting...</div>;
 
   const s = data.status;
   const pnlClass = s.daily_pnl_pct >= 0 ? "pnl-positive" : "pnl-negative";
 
-  const doAction = async (label: string, fn: () => Promise<unknown>) => {
+  const resolveTarget = (action: string): string | null => {
+    if (actionTarget === "-") {
+      const choice = prompt(`Which bot should "${action}" target?\nOptions: ${bots.map((b) => b.bot_id).join(", ")}, all`);
+      if (!choice) return null;
+      return choice.trim().toLowerCase();
+    }
+    return actionTarget;
+  };
+
+  const doAction = async (label: string, fn: (botId: string) => Promise<unknown>, progressMsg?: string) => {
+    const target = resolveTarget(label);
+    if (target === null) return;
+    if (progressMsg) setBulkAction(progressMsg);
     try {
-      await fn();
-      setActionMsg(`${label} -- OK`);
+      await fn(target);
+      setActionMsg(`${label} [${target}] -- OK`);
     } catch (e: any) {
       setActionMsg(`${label} failed: ${e.message}`);
     }
-    setTimeout(() => setActionMsg(""), 3000);
+    setBulkAction("");
+    setTimeout(() => setActionMsg(""), 4000);
   };
 
   const fmtUptime = (sec: number) => {
@@ -70,7 +91,7 @@ export function Dashboard({ data, showBotColumn = false }: { data: FullSnapshot 
                 color: "var(--text)", borderRadius: 4, cursor: "pointer",
               }}
               title="Lock in your profits: resets the house-money buffer to 0 and restores the base daily loss limit."
-              onClick={() => doAction("Lock Profits", () => post("/api/reset-profit-buffer"))}
+              onClick={() => doAction("Lock Profits", () => postBody("/api/reset-profit-buffer", {}))}
             >
               Lock Profits
             </button>
@@ -108,43 +129,61 @@ export function Dashboard({ data, showBotColumn = false }: { data: FullSnapshot 
       </div>
 
       <div className="controls">
-        <button
-          className="btn-success"
-          title="Start the trading bot tick loop; it will begin processing the trade queue and managing positions."
-          onClick={() => doAction("Start", () => post("/api/bot/start"))}
-        >
-          Start Bot
-        </button>
-        <button
-          className="btn-danger"
-          title="Stop the bot process; no new trades and no position management until started again."
-          onClick={() => doAction("Stop", () => post("/api/bot/stop"))}
-        >
-          Stop Bot
-        </button>
-        <button
-          className="btn-warning"
-          title="Temporarily halt taking new trades; bot keeps running and managing existing positions."
-          onClick={() => doAction("Halt", () => post("/api/stop-trading"))}
-        >
-          Halt Trading
-        </button>
-        <button
-          className="btn-primary"
-          title="Resume taking new trades after a halt."
-          onClick={() => doAction("Resume", () => post("/api/resume-trading"))}
-        >
-          Resume Trading
-        </button>
-        <button
-          className="btn-danger"
-          title="Close all open positions at market. Use with caution."
-          onClick={() => {
-            if (confirm("Close ALL positions?")) doAction("Close All", () => post("/api/close-all"));
+        <select
+          value={actionTarget}
+          onChange={(e) => setActionTarget(e.target.value)}
+          title="Choose which bot(s) to target with actions."
+          style={{
+            padding: "0.3rem 0.5rem",
+            borderRadius: "var(--radius)",
+            border: "1px solid var(--border)",
+            background: "var(--surface)",
+            color: "var(--text)",
+            fontSize: "0.8rem",
+            cursor: "pointer",
+            minWidth: 100,
           }}
         >
-          Close All Positions
-        </button>
+          <option value="-">—</option>
+          <option value="all">All Bots</option>
+          {bots.map((b) => (
+            <option key={b.bot_id} value={b.bot_id}>{b.label}</option>
+          ))}
+        </select>
+        {bulkAction ? (
+          <span style={{ alignSelf: "center", fontSize: "0.85rem", color: "var(--yellow)", fontWeight: 600 }}>
+            {bulkAction}
+          </span>
+        ) : (
+          <>
+            <button
+              className="btn-warning"
+              title="Temporarily halt taking new trades; bot keeps running and managing existing positions."
+              onClick={() => doAction("Halt", (id) => postBody("/api/stop-trading", { bot_id: id }), "Halting...")}
+            >
+              Halt
+            </button>
+            <button
+              className="btn-primary"
+              title="Resume taking new trades after a halt."
+              onClick={() => doAction("Resume", (id) => postBody("/api/resume-trading", { bot_id: id }), "Resuming...")}
+            >
+              Resume
+            </button>
+            <button
+              className="btn-danger"
+              title="Close all open positions at market. Use with caution."
+              onClick={() => {
+                const t = resolveTarget("Close All");
+                if (t === null) return;
+                if (confirm(`Close ALL positions on [${t}]?`))
+                  doAction("Close All", (id) => postBody("/api/close-all", { bot_id: id }), "Closing all positions...");
+              }}
+            >
+              Close All
+            </button>
+          </>
+        )}
         {actionMsg && (
           <span style={{ alignSelf: "center", fontSize: "0.85rem", color: "var(--accent)" }}>
             {actionMsg}
@@ -178,7 +217,7 @@ export function Dashboard({ data, showBotColumn = false }: { data: FullSnapshot 
             </thead>
             <tbody>
               {data.positions.map((p) => (
-                <PositionRow key={`${(p as any).bot_id || ""}:${p.symbol}`} position={p} onAction={() => {}} showBot={showBotColumn} />
+                <PositionRow key={`${(p as any).bot_id || ""}:${p.symbol}`} position={p} onAction={() => {}} showBot={showBotColumn} bulkAction={bulkAction} />
               ))}
             </tbody>
           </table>

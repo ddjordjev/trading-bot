@@ -83,9 +83,24 @@ export function App() {
         marginBottom: "0.5rem",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-          <h1 style={{ color: "var(--heading)", fontSize: "1.3rem", fontWeight: 600 }}>
-            Trade Borg
-          </h1>
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+          }}>
+            <div style={{
+              width: 36,
+              height: 36,
+              borderRadius: 8,
+              backgroundImage: "url(/trade-borg-icon.png)",
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+              flexShrink: 0,
+            }} />
+            <h1 style={{ color: "var(--heading)", fontSize: "1.3rem", fontWeight: 600 }}>
+              Trade Borg
+            </h1>
+          </div>
           <select
             value={selected}
             onChange={(e) => setSelected(e.target.value)}
@@ -154,7 +169,7 @@ export function App() {
         ))}
       </nav>
 
-      {tab === "Dashboard" && <Dashboard data={dashboardData} showBotColumn={bots.length > 1} />}
+      {tab === "Dashboard" && <Dashboard data={dashboardData} showBotColumn={bots.length > 1} bots={bots} />}
       {tab === "Intel" && <Intel wsIntel={dashboardData?.intel ?? null} />}
       {tab === "Scanner" && <Scanner />}
       {tab === "Strategies" && <Strategies bots={[]} />}

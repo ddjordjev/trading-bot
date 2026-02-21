@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections import deque
 from pathlib import Path
@@ -18,6 +19,7 @@ from web.auth import verify_token, verify_ws_token
 from web.schemas import (
     ActionResponse,
     AnalyticsSnapshot,
+    BotActionBody,
     BotInstance,
     BotStatus,
     DailyReportData,
@@ -601,6 +603,25 @@ async def get_modules(_: str = Depends(verify_token)) -> list[ModuleStatus]:
     ]
 
 
+def _compound_projection(target: Any) -> str:
+    """Single consolidated projection block for the dashboard."""
+    p = target.projected_balance
+    pct = target.daily_target_pct
+    bal = target._current_balance
+    growth = target.total_growth_pct
+    day = target._day_number
+    lines = [
+        f"  Balance: {bal:,.2f} USDT  |  Growth: {growth:+.1f}%  |  Day {day}",
+        f"  Daily target: {pct:.1f}%",
+        "",
+        "  Compound projections (if target hit daily):",
+        f"    1 week:   {p['1_week']:>12,.2f} USDT",
+        f"    1 month:  {p['1_month']:>12,.2f} USDT",
+        f"    3 months: {p['3_months']:>12,.2f} USDT",
+    ]
+    return "\n".join(lines)
+
+
 @app.get("/api/daily-report", response_model=DailyReportData)
 async def get_daily_report(_: str = Depends(verify_token)) -> DailyReportData:
     if not _bot:
@@ -613,10 +634,8 @@ async def get_daily_report(_: str = Depends(verify_token)) -> DailyReportData:
     best_day: dict[str, Any] | None = None
     worst_day: dict[str, Any] | None = None
     all_history: list[dict[str, Any]] = []
-    reports_text: list[str] = []
 
     for rpt in _bot_reports.values():
-        bid = rpt.get("bot_id", "unknown")
         daily = rpt.get("daily_report", {})
         if not daily:
             continue
@@ -634,18 +653,14 @@ async def get_daily_report(_: str = Depends(verify_token)) -> DailyReportData:
         wd = daily.get("worst_day")
         if wd and (not worst_day or wd.get("pnl_pct", 0) < worst_day.get("pnl_pct", 0)):
             worst_day = wd
-        cr = daily.get("compound_report", "")
-        if cr:
-            reports_text.append(f"=== {bid.upper()} ===\n{cr}")
-
-    if not reports_text:
+    if not all_pnl_pcts:
         # Fallback: local bot only
         t = _bot.target
         history = [r.model_dump() for r in t.history]
         best = t.best_day
         worst = t.worst_day
         return DailyReportData(
-            compound_report=t.compound_report(),
+            compound_report=_compound_projection(_bot.target),
             history=history,
             winning_days=t.winning_days,
             losing_days=t.losing_days,
@@ -657,7 +672,7 @@ async def get_daily_report(_: str = Depends(verify_token)) -> DailyReportData:
         )
 
     return DailyReportData(
-        compound_report="\n\n".join(reports_text),
+        compound_report=_compound_projection(_bot.target),
         history=all_history,
         winning_days=total_winning,
         losing_days=total_losing,
@@ -805,9 +820,25 @@ async def refresh_analytics(_: str = Depends(verify_token)) -> ActionResponse:
 
 
 @app.post("/api/bot/start", response_model=ActionResponse)
-async def bot_start(_: str = Depends(verify_token)) -> ActionResponse:
+async def bot_start(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
+    bid = (body.bot_id if body else "") or ""
     if not _bot:
         return ActionResponse(success=False, message="Bot instance not initialized")
+    if bid and not _is_local_bot(bid):
+        return await _forward_to_bot(bid, "/api/bot/start", {})
+    if bid == "all" or not bid:
+        results = []
+        if not _bot._running:
+            _background_tasks[:] = [t for t in _background_tasks if not t.done()]
+            _background_tasks.append(asyncio.create_task(_bot.start()))
+            results.append("local: starting")
+        else:
+            results.append("local: already running")
+        if not bid or bid == "all":
+            remote = await _broadcast_to_remote_bots("/api/bot/start", {})
+            if remote:
+                results.append(remote)
+        return ActionResponse(success=True, message="; ".join(results))
     if _bot._running:
         return ActionResponse(success=False, message="Bot is already running")
     _background_tasks[:] = [t for t in _background_tasks if not t.done()]
@@ -816,13 +847,23 @@ async def bot_start(_: str = Depends(verify_token)) -> ActionResponse:
 
 
 @app.post("/api/bot/stop", response_model=ActionResponse)
-async def bot_stop(_: str = Depends(verify_token)) -> ActionResponse:
+async def bot_stop(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
+    bid = (body.bot_id if body else "") or ""
     if not _bot:
         return ActionResponse(success=False, message="Bot instance not initialized")
-    if not _bot._running:
-        return ActionResponse(success=False, message="Bot is not running")
-    await _bot.stop()
-    return ActionResponse(success=True, message="Bot stopped")
+    if bid and not _is_local_bot(bid) and bid != "all":
+        return await _forward_to_bot(bid, "/api/bot/stop", {})
+    results = []
+    if _bot._running:
+        await _bot.stop()
+        results.append("local: stopped")
+    else:
+        results.append("local: already stopped")
+    if not bid or bid == "all":
+        remote = await _broadcast_to_remote_bots("/api/bot/stop", {})
+        if remote:
+            results.append(remote)
+    return ActionResponse(success=True, message="; ".join(results))
 
 
 @app.post("/api/position/close", response_model=ActionResponse)
@@ -842,6 +883,7 @@ async def close_position(body: PositionCloseBody, _: str = Depends(verify_token)
     )
     try:
         await _bot.orders.execute_signal(sig)
+        nudge_ws()
         return ActionResponse(success=True, message=f"Closed {symbol}")
     except Exception as e:
         return ActionResponse(success=False, message=str(e))
@@ -873,6 +915,7 @@ async def take_profit(body: PositionTakeProfitBody, _: str = Depends(verify_toke
             leverage=pos.leverage,
             market_type=mkt,
         )
+        nudge_ws()
         return ActionResponse(success=True, message=f"Took {pct}% profit on {symbol} ({close_amount:.6f})")
     except Exception as e:
         return ActionResponse(success=False, message=str(e))
@@ -899,35 +942,60 @@ async def tighten_stop(body: PositionTightenStopBody, _: str = Depends(verify_to
         return ActionResponse(success=False, message="No current price available")
     new_stop = pos.current_price * (1 - pct / 100) if pos.side.value == "buy" else pos.current_price * (1 + pct / 100)
     ts.current_stop = new_stop
+    nudge_ws()
     return ActionResponse(success=True, message=f"Stop tightened to {new_stop:.6f} ({pct}% from current)")
 
 
 @app.post("/api/close-all", response_model=ActionResponse)
-async def close_all(_: str = Depends(verify_token)) -> ActionResponse:
+async def close_all(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
+    bid = (body.bot_id if body else "") or ""
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
+    if bid and not _is_local_bot(bid) and bid != "all":
+        return await _forward_to_bot(bid, "/api/close-all", {})
+    results = []
     await _bot._close_all_positions("Dashboard: close all")
-    results = await _broadcast_to_remote_bots("/api/close-all", {})
-    msg = "All positions closed" + (f" ({results})" if results else "")
-    return ActionResponse(success=True, message=msg)
+    results.append("local: closed")
+    if not bid or bid == "all":
+        remote = await _broadcast_to_remote_bots("/api/close-all", {})
+        if remote:
+            results.append(remote)
+    nudge_ws()
+    return ActionResponse(success=True, message="; ".join(results))
 
 
 @app.post("/api/stop-trading", response_model=ActionResponse)
-async def stop_trading(_: str = Depends(verify_token)) -> ActionResponse:
+async def stop_trading(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
+    bid = (body.bot_id if body else "") or ""
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
+    if bid and not _is_local_bot(bid) and bid != "all":
+        return await _forward_to_bot(bid, "/api/stop-trading", {})
     _bot.target.STOP_FILE.touch()
-    await _broadcast_to_remote_bots("/api/stop-trading", {})
-    return ActionResponse(success=True, message="Trading halted on all bots")
+    results = ["local: halted"]
+    if not bid or bid == "all":
+        remote = await _broadcast_to_remote_bots("/api/stop-trading", {})
+        if remote:
+            results.append(remote)
+    nudge_ws()
+    return ActionResponse(success=True, message="; ".join(results))
 
 
 @app.post("/api/resume-trading", response_model=ActionResponse)
-async def resume_trading(_: str = Depends(verify_token)) -> ActionResponse:
+async def resume_trading(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
+    bid = (body.bot_id if body else "") or ""
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
+    if bid and not _is_local_bot(bid) and bid != "all":
+        return await _forward_to_bot(bid, "/api/resume-trading", {})
     _bot.target.STOP_FILE.unlink(missing_ok=True)
-    await _broadcast_to_remote_bots("/api/resume-trading", {})
-    return ActionResponse(success=True, message="Trading resumed on all bots")
+    results = ["local: resumed"]
+    if not bid or bid == "all":
+        remote = await _broadcast_to_remote_bots("/api/resume-trading", {})
+        if remote:
+            results.append(remote)
+    nudge_ws()
+    return ActionResponse(success=True, message="; ".join(results))
 
 
 @app.post("/api/reset-profit-buffer", response_model=ActionResponse)
@@ -1270,17 +1338,35 @@ async def receive_deposit(request: Request) -> dict[str, Any]:
 
 # --------------- WebSocket ---------------
 
+_ws_nudge: asyncio.Event | None = None
+
+
+def _get_nudge() -> asyncio.Event:
+    global _ws_nudge
+    if _ws_nudge is None:
+        _ws_nudge = asyncio.Event()
+    return _ws_nudge
+
+
+def nudge_ws() -> None:
+    """Signal all WebSocket loops to push an update immediately."""
+    evt = _get_nudge()
+    evt.set()
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     if not await verify_ws_token(websocket):
         return
     await websocket.accept()
+    nudge = _get_nudge()
     try:
         while True:
             snapshot = _build_merged_snapshot()
             await websocket.send_json(snapshot)
-            await asyncio.sleep(2)
+            nudge.clear()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(nudge.wait(), timeout=2)
     except WebSocketDisconnect:
         logger.debug("Dashboard WebSocket disconnected")
     except Exception as e:

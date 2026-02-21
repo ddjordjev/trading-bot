@@ -236,7 +236,7 @@ class TestDepositDetection:
     def test_small_fluctuation_ignored(self):
         t = DailyTargetTracker(daily_target_pct=10.0)
         t.reset_day(1000.0)
-        # $3 difference is below the noise threshold ($5)
+        # $3 difference is below the noise threshold ($50)
         t.update_balance(1003.0, unrealized_pnl=0.0)
         assert t._total_deposits == pytest.approx(0.0)
 

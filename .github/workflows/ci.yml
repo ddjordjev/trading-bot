@@ -55,7 +55,7 @@ jobs:
         run: npm run build
 
   integration-test:
-    name: Integration Tests
+    name: Binance IT
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
     needs: [test]

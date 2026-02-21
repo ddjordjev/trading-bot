@@ -109,6 +109,20 @@ class Settings(BaseSettings):
 
     short_term_max_hold_minutes: int = 60  # auto-cut non-pyramid losers after this
 
+    # Extreme mover strategy (6.5)
+    extreme_enabled: bool = True
+    extreme_min_hourly_move_pct: float = 5.0
+    extreme_min_volume_24h: float = 10_000_000.0
+    extreme_max_candidates: int = 10
+    extreme_max_positions: int = 3
+    extreme_position_size_pct: float = 3.0  # % of balance per extreme trade
+    extreme_initial_stop_pct: float = 1.5
+    extreme_trail_pct: float = 0.5
+    extreme_loser_timeout_minutes: int = 1  # kill flat/losing positions after this
+    extreme_eval_interval: int = 30  # seconds between watchlist re-evaluation
+    extreme_stale_seconds: int = 300  # drop candidates older than this
+    extreme_price_buffer_size: int = 30  # ticks to buffer per symbol for pattern detection
+
     # Major coins always get static strategies + regular queue proposals.
     # Separate from trending/scanner which only adds volatile movers.
     major_symbols: str = "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,DOGE/USDT,ADA/USDT,AVAX/USDT,LINK/USDT"

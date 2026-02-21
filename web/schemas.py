@@ -275,3 +275,7 @@ class PositionTightenStopBody(BaseModel):
     symbol: str
     pct: float = 2.0
     bot_id: str = ""
+
+
+class BotActionBody(BaseModel):
+    bot_id: str = ""

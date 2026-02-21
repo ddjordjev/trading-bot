@@ -151,7 +151,7 @@ class RiskManager:
         if signal.suggested_price and signal.suggested_price > 0:
             position_value = signal.suggested_price * self._estimate_amount(signal, balance)
             max_allowed = balance * (self.max_position_pct / 100)
-            if position_value > max_allowed:
+            if position_value > max_allowed * 1.001:
                 logger.warning("Risk REJECT {}: size ${:.0f} > max ${:.0f}", signal.symbol, position_value, max_allowed)
                 return False
 

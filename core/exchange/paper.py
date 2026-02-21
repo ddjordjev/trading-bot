@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -21,6 +22,8 @@ from core.models import (
 )
 from web.metrics import timed
 
+_TICKER_CACHE_TTL = 0.8
+
 
 class PaperExchange(BaseExchange):
     """Simulated exchange for paper trading. Wraps a real exchange for market data
@@ -33,6 +36,7 @@ class PaperExchange(BaseExchange):
         self._orders: dict[str, Order] = {}
         self._positions: list[Position] = []
         self._leverage_map: dict[str, int] = {}
+        self._ticker_cache: dict[str, tuple[float, Ticker]] = {}
 
     @property
     def name(self) -> str:
@@ -49,7 +53,12 @@ class PaperExchange(BaseExchange):
 
     @timed("exchange.fetch_ticker")
     async def fetch_ticker(self, symbol: str) -> Ticker:
-        return await self._real.fetch_ticker(symbol)
+        cached = self._ticker_cache.get(symbol)
+        if cached and (time.monotonic() - cached[0]) < _TICKER_CACHE_TTL:
+            return cached[1]
+        ticker = await self._real.fetch_ticker(symbol)
+        self._ticker_cache[symbol] = (time.monotonic(), ticker)
+        return ticker
 
     async def fetch_tickers(self, symbols: list[str] | None = None) -> list[Ticker]:
         return await self._real.fetch_tickers(symbols)
@@ -69,7 +78,7 @@ class PaperExchange(BaseExchange):
         for pos in self._positions:
             margin = pos.entry_price * pos.amount / max(pos.leverage, 1)
             try:
-                ticker = await self._real.fetch_ticker(pos.symbol)
+                ticker = await self.fetch_ticker(pos.symbol)
                 if pos.side == OrderSide.BUY:
                     pnl = (ticker.last - pos.entry_price) * pos.amount
                 else:
@@ -84,7 +93,7 @@ class PaperExchange(BaseExchange):
         targets = [p for p in self._positions if p.symbol == symbol] if symbol else list(self._positions)
         for pos in targets:
             try:
-                ticker = await self._real.fetch_ticker(pos.symbol)
+                ticker = await self.fetch_ticker(pos.symbol)
                 pos.current_price = ticker.last
                 if pos.entry_price > 0:
                     if pos.side == OrderSide.BUY:
@@ -130,7 +139,8 @@ class PaperExchange(BaseExchange):
             )
 
         try:
-            ticker = await self.fetch_ticker(symbol)
+            ticker = await self._real.fetch_ticker(symbol)
+            self._ticker_cache[symbol] = (time.monotonic(), ticker)
             fill_price = price if price and order_type != OrderType.MARKET else ticker.last
             if not fill_price or fill_price <= 0 or not math.isfinite(fill_price):
                 logger.error("[PAPER] Invalid fill price {} for {}", fill_price, symbol)

@@ -382,6 +382,12 @@ class OrderManager:
             close_side = OrderSide.SELL if sp.side == "long" else OrderSide.BUY
             market_type = MarketType(sp.market_type) if sp.market_type else MarketType.FUTURES
 
+            # Cap to exchange position size so we never request more than we have
+            # (scaler can drift from exchange e.g. rounding; over-close would full-close by mistake)
+            amount = min(amount, pos.amount)
+            if amount <= 0:
+                continue
+
             logger.info(
                 "PARTIAL TAKE on {} | closing {:.4f} ({:.0f}%) | profit: {:.2f}%",
                 symbol,
@@ -948,7 +954,9 @@ class OrderManager:
                 continue
 
             pos = pos_map.get(signal.symbol)
-            if pos and pos.pnl_pct > 1.0:
+            is_extreme = signal.strategy.startswith("extreme_")
+            profit_floor = 0.0 if is_extreme else 1.0
+            if pos and pos.pnl_pct > profit_floor:
                 logger.info(
                     "Quick trade {} expired but in profit ({:+.1f}%) -- letting trail ride", signal.symbol, pos.pnl_pct
                 )

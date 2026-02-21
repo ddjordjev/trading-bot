@@ -171,7 +171,7 @@ class DailyTargetTracker:
         expected_balance = self._day_start_balance + unrealized_pnl + self._realized_pnl_today
         unexplained = balance - expected_balance
 
-        noise_threshold = max(5.0, self._day_start_balance * 0.005)
+        noise_threshold = max(50.0, self._day_start_balance * 0.05)
 
         if abs(unexplained) > noise_threshold:
             deposit = unexplained

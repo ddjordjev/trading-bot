@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from shared.models import (
     AnalyticsSnapshot,
     BotDeploymentStatus,
+    ExtremeWatchlist,
     IntelSnapshot,
     TradeQueue,
 )
@@ -116,6 +117,16 @@ class SharedState:
             return (datetime.now(UTC) - updated).total_seconds()
         except Exception:
             return 999999
+
+    # ---- Extreme watchlist (written by monitor, read by bot) ---- #
+
+    def write_extreme_watchlist(self, watchlist: ExtremeWatchlist) -> None:
+        watchlist.updated_at = datetime.now(UTC).isoformat()
+        self._write(self._data_dir / "extreme_watchlist.json", watchlist)
+
+    def read_extreme_watchlist(self) -> ExtremeWatchlist:
+        s = self._read(self._data_dir / "extreme_watchlist.json", ExtremeWatchlist)
+        return s or ExtremeWatchlist()
 
     # ---- Analytics state (written by analytics service, read by bot) ---- #
 

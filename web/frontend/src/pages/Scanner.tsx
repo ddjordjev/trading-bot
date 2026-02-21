@@ -51,11 +51,6 @@ export function Scanner() {
     <div>
       <h3 style={{ color: "var(--heading)", marginBottom: "0.5rem" }}>
         Trade Queue ({tradeQueue.length})
-        {tradeQueue.length > 0 && (
-          <span style={{ fontSize: "0.8rem", fontWeight: 400, color: "var(--text-muted)", marginLeft: 8 }}>
-            {tradeQueue.filter(p => p.status === "pending").length} pending · {tradeQueue.filter(p => p.status === "consumed").length} consumed · {tradeQueue.filter(p => p.status === "rejected").length} rejected
-          </span>
-        )}
       </h3>
       {tradeQueue.length === 0 ? (
         <div className="empty-state" style={{ marginBottom: "1.5rem" }}>No proposals yet</div>

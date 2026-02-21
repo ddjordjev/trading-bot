@@ -95,10 +95,12 @@ method_errors = Counter(
 
 # ── Application: tick-level metrics ───────────────────────────────────────────
 
+TICK_BUCKETS = (0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0)
+
 _tick_duration = Histogram(
     "bot_tick_duration_seconds",
     "Full tick loop execution time",
-    buckets=DURATION_BUCKETS,
+    buckets=TICK_BUCKETS,
     registry=registry,
 )
 _tick_total = Counter("bot_ticks_total", "Total ticks executed", registry=registry)

@@ -6,6 +6,7 @@ interface Props {
   position: PositionInfo & { bot_id?: string; exchange_name?: string };
   onAction: () => void;
   showBot?: boolean;
+  bulkAction?: string;
 }
 
 const BOT_COLORS: Record<string, string> = {
@@ -14,9 +15,10 @@ const BOT_COLORS: Record<string, string> = {
   swing: "#a371f7",
 };
 
-export function PositionRow({ position: p, onAction, showBot = false }: Props) {
+export function PositionRow({ position: p, onAction, showBot = false, bulkAction = "" }: Props) {
   const [loading, setLoading] = useState("");
   const [feedback, setFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [closed, setClosed] = useState(false);
 
   const act = async (action: string, fn: () => Promise<{ success: boolean; message: string }>) => {
     setLoading(action);
@@ -24,12 +26,15 @@ export function PositionRow({ position: p, onAction, showBot = false }: Props) {
     try {
       const res = await fn();
       setFeedback({ ok: res.success, msg: res.message });
-      if (res.success) onAction();
+      if (res.success) {
+        if (action === "close") setClosed(true);
+        onAction();
+      }
     } catch (e: any) {
       setFeedback({ ok: false, msg: e?.message || "Request failed" });
     }
     setLoading("");
-    setTimeout(() => setFeedback(null), 5000);
+    if (!closed) setTimeout(() => setFeedback(null), 5000);
   };
 
   const pnlClass = p.pnl_pct >= 0 ? "pnl-positive" : "pnl-negative";
@@ -107,7 +112,7 @@ export function PositionRow({ position: p, onAction, showBot = false }: Props) {
             const s = p.side.toLowerCase();
             const isLong = s === "long" || s === "buy";
             const diff = isLong ? p.stop_loss - e : e - p.stop_loss;
-            label = diff > tick ? "PR" : diff >= 0 ? "BE" : "LO";
+            label = diff > tick ? "PR" : diff > 0 ? "BE" : "LO";
           }
           const color = label === "PR" ? "var(--green)" : label === "LO" ? "var(--red)" : "var(--yellow)";
           return (
@@ -132,47 +137,59 @@ export function PositionRow({ position: p, onAction, showBot = false }: Props) {
           : `${(p.age_minutes / 60).toFixed(1)}h`}
       </td>
       <td>
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
-          <button
-            className="btn-danger"
-            title="Close this position at market."
-            disabled={!!loading}
-            onClick={() => act("close", () => postBody("/api/position/close", { symbol: p.symbol, bot_id: botId }))}
-          >
-            {loading === "close" ? "..." : "Close"}
-          </button>
-          <button
-            className="btn-warning"
-            title="Take profit: close 25% of this position at market."
-            style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
-            disabled={!!loading}
-            onClick={() =>
-              act("tp25", () => postBody("/api/position/take-profit", { symbol: p.symbol, pct: 25, bot_id: botId }))
-            }
-          >
-            {loading === "tp25" ? "..." : "25%"}
-          </button>
-          <button
-            className="btn-primary"
-            title="Tighten trailing stop (move stop loss closer to current price)."
-            style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
-            disabled={!!loading}
-            onClick={() =>
-              act("stop", () => postBody("/api/position/tighten-stop", { symbol: p.symbol, pct: 2, bot_id: botId }))
-            }
-          >
-            {loading === "stop" ? "..." : "Tighten"}
-          </button>
-        </div>
-        {feedback && (
-          <div style={{
-            marginTop: 4,
-            fontSize: "0.7rem",
-            fontWeight: 600,
-            color: feedback.ok ? "var(--green)" : "var(--red)",
-          }}>
-            {feedback.msg}
+        {closed ? (
+          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--green)" }}>
+            Closed
           </div>
+        ) : bulkAction ? (
+          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--yellow)" }}>
+            {bulkAction}
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
+              <button
+                className="btn-danger"
+                title="Close this position at market."
+                disabled={!!loading}
+                onClick={() => act("close", () => postBody("/api/position/close", { symbol: p.symbol, bot_id: botId }))}
+              >
+                {loading === "close" ? "..." : "Close"}
+              </button>
+              <button
+                className="btn-warning"
+                title="Take profit: close 25% of this position at market."
+                style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
+                disabled={!!loading}
+                onClick={() =>
+                  act("tp25", () => postBody("/api/position/take-profit", { symbol: p.symbol, pct: 25, bot_id: botId }))
+                }
+              >
+                {loading === "tp25" ? "..." : "25%"}
+              </button>
+              <button
+                className="btn-primary"
+                title="Tighten trailing stop (move stop loss closer to current price)."
+                style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
+                disabled={!!loading}
+                onClick={() =>
+                  act("stop", () => postBody("/api/position/tighten-stop", { symbol: p.symbol, pct: 2, bot_id: botId }))
+                }
+              >
+                {loading === "stop" ? "..." : "Tighten"}
+              </button>
+            </div>
+            {feedback && (
+              <div style={{
+                marginTop: 4,
+                fontSize: "0.7rem",
+                fontWeight: 600,
+                color: feedback.ok ? "var(--green)" : "var(--red)",
+              }}>
+                {feedback.msg}
+              </div>
+            )}
+          </>
         )}
       </td>
     </tr>

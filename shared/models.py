@@ -313,3 +313,28 @@ class AnalyticsSnapshot(BaseModel):
     suggestions: list[dict[str, Any]] = []
     total_trades_logged: int = 0
     updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
+# ---------------------------------------------------------------------------
+#  Extreme mover watchlist (monitor -> bot via shared state)
+# ---------------------------------------------------------------------------
+
+
+class ExtremeCandidate(BaseModel):
+    """A single extreme mover identified by the monitor."""
+
+    symbol: str
+    direction: str = "bull"  # "bull" or "bear"
+    change_1h: float = 0.0
+    change_5m: float = 0.0
+    volume_24h: float = 0.0
+    momentum_score: float = 0.0
+    reason: str = ""
+    detected_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
+class ExtremeWatchlist(BaseModel):
+    """Written by monitor, read by trading bots."""
+
+    candidates: list[ExtremeCandidate] = []
+    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
