@@ -490,7 +490,8 @@ class TradingBot:
 
         positions = await self.exchange.fetch_positions()
         total_unrealized = sum(p.unrealized_pnl for p in positions if p.amount > 0)
-        deposit_amount = self.target.update_balance(raw_balance, unrealized_pnl=total_unrealized)
+        unrealized_for_deposit = None if self.settings.is_paper_local() else total_unrealized
+        deposit_amount = self.target.update_balance(raw_balance, unrealized_pnl=unrealized_for_deposit)
         if deposit_amount is not None:
             balance_before = raw_balance - deposit_amount
             await self._push_deposit_to_hub(deposit_amount, balance_before, raw_balance)
@@ -2319,7 +2320,8 @@ class TradingBot:
             raw_balance = balance_map.get("USDT", 0.0)
             positions = await self.exchange.fetch_positions()
             total_unrealized = sum(p.unrealized_pnl for p in positions if p.amount > 0)
-            dep = self.target.update_balance(raw_balance, unrealized_pnl=total_unrealized)
+            unrealized_for_dep = None if self.settings.is_paper_local() else total_unrealized
+            dep = self.target.update_balance(raw_balance, unrealized_pnl=unrealized_for_dep)
             if dep is not None:
                 await self._push_deposit_to_hub(dep, raw_balance - dep, raw_balance)
 

@@ -93,6 +93,8 @@ services:
       - BOT_ID=meanrev
       - BOT_STYLE=meanrev
       - BOT_STRATEGIES=bollinger,mean_reversion
+      - TICK_INTERVAL_IDLE=120
+      - TICK_INTERVAL_ACTIVE=60
       - DASHBOARD_ENABLED=false
       - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
@@ -111,6 +113,8 @@ services:
       - BOT_ID=swing
       - BOT_STYLE=swing
       - BOT_STRATEGIES=swing_opportunity,grid
+      - TICK_INTERVAL_IDLE=600
+      - TICK_INTERVAL_ACTIVE=300
       - DASHBOARD_ENABLED=false
       - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
@@ -131,6 +135,8 @@ services:
       - BOT_STRATEGIES=compound_momentum,market_open_volatility
       - DEFAULT_LEVERAGE=20
       - MAX_CONCURRENT_POSITIONS=10
+      - TICK_INTERVAL_IDLE=30
+      - TICK_INTERVAL_ACTIVE=30
       - EXTREME_ENABLED=true
       - EXTREME_MAX_POSITIONS=10
       - EXTREME_POSITION_SIZE_PCT=10.0

@@ -27,11 +27,18 @@ isn't on PATH.
 When fixing build failures (lint, formatting, type errors, test failures)
 caused by a commit you just made:
 
+**If the commit has NOT been merged to master yet:**
 1. Fix the issue
 2. `git add -A && git commit --amend --no-edit`
 3. `git push --force origin develop`
 
-Build fixes are never separate commits.
+**If the commit HAS already been merged to master:**
+NEVER amend — it rewrites a commit master already has, breaking the
+ancestor chain. Instead:
+1. Fix the issue
+2. `git add -A && git commit -m "fix: ..."` — genuine new commit
+3. `git push origin develop`
+4. When CI is green, squash before merging (see Merging section)
 
 ## New Features / Changes
 
@@ -58,31 +65,47 @@ Both run in one go, no questions asked.
 
 ## Merging develop → master
 
-Develop is always one squashed commit ahead of master (via `csp`).
-Merging is a **fast-forward** — zero conflicts, zero merge commits:
+**The goal: master gets exactly one new commit per merge.**
+
+The squash exists to collapse N commits on develop into 1 commit on top
+of master. You need genuine commits ahead of master first — don't squash
+when develop and master point at the same commit (there's nothing to
+squash).
+
+**Full sequence — only when CI is green:**
 
 ```bash
+# 1. Squash: collapse all commits since master into one
+git checkout develop
+git reset --soft master && git commit -m "descriptive message"
+git push --force origin develop
+
+# 2. Fast-forward master to that one commit
 git checkout master
-git merge develop
+git merge develop          # always a clean fast-forward
 git push origin master
 git checkout develop
 ```
 
-**CRITICAL**: Only merge to master AFTER all work is done and CI is
-green. Never merge, then amend develop — that diverges the branches.
+**CRITICAL**: Only merge to master AFTER CI is green. Never merge first,
+then fix on develop — that creates a commit on master that develop will
+later rewrite, breaking the ancestor chain.
 
 If branches somehow diverge, fix with:
 ```bash
-git checkout master
-git reset --hard develop
-git push --force origin master
+git checkout develop
+git reset --soft master && git commit -m "..."
+git push --force origin develop
+# now develop is 1 commit ahead — safe to fast-forward
+git checkout master && git merge develop && git push origin master
 git checkout develop
 ```
 
 ## Rules
 
-- Only amend commits you created in the current session
+- Only amend commits you created in the current session AND not yet in master
 - Only force push to `develop` (force push `master` only to fix divergence)
 - Merge to master = fast-forward only, never `--squash`
-- Never merge to master mid-work — finish everything first
+- Never merge to master mid-work — finish everything, wait for green CI
+- Never amend a commit that master already has — make a new commit instead
 - Never run exploratory git commands — you know what you changed

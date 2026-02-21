@@ -41,6 +41,8 @@ ALL_PROFILES: list[BotProfile] = [
         env_overrides={
             "DEFAULT_LEVERAGE": "20",
             "MAX_CONCURRENT_POSITIONS": "10",
+            "TICK_INTERVAL_IDLE": "30",
+            "TICK_INTERVAL_ACTIVE": "30",
             "EXTREME_ENABLED": "true",
             "EXTREME_MAX_POSITIONS": "10",
             "EXTREME_POSITION_SIZE_PCT": "10.0",
@@ -75,6 +77,10 @@ ALL_PROFILES: list[BotProfile] = [
         description="Bollinger Band breakouts and mean reversion on extended moves",
         style="meanrev",
         strategies=["bollinger", "mean_reversion"],
+        env_overrides={
+            "TICK_INTERVAL_IDLE": "120",
+            "TICK_INTERVAL_ACTIVE": "60",
+        },
         is_default=True,
     ),
     BotProfile(
@@ -83,6 +89,10 @@ ALL_PROFILES: list[BotProfile] = [
         description="Multi-day swing trades and grid trading with fixed intervals",
         style="swing",
         strategies=["swing_opportunity", "grid"],
+        env_overrides={
+            "TICK_INTERVAL_IDLE": "600",
+            "TICK_INTERVAL_ACTIVE": "300",
+        },
         is_default=True,
     ),
     BotProfile(
