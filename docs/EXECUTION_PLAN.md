@@ -2,16 +2,19 @@
 
 ## Goal
 
-Run the bot on Binance testnet for 10+ continuous days starting with $100.
+Run 5 trading bots on Binance testnet for 10+ continuous days, each starting
+with $1,000 (total system capital: $5,000). A 6th container (the Hub) runs
+with $0 balance — it handles dashboard, coordination, and trade persistence
+only.
+
 The agent operating this plan has full autonomy to add, remove, or reconfigure
 strategies at any time based on observed results. The only hard constraints are:
 
-1. **Starting capital: $100** (SESSION_BUDGET=100)
-2. **Don't blow up** — if balance drops below $60, halt and reassess.
-   If the account hits $0 (or near-zero), **don't panic and don't force it**.
-   Log what happened, analyze why, archive the attempt, reset SESSION_BUDGET
-   back to $100, and start a brand new 10-day session with adjusted
-   strategies/params based on what you learned. Each blown account is a
+1. **Starting capital: $1,000 per bot × 5 bots = $5,000 total**
+   (SESSION_BUDGET=1000 per bot, hub SESSION_BUDGET=0)
+2. **Don't blow up** — if any bot's balance drops below $600, halt it and
+   reassess. If a bot hits $0, log what happened, analyze why, archive
+   the attempt, and restart that bot with $1,000. Each blown account is a
    lesson, not a failure — but never repeat the same mistake twice.
 3. **Write reports** — daily snapshot + a final summary at the end
 4. **Fix what breaks** — if something crashes, fix it, **reset the 10-day
@@ -23,6 +26,32 @@ strategies at any time based on observed results. The only hard constraints are:
 Everything else — which strategies to run, when to change them, leverage,
 risk params, symbols — is at the agent's discretion. Use the analytics
 engine, trade DB, and logs to make data-driven decisions.
+
+### Default Bots (5 active)
+
+| Bot | Profile | Strategies | Style |
+|-----|---------|-----------|-------|
+| bot-extreme | Extreme Mover | compound_momentum, market_open_volatility | momentum |
+| bot-momentum | Momentum | compound_momentum, market_open_volatility | momentum |
+| bot-indicators | Technical Indicators | rsi, macd | momentum |
+| bot-meanrev | Mean Reversion | bollinger, mean_reversion | meanrev |
+| bot-swing | Swing / Grid | swing_opportunity, grid | swing |
+
+### Idle Bots (can be activated from Settings page)
+
+| Bot | Profile |
+|-----|---------|
+| bot-scalper | Scalper |
+| bot-fullstack | Full Stack |
+| bot-conservative | Conservative |
+| bot-aggressive | Aggressive |
+| bot-hedger | Hedge Heavy |
+
+### Hub (no trading)
+
+| Container | Role | Balance |
+|-----------|------|---------|
+| bot-hub | Dashboard, coordination, trade persistence (hub.db) | $0 |
 
 ### Trading Modes
 
@@ -41,37 +70,66 @@ the code without touching the exchange. Once all checks pass, switch to
 
 **The 10-day run** uses `paper_live` (TRADING_MODE=paper_live). Orders are
 placed on Binance testnet — you can see them on demo.binance.com. The
-testnet pre-funds accounts with $5,000–$10,000 USDT. SESSION_BUDGET=100
-caps the bot's usable balance to $100 (it won't use the full $5K+).
-Trade PnL is tracked per-trade in `hub.db` (via the hub) and the daily target tracker.
+testnet pre-funds accounts with $5,000–$10,000 USDT. SESSION_BUDGET=1000
+caps each bot's usable balance to $1,000. The hub runs with SESSION_BUDGET=0
+(no trading). Trade PnL is tracked per-trade in `hub.db` (via the hub) and
+the daily target tracker.
 
-To reset after a blown account: update the .env to change the SESSION_BUDGET
-or restart to re-read config.
+To reset after a blown bot: restart that specific container. It re-reads
+SESSION_BUDGET=1000 and starts fresh with a new PaperExchange balance.
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────┐    ┌──────────────┐    ┌──────────────────┐
-│   trading-bot    │    │   monitor    │    │    analytics     │
-│   (bot.py)       │◄──►│ (run_monitor)│◄──►│ (run_analytics)  │
-│                  │    │              │    │                  │
-│ - Strategies     │    │ - Intel feeds│    │ - Strategy scores│
-│ - Order mgmt     │    │ - Trade queue│    │ - Patterns       │
-│ - Risk mgmt      │    │ - Scanning   │    │ - Suggestions    │
-│ - Dashboard:9035 │    │              │    │                  │
-└────────┬─────────┘    └──────┬───────┘    └────────┬─────────┘
-         │                     │                     │
-         └─────────── data/ (shared JSON + SQLite) ──┘
+┌─────────────────────────────────────────────────────────────┐
+│                     bot-hub ($0, no trading)                 │
+│  Dashboard :9035 ◄── browser                                │
+│  /internal/report ◄── trading bots POST snapshots + reads   │
+│  hub.db (sole persistent trade DB)                          │
+│  Reads/writes shared JSON on behalf of bots                 │
+└────────┬───────────────────────────────────────┬────────────┘
+         │  HTTP POST/response                   │
+    ┌────┴────────────────────────┐              │
+    │  5 trading bots (in-memory) │              │
+    │  bot-extreme   $1000        │              │
+    │  bot-momentum  $1000        │              │
+    │  bot-indicators $1000       │              │
+    │  bot-meanrev   $1000        │              │
+    │  bot-swing     $1000        │              │
+    │  (+ 5 idle containers)      │              │
+    │                             │              │
+    │  Each bot:                  │              │
+    │  - Strategies + Orders      │              │
+    │  - Risk mgmt + Exchange     │    ┌────────┴──────────┐
+    │  - Zero file I/O            │    │  data/ (shared vol)│
+    │  - Reports to hub via HTTP  │    │  intel_state.json  │
+    └─────────────────────────────┘    │  analytics_state   │
+                                       │  trade_queue.json  │
+    ┌──────────────┐  ┌──────────────┐ │  bot_status.json   │
+    │   monitor    │  │  analytics   │ │  hub.db            │
+    │ - Intel feeds│  │ - Scores     │ │                    │
+    │ - Scanning   │  │ - Patterns   │ └────────────────────┘
+    │ - Queue gen  │  │ - Feedback   │        ▲
+    └──────┬───────┘  └──────┬───────┘        │
+           └─────────────────┴────── read/write ┘
 ```
 
-**IPC via files in `data/`:**
-- `bot_status.json` — bot writes, monitor reads
-- `intel_state.json` — monitor writes, bot reads
-- `analytics_state.json` — analytics writes, bot reads
-- `trade_queue.json` — monitor writes proposals, bot reads/executes
-- `hub.db` — SQLite trade history (hub writes, analytics reads; bots push via HTTP)
+**Data flow:**
+- Trading bots are **stateless** — in-memory only, zero file access
+- All shared data (intel, analytics, trade queue, extreme watchlist) flows
+  through the hub's `/internal/report` HTTP endpoint
+- Bots POST their snapshots to hub → hub writes to shared volume on their behalf
+- Hub reads intel/analytics/queue from shared volume → returns in HTTP response
+- `hub.db` is the sole persistent trade DB; bots push trades via HTTP
+
+**Shared files in `data/` (hub + monitor + analytics read/write):**
+- `bot_status.json` — hub writes (proxied from bots), monitor reads
+- `intel_state.json` — monitor writes, hub reads (proxied to bots)
+- `analytics_state.json` — analytics writes, hub reads (proxied to bots)
+- `trade_queue.json` — monitor writes proposals, hub reads (proxied to bots)
+- `hub.db` — SQLite trade history (hub writes, analytics reads)
 
 **Logs:** `logs/` directory (1-day rotation, 30-day retention)
 
@@ -98,7 +156,7 @@ All use PYRAMID mode (DCA in): start small → DCA on dips → lever up on recov
 
 ### Mindset
 
-You are a trading desk operator. You have 10 days and $100. Your job is to:
+You are a trading desk operator. You have 10 days and $5,000 across 5 bots. Your job is to:
 - Keep the system running 24/7
 - Watch what the strategies are doing
 - Cut what's losing, double down on what's working
@@ -140,13 +198,14 @@ is ranging and grid trading looks promising, try it. Be adaptive.
 
 ### What "Working" Means
 
-- **Minimum:** Balance stays above $60 after 10 days (didn't blow up)
-- **Good:** Balance grows to $120+ (20% over 10 days)
-- **Great:** Consistent daily positive PnL, even if small
-- **Target:** Hit the 10% daily target at least a few times
+- **Minimum:** Total balance stays above $3,000 after 10 days (didn't blow up)
+- **Good:** Total balance grows to $6,000+ (20% over 10 days)
+- **Great:** Consistent daily positive PnL across most bots, even if small
+- **Target:** Hit the 10% daily target at least a few times per bot
 
 Even if we lose money, the data is valuable. Knowing which strategies
 fail and under what conditions is just as important as finding winners.
+Comparing performance across bots reveals which strategy combos work best.
 
 ---
 
@@ -227,8 +286,10 @@ docker compose logs --tail 20 analytics
 Verify:
 - No crash loops or repeating errors
 - Dashboard loads at http://localhost:9035
-- Bot connects to Binance testnet (look for "Connected to binance" in logs)
-- Balance shows ~$100 (SESSION_BUDGET, not testnet's $5,000+)
+- All 5 trading bots + hub show healthy in `docker compose ps`
+- Each bot connects to Binance testnet (check per-bot logs)
+- Dashboard total balance shows ~$5,000 (5 × $1,000; hub excluded)
+- Hub balance is $0
 - Monitor is writing `data/intel_state.json` (intel feeds polling)
 - Analytics is writing `data/analytics_state.json`
 
@@ -286,10 +347,10 @@ docker compose up -d
 
 ### Step 3: Verify
 - Dashboard loads at http://localhost:9035
-- All 3 services healthy: `docker compose ps`
-- Bot connects to Binance testnet (check logs)
-- Balance shows ~$100 (capped from testnet's $5000+)
-- Strategies are registered (check Strategies tab)
+- All containers healthy: `docker compose ps`
+- 5 trading bots + hub + monitor + analytics running
+- Total balance ~$5,000 (5 × $1,000 per bot; hub $0)
+- Each bot has its strategies registered (check Strategies tab / dropdown)
 - Check demo.binance.com — trades should appear there
 
 ### Step 4: Watch
@@ -476,7 +537,7 @@ TRADING_MODE=paper_local
 # TRADING_MODE=paper_live
 EXCHANGE=binance
 ALLOWED_MARKET_TYPES=spot,futures
-SESSION_BUDGET=100
+SESSION_BUDGET=1000          # $1,000 per trading bot (hub overrides to $0)
 DEFAULT_LEVERAGE=10
 
 MAX_POSITION_SIZE_PCT=5
@@ -488,6 +549,10 @@ MAX_CONCURRENT_POSITIONS=3
 NOTIFY_EMAIL=damirdjordjev@gmail.com
 NOTIFICATIONS_ENABLED=liquidation,stop_loss,spike_detected,daily_summary
 ```
+
+**Per-bot overrides** are set in `docker-compose.yml` via environment
+variables. The hub has `SESSION_BUDGET=0` hardcoded. Individual bots
+(e.g. bot-extreme) can override leverage, risk, and strategy params.
 
 ---
 

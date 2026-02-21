@@ -34,6 +34,7 @@ services:
       - BOT_ID=hub
       - BOT_STYLE=momentum
       - HUB_ONLY=true
+      - SESSION_BUDGET=0
       - DASHBOARD_PORT=9035
     ports:
       - "${DASHBOARD_PORT:-9035}:9035"

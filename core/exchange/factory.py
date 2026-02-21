@@ -88,7 +88,10 @@ def create_exchange(settings: Settings) -> BaseExchange:
         settings.trading_mode = "paper_local"
 
     if settings.is_paper_local():
-        budget = settings.session_budget if settings.session_budget > 0 else 10_000.0
+        if settings.hub_only:
+            budget = 0.0
+        else:
+            budget = settings.session_budget if settings.session_budget > 0 else 10_000.0
         logger.info("Paper LOCAL: simulated balance ${:.2f} (no orders hit exchange)", budget)
         return PaperExchange(real_exchange, starting_balance=budget)
 
