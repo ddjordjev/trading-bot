@@ -5,17 +5,42 @@ alwaysApply: true
 
 # Data Protection
 
-**NEVER delete, reset, or wipe persisted databases or data unless the user
-explicitly tells you to.**
+## Persistent DBs — NEVER touch
+
+These contain trade history and analytics. Never delete, reset, or wipe
+them unless the user **explicitly** says to:
+
+- `*/trades.db` (+ `-shm`, `-wal`) — per-bot trade history
+- `hub.db` (+ `-shm`, `-wal`) — hub analytics DB
+- Docker volumes: `loki-data`, `prometheus-data`, `grafana-data`
+
+## Ephemeral state — WIPE on rebuild
+
+These are runtime state files that get recreated on startup. Always clean
+them when rebuilding/redeploying:
+
+- `**/bot_status.json` — runtime status
+- `**/trade_queue.json`, `**/trade_queue.lock` — queue state
+- `**/exchange_symbols.json` — symbol cache
+- `analytics_state.json`, `intel_state.json` — service state
+- `extreme_watchlist.json` — watchlist cache
+- `bot_registry.json` — hub bot registry
+
+## Rebuild procedure
+
+```bash
+docker compose up -d --build
+# Wipe ephemeral state inside the data volume:
+docker compose exec bot-momentum sh -c \
+  'find /app/data -name "*.json" -o -name "*.lock" | xargs rm -f'
+# Restart so containers rebuild fresh state:
+docker compose restart
+```
 
 ## Rules
 
 1. `docker compose down` is fine. `docker compose down -v` is **FORBIDDEN**
-   unless the user says to wipe volumes.
-2. Never `rm -rf data/`, `rm data/*.db`, or similar.
-3. Never `DROP TABLE`, `DELETE FROM`, or truncate any SQLite/Postgres data.
-4. When rebuilding/redeploying, use `docker compose up -d --build` — this
-   recreates containers but preserves named volumes.
-5. Named volumes (`bot-data`, `bot-logs`, `loki-data`, `grafana-data`,
-   `prometheus-data`) contain live trading data. Treat them as production.
-6. If a migration or schema change needs data changes, ask first.
+   unless the user explicitly says to wipe volumes.
+2. Never `rm` any `.db` file or run `DROP TABLE` / `DELETE FROM`.
+3. Never add `-v` to teardown commands.
+4. If a migration or schema change needs data changes, ask first.

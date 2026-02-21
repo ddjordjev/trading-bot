@@ -1875,7 +1875,7 @@ class TestBotProfiles:
         set_bot(mock_bot)
         r = await client.get("/api/bot-profiles")
         data = r.json()
-        hub = next(p for p in data if p["id"] == "momentum")
+        hub = next(p for p in data if p["id"] == "hub")
         assert hub["is_hub"] is True
         non_hub = [p for p in data if not p["is_hub"]]
         assert len(non_hub) >= 9
@@ -1883,7 +1883,7 @@ class TestBotProfiles:
     async def test_toggle_hub_rejected(self, client, mock_bot):
         set_bot(mock_bot)
         with patch("web.docker_manager.DOCKER_AVAILABLE", True):
-            r = await client.post("/api/bot-profile/momentum/toggle")
+            r = await client.post("/api/bot-profile/hub/toggle")
         assert r.status_code == 200
         data = r.json()
         assert data["success"] is False

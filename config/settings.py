@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     bot_id: str = ""
     bot_strategies: str = ""
     bot_style: str = "momentum"  # momentum / meanrev / swing — determines queue routing
+    hub_only: bool = False  # True = dashboard/coordination only, no trading
 
     exchange: str = "mexc"
 

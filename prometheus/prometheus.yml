@@ -3,6 +3,13 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
+  - job_name: "bot-hub"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["bot-hub:9035"]
+        labels:
+          bot_id: "hub"
+
   - job_name: "bot-momentum"
     metrics_path: /metrics
     static_configs:

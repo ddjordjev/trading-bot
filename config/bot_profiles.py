@@ -1,8 +1,8 @@
 """Bot profile definitions for dynamic container management.
 
 Each profile maps to a Docker container configuration. The hub
-(bot-momentum) can spin up / tear down profiles at runtime via
-the Docker socket.
+(bot-hub) can spin up / tear down profiles at runtime via the
+Docker socket. The hub itself is infrastructure-only (no trading).
 """
 
 from __future__ import annotations
@@ -24,13 +24,21 @@ class BotProfile:
 
 ALL_PROFILES: list[BotProfile] = [
     BotProfile(
+        id="hub",
+        display_name="Hub",
+        description="Dashboard and coordination — no trading",
+        style="momentum",
+        strategies=[],
+        is_default=True,
+        is_hub=True,
+    ),
+    BotProfile(
         id="momentum",
         display_name="Momentum",
         description="Trend-following with compounding momentum and market-open volatility",
         style="momentum",
         strategies=["compound_momentum", "market_open_volatility"],
         is_default=True,
-        is_hub=True,
     ),
     BotProfile(
         id="indicators",

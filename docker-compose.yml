@@ -27,7 +27,30 @@ x-bot-common: &bot-common
       max-file: "5"
 
 services:
-  # ---- Bot 1: Momentum / trend-following (HUB — runs dashboard) ----
+  # ---- HUB: Dashboard & coordination only (no trading) ----
+  bot-hub:
+    <<: *bot-common
+    container_name: bot-hub
+    environment:
+      - TZ=UTC
+      - BOT_ID=hub
+      - BOT_STYLE=momentum
+      - HUB_ONLY=true
+      - DASHBOARD_PORT=9035
+    ports:
+      - "${DASHBOARD_PORT:-9035}:9035"
+    volumes:
+      - bot-data:/app/data
+      - bot-logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
+  # ---- Bot 1: Momentum / trend-following ----
   bot-momentum:
     <<: *bot-common
     container_name: bot-momentum
@@ -36,13 +59,8 @@ services:
       - BOT_ID=momentum
       - BOT_STYLE=momentum
       - BOT_STRATEGIES=compound_momentum,market_open_volatility
-      - DASHBOARD_PORT=9035
-    ports:
-      - "${DASHBOARD_PORT:-9035}:9035"
-    volumes:
-      - bot-data:/app/data
-      - bot-logs:/app/logs
-      - /var/run/docker.sock:/var/run/docker.sock
+      - DASHBOARD_ENABLED=false
+      - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
       interval: 30s
@@ -60,7 +78,7 @@ services:
       - BOT_STYLE=momentum
       - BOT_STRATEGIES=rsi,macd
       - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-momentum:9035
+      - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
       interval: 30s
@@ -78,7 +96,7 @@ services:
       - BOT_STYLE=meanrev
       - BOT_STRATEGIES=bollinger,mean_reversion
       - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-momentum:9035
+      - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
       interval: 30s
@@ -96,7 +114,7 @@ services:
       - BOT_STYLE=swing
       - BOT_STRATEGIES=swing_opportunity,grid
       - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-momentum:9035
+      - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
       interval: 30s
@@ -125,7 +143,7 @@ services:
       - INITIAL_RISK_AMOUNT=100
       - TAKE_PROFIT_PCT=8
       - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-momentum:9035
+      - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
       interval: 30s
@@ -231,7 +249,7 @@ services:
     volumes:
       - prometheus-data:/prometheus
     depends_on:
-      bot-momentum:
+      bot-hub:
         condition: service_healthy
     logging:
       driver: "json-file"

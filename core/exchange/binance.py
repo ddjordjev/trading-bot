@@ -283,6 +283,10 @@ class BinanceExchange(BaseExchange):
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
+                    msg = str(e)
+                    if "not supported" in msg.lower():
+                        logger.warning("watchTicker not supported for {} — unsubscribing", symbol)
+                        break
                     logger.error("Ticker watch error for {}: {}", symbol, e)
                     await asyncio.sleep(5)
 

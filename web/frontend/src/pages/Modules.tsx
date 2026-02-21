@@ -30,7 +30,6 @@ export function Modules() {
 
   return (
     <div>
-      <h3 style={{ color: "var(--heading)", marginBottom: "1rem" }}>Modules</h3>
       <div className="module-grid">
         {modules.map((m) => (
           <div className="module-card" key={m.name}>

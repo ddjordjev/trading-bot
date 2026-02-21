@@ -88,15 +88,19 @@ export function App() {
             alignItems: "center",
             gap: "0.5rem",
           }}>
-            <div style={{
-              width: 36,
-              height: 36,
-              borderRadius: 8,
-              backgroundImage: "url(/trade-borg-icon.png)",
-              backgroundSize: "cover",
-              backgroundPosition: "center",
-              flexShrink: 0,
-            }} />
+            <img
+              src="/trade-borg-icon.png"
+              alt=""
+              style={{
+                width: 36,
+                height: 36,
+                borderRadius: 8,
+                objectFit: "cover",
+                flexShrink: 0,
+                filter: "brightness(0.9) contrast(1.2)",
+                mixBlendMode: "lighten",
+              }}
+            />
             <h1 style={{ color: "var(--heading)", fontSize: "1.3rem", fontWeight: 600 }}>
               Trade Borg
             </h1>
@@ -169,7 +173,7 @@ export function App() {
         ))}
       </nav>
 
-      {tab === "Dashboard" && <Dashboard data={dashboardData} showBotColumn={bots.length > 1} bots={bots} exchangeFilter={exchangeFilter} />}
+      {tab === "Dashboard" && <Dashboard data={dashboardData} showBotColumn={bots.length > 1} bots={bots} exchangeFilter={exchangeFilter} onExchangeFilterChange={setExchangeFilter} exchanges={exchanges} />}
       {tab === "Intel" && <Intel wsIntel={dashboardData?.intel ?? null} />}
       {tab === "Scanner" && <Scanner />}
       {tab === "Strategies" && <Strategies bots={[]} />}

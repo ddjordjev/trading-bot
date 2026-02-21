@@ -9,9 +9,11 @@ interface Props {
   showBotColumn?: boolean;
   bots?: { bot_id: string; label: string; exchange: string }[];
   exchangeFilter?: string;
+  onExchangeFilterChange?: (exchange: string) => void;
+  exchanges?: string[];
 }
 
-export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilter = "all" }: Props) {
+export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilter = "all", onExchangeFilterChange, exchanges = [] }: Props) {
   const [actionMsg, setActionMsg] = useState("");
   const [logsExpanded, setLogsExpanded] = useState(true);
   const [actionTarget, setActionTarget] = useState("-");
@@ -142,6 +144,27 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
       </div>
 
       <div className="controls">
+        {onExchangeFilterChange && exchanges.length > 0 && (
+          <select
+            value={exchangeFilter}
+            onChange={(e) => onExchangeFilterChange(e.target.value)}
+            title="Filter bots and actions by exchange."
+            style={{
+              padding: "0.3rem 0.5rem",
+              borderRadius: "var(--radius)",
+              border: "1px solid var(--border)",
+              background: "var(--surface)",
+              color: "var(--text)",
+              fontSize: "0.8rem",
+              cursor: "pointer",
+            }}
+          >
+            <option value="all">All Exchanges</option>
+            {exchanges.map((ex) => (
+              <option key={ex} value={ex}>{ex}</option>
+            ))}
+          </select>
+        )}
         <select
           value={actionTarget}
           onChange={(e) => setActionTarget(e.target.value)}

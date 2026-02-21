@@ -58,19 +58,22 @@ Both run in one go, no questions asked.
 
 ## Merging develop → master
 
-ALWAYS use squash merge. Never `git merge develop` (regular merge).
+**Never** use `git merge` (including `--squash`) — it does a three-way
+merge and WILL conflict when develop has amended/force-pushed commits.
+
+Instead, overwrite master's tree with develop's content directly:
 
 ```bash
 git checkout master
-git merge --squash develop
+git checkout develop -- .
+git add -A
 git commit -m "descriptive message"
 git push origin master
 git checkout develop
 ```
 
-Regular merge compares commit history and will conflict with
-amended/force-pushed commits on develop. Squash applies the final diff
-as one clean commit — no conflicts possible.
+This takes exactly what's on develop and applies it as one commit on
+master. Zero merge logic, zero conflicts, guaranteed.
 
 ## Rules
 

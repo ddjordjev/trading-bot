@@ -2133,29 +2133,32 @@ def main() -> None:
 
     bot = TradingBot(settings, daily_target_pct=5.0)
 
-    mkt = "futures" if settings.futures_allowed else "spot"
-    all_strategies = [
-        "compound_momentum",
-        "market_open_volatility",
-        "swing_opportunity",
-        "rsi",
-        "macd",
-        "bollinger",
-        "mean_reversion",
-        "grid",
-    ]
-    allowed = settings.bot_strategy_list
-    active_strategies = [s for s in all_strategies if s in allowed] if allowed else all_strategies
-    for symbol in settings.major_symbol_list:
-        for strat_name in active_strategies:
-            bot.add_strategy(strat_name, symbol, market_type=mkt)
     bot_label = settings.bot_id or "default"
-    logger.info(
-        "Bot [{}]: registered {} strategies across {} major symbols",
-        bot_label,
-        len(active_strategies),
-        len(settings.major_symbol_list),
-    )
+    if settings.hub_only:
+        logger.info("Bot [{}]: HUB-ONLY mode — dashboard and coordination, no trading", bot_label)
+    else:
+        mkt = "futures" if settings.futures_allowed else "spot"
+        all_strategies = [
+            "compound_momentum",
+            "market_open_volatility",
+            "swing_opportunity",
+            "rsi",
+            "macd",
+            "bollinger",
+            "mean_reversion",
+            "grid",
+        ]
+        allowed = settings.bot_strategy_list
+        active_strategies = [s for s in all_strategies if s in allowed] if allowed else all_strategies
+        for symbol in settings.major_symbol_list:
+            for strat_name in active_strategies:
+                bot.add_strategy(strat_name, symbol, market_type=mkt)
+        logger.info(
+            "Bot [{}]: registered {} strategies across {} major symbols",
+            bot_label,
+            len(active_strategies),
+            len(settings.major_symbol_list),
+        )
 
     loop = asyncio.new_event_loop()
     _background_tasks: list[asyncio.Task[None]] = []

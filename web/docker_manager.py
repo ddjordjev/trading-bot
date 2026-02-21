@@ -1,6 +1,6 @@
 """Docker container lifecycle manager for dynamic bot spawning.
 
-The hub bot (bot-momentum) uses the Docker socket to start and stop
+The hub bot (bot-hub) uses the Docker socket to start and stop
 sibling bot containers at runtime.  New containers inherit the base
 .env configuration and get profile-specific overrides on top.
 """
@@ -28,14 +28,14 @@ except ImportError:
     DOCKER_AVAILABLE = False
 
 
-_HUB_CONTAINER = "bot-momentum"
+_HUB_CONTAINER = "bot-hub"
 _VOLUME_DATA = "trading-bot_bot-data"
 _VOLUME_LOGS = "trading-bot_bot-logs"
 _NETWORK = "trading-bot_default"
 _ENV_PATH = Path("/app/.env")
 
 # Keys we never forward from the hub's env to child containers
-_SKIP_KEYS = {"DASHBOARD_PORT", "DASHBOARD_ENABLED", "BOT_ID", "BOT_STRATEGIES", "BOT_STYLE"}
+_SKIP_KEYS = {"DASHBOARD_PORT", "DASHBOARD_ENABLED", "BOT_ID", "BOT_STRATEGIES", "BOT_STYLE", "HUB_ONLY"}
 
 
 def _get_client() -> Any:
@@ -77,7 +77,7 @@ def _hub_image() -> str:
         tags = hub.image.tags
         return str(tags[0]) if tags else str(hub.image.id)
     except Exception:
-        return "trading-bot-bot-momentum:latest"
+        return "trading-bot-bot-hub:latest"
 
 
 def get_container_status(profile_id: str) -> str:
