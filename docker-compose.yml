@@ -148,6 +148,114 @@ services:
       start_period: 90s
       retries: 3
 
+  # ---- Bot 6: Scalper (idle by default) ----
+  bot-scalper:
+    <<: *bot-common
+    container_name: bot-scalper
+    environment:
+      - TZ=UTC
+      - BOT_ID=scalper
+      - BOT_STYLE=momentum
+      - BOT_STRATEGIES=compound_momentum
+      - TICK_INTERVAL_ACTIVE=15
+      - STOP_LOSS_PCT=0.8
+      - TAKE_PROFIT_PCT=2.0
+      - INITIAL_RISK_AMOUNT=30
+      - DASHBOARD_ENABLED=false
+      - DASHBOARD_HUB_URL=http://bot-hub:9035
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
+  # ---- Bot 7: Full Stack (idle by default) ----
+  bot-fullstack:
+    <<: *bot-common
+    container_name: bot-fullstack
+    environment:
+      - TZ=UTC
+      - BOT_ID=fullstack
+      - BOT_STYLE=momentum
+      - BOT_STRATEGIES=compound_momentum,market_open_volatility,swing_opportunity,rsi,macd,bollinger,mean_reversion,grid
+      - MAX_CONCURRENT_POSITIONS=10
+      - DASHBOARD_ENABLED=false
+      - DASHBOARD_HUB_URL=http://bot-hub:9035
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
+  # ---- Bot 8: Conservative (idle by default) ----
+  bot-conservative:
+    <<: *bot-common
+    container_name: bot-conservative
+    environment:
+      - TZ=UTC
+      - BOT_ID=conservative
+      - BOT_STYLE=meanrev
+      - BOT_STRATEGIES=rsi,bollinger
+      - DEFAULT_LEVERAGE=3
+      - MAX_POSITION_SIZE_PCT=3
+      - STOP_LOSS_PCT=1.0
+      - INITIAL_RISK_AMOUNT=20
+      - DASHBOARD_ENABLED=false
+      - DASHBOARD_HUB_URL=http://bot-hub:9035
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
+  # ---- Bot 9: Aggressive (idle by default) ----
+  bot-aggressive:
+    <<: *bot-common
+    container_name: bot-aggressive
+    environment:
+      - TZ=UTC
+      - BOT_ID=aggressive
+      - BOT_STYLE=momentum
+      - BOT_STRATEGIES=compound_momentum,rsi
+      - DEFAULT_LEVERAGE=20
+      - MAX_POSITION_SIZE_PCT=10
+      - TAKE_PROFIT_PCT=10
+      - INITIAL_RISK_AMOUNT=100
+      - MAX_CONCURRENT_POSITIONS=8
+      - DASHBOARD_ENABLED=false
+      - DASHBOARD_HUB_URL=http://bot-hub:9035
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
+  # ---- Bot 10: Hedge Heavy (idle by default) ----
+  bot-hedger:
+    <<: *bot-common
+    container_name: bot-hedger
+    environment:
+      - TZ=UTC
+      - BOT_ID=hedger
+      - BOT_STYLE=momentum
+      - BOT_STRATEGIES=compound_momentum,mean_reversion
+      - HEDGE_ENABLED=true
+      - HEDGE_RATIO=0.40
+      - HEDGE_MIN_PROFIT_PCT=2.0
+      - MAX_HEDGES=4
+      - DASHBOARD_ENABLED=false
+      - DASHBOARD_HUB_URL=http://bot-hub:9035
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
   # ---- Shared services (one instance each) ----
   monitor:
     build: .
@@ -265,7 +373,7 @@ services:
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
       - GF_SECURITY_ALLOW_EMBEDDING=true
       - GF_AUTH_DISABLE_LOGIN_FORM=true
-      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/trading-bot.json
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/dashboards/trading-bot.json
       - GF_SERVER_SERVE_FROM_SUB_PATH=false
     volumes:
       - grafana-data:/var/lib/grafana

@@ -1,6 +1,7 @@
 {
   "uid": "trading-bot",
   "title": "Trade Borg",
+  "schemaVersion": 39,
   "tags": ["trading"],
   "timezone": "utc",
   "refresh": "15s",
@@ -35,7 +36,7 @@
         "overrides": []
       },
       "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_cpu_percent", "legendFormat": "{{job}}", "refId": "A" }]
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_cpu_percent", "legendFormat": "{{job}}", "refId": "A", "range": true, "instant": false }]
     },
     {
       "id": 2,
@@ -56,8 +57,8 @@
       },
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_memory_used_bytes", "legendFormat": "Used", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_memory_available_bytes", "legendFormat": "Available", "refId": "B" }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_memory_used_bytes", "legendFormat": "Used", "refId": "A", "range": true, "instant": false },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_memory_available_bytes", "legendFormat": "Available", "refId": "B", "range": true, "instant": false }
       ]
     },
     {
@@ -78,7 +79,7 @@
         "overrides": []
       },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false, "showThresholdMarkers": true },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_disk_percent", "legendFormat": "Disk %", "refId": "A" }]
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_disk_percent", "legendFormat": "Disk %", "refId": "A", "range": true, "instant": false }]
     },
     {
       "id": 4,
@@ -95,9 +96,9 @@
       },
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_load_1m", "legendFormat": "1m", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_load_5m", "legendFormat": "5m", "refId": "B" },
-        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_load_15m", "legendFormat": "15m", "refId": "C" }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_load_1m", "legendFormat": "1m", "refId": "A", "range": true, "instant": false },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_load_5m", "legendFormat": "5m", "refId": "B", "range": true, "instant": false },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_load_15m", "legendFormat": "15m", "refId": "C", "range": true, "instant": false }
       ]
     },
     {
@@ -118,7 +119,7 @@
         "overrides": []
       },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area", "textMode": "auto" },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_swap_percent", "legendFormat": "Swap", "refId": "A" }]
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_swap_percent", "legendFormat": "Swap", "refId": "A", "range": true, "instant": false }]
     },
     {
       "id": 6,
@@ -156,8 +157,8 @@
       },
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_memory_percent", "legendFormat": "System", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "process_memory_percent", "legendFormat": "Bot process", "refId": "B" }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "system_memory_percent", "legendFormat": "System", "refId": "A", "range": true, "instant": false },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "process_memory_percent", "legendFormat": "Bot process", "refId": "B", "range": true, "instant": false }
       ]
     },
 
@@ -185,7 +186,7 @@
         "overrides": []
       },
       "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "process_cpu_percent", "legendFormat": "{{job}}", "refId": "A" }]
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "process_cpu_percent", "legendFormat": "{{job}}", "refId": "A", "range": true, "instant": false }]
     },
     {
       "id": 11,
@@ -203,8 +204,8 @@
       },
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "process_memory_rss_bytes", "legendFormat": "RSS", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "process_memory_vms_bytes", "legendFormat": "VMS", "refId": "B" }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "process_memory_rss_bytes", "legendFormat": "RSS", "refId": "A", "range": true, "instant": false },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "process_memory_vms_bytes", "legendFormat": "VMS", "refId": "B", "range": true, "instant": false }
       ]
     },
     {
@@ -224,7 +225,7 @@
         "overrides": []
       },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none", "textMode": "auto" },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "process_threads", "legendFormat": "Threads", "refId": "A" }]
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "process_threads", "legendFormat": "Threads", "refId": "A", "range": true, "instant": false }]
     },
     {
       "id": 13,
@@ -243,7 +244,7 @@
         "overrides": []
       },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none", "textMode": "auto" },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "process_open_fds", "legendFormat": "FDs", "refId": "A" }]
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "process_open_fds", "legendFormat": "FDs", "refId": "A", "range": true, "instant": false }]
     },
     {
       "id": 14,
@@ -259,7 +260,7 @@
         "overrides": []
       },
       "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "python_gc_objects", "legendFormat": "GC objects", "refId": "A" }]
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "python_gc_objects", "legendFormat": "GC objects", "refId": "A", "range": true, "instant": false }]
     },
     {
       "id": 15,
@@ -332,7 +333,7 @@
         "overrides": []
       },
       "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "bot_event_loop_lag_seconds", "legendFormat": "lag", "refId": "A" }]
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "bot_event_loop_lag_seconds", "legendFormat": "lag", "refId": "A", "range": true, "instant": false }]
     },
     {
       "id": 22,
