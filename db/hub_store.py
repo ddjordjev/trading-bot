@@ -98,7 +98,7 @@ class HubDB(TradeDB):
             existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
             if existing:
                 self._mark_confirmed(bot_id, request_key)
-                return existing["id"]
+                return int(existing["id"])
 
         cursor = self._conn.execute(
             """INSERT INTO trades (

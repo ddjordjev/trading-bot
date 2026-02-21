@@ -211,7 +211,8 @@ def _intel_snapshot() -> IntelSnapshot | None:
     # Multibot: read from shared state written by the monitor service
     if not _bot.intel:
         try:
-            snap = _bot.shared_intel.read_intel()
+            _hub_state = SharedState(data_dir=Path("data"))
+            snap = _hub_state.read_intel()
             if not snap.sources_active:
                 return None
             return IntelSnapshot(
@@ -509,8 +510,9 @@ async def get_trending(_: str = Depends(verify_token)) -> list[TrendingCoinInfo]
             for coin in _bot.scanner.hot_movers
         ]
 
-    # Multi-bot: read from shared intel state
-    snap = _bot.shared_intel.read_intel()
+    # Multi-bot: read from shared intel state (hub-local, not bot's)
+    _hub_state = SharedState(data_dir=Path("data"))
+    snap = _hub_state.read_intel()
     return [
         TrendingCoinInfo(
             symbol=m.symbol,
@@ -562,7 +564,7 @@ async def get_modules(_: str = Depends(verify_token)) -> list[ModuleStatus]:
     if not _bot:
         return []
     shared = _bot._multibot
-    snap = _bot.shared_intel.read_intel() if shared else None
+    snap = SharedState(data_dir=Path("data")).read_intel() if shared else None
     return [
         ModuleStatus(
             name="intel",
