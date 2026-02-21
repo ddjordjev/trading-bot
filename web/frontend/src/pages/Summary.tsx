@@ -30,6 +30,11 @@ export function Summary() {
     );
   }
 
+  const patched = html.replace(
+    /<head>/i,
+    "<head><base target='_self'>"
+  );
+
   return (
     <div
       style={{
@@ -40,7 +45,8 @@ export function Summary() {
       }}
     >
       <iframe
-        srcDoc={html}
+        srcDoc={patched}
+        sandbox="allow-same-origin"
         style={{
           width: "100%",
           height: "100%",

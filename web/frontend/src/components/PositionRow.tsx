@@ -74,7 +74,7 @@ export function PositionRow({ position: p, onAction, showBot = false }: Props) {
         )}
         <br />
         <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-          {p.side.toUpperCase()} · {p.leverage}x · {p.market_type}
+          {p.side === "buy" ? "LONG" : p.side === "sell" ? "SHORT" : p.side.toUpperCase()} · {p.leverage}x · {p.market_type}
         </span>
       </td>
       <td>{p.entry_price.toFixed(p.entry_price < 1 ? 6 : 2)}</td>
@@ -100,7 +100,8 @@ export function PositionRow({ position: p, onAction, showBot = false }: Props) {
               : e >= 10 ? 0.1
               : e >= 1 ? 0.001
               : e * 0.1;
-            const isLong = p.side.toLowerCase() === "long";
+            const s = p.side.toLowerCase();
+            const isLong = s === "long" || s === "buy";
             const diff = isLong ? p.stop_loss - e : e - p.stop_loss;
             label = diff > tick ? "PR" : diff >= 0 ? "BE" : "LO";
           }

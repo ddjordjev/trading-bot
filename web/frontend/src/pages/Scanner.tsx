@@ -68,7 +68,7 @@ export function Scanner() {
               {tradeQueue.map((p) => (
                 <tr key={`${p.symbol}-${p.side}-${p.age_seconds}`}>
                   <td style={{ fontWeight: 600 }}>{p.symbol}</td>
-                  <td style={{ color: p.side === "long" ? "var(--green)" : "var(--red)" }}>{p.side.toUpperCase()}</td>
+                  <td style={{ color: p.side === "long" || p.side === "buy" ? "var(--green)" : "var(--red)" }}>{p.side === "buy" ? "LONG" : p.side === "sell" ? "SHORT" : p.side.toUpperCase()}</td>
                   <td>{p.strategy || "—"}</td>
                   <td>{p.strength.toFixed(2)}</td>
                   <td>{p.age_seconds < 60 ? `${Math.round(p.age_seconds)}s` : `${(p.age_seconds / 60).toFixed(1)}m`}</td>

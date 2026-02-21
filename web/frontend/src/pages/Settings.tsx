@@ -86,7 +86,7 @@ function AboutSection() {
     ["Name", "Trade Borg"],
     ["Version", `v${VERSION}`],
     ["Build Date", BUILD_DATE],
-    ["Exchanges", "MEXC · Binance · Bybit"],
+    ["Exchanges", "MEXC\nBinance\nBybit"],
     ["License", "Proprietary"],
   ];
 
@@ -116,7 +116,9 @@ function AboutSection() {
           {rows.map(([label, value]) => (
             <tr key={label}>
               <td style={{ color: "var(--text-muted)", fontWeight: 500, width: 140 }}>{label}</td>
-              <td style={{ color: "var(--heading)" }}>{value}</td>
+              <td style={{ color: "var(--heading)" }}>
+                {value.includes("\n") ? value.split("\n").map((line, i) => <div key={i}>{line}</div>) : value}
+              </td>
             </tr>
           ))}
         </tbody>

@@ -267,7 +267,7 @@ function LivePositionsTab({ positions }: { positions: LivePosition[] }) {
             {positions.map((p) => (
               <tr key={p.symbol}>
                 <td><strong>{p.symbol}</strong></td>
-                <td style={{ color: p.side === "long" ? "var(--green)" : "var(--red)" }}>
+                <td style={{ color: p.side === "long" || p.side === "buy" ? "var(--green)" : "var(--red)" }}>
                   {p.side.toUpperCase()}
                 </td>
                 <td style={{ fontSize: "0.85rem" }}>{p.strategy}</td>

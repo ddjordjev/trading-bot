@@ -127,6 +127,7 @@ class StrategyInfo(BaseModel):
     applied_count: int = 0
     success_count: int = 0
     fail_count: int = 0
+    bot_id: str = ""
 
 
 class ModuleStatus(BaseModel):

@@ -156,8 +156,35 @@ async def _positions() -> list[PositionInfo]:
 
 
 def _intel_snapshot() -> IntelSnapshot | None:
-    if not _bot or not _bot.intel:
+    if not _bot:
         return None
+
+    # Multibot: read from shared state written by the monitor service
+    if not _bot.intel:
+        try:
+            snap = _bot.shared_intel.read_intel()
+            if not snap.sources_active:
+                return None
+            return IntelSnapshot(
+                regime=snap.regime,
+                fear_greed=snap.fear_greed,
+                fear_greed_bias=snap.fear_greed_bias,
+                liquidation_24h=snap.liquidation_24h,
+                mass_liquidation=snap.mass_liquidation,
+                liquidation_bias=snap.liquidation_bias,
+                macro_event_imminent=snap.macro_event_imminent,
+                macro_exposure_mult=snap.macro_exposure_mult,
+                macro_spike_opportunity=snap.macro_spike_opportunity,
+                next_macro_event=snap.next_macro_event,
+                whale_bias=snap.whale_bias,
+                overleveraged_side=snap.overleveraged_side,
+                position_size_multiplier=snap.position_size_multiplier,
+                should_reduce_exposure=snap.should_reduce_exposure,
+                preferred_direction=snap.preferred_direction,
+            )
+        except Exception:
+            return None
+
     c = _bot.intel.condition
     if c is None:
         return None
@@ -339,15 +366,50 @@ async def get_news(_: str = Depends(verify_token)) -> list[NewsItemInfo]:
 
 @app.get("/api/trade-queue", response_model=list[TradeQueueItem])
 async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem]:
-    """Return pending trade proposals (symbol, side, strategy, strength, age)."""
+    """Return pending trade proposals across all bot queues."""
     state = SharedState()
-    queue = state.read_trade_queue()
-    pending = [
-        p
-        for bucket in (queue.critical, queue.daily, queue.swing)
-        for p in bucket
-        if not p.consumed and not p.rejected and not p.is_expired
-    ]
+    all_pending = []
+
+    # Multibot: each bot has data/<bot_id>/trade_queue.json
+    data_dir = state._data_dir
+    for child in sorted(data_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        qf = child / "trade_queue.json"
+        if not qf.exists():
+            continue
+        try:
+            from shared.models import TradeQueue as TQ
+
+            q = TQ.model_validate_json(qf.read_text())
+            for p in (
+                p
+                for bucket in (q.critical, q.daily, q.swing)
+                for p in bucket
+                if not p.consumed and not p.rejected and not p.is_expired
+            ):
+                all_pending.append(p)
+        except Exception:
+            continue
+
+    # Fallback: root-level queue (single-bot mode)
+    if not all_pending:
+        queue = state.read_trade_queue()
+        all_pending = [
+            p
+            for bucket in (queue.critical, queue.daily, queue.swing)
+            for p in bucket
+            if not p.consumed and not p.rejected and not p.is_expired
+        ]
+
+    seen = set()
+    unique = []
+    for p in all_pending:
+        key = (p.symbol, p.side, p.strategy or "")
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+
     return [
         TradeQueueItem(
             symbol=p.symbol,
@@ -356,7 +418,7 @@ async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem
             strength=p.strength,
             age_seconds=p.age_seconds,
         )
-        for p in pending
+        for p in unique
     ]
 
 
@@ -403,6 +465,7 @@ async def get_trending(_: str = Depends(verify_token)) -> list[TrendingCoinInfo]
 async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
     result: list[StrategyInfo] = []
     for rpt in _bot_reports.values():
+        bid = rpt.get("bot_id", "")
         for s in rpt.get("strategies", []):
             result.append(
                 StrategyInfo(
@@ -416,6 +479,7 @@ async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
                     applied_count=s.get("applied_count", 0),
                     success_count=s.get("success_count", 0),
                     fail_count=s.get("fail_count", 0),
+                    bot_id=bid,
                 )
             )
     return result
@@ -506,42 +570,82 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
     regime = _bot.trade_db.get_regime_performance()
 
     live = []
-    positions = await _bot.exchange.fetch_positions()
-    price_map = {p.symbol: p.current_price for p in positions if p.amount > 0}
-    for sym, sp in _bot.orders.scaler.active_positions.items():
-        current_price = price_map.get(sym, sp.last_add_price or sp.avg_entry_price)
-        if sp.avg_entry_price > 0:
-            if sp.side == "long":
-                pnl_pct = (current_price - sp.avg_entry_price) / sp.avg_entry_price * 100
-            else:
-                pnl_pct = (sp.avg_entry_price - current_price) / sp.avg_entry_price * 100
-        else:
-            pnl_pct = 0.0
-        notional = sp.current_size * current_price * sp.current_leverage
-        pnl_usd = notional * pnl_pct / 100 if sp.current_leverage > 0 else 0
-        _opened = getattr(sp, "opened_at", 0)
-        age = (time.time() - _opened) / 60 if _opened else 0
-        live.append(
-            LivePositionInfo(
-                symbol=sym,
-                side=sp.side,
-                strategy=sp.strategy or "unknown",
-                entry_price=sp.avg_entry_price,
-                current_price=current_price,
-                pnl_pct=pnl_pct,
-                pnl_usd=pnl_usd,
-                notional=notional,
-                leverage=sp.current_leverage,
-                age_minutes=age,
-                dca_count=sp.adds,
+    # Pull live positions from all bot reports (multibot)
+    for rpt in _bot_reports.values():
+        for p in rpt.get("positions", []):
+            entry = p.get("entry_price", 0)
+            current = p.get("current_price", 0)
+            side = p.get("side", "buy")
+            is_long = side in ("long", "buy")
+            pnl_pct = p.get("pnl_pct", 0.0)
+            leverage = p.get("leverage", 1)
+            notional = p.get("notional_value", 0)
+            pnl_usd = p.get("pnl_usd", 0.0)
+            live.append(
+                LivePositionInfo(
+                    symbol=p.get("symbol", ""),
+                    side="long" if is_long else "short",
+                    strategy=p.get("strategy", "unknown"),
+                    entry_price=entry,
+                    current_price=current,
+                    pnl_pct=pnl_pct,
+                    pnl_usd=pnl_usd,
+                    notional=notional,
+                    leverage=leverage,
+                    age_minutes=p.get("age_minutes", 0),
+                    dca_count=p.get("dca_count", 0),
+                )
             )
-        )
+    # Fallback: local bot positions if no reports
+    if not live:
+        positions = await _bot.exchange.fetch_positions()
+        price_map = {p.symbol: p.current_price for p in positions if p.amount > 0}
+        for sym, sp in _bot.orders.scaler.active_positions.items():
+            current_price = price_map.get(sym, sp.last_add_price or sp.avg_entry_price)
+            if sp.avg_entry_price > 0:
+                if sp.side == "long":
+                    pnl_pct = (current_price - sp.avg_entry_price) / sp.avg_entry_price * 100
+                else:
+                    pnl_pct = (sp.avg_entry_price - current_price) / sp.avg_entry_price * 100
+            else:
+                pnl_pct = 0.0
+            notional = sp.current_size * current_price * sp.current_leverage
+            pnl_usd = notional * pnl_pct / 100 if sp.current_leverage > 0 else 0
+            _opened = getattr(sp, "opened_at", 0)
+            age = (time.time() - _opened) / 60 if _opened else 0
+            live.append(
+                LivePositionInfo(
+                    symbol=sym,
+                    side=sp.side,
+                    strategy=sp.strategy or "unknown",
+                    entry_price=sp.avg_entry_price,
+                    current_price=current_price,
+                    pnl_pct=pnl_pct,
+                    pnl_usd=pnl_usd,
+                    notional=notional,
+                    leverage=sp.current_leverage,
+                    age_minutes=age,
+                    dca_count=sp.adds,
+                )
+            )
+
+    total_logged = _bot.trade_db.trade_count()
+    unified_path = Path("data/trades_all.db")
+    if unified_path.exists():
+        try:
+            from db.store import TradeDB
+
+            udb = TradeDB(path=unified_path)
+            udb.connect()
+            total_logged = max(total_logged, udb.trade_count())
+        except Exception:
+            pass
 
     return AnalyticsSnapshot(
         strategy_scores=scores,
         patterns=patterns,
         suggestions=suggestions,
-        total_trades_logged=_bot.trade_db.trade_count(),
+        total_trades_logged=total_logged,
         hourly_performance=hourly,
         regime_performance=regime,
         live_positions=live,
@@ -552,6 +656,16 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
 async def get_closed_trades(limit: int = 100, _: str = Depends(verify_token)) -> list[TradeRecord]:
     if not _bot:
         return []
+    # Prefer unified DB (all bots merged by db-sync service)
+    unified_path = Path("data/trades_all.db")
+    if unified_path.exists():
+        from db.store import TradeDB
+
+        unified = TradeDB(path=unified_path)
+        unified.connect()
+        rows = unified.get_all_trades(limit=limit)
+        if rows:
+            return [TradeRecord(**r.model_dump()) for r in rows if r.closed_at]
     rows = _bot.trade_db.get_all_trades(limit=limit)
     return [TradeRecord(**r.model_dump()) for r in rows if r.closed_at]
 
