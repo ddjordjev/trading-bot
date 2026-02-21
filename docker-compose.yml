@@ -1,6 +1,4 @@
 volumes:
-  bot-data:
-  bot-logs:
   loki-data:
   grafana-data:
   prometheus-data:
@@ -13,8 +11,8 @@ x-bot-common: &bot-common
     - TZ=UTC
   command: python bot.py
   volumes:
-    - bot-data:/app/data
-    - bot-logs:/app/logs
+    - ${HOST_DATA_DIR}:/app/data
+    - ${HOST_LOGS_DIR}:/app/logs
   depends_on:
     monitor:
       condition: service_started
@@ -40,9 +38,9 @@ services:
     ports:
       - "${DASHBOARD_PORT:-9035}:9035"
     volumes:
-      - bot-data:/app/data
-      - bot-logs:/app/logs
-      - /var/run/docker.sock:/var/run/docker.sock
+    - ${HOST_DATA_DIR}:/app/data
+    - ${HOST_LOGS_DIR}:/app/logs
+    - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
       interval: 30s
@@ -161,8 +159,8 @@ services:
       - TZ=UTC
     command: python run_monitor.py
     volumes:
-      - bot-data:/app/data
-      - bot-logs:/app/logs
+    - ${HOST_DATA_DIR}:/app/data
+    - ${HOST_LOGS_DIR}:/app/logs
     healthcheck:
       test: ["CMD", "python", "-c", "import os, time; f='data/intel_state.json'; exit(0) if not os.path.exists(f) else exit(0 if time.time()-os.stat(f).st_mtime<600 else 1)"]
       interval: 60s
@@ -184,8 +182,8 @@ services:
       - TZ=UTC
     command: python run_analytics.py
     volumes:
-      - bot-data:/app/data
-      - bot-logs:/app/logs
+    - ${HOST_DATA_DIR}:/app/data
+    - ${HOST_LOGS_DIR}:/app/logs
     healthcheck:
       test: ["CMD", "python", "-c", "import os, time; f='data/analytics_state.json'; exit(0) if not os.path.exists(f) else exit(0 if time.time()-os.stat(f).st_mtime<600 else 1)"]
       interval: 60s

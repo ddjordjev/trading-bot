@@ -7,12 +7,26 @@ alwaysApply: true
 
 ## Persistent DBs — NEVER touch
 
-These contain trade history and analytics. Never delete, reset, or wipe
-them unless the user **explicitly** says to:
+All trade and analytics databases live on the **host filesystem**, outside
+Docker, via bind mounts. They survive `docker compose down -v`, container
+rebuilds, and even full Docker removal.
+
+Host paths (set in `.env`):
+
+| Env var | Default host path | Container path |
+|---------|-------------------|----------------|
+| `HOST_DATA_DIR` | `/Users/damirdjordjev/workspace/trading-bot-data` | `/app/data` |
+| `HOST_LOGS_DIR` | `/Users/damirdjordjev/workspace/trading-bot-logs` | `/app/logs` |
+
+Never delete, reset, or wipe these unless the user **explicitly** says to:
 
 - `*/trades.db` (+ `-shm`, `-wal`) — per-bot trade history
 - `hub.db` (+ `-shm`, `-wal`) — hub analytics DB
-- Docker volumes: `loki-data`, `prometheus-data`, `grafana-data`
+- Daily backups in `/Users/damirdjordjev/workspace/trading-bot-backups/`
+
+Infrastructure volumes (Docker-managed, less critical — can be rebuilt):
+
+- `loki-data`, `prometheus-data`, `grafana-data`
 
 ## Ephemeral state — WIPE on rebuild
 
@@ -29,18 +43,18 @@ them when rebuilding/redeploying:
 ## Rebuild procedure
 
 ```bash
-docker compose up -d --build
-# Wipe ephemeral state inside the data volume:
-docker compose exec bot-momentum sh -c \
-  'find /app/data -name "*.json" -o -name "*.lock" | xargs rm -f'
-# Restart so containers rebuild fresh state:
-docker compose restart
+# Wipe ephemeral state on the host (DBs are untouched):
+find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" | xargs rm -f
+# Rebuild and start:
+docker compose build && docker compose up -d
 ```
 
 ## Rules
 
-1. `docker compose down` is fine. `docker compose down -v` is **FORBIDDEN**
-   unless the user explicitly says to wipe volumes.
+1. `docker compose down` is fine. `docker compose down -v` only removes
+   infrastructure volumes (Loki, Prometheus, Grafana) — trade data is safe
+   on the host. Still avoid `-v` unless needed.
 2. Never `rm` any `.db` file or run `DROP TABLE` / `DELETE FROM`.
-3. Never add `-v` to teardown commands.
-4. If a migration or schema change needs data changes, ask first.
+3. If a migration or schema change needs data changes, ask first.
+4. The backup script (`scripts/backup_dbs.sh`) copies directly from the
+   host data dir — no Docker dependency needed.

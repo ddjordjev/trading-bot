@@ -29,8 +29,6 @@ except ImportError:
 
 
 _HUB_CONTAINER = "bot-hub"
-_VOLUME_DATA = "trading-bot_bot-data"
-_VOLUME_LOGS = "trading-bot_bot-logs"
 _NETWORK = "trading-bot_default"
 _ENV_PATH = Path("/app/.env")
 
@@ -141,6 +139,9 @@ async def start_container(profile: BotProfile) -> tuple[bool, str]:
     )
     env.update(profile.env_overrides)
 
+    host_data = os.environ.get("HOST_DATA_DIR", "/Users/damirdjordjev/workspace/trading-bot-data")
+    host_logs = os.environ.get("HOST_LOGS_DIR", "/Users/damirdjordjev/workspace/trading-bot-logs")
+
     def _run() -> Any:
         return client.containers.run(
             image=image,
@@ -148,8 +149,8 @@ async def start_container(profile: BotProfile) -> tuple[bool, str]:
             command="python bot.py",
             environment=env,
             volumes={
-                _VOLUME_DATA: {"bind": "/app/data", "mode": "rw"},
-                _VOLUME_LOGS: {"bind": "/app/logs", "mode": "rw"},
+                host_data: {"bind": "/app/data", "mode": "rw"},
+                host_logs: {"bind": "/app/logs", "mode": "rw"},
             },
             network=_NETWORK,
             detach=True,

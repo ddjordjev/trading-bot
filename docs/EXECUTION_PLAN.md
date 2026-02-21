@@ -251,7 +251,9 @@ being evaluated by checking log lines like "Strategy X: no signal" or
 ### 5. Teardown & Clean Slate
 
 ```bash
-docker compose down -v      # -v removes volumes for a fresh start
+docker compose down
+# Wipe ephemeral state (keeps .db files intact):
+find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" | xargs rm -f
 ```
 
 Once all 5 steps pass, proceed to Day 1 with confidence.
@@ -360,15 +362,17 @@ docker compose logs --tail 50 trading-bot
 
 ### 2. Check persisted state
 ```bash
-# Trade count (data survives in Docker volumes)
-docker compose exec trading-bot python -c "
+# Trade data is on the host — no Docker needed to inspect it:
+ls -la $HOST_DATA_DIR/*.db
+# Or via a running container:
+docker compose exec bot-hub python -c "
 from db import TradeDB
 db = TradeDB(); db.connect()
 print(f'Trades: {db.trade_count()}')
 "
 
 # Last bot status
-docker compose exec trading-bot cat data/bot_status.json
+cat $HOST_DATA_DIR/bot_status.json
 ```
 
 ### 3. Read the daily log
@@ -394,19 +398,35 @@ docker compose build && docker compose up -d
 
 ---
 
-## Persistent Data (survives restarts and crashes)
+## Persistent Data (survives restarts, crashes, and Docker destruction)
 
-| Data | Location | Docker Volume |
-|------|----------|---------------|
-| Trade history | `data/trades.db` | `bot-data` |
-| Bot status | `data/bot_status.json` | `bot-data` |
-| Intel state | `data/intel_state.json` | `bot-data` |
-| Analytics | `data/analytics_state.json` | `bot-data` |
-| Trade queue | `data/trade_queue.json` | `bot-data` |
-| Bot logs | `logs/bot_*.log` | `bot-logs` |
-| Monitor logs | `logs/monitor_*.log` | `bot-logs` |
-| Analytics logs | `logs/analytics_*.log` | `bot-logs` |
+Data and logs are stored on the **host filesystem** via bind mounts, not
+Docker named volumes. This means they survive `docker compose down -v`,
+container rebuilds, and even full Docker removal.
+
+Host paths are configured in `.env`:
+
+| Env var | Default path | Container mount |
+|---------|-------------|----------------|
+| `HOST_DATA_DIR` | `/Users/damirdjordjev/workspace/trading-bot-data` | `/app/data` |
+| `HOST_LOGS_DIR` | `/Users/damirdjordjev/workspace/trading-bot-logs` | `/app/logs` |
+
+| Data | Host location | Notes |
+|------|--------------|-------|
+| Trade history | `$HOST_DATA_DIR/trades.db` | Per-bot trade history (critical) |
+| Hub analytics | `$HOST_DATA_DIR/hub.db` | Hub analytics DB (critical) |
+| Bot status | `$HOST_DATA_DIR/bot_status.json` | Runtime state (ephemeral) |
+| Intel state | `$HOST_DATA_DIR/intel_state.json` | Runtime state (ephemeral) |
+| Analytics | `$HOST_DATA_DIR/analytics_state.json` | Runtime state (ephemeral) |
+| Trade queue | `$HOST_DATA_DIR/trade_queue.json` | Runtime state (ephemeral) |
+| Bot logs | `$HOST_LOGS_DIR/bot_*.log` | 1-day rotation, 30-day retention |
+| Monitor logs | `$HOST_LOGS_DIR/monitor_*.log` | 1-day rotation, 30-day retention |
+| Analytics logs | `$HOST_LOGS_DIR/analytics_*.log` | 1-day rotation, 30-day retention |
 | Daily reports | `docs/reports/` | Git (committed) |
+| Daily backups | `/Users/damirdjordjev/workspace/trading-bot-backups/` | Host-side, launchd 3 AM daily |
+
+**Important:** Only `.db` files are critical. JSON/lock files are ephemeral
+state that gets recreated on startup — safe to delete during rebuilds.
 
 ---
 
