@@ -310,10 +310,10 @@ class HubDB(TradeDB):
         )
         self._conn.commit()
 
-    def is_bot_enabled(self, bot_id: str) -> bool:
+    def is_bot_enabled(self, bot_id: str, default: bool = True) -> bool:
         assert self._conn
         row = self._conn.execute("SELECT enabled FROM bot_config WHERE bot_id=?", (bot_id,)).fetchone()
-        return bool(row["enabled"]) if row else True
+        return bool(row["enabled"]) if row else default
 
     def get_all_bot_enabled(self) -> dict[str, bool]:
         assert self._conn

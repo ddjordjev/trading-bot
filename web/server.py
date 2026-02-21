@@ -336,12 +336,21 @@ async def get_status(_: str = Depends(verify_token)) -> BotStatus:
 
 @app.get("/api/bots", response_model=list[BotInstance])
 async def get_bots(_: str = Depends(verify_token)) -> list[BotInstance]:
-    """List all bot instances from in-memory reports."""
+    """List only enabled (non-hub) bot instances from in-memory reports."""
+    from config.bot_profiles import PROFILES_BY_ID
+
     bots: list[BotInstance] = []
     label_map = {"momentum": "Momentum", "meanrev": "Mean Reversion", "swing": "Swing"}
+    hub = _get_hub_db()
+    enabled_map = hub.get_all_bot_enabled()
 
     for rpt in _bot_reports.values():
         bid = rpt.get("bot_id", "")
+        if bid == "hub":
+            continue
+        profile = PROFILES_BY_ID.get(bid)
+        if not enabled_map.get(bid, profile.is_default if profile else False):
+            continue
         strat_names = [s.get("name", "") for s in rpt.get("strategies", [])]
         bots.append(
             BotInstance(
@@ -1235,8 +1244,15 @@ def _is_local_bot(bot_id: str) -> bool:
 
 
 def _build_merged_snapshot() -> dict[str, Any]:
-    """Merge all bot reports into a single dashboard payload."""
+    """Merge all bot reports into a single dashboard payload.
+
+    Only includes enabled trading bots (skips hub and disabled/idle bots).
+    """
+    from config.bot_profiles import PROFILES_BY_ID
+
     reports = list(_bot_reports.values())
+    hub = _get_hub_db()
+    enabled_map = hub.get_all_bot_enabled()
 
     all_positions: list[dict[str, Any]] = []
     all_wicks: list[dict[str, Any]] = []
@@ -1263,6 +1279,9 @@ def _build_merged_snapshot() -> dict[str, Any]:
         ex_name = rpt.get("exchange", "")
 
         if bid == "hub":
+            continue
+        profile = PROFILES_BY_ID.get(bid)
+        if not enabled_map.get(bid, profile.is_default if profile else False):
             continue
 
         if not first_status:
@@ -1386,7 +1405,14 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
     report_bot_snapshot(data)
     hub = _get_hub_db()
     confirmed = hub.drain_confirmed_keys(bot_id) if bot_id else []
-    enabled = hub.is_bot_enabled(bot_id) if bot_id else True
+    if bot_id:
+        from config.bot_profiles import PROFILES_BY_ID
+
+        profile = PROFILES_BY_ID.get(bot_id)
+        default_enabled = profile.is_default if profile else False
+        enabled = hub.is_bot_enabled(bot_id, default=default_enabled)
+    else:
+        enabled = True
 
     # --- Proxy reads: return shared data the bot needs ---
     response: dict[str, Any] = {
