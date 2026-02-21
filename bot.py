@@ -138,6 +138,7 @@ class TradingBot:
         self._started_at: datetime | None = None
         self._warmup_minutes = 3  # no queue processing for first N minutes
         self._hub_session: aiohttp.ClientSession | None = None
+        self._hub_tasks: set[asyncio.Task[None]] = set()
 
     # -- Strategy Management --
 
@@ -321,11 +322,17 @@ class TradingBot:
         balance_map = await self.exchange.fetch_balance()
         raw_balance = balance_map.get("USDT", 0.0)
         balance = self.settings.cap_balance(raw_balance)
-        self.target.update_balance(raw_balance)
+
+        positions = await self.exchange.fetch_positions()
+        total_unrealized = sum(p.unrealized_pnl for p in positions if p.amount > 0)
+        deposit_amount = self.target.update_balance(raw_balance, unrealized_pnl=total_unrealized)
+        if deposit_amount is not None:
+            balance_before = raw_balance - deposit_amount
+            await self._push_deposit_to_hub(deposit_amount, balance_before, raw_balance)
 
         pyramid_pnl = sum(
             p.unrealized_pnl
-            for p in (await self.exchange.fetch_positions())
+            for p in positions
             if p.amount > 0 and (sp := self.orders.scaler.get(p.symbol)) and sp.mode == ScaleMode.PYRAMID
         )
         self.target.update_pyramid_unrealized(pyramid_pnl)
@@ -997,8 +1004,31 @@ class TradingBot:
             row_id = self.trade_db.open_trade(record)
             self._open_trade_ids[signal.symbol] = row_id
             logger.debug("DB: opened trade #{} for {}", row_id, signal.symbol)
+            task = asyncio.ensure_future(self._push_trade_to_hub(record))
+            self._hub_tasks.add(task)
+            task.add_done_callback(self._hub_tasks.discard)
         except Exception as e:
             logger.debug("Failed to log opened trade: {}", e)
+
+    def _calc_realized_pnl(self, order: Order) -> float:
+        """Extract the realized PnL from a close order for deposit detection."""
+        try:
+            sp = self.orders.scaler.get(order.symbol)
+            if not sp:
+                stashed = self.orders._closed_scalers.get(order.symbol, [])
+                sp = stashed[0] if stashed else None
+            exit_price = order.average_price or order.price or 0
+            entry_price = sp.avg_entry_price if sp and sp.avg_entry_price > 0 else exit_price
+            amount = order.filled or order.amount
+            if entry_price > 0 and exit_price > 0:
+                order_side = order.side.value if hasattr(order.side, "value") else str(order.side)
+                pos_side = sp.side if sp else ("long" if order_side in ("buy", "long") else "short")
+                if pos_side == "long":
+                    return (exit_price - entry_price) * amount
+                return (entry_price - exit_price) * amount
+        except Exception:
+            pass
+        return 0.0
 
     def _log_closed_trade(self, order: Order, close_reason: str = "") -> None:
         """Update the open DB row with exit data, or INSERT if no open row exists."""
@@ -1085,6 +1115,9 @@ class TradingBot:
                 self.trade_db.log_trade(record)
                 logger.debug("DB: logged close (no open row) for {} PnL={:.2f}", order.symbol, pnl_usd)
 
+            task = asyncio.ensure_future(self._push_trade_to_hub(record))
+            self._hub_tasks.add(task)
+            task.add_done_callback(self._hub_tasks.discard)
             self._whale_alerted.discard(order.symbol)
         except Exception as e:
             logger.debug("Failed to log closed trade: {}", e)
@@ -1278,6 +1311,20 @@ class TradingBot:
             margin_used += sp.avg_entry_price * sp.current_size / max(sp.current_leverage, 1)
         total_balance = self.target._current_balance
 
+        t = self.target
+        best = t.best_day
+        worst = t.worst_day
+        daily_report = {
+            "compound_report": t.compound_report(),
+            "history": [r.model_dump() for r in t.history],
+            "winning_days": t.winning_days,
+            "losing_days": t.losing_days,
+            "target_hit_days": t.target_hit_days,
+            "avg_daily_pnl_pct": t.avg_daily_pnl_pct,
+            "best_day": best.model_dump() if best else None,
+            "worst_day": worst.model_dump() if worst else None,
+        }
+
         payload = {
             "bot_id": self.settings.bot_id or "default",
             "bot_style": self.settings.bot_style,
@@ -1305,6 +1352,8 @@ class TradingBot:
             "positions": pos_list,
             "wick_scalps": wick_list,
             "strategies": strat_list,
+            "trade_log": self.orders._trade_log[-50:],
+            "daily_report": daily_report,
         }
 
         hub_url = self.settings.dashboard_hub_url
@@ -1326,6 +1375,51 @@ class TradingBot:
                     logger.debug("Hub report failed: {}", resp.status)
         except Exception as e:
             logger.debug("Hub report error: {}", e)
+
+    async def _push_trade_to_hub(self, record: TradeRecord) -> None:
+        """Push a trade open/close event to the hub's DB via HTTP."""
+        hub_url = self.settings.dashboard_hub_url
+        target = hub_url or ("http://localhost:9035" if self.settings.dashboard_enabled else "")
+        if not target:
+            return
+        if not self._hub_session:
+            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
+        try:
+            url = f"{target.rstrip('/')}/internal/trade"
+            payload = {
+                "bot_id": self.settings.bot_id or "default",
+                "action": record.action,
+                "trade": record.model_dump(),
+            }
+            async with self._hub_session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    logger.debug("Hub trade push failed: {}", resp.status)
+        except Exception as e:
+            logger.debug("Hub trade push error: {}", e)
+
+    async def _push_deposit_to_hub(self, amount: float, balance_before: float, balance_after: float) -> None:
+        """Push a deposit/withdrawal detection event to the hub."""
+        hub_url = self.settings.dashboard_hub_url
+        target = hub_url or ("http://localhost:9035" if self.settings.dashboard_enabled else "")
+        if not target:
+            return
+        if not self._hub_session:
+            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
+        try:
+            url = f"{target.rstrip('/')}/internal/deposit"
+            payload = {
+                "bot_id": self.settings.bot_id or "default",
+                "amount": amount,
+                "exchange": self.settings.exchange,
+                "detected_at": datetime.now(UTC).isoformat(),
+                "balance_before": balance_before,
+                "balance_after": balance_after,
+            }
+            async with self._hub_session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    logger.debug("Hub deposit push failed: {}", resp.status)
+        except Exception as e:
+            logger.debug("Hub deposit push error: {}", e)
 
     def _read_shared_intel(self) -> MarketCondition | None:
         """Read intel from shared state file (written by monitor service).
@@ -1597,12 +1691,14 @@ class TradingBot:
             pyramid=pyramid,
         )
         if order:
+            realized_pnl = 0.0
             if is_close:
                 self._log_closed_trade(order, sig.strategy)
+                realized_pnl = self._calc_realized_pnl(order)
             else:
                 self._log_opened_trade(sig, order, low_liquidity=low_liquidity)
             self._active_signals.append(sig)
-            self.target.record_trade()
+            self.target.record_trade(realized_pnl=realized_pnl)
             if len(self._active_signals) > 100:
                 self._active_signals = self._active_signals[-100:]
 
@@ -1733,8 +1829,11 @@ class TradingBot:
                 return
             balance_map = await self.exchange.fetch_balance()
             raw_balance = balance_map.get("USDT", 0.0)
-            self.target.update_balance(raw_balance)
             positions = await self.exchange.fetch_positions()
+            total_unrealized = sum(p.unrealized_pnl for p in positions if p.amount > 0)
+            dep = self.target.update_balance(raw_balance, unrealized_pnl=total_unrealized)
+            if dep is not None:
+                await self._push_deposit_to_hub(dep, raw_balance - dep, raw_balance)
 
             logger.info("=== DAILY SUMMARY ===")
             logger.info(self.target.status_report())

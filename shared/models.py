@@ -157,7 +157,7 @@ class TradeQueue(BaseModel):
                 return
 
     def purge_stale(self, max_consumed_age: int = 3600, max_expired_age: int = 600) -> int:
-        """Remove consumed/expired proposals older than thresholds."""
+        """Remove consumed/rejected/expired proposals older than thresholds."""
         removed = 0
         _now = datetime.now(UTC)
         for attr in ("critical", "daily", "swing"):
@@ -165,7 +165,11 @@ class TradeQueue(BaseModel):
             keep = []
             for p in bucket:
                 age = p.age_seconds
-                if (p.consumed and age > max_consumed_age) or (p.is_expired and age > max_expired_age):
+                if (
+                    (p.consumed and age > max_consumed_age)
+                    or (p.rejected and age > max_expired_age)
+                    or (p.is_expired and age > max_expired_age)
+                ):
                     removed += 1
                 else:
                     keep.append(p)

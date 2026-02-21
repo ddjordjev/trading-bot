@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
+from config.settings import get_settings
 from shared.state import SharedState
 from web.auth import verify_token, verify_ws_token
 from web.schemas import (
@@ -42,6 +43,7 @@ from web.schemas import (
 
 if TYPE_CHECKING:
     from bot import TradingBot
+    from db.hub_store import HubDB
 
 _bot: TradingBot | None = None
 _start_time: float = 0.0
@@ -50,6 +52,19 @@ _background_tasks: list[asyncio.Task[None]] = []
 _bot_reports: dict[str, dict[str, Any]] = {}
 _BOT_REGISTRY = Path("data/bot_registry.json")
 _bot_urls: dict[str, str] = {}  # bot_id -> base URL (e.g. "http://bot-meanrev:9035")
+_HUB_DB_PATH = Path("data/hub.db")
+_hub_db: HubDB | None = None
+
+
+def _get_hub_db() -> HubDB:
+    """Return the singleton HubDB (creates on first call)."""
+    global _hub_db
+    if _hub_db is None:
+        from db.hub_store import HubDB
+
+        _hub_db = HubDB(path=_HUB_DB_PATH)
+        _hub_db.connect()
+    return _hub_db
 
 
 def _load_bot_registry() -> None:
@@ -356,20 +371,38 @@ async def get_trades(_: str = Depends(verify_token)) -> list[TradeRecord]:
     if not _bot:
         return []
     records = []
-    for t in _bot.orders._trade_log[-100:]:
-        records.append(
-            TradeRecord(
-                timestamp=t.get("timestamp", ""),
-                symbol=t.get("symbol", ""),
-                side=t.get("side", ""),
-                action=t.get("action", ""),
-                amount=t.get("amount", 0),
-                price=t.get("price", 0),
-                strategy=t.get("strategy", ""),
-                pnl=t.get("pnl", 0),
+    # Aggregate trade logs from all bot reports
+    for rpt in _bot_reports.values():
+        for t in rpt.get("trade_log", []):
+            records.append(
+                TradeRecord(
+                    timestamp=t.get("timestamp", ""),
+                    symbol=t.get("symbol", ""),
+                    side=t.get("side", ""),
+                    action=t.get("action", ""),
+                    amount=t.get("amount", 0),
+                    price=t.get("price", 0),
+                    strategy=t.get("strategy", ""),
+                    pnl=t.get("pnl", 0),
+                )
             )
-        )
-    return records
+    if not records:
+        # Fallback: local bot's in-memory log
+        for t in _bot.orders._trade_log[-100:]:
+            records.append(
+                TradeRecord(
+                    timestamp=t.get("timestamp", ""),
+                    symbol=t.get("symbol", ""),
+                    side=t.get("side", ""),
+                    action=t.get("action", ""),
+                    amount=t.get("amount", 0),
+                    price=t.get("price", 0),
+                    strategy=t.get("strategy", ""),
+                    pnl=t.get("pnl", 0),
+                )
+            )
+    records.sort(key=lambda r: r.timestamp, reverse=True)
+    return records[:200]
 
 
 @app.get("/api/intel", response_model=IntelSnapshot | None)
@@ -426,19 +459,12 @@ async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem
             for p in bucket:
                 all_proposals.append(p)
 
-    def _status(p: Any) -> str:
-        if p.consumed:
-            return "consumed"
-        if p.rejected:
-            return "rejected"
-        if p.is_expired:
-            return "expired"
-        return "pending"
+    pending = [p for p in all_proposals if not p.consumed and not p.rejected and not p.is_expired]
 
     seen: set[tuple[str, ...]] = set()
     unique = []
-    for p in all_proposals:
-        key = (p.symbol, p.side, p.strategy or "", _status(p))
+    for p in pending:
+        key = (p.symbol, p.side, p.strategy or "")
         if key not in seen:
             seen.add(key)
             unique.append(p)
@@ -452,8 +478,8 @@ async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem
             strategy=p.strategy or "",
             strength=p.strength,
             age_seconds=p.age_seconds,
-            status=_status(p),
-            reason=p.reject_reason if p.rejected else (p.reason or ""),
+            status="pending",
+            reason=p.reason or "",
         )
         for p in unique
     ]
@@ -500,26 +526,32 @@ async def get_trending(_: str = Depends(verify_token)) -> list[TrendingCoinInfo]
 
 @app.get("/api/strategies", response_model=list[StrategyInfo])
 async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
-    result: list[StrategyInfo] = []
+    grouped: dict[tuple[str, bool], StrategyInfo] = {}
     for rpt in _bot_reports.values():
-        bid = rpt.get("bot_id", "")
         for s in rpt.get("strategies", []):
-            result.append(
-                StrategyInfo(
-                    name=s.get("name", ""),
-                    symbol=s.get("symbol", ""),
+            name = s.get("name", "")
+            is_dyn = s.get("is_dynamic", False)
+            key = (name, is_dyn)
+            if key not in grouped:
+                grouped[key] = StrategyInfo(
+                    name=name,
+                    symbol="",
                     market_type=s.get("market_type", "futures"),
                     leverage=s.get("leverage", 1),
                     mode=s.get("mode", "pyramid"),
-                    is_dynamic=s.get("is_dynamic", False),
-                    open_now=s.get("open_now", 0),
-                    applied_count=s.get("applied_count", 0),
-                    success_count=s.get("success_count", 0),
-                    fail_count=s.get("fail_count", 0),
-                    bot_id=bid,
+                    is_dynamic=is_dyn,
                 )
-            )
-    return result
+            g = grouped[key]
+            g.open_now += s.get("open_now", 0)
+            g.applied_count += s.get("applied_count", 0)
+            g.success_count += s.get("success_count", 0)
+            g.fail_count += s.get("fail_count", 0)
+            sym = s.get("symbol", "")
+            if sym:
+                existing = {x.strip() for x in g.symbol.split(",") if x.strip()}
+                if sym not in existing:
+                    g.symbol = ", ".join(sorted(existing | {sym})) if existing else sym
+    return list(grouped.values())
 
 
 @app.get("/api/modules", response_model=list[ModuleStatus])
@@ -573,20 +605,67 @@ async def get_modules(_: str = Depends(verify_token)) -> list[ModuleStatus]:
 async def get_daily_report(_: str = Depends(verify_token)) -> DailyReportData:
     if not _bot:
         return DailyReportData()
-    t = _bot.target
-    history = [r.model_dump() for r in t.history]
-    best = t.best_day
-    worst = t.worst_day
+    # Aggregate daily report data across all bots
+    total_winning = 0
+    total_losing = 0
+    total_target_hit = 0
+    all_pnl_pcts: list[float] = []
+    best_day: dict[str, Any] | None = None
+    worst_day: dict[str, Any] | None = None
+    all_history: list[dict[str, Any]] = []
+    reports_text: list[str] = []
+
+    for rpt in _bot_reports.values():
+        bid = rpt.get("bot_id", "unknown")
+        daily = rpt.get("daily_report", {})
+        if not daily:
+            continue
+        total_winning += daily.get("winning_days", 0)
+        total_losing += daily.get("losing_days", 0)
+        total_target_hit += daily.get("target_hit_days", 0)
+        avg = daily.get("avg_daily_pnl_pct", 0)
+        if avg:
+            all_pnl_pcts.append(avg)
+        for h in daily.get("history", []):
+            all_history.append(h)
+        bd = daily.get("best_day")
+        if bd and (not best_day or bd.get("pnl_pct", 0) > best_day.get("pnl_pct", 0)):
+            best_day = bd
+        wd = daily.get("worst_day")
+        if wd and (not worst_day or wd.get("pnl_pct", 0) < worst_day.get("pnl_pct", 0)):
+            worst_day = wd
+        cr = daily.get("compound_report", "")
+        if cr:
+            reports_text.append(f"=== {bid.upper()} ===\n{cr}")
+
+    if not reports_text:
+        # Fallback: local bot only
+        t = _bot.target
+        history = [r.model_dump() for r in t.history]
+        best = t.best_day
+        worst = t.worst_day
+        return DailyReportData(
+            compound_report=t.compound_report(),
+            history=history,
+            winning_days=t.winning_days,
+            losing_days=t.losing_days,
+            target_hit_days=t.target_hit_days,
+            avg_daily_pnl_pct=t.avg_daily_pnl_pct,
+            best_day=best.model_dump() if best else None,
+            worst_day=worst.model_dump() if worst else None,
+            projected=t.projected_balance,
+        )
+
     return DailyReportData(
-        compound_report=t.compound_report(),
-        history=history,
-        winning_days=t.winning_days,
-        losing_days=t.losing_days,
-        target_hit_days=t.target_hit_days,
-        avg_daily_pnl_pct=t.avg_daily_pnl_pct,
-        best_day=best.model_dump() if best else None,
-        worst_day=worst.model_dump() if worst else None,
-        projected=t.projected_balance,
+        compound_report="\n\n".join(reports_text),
+        history=all_history,
+        winning_days=total_winning,
+        losing_days=total_losing,
+        target_hit_days=total_target_hit,
+        avg_daily_pnl_pct=sum(all_pnl_pcts) / len(all_pnl_pcts) if all_pnl_pcts else 0,
+        best_day=best_day,
+        worst_day=worst_day,
+        projected=_bot.target.projected_balance,
     )
 
 
@@ -597,14 +676,30 @@ async def get_daily_report(_: str = Depends(verify_token)) -> DailyReportData:
 async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
     if not _bot:
         return AnalyticsSnapshot()
-    scores = [
-        StrategyScoreInfo(**s.model_dump())
-        for s in sorted(_bot.analytics.scores.values(), key=lambda x: x.total_pnl, reverse=True)
-    ]
-    patterns = [PatternInsightInfo(**p.model_dump()) for p in _bot.analytics.patterns]
-    suggestions = [ModificationSuggestionInfo(**s.model_dump()) for s in _bot.analytics.suggestions]
-    hourly = _bot.trade_db.get_hourly_performance()
-    regime = _bot.trade_db.get_regime_performance()
+
+    hub = _get_hub_db()
+    if hub.trade_count() > 0:
+        from analytics.engine import AnalyticsEngine as AE
+
+        hub_analytics = AE(hub)
+        hub_analytics.refresh()
+        scores = [
+            StrategyScoreInfo(**s.model_dump())
+            for s in sorted(hub_analytics.scores.values(), key=lambda x: x.total_pnl, reverse=True)
+        ]
+        patterns = [PatternInsightInfo(**p.model_dump()) for p in hub_analytics.patterns]
+        suggestions = [ModificationSuggestionInfo(**s.model_dump()) for s in hub_analytics.suggestions]
+        hourly = hub.get_hourly_performance()
+        regime = hub.get_regime_performance()
+    else:
+        scores = [
+            StrategyScoreInfo(**s.model_dump())
+            for s in sorted(_bot.analytics.scores.values(), key=lambda x: x.total_pnl, reverse=True)
+        ]
+        patterns = [PatternInsightInfo(**p.model_dump()) for p in _bot.analytics.patterns]
+        suggestions = [ModificationSuggestionInfo(**s.model_dump()) for s in _bot.analytics.suggestions]
+        hourly = _bot.trade_db.get_hourly_performance()
+        regime = _bot.trade_db.get_regime_performance()
 
     live = []
     # Pull live positions from all bot reports (multibot)
@@ -666,18 +761,8 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
                 )
             )
 
-    total_logged = _bot.trade_db.trade_count()
-    unified_path = Path("data/trades_all.db")
-    if unified_path.exists():
-        try:
-            from db.store import TradeDB
-
-            udb = TradeDB(path=unified_path)
-            udb.connect()
-            total_logged = max(total_logged, udb.trade_count())
-            udb.close()
-        except Exception:
-            pass
+    hub_count = hub.trade_count()
+    total_logged = max(_bot.trade_db.trade_count(), hub_count)
 
     return AnalyticsSnapshot(
         strategy_scores=scores,
@@ -694,22 +779,18 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
 async def get_closed_trades(limit: int = 100, _: str = Depends(verify_token)) -> list[dict[str, Any]]:
     if not _bot:
         return []
-    # Prefer unified DB (all bots merged by db-sync service)
-    unified_path = Path("data/trades_all.db")
-    if unified_path.exists():
-        try:
-            from db.store import TradeDB
-
-            unified = TradeDB(path=unified_path)
-            unified.connect()
-            rows = unified.get_all_trades(limit=limit)
-            unified.close()
-            if rows:
-                return [r.model_dump() for r in rows if r.closed_at]
-        except Exception:
-            pass
+    hub = _get_hub_db()
+    rows = hub.get_all_trades(limit=limit)
+    if rows:
+        return [r.model_dump() for r in rows if r.closed_at]
     rows = _bot.trade_db.get_all_trades(limit=limit)
     return [r.model_dump() for r in rows if r.closed_at]
+
+
+@app.get("/api/deposits")
+async def get_deposits(limit: int = 100, _: str = Depends(verify_token)) -> list[dict[str, Any]]:
+    hub = _get_hub_db()
+    return hub.get_deposits(limit=limit)
 
 
 @app.post("/api/analytics/refresh", response_model=ActionResponse)
@@ -717,7 +798,7 @@ async def refresh_analytics(_: str = Depends(verify_token)) -> ActionResponse:
     if not _bot:
         return ActionResponse(success=False, message="Bot not initialized")
     _bot.analytics.refresh()
-    return ActionResponse(success=True, message=f"Analytics refreshed: {len(_bot.analytics.scores)} strategies scored")
+    return ActionResponse(success=True, message="Analytics refreshed")
 
 
 # --------------- action endpoints ---------------
@@ -905,10 +986,20 @@ async def toggle_module(name: str, _: str = Depends(verify_token)) -> ActionResp
 _ALLOWED_TABLES: set[str] = set()
 
 
+def _get_db_conn() -> Any:
+    """Get the best available DB connection — hub first, local fallback."""
+    hub = _get_hub_db()
+    if hub.conn:
+        return hub.conn
+    if _bot and _bot.trade_db._conn:
+        return _bot.trade_db._conn
+    return None
+
+
 def _get_db_tables() -> list[dict[str, Any]]:
-    if not _bot or not _bot.trade_db._conn:
+    conn = _get_db_conn()
+    if not conn:
         return []
-    conn = _bot.trade_db._conn
     rows = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     ).fetchall()
@@ -933,15 +1024,14 @@ async def db_table_rows(
     page_size: int = 100,
     _: str = Depends(verify_token),
 ) -> dict[str, Any]:
-    if not _bot or not _bot.trade_db._conn:
+    conn = _get_db_conn()
+    if not conn:
         return {"columns": [], "rows": [], "total": 0, "page": page, "page_size": page_size}
 
     if not _ALLOWED_TABLES:
         _get_db_tables()
     if table_name not in _ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found")
-
-    conn = _bot.trade_db._conn
     page_size = min(max(page_size, 10), 500)
     offset = (max(page, 1) - 1) * page_size
 
@@ -981,10 +1071,14 @@ async def _forward_to_bot(bot_id: str, path: str, body: dict[str, Any]) -> Actio
     if not base:
         return ActionResponse(success=False, message=f"Bot '{bot_id}' not registered")
     url = f"{base}{path}"
+    token = get_settings().dashboard_token
+    headers: dict[str, str] = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     try:
         async with (
             aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as sess,
-            sess.post(url, json=body) as resp,
+            sess.post(url, json=body, headers=headers) as resp,
         ):
             data = await resp.json()
             return ActionResponse(success=data.get("success", False), message=data.get("message", ""))
@@ -1129,6 +1223,49 @@ async def receive_bot_report(request: Request) -> dict[str, str]:
             _save_bot_registry()
     report_bot_snapshot(data)
     return {"status": "ok"}
+
+
+@app.post("/internal/trade")
+async def receive_trade(request: Request) -> dict[str, Any]:
+    """Bots push trade open/close events here. Hub writes to its own DB."""
+    data = await request.json()
+    bot_id = data.get("bot_id", "")
+    action = data.get("action", "")
+    trade = data.get("trade", {})
+    if not bot_id or not trade:
+        return {"status": "error", "detail": "missing bot_id or trade"}
+
+    hub = _get_hub_db()
+    if action == "close" and trade.get("opened_at"):
+        updated = hub.update_trade_close(bot_id, trade["opened_at"], trade)
+        if not updated:
+            hub.insert_trade(bot_id, trade)
+    else:
+        hub.insert_trade(bot_id, trade)
+
+    return {"status": "ok", "action": action}
+
+
+@app.post("/internal/deposit")
+async def receive_deposit(request: Request) -> dict[str, Any]:
+    """Bots push deposit/withdrawal detection events here."""
+    data = await request.json()
+    bot_id = data.get("bot_id", "")
+    amount = data.get("amount", 0)
+    if not bot_id:
+        return {"status": "error", "detail": "missing bot_id"}
+
+    hub = _get_hub_db()
+    row_id = hub.insert_deposit(
+        bot_id=bot_id,
+        amount=amount,
+        exchange=data.get("exchange", ""),
+        detected_at=data.get("detected_at", ""),
+        balance_before=data.get("balance_before", 0),
+        balance_after=data.get("balance_after", 0),
+        notes=data.get("notes", ""),
+    )
+    return {"status": "ok", "deposit_id": row_id}
 
 
 # --------------- WebSocket ---------------

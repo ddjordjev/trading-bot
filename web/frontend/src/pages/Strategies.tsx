@@ -26,7 +26,7 @@ export function Strategies({ bots = [] }: { bots?: { bot_id: string; label?: str
       .finally(() => setLoading(false));
   }, []);
 
-  const multiBot = strategies.some((s) => s.bot_id);
+  const _multiBot = false;
 
   if (loading) return <div className="empty-state">Loading...</div>;
   if (strategies.length === 0) return <div className="empty-state">No active strategies</div>;
@@ -38,46 +38,61 @@ export function Strategies({ bots = [] }: { bots?: { bot_id: string; label?: str
     <table style={{ marginBottom: "2rem" }}>
       <thead>
         <tr>
-          {multiBot && <th>Bot</th>}
+          {/* Bot column removed — strategies aggregated across all bots */}
           <th>Strategy</th>
-          <th>Symbol</th>
+          <th>Symbols</th>
           <th>Market</th>
           <th>Leverage</th>
           <th>Mode</th>
           <th>Open</th>
-          <th>Closed</th>
+          <th>Trades</th>
           <th>Wins</th>
           <th>Losses</th>
         </tr>
       </thead>
       <tbody>
-        {rows.map((s, i) => (
-          <tr key={`${s.bot_id}:${s.name}:${s.symbol}:${i}`}>
-            {multiBot && (
-              <td style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)" }}>
-                {s.bot_id || "—"}
+        {rows.map((s, i) => {
+          const symbols = s.symbol ? s.symbol.split(",").map((x) => x.trim()).filter(Boolean) : [];
+          const totalTrades = s.success_count + s.fail_count;
+          const winRate = totalTrades > 0 ? Math.round((s.success_count / totalTrades) * 100) : 0;
+          return (
+            <tr key={`${s.name}:${i}`}>
+              <td><strong>{s.name}</strong></td>
+              <td title={s.symbol || "none"}>
+                {symbols.length > 0 ? (
+                  <span style={{ fontSize: "0.8rem" }}>
+                    {symbols.length} pair{symbols.length !== 1 ? "s" : ""}
+                  </span>
+                ) : "—"}
               </td>
-            )}
-            <td><strong>{s.name}</strong></td>
-            <td>{s.symbol}</td>
-            <td>{s.market_type}</td>
-            <td>{s.leverage}x</td>
-            <td>
-              <span className="badge" style={{
-                background: s.mode === "pyramid" ? "rgba(188,140,255,0.15)" : "rgba(88,166,255,0.15)",
-                color: s.mode === "pyramid" ? "var(--purple)" : "var(--accent)",
-              }}>
-                {s.mode.toUpperCase()}
-              </span>
-            </td>
-            <td>{s.open_now > 0 ? (
-              <span className="badge" style={{ background: "rgba(63,185,80,0.15)", color: "var(--green)" }}>ACTIVE</span>
-            ) : "—"}</td>
-            <td>{s.applied_count}</td>
-            <td className="pnl-positive">{s.success_count}</td>
-            <td className="pnl-negative">{s.fail_count}</td>
-          </tr>
-        ))}
+              <td>{s.market_type}</td>
+              <td>{s.leverage}x</td>
+              <td>
+                <span className="badge" style={{
+                  background: s.mode === "pyramid" ? "rgba(188,140,255,0.15)" : "rgba(88,166,255,0.15)",
+                  color: s.mode === "pyramid" ? "var(--purple)" : "var(--accent)",
+                }}>
+                  {s.mode.toUpperCase()}
+                </span>
+              </td>
+              <td>{s.open_now > 0 ? (
+                <span className="badge" style={{ background: "rgba(63,185,80,0.15)", color: "var(--green)" }}>
+                  {s.open_now} open
+                </span>
+              ) : "—"}</td>
+              <td>
+                {s.applied_count}
+                {totalTrades > 0 && (
+                  <span style={{ fontSize: "0.7rem", color: "var(--text-muted)", marginLeft: 4 }}>
+                    ({winRate}% WR)
+                  </span>
+                )}
+              </td>
+              <td className="pnl-positive">{s.success_count}</td>
+              <td className="pnl-negative">{s.fail_count}</td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );

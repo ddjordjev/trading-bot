@@ -16,16 +16,20 @@ const BOT_COLORS: Record<string, string> = {
 
 export function PositionRow({ position: p, onAction, showBot = false }: Props) {
   const [loading, setLoading] = useState("");
+  const [feedback, setFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  const act = async (action: string, fn: () => Promise<unknown>) => {
+  const act = async (action: string, fn: () => Promise<{ success: boolean; message: string }>) => {
     setLoading(action);
+    setFeedback(null);
     try {
-      await fn();
-      onAction();
-    } catch (e) {
-      console.error(e);
+      const res = await fn();
+      setFeedback({ ok: res.success, msg: res.message });
+      if (res.success) onAction();
+    } catch (e: any) {
+      setFeedback({ ok: false, msg: e?.message || "Request failed" });
     }
     setLoading("");
+    setTimeout(() => setFeedback(null), 5000);
   };
 
   const pnlClass = p.pnl_pct >= 0 ? "pnl-positive" : "pnl-negative";
@@ -128,38 +132,48 @@ export function PositionRow({ position: p, onAction, showBot = false }: Props) {
           : `${(p.age_minutes / 60).toFixed(1)}h`}
       </td>
       <td>
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
           <button
             className="btn-danger"
             title="Close this position at market."
-            disabled={loading === "close"}
+            disabled={!!loading}
             onClick={() => act("close", () => postBody("/api/position/close", { symbol: p.symbol, bot_id: botId }))}
           >
-            Close
+            {loading === "close" ? "..." : "Close"}
           </button>
           <button
             className="btn-warning"
             title="Take profit: close 25% of this position at market."
             style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
-            disabled={loading === "tp25"}
+            disabled={!!loading}
             onClick={() =>
               act("tp25", () => postBody("/api/position/take-profit", { symbol: p.symbol, pct: 25, bot_id: botId }))
             }
           >
-            25%
+            {loading === "tp25" ? "..." : "25%"}
           </button>
           <button
             className="btn-primary"
             title="Tighten trailing stop (move stop loss closer to current price)."
             style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
-            disabled={loading === "stop"}
+            disabled={!!loading}
             onClick={() =>
               act("stop", () => postBody("/api/position/tighten-stop", { symbol: p.symbol, pct: 2, bot_id: botId }))
             }
           >
-            Tighten
+            {loading === "stop" ? "..." : "Tighten"}
           </button>
         </div>
+        {feedback && (
+          <div style={{
+            marginTop: 4,
+            fontSize: "0.7rem",
+            fontWeight: 600,
+            color: feedback.ok ? "var(--green)" : "var(--red)",
+          }}>
+            {feedback.msg}
+          </div>
+        )}
       </td>
     </tr>
   );

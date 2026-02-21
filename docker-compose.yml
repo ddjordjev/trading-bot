@@ -82,26 +82,6 @@ services:
       start_period: 90s
       retries: 3
 
-  # ---- Background DB sync (merges per-bot DBs into unified) ----
-  db-sync:
-    build: .
-    container_name: tradeborg-db-sync
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      - TZ=UTC
-    command: python scripts/db_sync.py
-    volumes:
-      - bot-data:/app/data
-    depends_on:
-      bot-momentum:
-        condition: service_started
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "5m"
-        max-file: "2"
-
   # ---- Shared services (one instance each) ----
   monitor:
     build: .

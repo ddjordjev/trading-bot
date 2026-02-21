@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from web.server import _ALLOWED_TABLES, _bot_reports, app, report_bot_snapshot, set_bot
+from web.server import _ALLOWED_TABLES, _bot_reports, _get_hub_db, app, report_bot_snapshot, set_bot
 
 # ── Fixtures ─────────────────────────────────────────────────────────
 
@@ -956,7 +956,10 @@ class TestDbExplorer:
         set_bot(None)  # type: ignore[arg-type]
         r = await client.get("/api/db/tables")
         assert r.status_code == 200
-        assert r.json() == []
+        tables = r.json()
+        names = {t["name"] for t in tables}
+        assert "trades" in names
+        assert "deposits" in names
 
     async def test_db_tables_with_bot(self, client, mock_bot):
         _ALLOWED_TABLES.clear()
@@ -969,66 +972,63 @@ class TestDbExplorer:
         r = await client.get("/api/db/tables")
         assert r.status_code == 200
         data = r.json()
-        assert len(data) == 1
-        assert data[0]["name"] == "trades"
-        assert data[0]["row_count"] == 0
+        names = {t["name"] for t in data}
+        assert "trades" in names
+        assert "deposits" in names
 
     async def test_db_table_rows_empty(self, client, mock_bot):
         _ALLOWED_TABLES.clear()
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, symbol TEXT)")
-        conn.commit()
-        mock_bot.trade_db._conn = conn
         set_bot(mock_bot)  # type: ignore[arg-type]
         r = await client.get("/api/db/table/trades")
         assert r.status_code == 200
         data = r.json()
         assert "id" in data["columns"]
         assert "symbol" in data["columns"]
-        assert data["rows"] == []
-        assert data["total"] == 0
 
     async def test_db_table_rows_with_data(self, client, mock_bot):
         _ALLOWED_TABLES.clear()
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, symbol TEXT)")
-        for i in range(15):
-            conn.execute("INSERT INTO trades (id, symbol) VALUES (?, ?)", (i + 1, "BTC"))
-        conn.commit()
-        mock_bot.trade_db._conn = conn
         set_bot(mock_bot)  # type: ignore[arg-type]
+        hub = _get_hub_db()
+        for i in range(15):
+            hub.insert_trade(
+                "test",
+                {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "open",
+                    "opened_at": f"2026-02-20T{10 + i}:00:00",
+                },
+            )
         r = await client.get("/api/db/table/trades?page=1&page_size=10")
         assert r.status_code == 200
         data = r.json()
         assert len(data["rows"]) == 10
-        assert data["total"] == 15
-        assert data["total_pages"] == 2
+        assert data["total"] >= 15
+        assert data["total_pages"] >= 2
 
     async def test_db_table_not_found(self, client, mock_bot):
         _ALLOWED_TABLES.clear()
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, symbol TEXT)")
-        conn.commit()
-        mock_bot.trade_db._conn = conn
         set_bot(mock_bot)  # type: ignore[arg-type]
-        # Populate _ALLOWED_TABLES so "trades" exists but "nonexistent" does not
         await client.get("/api/db/tables")
         r = await client.get("/api/db/table/nonexistent")
         assert r.status_code == 404
 
     async def test_db_table_pagination(self, client, mock_bot):
         _ALLOWED_TABLES.clear()
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, symbol TEXT)")
-        for i in range(25):
-            conn.execute("INSERT INTO trades (id, symbol) VALUES (?, ?)", (i + 1, "BTC"))
-        conn.commit()
-        mock_bot.trade_db._conn = conn
         set_bot(mock_bot)  # type: ignore[arg-type]
+        hub = _get_hub_db()
+        for i in range(25):
+            hub.insert_trade(
+                "test",
+                {
+                    "symbol": "ETH/USDT",
+                    "side": "long",
+                    "strategy": "macd",
+                    "action": "open",
+                    "opened_at": f"2026-02-20T{i}:00:00",
+                },
+            )
         r = await client.get("/api/db/table/trades?page=2&page_size=10")
         assert r.status_code == 200
         data = r.json()
@@ -1273,7 +1273,7 @@ class TestBroadcastActions:
 
 
 class TestTradeQueueLifecycle:
-    async def test_trade_queue_shows_all_statuses(self, client):
+    async def test_trade_queue_shows_only_pending(self, client):
         from shared.models import SignalPriority, TradeProposal, TradeQueue
 
         with patch("web.server.SharedState") as MockSharedState:
@@ -1312,21 +1312,19 @@ class TestTradeQueueLifecycle:
                 ),
             ]
             mock_state.read_trade_queue.return_value = q
-            mock_state._data_dir = MagicMock()
-            mock_state._data_dir.iterdir.return_value = []
+            mock_data_dir = MagicMock()
+            mock_data_dir.iterdir.return_value = iter([])
+            mock_state._data_dir = mock_data_dir
             MockSharedState.return_value = mock_state
             r = await client.get("/api/trade-queue")
 
         assert r.status_code == 200
         data = r.json()
-        assert len(data) == 3
-        statuses = {d["symbol"]: d["status"] for d in data}
-        assert statuses["BTC/USDT"] == "pending"
-        assert statuses["ETH/USDT"] == "consumed"
-        assert statuses["SOL/USDT"] == "rejected"
-
-        rejected_item = next(d for d in data if d["symbol"] == "SOL/USDT")
-        assert rejected_item["reason"] == "size too big"
+        assert len(data) == 1
+        assert data[0]["symbol"] == "BTC/USDT"
+        assert data[0]["status"] == "pending"
+        assert not any(d["symbol"] == "SOL/USDT" for d in data)
+        assert not any(d["symbol"] == "ETH/USDT" for d in data)
 
 
 # ── Analytics with Multibot Positions ───────────────────────────────────
@@ -1377,31 +1375,33 @@ class TestClosedTrades:
         assert r.status_code == 200
         assert r.json() == []
 
-    async def test_closed_trades_from_local_db(self, client, mock_bot):
-        from db.models import TradeRecord
-
+    async def test_closed_trades_from_hub_db(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        record = TradeRecord(
-            symbol="BTC/USDT",
-            side="buy",
-            action="close",
-            strategy="momentum",
-            amount=0.01,
-            entry_price=50000.0,
-            exit_price=52000.0,
-            pnl_usd=20.0,
-            pnl_pct=4.0,
-            leverage=10,
-            opened_at="2026-02-20T10:00:00",
-            closed_at="2026-02-20T11:00:00",
+        hub = _get_hub_db()
+        hub.insert_trade(
+            "test_ct",
+            {
+                "symbol": "SOL/USDT",
+                "side": "long",
+                "strategy": "momentum",
+                "action": "close",
+                "entry_price": 100.0,
+                "exit_price": 110.0,
+                "amount": 1.0,
+                "pnl_usd": 10.0,
+                "pnl_pct": 10.0,
+                "is_winner": True,
+                "leverage": 5,
+                "opened_at": "2026-02-20T10:00:00",
+                "closed_at": "2026-02-20T11:00:00",
+            },
         )
-        mock_bot.trade_db.get_all_trades = MagicMock(return_value=[record])
-        r = await client.get("/api/closed-trades?limit=10")
+        r = await client.get("/api/closed-trades?limit=500")
         assert r.status_code == 200
         data = r.json()
-        assert len(data) == 1
-        assert data[0]["symbol"] == "BTC/USDT"
-        assert data[0]["pnl_usd"] == 20.0
+        sol_trades = [d for d in data if d["symbol"] == "SOL/USDT"]
+        assert len(sol_trades) >= 1
+        assert sol_trades[0]["pnl_usd"] == 10.0
 
 
 # ── Module Toggle in Multibot Mode ─────────────────────────────────────
@@ -1720,3 +1720,118 @@ class TestResumeTrading:
             assert mock_bot.target.manual_stop is False
         finally:
             mock_bot.target.STOP_FILE.unlink(missing_ok=True)
+
+
+# ── Hub push endpoints ──────────────────────────────────────────────────
+
+
+class TestHubPushEndpoints:
+    """Test /internal/trade and /internal/deposit endpoints."""
+
+    async def test_push_trade_open(self, client):
+        r = await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "momentum",
+                "action": "open",
+                "trade": {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "open",
+                    "entry_price": 50000,
+                    "amount": 0.01,
+                    "leverage": 10,
+                    "opened_at": "2026-02-20T10:00:00",
+                },
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+
+    async def test_push_trade_close_updates_open_row(self, client):
+        await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "meanrev",
+                "action": "open",
+                "trade": {
+                    "symbol": "ETH/USDT",
+                    "side": "long",
+                    "strategy": "bollinger",
+                    "action": "open",
+                    "entry_price": 3000,
+                    "amount": 0.5,
+                    "leverage": 5,
+                    "opened_at": "2026-02-20T11:00:00",
+                },
+            },
+        )
+        r = await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "meanrev",
+                "action": "close",
+                "trade": {
+                    "symbol": "ETH/USDT",
+                    "side": "long",
+                    "strategy": "bollinger",
+                    "action": "close",
+                    "entry_price": 3000,
+                    "exit_price": 3100,
+                    "amount": 0.5,
+                    "leverage": 5,
+                    "pnl_usd": 50,
+                    "pnl_pct": 3.33,
+                    "is_winner": True,
+                    "hold_minutes": 120,
+                    "opened_at": "2026-02-20T11:00:00",
+                    "closed_at": "2026-02-20T13:00:00",
+                },
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["action"] == "close"
+
+    async def test_push_deposit(self, client):
+        r = await client.post(
+            "/internal/deposit",
+            json={
+                "bot_id": "momentum",
+                "amount": 500.0,
+                "exchange": "mexc",
+                "detected_at": "2026-02-20T14:00:00",
+                "balance_before": 1000.0,
+                "balance_after": 1500.0,
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        assert r.json()["deposit_id"] > 0
+
+    async def test_get_deposits(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        await client.post(
+            "/internal/deposit",
+            json={
+                "bot_id": "test",
+                "amount": 250.0,
+                "exchange": "binance",
+                "detected_at": "2026-02-20T15:00:00",
+                "balance_before": 500.0,
+                "balance_after": 750.0,
+            },
+        )
+        r = await client.get("/api/deposits")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) >= 1
+        assert any(d["amount"] == 250.0 for d in data)
+
+    async def test_push_trade_missing_bot_id(self, client):
+        r = await client.post(
+            "/internal/trade",
+            json={"action": "open", "trade": {"symbol": "X"}},
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "error"

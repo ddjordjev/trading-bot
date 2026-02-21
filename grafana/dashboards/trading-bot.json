@@ -34,7 +34,7 @@
         "overrides": []
       },
       "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
-      "targets": [{ "expr": "system_cpu_percent", "legendFormat": "CPU %", "refId": "A" }]
+      "targets": [{ "expr": "system_cpu_percent", "legendFormat": "{{job}}", "refId": "A" }]
     },
     {
       "id": 2,
@@ -177,7 +177,7 @@
         "overrides": []
       },
       "options": { "tooltip": { "mode": "single" }, "legend": { "displayMode": "hidden" } },
-      "targets": [{ "expr": "process_cpu_percent", "legendFormat": "CPU %", "refId": "A" }]
+      "targets": [{ "expr": "process_cpu_percent", "legendFormat": "{{job}}", "refId": "A" }]
     },
     {
       "id": 11,

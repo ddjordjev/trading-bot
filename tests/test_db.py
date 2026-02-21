@@ -1,9 +1,10 @@
-"""Tests for db/ (models, store)."""
+"""Tests for db/ (models, store, hub_store)."""
 
 from __future__ import annotations
 
 import pytest
 
+from db.hub_store import HubDB
 from db.models import ModificationSuggestion, PatternInsight, StrategyScore, TradeRecord
 from db.store import TradeDB
 
@@ -332,3 +333,126 @@ class TestTradeDB:
         assert t.fear_greed == 80
         assert t.daily_tier == "strong"
         assert t.signal_strength == 0.85
+
+
+# ── HubDB ────────────────────────────────────────────────────────────
+
+
+class TestHubDB:
+    @pytest.fixture
+    def hub(self, tmp_path):
+        h = HubDB(path=tmp_path / "hub.db")
+        h.connect()
+        yield h
+        h.close()
+
+    def test_insert_and_query_trade(self, hub: HubDB):
+        row_id = hub.insert_trade(
+            "momentum",
+            {
+                "symbol": "BTC/USDT",
+                "side": "long",
+                "strategy": "rsi",
+                "action": "open",
+                "entry_price": 50000,
+                "amount": 0.01,
+                "leverage": 10,
+                "opened_at": "2026-02-20T10:00:00",
+            },
+        )
+        assert row_id > 0
+        assert hub.trade_count() == 1
+        trades = hub.get_all_trades()
+        assert len(trades) == 1
+        assert trades[0].symbol == "BTC/USDT"
+        assert trades[0].strategy == "rsi"
+
+    def test_update_trade_close(self, hub: HubDB):
+        hub.insert_trade(
+            "meanrev",
+            {
+                "symbol": "ETH/USDT",
+                "side": "long",
+                "strategy": "bollinger",
+                "action": "open",
+                "entry_price": 3000,
+                "amount": 0.5,
+                "opened_at": "2026-02-20T11:00:00",
+            },
+        )
+        updated = hub.update_trade_close(
+            "meanrev",
+            "2026-02-20T11:00:00",
+            {
+                "exit_price": 3100,
+                "amount": 0.5,
+                "pnl_usd": 50,
+                "pnl_pct": 3.33,
+                "is_winner": True,
+                "hold_minutes": 120,
+                "closed_at": "2026-02-20T13:00:00",
+            },
+        )
+        assert updated is True
+        trades = hub.get_all_trades()
+        assert trades[0].closed_at == "2026-02-20T13:00:00"
+        assert trades[0].pnl_usd == 50.0
+
+    def test_update_trade_close_no_match(self, hub: HubDB):
+        updated = hub.update_trade_close("ghost", "2026-01-01T00:00:00", {"closed_at": "now"})
+        assert updated is False
+
+    def test_insert_and_query_deposit(self, hub: HubDB):
+        dep_id = hub.insert_deposit(
+            bot_id="momentum",
+            amount=500.0,
+            exchange="mexc",
+            detected_at="2026-02-20T14:00:00",
+            balance_before=1000.0,
+            balance_after=1500.0,
+        )
+        assert dep_id > 0
+        deposits = hub.get_deposits()
+        assert len(deposits) == 1
+        assert deposits[0]["amount"] == 500.0
+        assert deposits[0]["exchange"] == "mexc"
+
+    def test_strategy_stats(self, hub: HubDB):
+        for i in range(3):
+            hub.insert_trade(
+                "bot1",
+                {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "close",
+                    "pnl_usd": 10.0 if i < 2 else -5.0,
+                    "pnl_pct": 1.0 if i < 2 else -0.5,
+                    "is_winner": i < 2,
+                    "closed_at": f"2026-02-20T{10 + i}:00:00",
+                },
+            )
+        stats = hub.get_strategy_stats("rsi")
+        assert stats["total"] == 3
+        assert stats["winners"] == 2
+
+    def test_hourly_performance(self, hub: HubDB):
+        hub.insert_trade(
+            "bot1",
+            {
+                "symbol": "X",
+                "side": "long",
+                "strategy": "s",
+                "action": "close",
+                "pnl_usd": 5,
+                "hour_utc": 14,
+                "is_winner": True,
+                "closed_at": "2026-02-20T14:00:00",
+            },
+        )
+        hourly = hub.get_hourly_performance()
+        assert len(hourly) == 1
+        assert hourly[0]["hour_utc"] == 14
+
+    def test_conn_property(self, hub: HubDB):
+        assert hub.conn is not None

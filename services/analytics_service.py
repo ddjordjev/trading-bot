@@ -20,7 +20,7 @@ from db.store import TradeDB
 from shared.models import AnalyticsSnapshot, StrategyWeightEntry
 from shared.state import SharedState
 
-UNIFIED_DB = Path("data/trades_all.db")
+HUB_DB = Path("data/hub.db")
 
 
 class AnalyticsService:
@@ -33,7 +33,7 @@ class AnalyticsService:
     def __init__(self, refresh_interval: int = 300):
         self.refresh_interval = refresh_interval
         self.state = SharedState()
-        self.db = TradeDB(path=UNIFIED_DB)
+        self.db = TradeDB(path=HUB_DB)
         self.engine: AnalyticsEngine | None = None
         self._running = False
         self._last_trade_count = 0

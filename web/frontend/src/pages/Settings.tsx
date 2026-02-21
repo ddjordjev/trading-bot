@@ -146,6 +146,12 @@ function AboutSection() {
 
 export function Settings() {
   const [section, setSection] = useState<Section>("modules");
+  const [renderKey, setRenderKey] = useState(0);
+
+  const navigate = (id: Section) => {
+    setSection(id);
+    setRenderKey((k) => k + 1);
+  };
 
   return (
     <div style={{ display: "flex", gap: "1.5rem", minHeight: "calc(100vh - 140px)" }}>
@@ -159,7 +165,7 @@ export function Settings() {
           {UPPER_LINKS.map((link) => (
             <button
               key={link.id}
-              onClick={() => setSection(link.id)}
+              onClick={() => navigate(link.id)}
               style={{
                 display: "block", width: "100%", textAlign: "left",
                 padding: "0.5rem 0.75rem", marginBottom: "0.25rem",
@@ -183,7 +189,7 @@ export function Settings() {
           {LOWER_LINKS.map((link) => (
             <button
               key={link.id}
-              onClick={() => setSection(link.id)}
+              onClick={() => navigate(link.id)}
               style={{
                 display: "block", width: "100%", textAlign: "left",
                 padding: "0.5rem 0.75rem", marginBottom: "0.25rem",
@@ -202,10 +208,10 @@ export function Settings() {
       </nav>
 
       <div style={{ flex: 1, minWidth: 0 }}>
-        {section === "modules" && <Modules />}
+        {section === "modules" && <Modules key={renderKey} />}
         {section === "auth" && <AuthSection />}
         {section === "about" && <AboutSection />}
-        {section === "summary" && <Summary />}
+        {section === "summary" && <Summary key={renderKey} />}
       </div>
     </div>
   );

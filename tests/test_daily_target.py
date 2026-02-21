@@ -192,3 +192,123 @@ class TestProfitBuffer:
         t.update_balance(1100.0)  # exactly 10%
         t.reset_day(1100.0)
         assert t.profit_buffer_pct == pytest.approx(0.0)  # no excess
+
+
+class TestDepositDetection:
+    """External deposits/withdrawals should adjust day-start balance,
+    not inflate daily PnL."""
+
+    def test_deposit_detected_when_balance_jumps(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        # Balance jumped to 1500 with 0 unrealized PnL → $500 is a deposit
+        t.update_balance(1500.0, unrealized_pnl=0.0)
+        assert t._total_deposits == pytest.approx(500.0)
+        assert t._day_start_balance == pytest.approx(1500.0)
+        # Daily PnL should be ~0% since profit came from deposit
+        assert abs(t.todays_pnl_pct) < 1.0
+
+    def test_no_false_positive_from_trading_profit(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        # Balance is 1050, unrealized PnL explains the gain
+        t.update_balance(1050.0, unrealized_pnl=50.0)
+        assert t._total_deposits == pytest.approx(0.0)
+        assert t.todays_pnl_pct == pytest.approx(5.0)
+
+    def test_deposit_plus_trading_profit(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        # Balance is 1550: $50 unrealized + $500 deposit
+        t.update_balance(1550.0, unrealized_pnl=50.0)
+        assert t._total_deposits == pytest.approx(500.0)
+        # Day-start adjusted to 1500, current 1550 → +3.33% from trading
+        assert t.todays_pnl_pct == pytest.approx(50.0 / 1500.0 * 100, abs=0.5)
+
+    def test_withdrawal_detected(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        # Balance dropped to 700 with 0 unrealized → $300 withdrawal
+        t.update_balance(700.0, unrealized_pnl=0.0)
+        assert t._total_deposits == pytest.approx(-300.0)
+        assert t._day_start_balance == pytest.approx(700.0)
+
+    def test_small_fluctuation_ignored(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        # $3 difference is below the noise threshold ($5)
+        t.update_balance(1003.0, unrealized_pnl=0.0)
+        assert t._total_deposits == pytest.approx(0.0)
+
+    def test_deposit_skipped_when_no_unrealized_provided(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        # No unrealized_pnl passed → deposit detection skipped
+        t.update_balance(1500.0)
+        assert t._total_deposits == pytest.approx(0.0)
+        assert t.todays_pnl_pct == pytest.approx(50.0)
+
+    def test_total_growth_excludes_deposits(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        # Deposit $500, then make $50 trading profit
+        t.update_balance(1550.0, unrealized_pnl=50.0)
+        # Total growth = (1550 - 1000 - 500) / 1000 = 5%
+        assert t.total_growth_pct == pytest.approx(5.0)
+
+    def test_deposit_resets_on_new_day(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        t.update_balance(1500.0, unrealized_pnl=0.0)
+        assert t._total_deposits == pytest.approx(500.0)
+        # New day — realized_pnl_today resets, but total_deposits persists
+        t.reset_day(1500.0)
+        assert t._total_deposits == pytest.approx(500.0)
+        assert t._realized_pnl_today == pytest.approx(0.0)
+
+    def test_realized_pnl_prevents_false_deposit(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        # Closed a trade for $100 profit (realized)
+        t.record_trade(realized_pnl=100.0)
+        # Balance now 1100 with 0 unrealized — the $100 is explained by realized PnL
+        t.update_balance(1100.0, unrealized_pnl=0.0)
+        assert t._total_deposits == pytest.approx(0.0)
+
+    def test_multiple_deposits_accumulate(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        t.update_balance(1200.0, unrealized_pnl=0.0)  # +200 deposit
+        assert t._total_deposits == pytest.approx(200.0)
+        t.update_balance(1500.0, unrealized_pnl=0.0)  # +300 more
+        assert t._total_deposits == pytest.approx(500.0)
+
+    def test_status_report_shows_deposits(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        t.update_balance(1500.0, unrealized_pnl=0.0)
+        report = t.status_report()
+        assert "Deposits" in report
+        assert "+500.00" in report
+
+    def test_status_report_hides_zero_deposits(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        t.update_balance(1050.0)
+        report = t.status_report()
+        assert "Deposits" not in report
+
+    def test_compound_report_shows_deposits(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        t.update_balance(1500.0, unrealized_pnl=0.0)
+        t.reset_day(1500.0)
+        report = t.compound_report()
+        assert "deposits" in report.lower()
+
+    def test_total_deposits_property(self):
+        t = DailyTargetTracker(daily_target_pct=10.0)
+        t.reset_day(1000.0)
+        assert t.total_deposits == 0.0
+        t.update_balance(1200.0, unrealized_pnl=0.0)
+        assert t.total_deposits == pytest.approx(200.0)
