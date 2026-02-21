@@ -146,6 +146,68 @@ class TestMonitorService:
         assert "BTC/USDT" in monitor._tv_symbols
         assert "ETH/USDT" in monitor._tv_symbols
 
+    def test_refresh_scanner_filters_by_exchange_symbols(self, monitor):
+        """Scanner refresh only includes symbols on known exchanges."""
+        monitor._exchange_symbols = {"BINANCE": {"BTC/USDT", "ETH/USDT", "SOL/USDT"}}
+        coin = MagicMock()
+        coin.symbol = "FAKE"
+        coin.is_tradable_size = True
+        monitor.cmc.all_interesting = [coin]
+        monitor.gecko.all_interesting = []
+        monitor._refresh_scanner_symbols()
+        assert "FAKE/USDT" not in monitor._tv_symbols
+        assert "BTC/USDT" in monitor._tv_symbols
+
+    def test_route_to_bots_skips_unsupported_exchange(self, monitor):
+        """Proposals tagged as unsupported on a bot's exchange are not routed."""
+        from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        staging = TradeQueue()
+        prop = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="FAKE/USDT",
+            side="long",
+            strategy="test",
+            unsupported_exchanges=["BINANCE"],
+        )
+        staging.add(prop)
+
+        bot_status = BotDeploymentStatus(
+            bot_id="momentum",
+            bot_style="momentum",
+            exchange="BINANCE",
+            should_trade=True,
+            open_positions=0,
+            max_positions=3,
+        )
+        monitor._route_to_bots(staging, [bot_status])
+        monitor.state.write_bot_trade_queue.assert_not_called()
+
+    def test_route_to_bots_allows_supported_exchange(self, monitor):
+        """Proposals for supported symbols get routed normally."""
+        from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        staging = TradeQueue()
+        prop = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            unsupported_exchanges=[],
+        )
+        staging.add(prop)
+
+        bot_status = BotDeploymentStatus(
+            bot_id="momentum",
+            bot_style="momentum",
+            exchange="BINANCE",
+            should_trade=True,
+            open_positions=0,
+            max_positions=3,
+        )
+        monitor._route_to_bots(staging, [bot_status])
+        monitor.state.write_bot_trade_queue.assert_called_once()
+
 
 # ── AnalyticsService ────────────────────────────────────────────────
 
@@ -571,3 +633,86 @@ class TestSignalGenerator:
         gen.generate(snap, empty_queue)
         daily = empty_queue.get_actionable(SignalPriority.DAILY)
         assert any(p.strategy == "trending_momentum" and "LOW" in p.symbol for p in daily)
+
+    # --- Exchange-aware filtering ---
+
+    def test_update_exchange_symbols(self, gen):
+        """Exchange symbol sets update correctly."""
+        gen.update_exchange_symbols({"BINANCE": {"BTC/USDT", "ETH/USDT"}, "MEXC": {"BTC/USDT", "PEPE/USDT"}})
+        assert gen._symbol_tradeable("BTC/USDT")
+        assert gen._symbol_tradeable("PEPE/USDT")
+        assert gen._symbol_tradeable("ETH/USDT")
+        assert not gen._symbol_tradeable("FAKE/USDT")
+
+    def test_unsupported_exchanges_tagging(self, gen):
+        """Symbols are tagged with which exchanges don't support them."""
+        gen.update_exchange_symbols({"BINANCE": {"BTC/USDT"}, "MEXC": {"BTC/USDT", "PEPE/USDT"}})
+        assert "BINANCE" in gen._unsupported_exchanges("PEPE/USDT")
+        assert "MEXC" not in gen._unsupported_exchanges("PEPE/USDT")
+        assert gen._unsupported_exchanges("BTC/USDT") == []
+
+    def test_propose_skips_untradeable_symbol(self, gen, empty_queue):
+        """Proposals for symbols not on any exchange are dropped."""
+        gen.update_exchange_symbols({"BINANCE": {"BTC/USDT", "ETH/USDT"}})
+        prop = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="FAKE/USDT",
+            side="long",
+            strategy="test",
+            source="monitor",
+        )
+        gen._propose(empty_queue, prop)
+        assert empty_queue.total == 0
+
+    def test_propose_tags_unsupported_exchanges(self, gen, empty_queue):
+        """Proposals get tagged with exchanges that don't support the symbol."""
+        gen.update_exchange_symbols({"BINANCE": {"BTC/USDT"}, "MEXC": {"BTC/USDT", "SOL/USDT"}})
+        prop = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="SOL/USDT",
+            side="long",
+            strategy="test",
+            source="monitor",
+        )
+        gen._propose(empty_queue, prop)
+        assert empty_queue.total == 1
+        queued = empty_queue.daily[0]
+        assert "BINANCE" in queued.unsupported_exchanges
+        assert "MEXC" not in queued.unsupported_exchanges
+
+    def test_propose_allows_when_no_exchange_data(self, gen, empty_queue):
+        """When no exchange data loaded, all symbols pass (optimistic)."""
+        prop = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="ANYTHING/USDT",
+            side="long",
+            strategy="test",
+            source="monitor",
+        )
+        gen._propose(empty_queue, prop)
+        assert empty_queue.total == 1
+        assert empty_queue.daily[0].unsupported_exchanges == []
+
+    def test_generate_filters_untradeable_extreme_movers(self, gen, empty_queue):
+        """Extreme mover proposals for untradeable symbols are dropped."""
+        gen.update_exchange_symbols({"BINANCE": {"BTC/USDT", "ETH/USDT"}})
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(symbol="FAKE", change_1h=12.0, volume_24h=10e6, is_low_liquidity=False),
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        crit = empty_queue.get_actionable(SignalPriority.CRITICAL)
+        assert not any("FAKE" in p.symbol for p in crit)
+
+    def test_generate_allows_tradeable_extreme_movers(self, gen, empty_queue):
+        """Extreme mover proposals for tradeable symbols pass through."""
+        gen.update_exchange_symbols({"BINANCE": {"BTC/USDT", "PEPE/USDT"}})
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(symbol="PEPE", change_1h=10.0, volume_24h=10e6, is_low_liquidity=False),
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        crit = empty_queue.get_actionable(SignalPriority.CRITICAL)
+        assert any("PEPE" in p.symbol for p in crit)

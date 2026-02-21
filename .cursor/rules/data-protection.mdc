@@ -1,0 +1,21 @@
+---
+description: Never touch persisted databases or data volumes
+alwaysApply: true
+---
+
+# Data Protection
+
+**NEVER delete, reset, or wipe persisted databases or data unless the user
+explicitly tells you to.**
+
+## Rules
+
+1. `docker compose down` is fine. `docker compose down -v` is **FORBIDDEN**
+   unless the user says to wipe volumes.
+2. Never `rm -rf data/`, `rm data/*.db`, or similar.
+3. Never `DROP TABLE`, `DELETE FROM`, or truncate any SQLite/Postgres data.
+4. When rebuilding/redeploying, use `docker compose up -d --build` — this
+   recreates containers but preserves named volumes.
+5. Named volumes (`bot-data`, `bot-logs`, `loki-data`, `grafana-data`,
+   `prometheus-data`) contain live trading data. Treat them as production.
+6. If a migration or schema change needs data changes, ask first.

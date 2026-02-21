@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 import tempfile
 from datetime import UTC, datetime
@@ -207,3 +208,52 @@ class SharedState:
             finally:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
         return q or TradeQueue()
+
+    # ---- Exchange symbols (written by bots, read by monitor) ---- #
+
+    def write_exchange_symbols(self, bot_id: str, exchange: str, symbols: list[str]) -> None:
+        """Publish the symbols this bot's exchange supports."""
+        bot_dir = self._data_dir / bot_id
+        bot_dir.mkdir(parents=True, exist_ok=True)
+        path = bot_dir / "exchange_symbols.json"
+        data = {"exchange": exchange.upper(), "symbols": symbols}
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        closed = False
+        try:
+            os.write(fd, json.dumps(data).encode())
+            os.fsync(fd)
+            os.close(fd)
+            closed = True
+            os.replace(tmp, str(path))
+        except Exception:
+            if not closed:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+
+    def read_all_exchange_symbols(self) -> dict[str, set[str]]:
+        """Scan all bots and return {EXCHANGE_NAME: {symbol, ...}}.
+
+        Used by the monitor to know which symbols are actually tradeable.
+        """
+        result: dict[str, set[str]] = {}
+        for child in sorted(self._data_dir.iterdir()):
+            if not child.is_dir():
+                continue
+            sym_file = child / "exchange_symbols.json"
+            if not sym_file.exists():
+                continue
+            try:
+                data = json.loads(sym_file.read_text())
+                exchange = data.get("exchange", "").upper()
+                symbols = set(data.get("symbols", []))
+                if exchange and symbols:
+                    if exchange in result:
+                        result[exchange] |= symbols
+                    else:
+                        result[exchange] = symbols
+            except Exception:
+                continue
+        return result

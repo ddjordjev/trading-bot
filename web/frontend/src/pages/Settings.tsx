@@ -1,11 +1,13 @@
 import { useState } from "react";
+import { BotProfiles } from "./BotProfiles";
 import { Modules } from "./Modules";
 import { Summary } from "./Summary";
 import { setToken } from "../api/client";
 
-type Section = "modules" | "auth" | "about" | "summary";
+type Section = "bots" | "modules" | "auth" | "about" | "summary";
 
 const UPPER_LINKS: { id: Section; label: string }[] = [
+  { id: "bots", label: "Bots" },
   { id: "modules", label: "Modules" },
   { id: "auth", label: "Authentication" },
 ];
@@ -145,7 +147,7 @@ function AboutSection() {
 }
 
 export function Settings() {
-  const [section, setSection] = useState<Section>("modules");
+  const [section, setSection] = useState<Section>("bots");
   const [renderKey, setRenderKey] = useState(0);
 
   const navigate = (id: Section) => {
@@ -208,6 +210,7 @@ export function Settings() {
       </nav>
 
       <div style={{ flex: 1, minWidth: 0 }}>
+        {section === "bots" && <BotProfiles key={renderKey} />}
         {section === "modules" && <Modules key={renderKey} />}
         {section === "auth" && <AuthSection />}
         {section === "about" && <AboutSection />}

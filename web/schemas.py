@@ -279,3 +279,15 @@ class PositionTightenStopBody(BaseModel):
 
 class BotActionBody(BaseModel):
     bot_id: str = ""
+
+
+class BotProfileInfo(BaseModel):
+    id: str
+    display_name: str
+    description: str
+    style: str
+    strategies: list[str] = []
+    env_overrides: dict[str, str] = {}
+    is_hub: bool = False
+    enabled: bool = False
+    container_status: str = "missing"

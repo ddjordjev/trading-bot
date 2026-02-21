@@ -145,6 +145,7 @@ class TradingBot:
 
         self.extreme_watcher = ExtremeWatcher(self.exchange, self.settings)
         self._last_extreme_eval: float = 0.0
+        self._available_symbols: set[str] = set()
 
     # -- Strategy Management --
 
@@ -221,6 +222,18 @@ class TradingBot:
         logger.info("Market schedule: {}", schedule.summary())
 
         await self.exchange.connect()
+
+        # Publish available symbols so the monitor can filter proposals
+        self._available_symbols = set()
+        try:
+            futures_syms = await self.exchange.get_available_symbols(MarketType.FUTURES)
+            spot_syms = await self.exchange.get_available_symbols(MarketType.SPOT)
+            self._available_symbols = set(futures_syms) | set(spot_syms)
+            bot_id = self.settings.bot_id or "default"
+            self.shared.write_exchange_symbols(bot_id, self.settings.exchange, list(self._available_symbols))
+            logger.info("Published {} available symbols for {}", len(self._available_symbols), self.settings.exchange)
+        except Exception as e:
+            logger.warning("Could not publish exchange symbols: {}", e)
 
         await self.notifier.start()
 
@@ -820,10 +833,16 @@ class TradingBot:
         consumed_ids: list[str] = []
         rejected: dict[str, str] = {}
 
+        my_exchange = self.settings.exchange.upper()
+
         # --- CRITICAL: time-sensitive, but still respect capacity + tick cap ---
         for proposal in queue.get_actionable(SignalPriority.CRITICAL):
             if executed >= tick_limit:
                 break
+            if not self._symbol_available(proposal.symbol) or my_exchange in proposal.unsupported_exchanges:
+                queue.mark_rejected(proposal.id, f"symbol not on {my_exchange}")
+                rejected[proposal.id] = f"symbol not on {my_exchange}"
+                continue
             if not self.settings.is_market_type_allowed(proposal.market_type):
                 queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
                 rejected[proposal.id] = f"market type '{proposal.market_type}' not allowed"
@@ -858,6 +877,10 @@ class TradingBot:
             for proposal in queue.get_actionable(SignalPriority.DAILY):
                 if executed >= tick_limit:
                     break
+                if not self._symbol_available(proposal.symbol) or my_exchange in proposal.unsupported_exchanges:
+                    queue.mark_rejected(proposal.id, f"symbol not on {my_exchange}")
+                    rejected[proposal.id] = f"symbol not on {my_exchange}"
+                    continue
                 if not self.settings.is_market_type_allowed(proposal.market_type):
                     queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
                     rejected[proposal.id] = f"market type '{proposal.market_type}' not allowed"
@@ -886,6 +909,10 @@ class TradingBot:
             for proposal in queue.get_actionable(SignalPriority.SWING):
                 if executed >= tick_limit:
                     break
+                if not self._symbol_available(proposal.symbol) or my_exchange in proposal.unsupported_exchanges:
+                    queue.mark_rejected(proposal.id, f"symbol not on {my_exchange}")
+                    rejected[proposal.id] = f"symbol not on {my_exchange}"
+                    continue
                 if not self.settings.is_market_type_allowed(proposal.market_type):
                     queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
                     rejected[proposal.id] = f"market type '{proposal.market_type}' not allowed"
@@ -919,6 +946,14 @@ class TradingBot:
 
     async def _execute_proposal(self, proposal: TradeProposal, aggression: float) -> bool:
         """Convert a queue proposal into a trading signal and execute it."""
+        my_exchange = self.settings.exchange.upper()
+        if my_exchange in proposal.unsupported_exchanges:
+            logger.debug("Queue skip {}: tagged not-for-{}", proposal.symbol, my_exchange)
+            return False
+        if not self._symbol_available(proposal.symbol):
+            logger.debug("Queue skip {}: not on {}", proposal.symbol, my_exchange)
+            return False
+
         try:
             ticker = await self.exchange.fetch_ticker(proposal.symbol)
             price = ticker.last
@@ -968,6 +1003,14 @@ class TradingBot:
         stop loss, take profit targets, leverage ramp.  The bot places
         the initial entry and lets PYRAMID mode handle the rest.
         """
+        my_exchange = self.settings.exchange.upper()
+        if my_exchange in proposal.unsupported_exchanges:
+            logger.debug("Swing skip {}: tagged not-for-{}", proposal.symbol, my_exchange)
+            return False
+        if not self._symbol_available(proposal.symbol):
+            logger.debug("Swing skip {}: not on {}", proposal.symbol, my_exchange)
+            return False
+
         plan = proposal.entry_plan
         strength = min(1.0, proposal.strength * aggression)
 
@@ -1933,6 +1976,12 @@ class TradingBot:
         "LINK/USDT": ["ETH/USDT"],
     }
 
+    def _symbol_available(self, symbol: str) -> bool:
+        """Check if a symbol is tradeable on this bot's exchange."""
+        if not self._available_symbols:
+            return True  # no data yet, optimistic
+        return symbol in self._available_symbols
+
     async def _evaluate_extreme_candidates(self) -> None:
         """Read extreme watchlist from shared state, approve candidates for WS subscription."""
         watchlist = self.shared_intel.read_extreme_watchlist()
@@ -1948,8 +1997,15 @@ class TradingBot:
 
         open_symbols = set(self.orders.scaler.active_positions.keys())
         extreme_positions = sum(1 for s in self._active_signals if s.strategy.startswith("extreme_"))
+        my_exchange = self.settings.exchange.upper()
 
         for candidate in watchlist.candidates:
+            if not self._symbol_available(candidate.symbol):
+                logger.debug("Extreme skip {}: not on {}", candidate.symbol, my_exchange)
+                continue
+            if my_exchange in candidate.unsupported_exchanges:
+                logger.debug("Extreme skip {}: tagged not-for-{}", candidate.symbol, my_exchange)
+                continue
             try:
                 detected = datetime.fromisoformat(candidate.detected_at.replace("Z", "+00:00"))
                 age = now_ts - detected.timestamp()

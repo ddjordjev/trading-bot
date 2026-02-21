@@ -76,6 +76,7 @@ class TradeProposal(BaseModel):
 
     source: str = ""
     target_bot: str = ""  # routing: which bot style should handle this (momentum/meanrev/swing)
+    unsupported_exchanges: list[str] = []  # exchanges where this symbol doesn't exist
 
     @property
     def is_expired(self) -> bool:
@@ -330,6 +331,7 @@ class ExtremeCandidate(BaseModel):
     volume_24h: float = 0.0
     momentum_score: float = 0.0
     reason: str = ""
+    unsupported_exchanges: list[str] = []  # exchanges where this symbol doesn't exist
     detected_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 

@@ -21,6 +21,7 @@ from web.schemas import (
     AnalyticsSnapshot,
     BotActionBody,
     BotInstance,
+    BotProfileInfo,
     BotStatus,
     DailyReportData,
     IntelSnapshot,
@@ -1047,6 +1048,95 @@ async def toggle_module(name: str, _: str = Depends(verify_token)) -> ActionResp
             state = "disabled"
         return ActionResponse(success=True, message=f"News {state}")
     return ActionResponse(success=False, message=f"Unknown module: {name}")
+
+
+# --------------- Bot Profiles (dynamic container management) ---------------
+
+
+@app.get("/api/bot-profiles", response_model=list[BotProfileInfo])
+async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInfo]:
+    """List all bot profiles with their current container status."""
+    from config.bot_profiles import ALL_PROFILES
+    from web.docker_manager import DOCKER_AVAILABLE, get_container_status, list_running_profiles
+
+    running = list_running_profiles() if DOCKER_AVAILABLE else set()
+
+    result: list[BotProfileInfo] = []
+    for p in ALL_PROFILES:
+        status = get_container_status(p.id) if DOCKER_AVAILABLE else "unknown"
+        enabled = p.id in running or (p.is_hub and _bot is not None and _bot._running)
+        result.append(
+            BotProfileInfo(
+                id=p.id,
+                display_name=p.display_name,
+                description=p.description,
+                style=p.style,
+                strategies=p.strategies,
+                env_overrides=p.env_overrides,
+                is_hub=p.is_hub,
+                enabled=enabled,
+                container_status=status,
+            )
+        )
+    return result
+
+
+@app.post("/api/bot-profile/{profile_id}/toggle", response_model=ActionResponse)
+async def toggle_bot_profile(profile_id: str, _: str = Depends(verify_token)) -> ActionResponse:
+    """Enable or disable a bot profile.
+
+    Enable:  start the Docker container, it auto-registers via /internal/report.
+    Disable: stop all trades -> stop bot -> kill container -> purge references.
+    """
+    from config.bot_profiles import PROFILES_BY_ID
+    from web.docker_manager import DOCKER_AVAILABLE, get_container_status, start_container, stop_container
+
+    if not DOCKER_AVAILABLE:
+        return ActionResponse(success=False, message="Docker SDK not available")
+
+    profile = PROFILES_BY_ID.get(profile_id)
+    if not profile:
+        return ActionResponse(success=False, message=f"Unknown profile: {profile_id}")
+
+    if profile.is_hub:
+        return ActionResponse(success=False, message="Hub bot cannot be toggled — it runs the dashboard")
+
+    status = get_container_status(profile_id)
+    is_running = status == "running"
+
+    if is_running:
+        # --- DISABLE: graceful teardown ---
+        # 1. Stop all trades on this bot
+        close_resp = await _forward_to_bot(profile_id, "/api/close-all", {})
+        if not close_resp.success:
+            logger.warning("Close-all for {} failed: {} (proceeding with shutdown)", profile_id, close_resp.message)
+
+        # 2. Tell bot process to stop
+        stop_resp = await _forward_to_bot(profile_id, "/api/bot/stop", {})
+        if not stop_resp.success:
+            logger.warning("Bot stop for {} failed: {} (killing container)", profile_id, stop_resp.message)
+
+        # Small delay for graceful shutdown
+        await asyncio.sleep(2)
+
+        # 3. Kill the Docker container
+        ok, msg = await stop_container(profile_id)
+        if not ok:
+            return ActionResponse(success=False, message=f"Container stop failed: {msg}")
+
+        # 4. Purge all hub references
+        _bot_reports.pop(profile_id, None)
+        _bot_urls.pop(profile_id, None)
+        _save_bot_registry()
+        nudge_ws()
+
+        return ActionResponse(success=True, message=f"Disabled {profile.display_name}")
+    else:
+        # --- ENABLE: start container ---
+        ok, msg = await start_container(profile)
+        if not ok:
+            return ActionResponse(success=False, message=f"Start failed: {msg}")
+        return ActionResponse(success=True, message=f"Enabled {profile.display_name} — registering...")
 
 
 # --------------- DB Explorer (read-only) ---------------

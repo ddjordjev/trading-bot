@@ -169,7 +169,7 @@ export function App() {
         ))}
       </nav>
 
-      {tab === "Dashboard" && <Dashboard data={dashboardData} showBotColumn={bots.length > 1} bots={bots} />}
+      {tab === "Dashboard" && <Dashboard data={dashboardData} showBotColumn={bots.length > 1} bots={bots} exchangeFilter={exchangeFilter} />}
       {tab === "Intel" && <Intel wsIntel={dashboardData?.intel ?? null} />}
       {tab === "Scanner" && <Scanner />}
       {tab === "Strategies" && <Strategies bots={[]} />}

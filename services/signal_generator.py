@@ -42,6 +42,27 @@ class SignalGenerator:
             SignalPriority.DAILY: 900,
             SignalPriority.SWING: 14400,
         }
+        self._exchange_symbols: dict[str, set[str]] = {}  # {EXCHANGE: {symbols}}
+        self._all_tradeable: set[str] = set()  # union of all exchange symbols
+
+    def update_exchange_symbols(self, exchange_symbols: dict[str, set[str]]) -> None:
+        """Update known exchange symbol sets (called by monitor each tick)."""
+        self._exchange_symbols = exchange_symbols
+        self._all_tradeable = set()
+        for syms in exchange_symbols.values():
+            self._all_tradeable |= syms
+
+    def _symbol_tradeable(self, symbol: str) -> bool:
+        """Check if at least one exchange supports this symbol."""
+        if not self._all_tradeable:
+            return True  # no data yet, optimistic
+        return symbol in self._all_tradeable
+
+    def _unsupported_exchanges(self, symbol: str) -> list[str]:
+        """Return list of exchanges that do NOT support this symbol."""
+        if not self._exchange_symbols:
+            return []
+        return [ex for ex, syms in self._exchange_symbols.items() if symbol not in syms]
 
     def generate(self, snap: IntelSnapshot, queue: TradeQueue) -> TradeQueue:
         """Evaluate the current intel snapshot and append new proposals."""
@@ -530,10 +551,17 @@ class SignalGenerator:
 
     def _propose(self, queue: TradeQueue, proposal: TradeProposal) -> None:
         """Add proposal if not on cooldown and not a live duplicate."""
+        if not self._symbol_tradeable(proposal.symbol):
+            logger.debug("Skipping {}: not on any known exchange", proposal.symbol)
+            return
+
         if not proposal.target_bot:
             proposal.target_bot = self._route_target(proposal)
         if proposal.market_type == "futures" and self._preferred_market_type != "futures":
             proposal.market_type = self._preferred_market_type
+
+        proposal.unsupported_exchanges = self._unsupported_exchanges(proposal.symbol)
+
         key = f"{proposal.priority.value}_{proposal.symbol}_{proposal.strategy}"
 
         if key in self._recent_ids:
@@ -548,13 +576,17 @@ class SignalGenerator:
 
         queue.add(proposal)
         self._recent_ids[key] = datetime.now(UTC)
+        exchange_note = (
+            f" (not on: {', '.join(proposal.unsupported_exchanges)})" if proposal.unsupported_exchanges else ""
+        )
         logger.info(
-            "QUEUE [{}] {} {} — {} (str={:.2f})",
+            "QUEUE [{}] {} {} — {} (str={:.2f}){}",
             proposal.priority.value.upper(),
             proposal.side.upper(),
             proposal.symbol,
             proposal.reason,
             proposal.strength,
+            exchange_note,
         )
 
     def _purge_cooldowns(self) -> None:

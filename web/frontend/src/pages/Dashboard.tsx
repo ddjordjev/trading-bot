@@ -7,10 +7,11 @@ import { useState } from "react";
 interface Props {
   data: FullSnapshot | null;
   showBotColumn?: boolean;
-  bots?: { bot_id: string; label: string }[];
+  bots?: { bot_id: string; label: string; exchange: string }[];
+  exchangeFilter?: string;
 }
 
-export function Dashboard({ data, showBotColumn = false, bots = [] }: Props) {
+export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilter = "all" }: Props) {
   const [actionMsg, setActionMsg] = useState("");
   const [logsExpanded, setLogsExpanded] = useState(true);
   const [actionTarget, setActionTarget] = useState("-");
@@ -21,26 +22,38 @@ export function Dashboard({ data, showBotColumn = false, bots = [] }: Props) {
   const s = data.status;
   const pnlClass = s.daily_pnl_pct >= 0 ? "pnl-positive" : "pnl-negative";
 
-  const resolveTarget = (action: string): string | null => {
+  const visibleBots = exchangeFilter === "all"
+    ? bots
+    : bots.filter((b) => b.exchange.toUpperCase() === exchangeFilter);
+
+  const resolveTargets = (action: string): string[] | null => {
     if (actionTarget === "-") {
-      const choice = prompt(`Which bot should "${action}" target?\nOptions: ${bots.map((b) => b.bot_id).join(", ")}, all`);
+      const opts = visibleBots.map((b) => b.bot_id).join(", ");
+      const choice = prompt(`Which bot should "${action}" target?\nOptions: ${opts}, all`);
       if (!choice) return null;
-      return choice.trim().toLowerCase();
+      const picked = choice.trim().toLowerCase();
+      if (picked === "all") return visibleBots.map((b) => b.bot_id);
+      return [picked];
     }
-    return actionTarget;
+    if (actionTarget === "all") return visibleBots.map((b) => b.bot_id);
+    return [actionTarget];
   };
 
   const doAction = async (label: string, fn: (botId: string) => Promise<unknown>, progressMsg?: string) => {
-    const target = resolveTarget(label);
-    if (target === null) return;
+    const targets = resolveTargets(label);
+    if (targets === null || targets.length === 0) return;
     if (progressMsg) setBulkAction(progressMsg);
-    try {
-      await fn(target);
-      setActionMsg(`${label} [${target}] -- OK`);
-    } catch (e: any) {
-      setActionMsg(`${label} failed: ${e.message}`);
+    const results: string[] = [];
+    for (const t of targets) {
+      try {
+        await fn(t);
+        results.push(`${t}: OK`);
+      } catch (e: any) {
+        results.push(`${t}: ${e.message}`);
+      }
     }
     setBulkAction("");
+    setActionMsg(`${label} — ${results.join(", ")}`);
     setTimeout(() => setActionMsg(""), 4000);
   };
 
@@ -145,9 +158,13 @@ export function Dashboard({ data, showBotColumn = false, bots = [] }: Props) {
           }}
         >
           <option value="-">—</option>
-          <option value="all">All Bots</option>
-          {bots.map((b) => (
-            <option key={b.bot_id} value={b.bot_id}>{b.label}</option>
+          <option value="all">
+            {exchangeFilter !== "all" ? `All ${exchangeFilter} Bots` : "All Bots"}
+          </option>
+          {visibleBots.map((b) => (
+            <option key={b.bot_id} value={b.bot_id}>
+              {b.label}{exchangeFilter === "all" && b.exchange ? ` (${b.exchange})` : ""}
+            </option>
           ))}
         </select>
         {bulkAction ? (
@@ -174,9 +191,10 @@ export function Dashboard({ data, showBotColumn = false, bots = [] }: Props) {
               className="btn-danger"
               title="Close all open positions at market. Use with caution."
               onClick={() => {
-                const t = resolveTarget("Close All");
-                if (t === null) return;
-                if (confirm(`Close ALL positions on [${t}]?`))
+                const targets = resolveTargets("Close All");
+                if (!targets || targets.length === 0) return;
+                const label = targets.length === 1 ? targets[0] : `${targets.length} bots`;
+                if (confirm(`Close ALL positions on [${label}]?`))
                   doAction("Close All", (id) => postBody("/api/close-all", { bot_id: id }), "Closing all positions...");
               }}
             >

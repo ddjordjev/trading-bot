@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import math
 import os
 import time
 from collections.abc import Callable, Generator
@@ -203,37 +204,34 @@ def _is_coroutine_function(fn: Callable[..., Any]) -> bool:
 # ── Scrape-time collection ────────────────────────────────────────────────────
 
 
-def _read_cgroup_cpu() -> float | None:
-    """Read container CPU usage from cgroup v2 (or v1 fallback).
+def _read_cgroup_cpu_usec() -> float | None:
+    """Read cumulative container CPU usage in microseconds from cgroup.
 
-    Returns a percentage (0-100) relative to assigned CPU quota, or None
-    if not running inside a cgroup-limited container.
+    Tries cgroup v2 first, then v1.  Returns None if not in a cgroup.
     """
     try:
-        # cgroup v2
         with open("/sys/fs/cgroup/cpu.stat") as f:
             for line in f:
                 if line.startswith("usage_usec"):
                     return float(line.split()[1])
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError, OSError):
         pass
     try:
-        # cgroup v1
-        with open("/proc/self/cgroup") as _, open("/sys/fs/cgroup/cpuacct/cpuacct.usage") as f:
+        with open("/sys/fs/cgroup/cpuacct/cpuacct.usage") as f:
             return float(f.read().strip()) / 1000  # ns → us
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError, OSError):
         pass
     return None
 
 
-_last_cgroup_cpu_us: float | None = _read_cgroup_cpu()
+_last_cgroup_cpu_us: float | None = _read_cgroup_cpu_usec()
 _last_cgroup_time: float = time.monotonic()
 
 
 def _cgroup_cpu_pct() -> float | None:
     """Compute container CPU % from cgroup delta between scrapes."""
     global _last_cgroup_cpu_us, _last_cgroup_time
-    current = _read_cgroup_cpu()
+    current = _read_cgroup_cpu_usec()
     if current is None or _last_cgroup_cpu_us is None:
         _last_cgroup_cpu_us = current
         _last_cgroup_time = time.monotonic()
@@ -245,13 +243,19 @@ def _cgroup_cpu_pct() -> float | None:
     cpu_pct = (current - _last_cgroup_cpu_us) / elapsed_us * 100
     _last_cgroup_cpu_us = current
     _last_cgroup_time = now
-    return max(0.0, min(cpu_pct, 100.0))
+    if cpu_pct < 0 or not math.isfinite(cpu_pct):
+        return None
+    return min(cpu_pct, 100.0 * (os.cpu_count() or 1))
 
 
 def _collect_system() -> None:
     try:
+        # Always use psutil for host-wide CPU (reliable everywhere).
+        # Cgroup CPU can be 0 when the container is mostly idle and
+        # some Docker Desktop cgroup configurations omit usage_usec.
+        host_cpu = psutil.cpu_percent(interval=None)
         cg = _cgroup_cpu_pct()
-        _sys_cpu_pct.set(cg if cg is not None else psutil.cpu_percent(interval=None))
+        _sys_cpu_pct.set(cg if (cg is not None and cg > 0) else host_cpu)
 
         mem = psutil.virtual_memory()
         _sys_mem_total.set(mem.total)

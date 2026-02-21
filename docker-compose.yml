@@ -27,7 +27,7 @@ x-bot-common: &bot-common
       max-file: "5"
 
 services:
-  # ---- Bot 1: Momentum / trend-following ----
+  # ---- Bot 1: Momentum / trend-following (HUB — runs dashboard) ----
   bot-momentum:
     <<: *bot-common
     container_name: bot-momentum
@@ -39,6 +39,10 @@ services:
       - DASHBOARD_PORT=9035
     ports:
       - "${DASHBOARD_PORT:-9035}:9035"
+    volumes:
+      - bot-data:/app/data
+      - bot-logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
       interval: 30s
@@ -91,6 +95,35 @@ services:
       - BOT_ID=swing
       - BOT_STYLE=swing
       - BOT_STRATEGIES=swing_opportunity,grid
+      - DASHBOARD_ENABLED=false
+      - DASHBOARD_HUB_URL=http://bot-momentum:9035
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
+  # ---- Bot 5: Extreme mover hunter ----
+  bot-extreme:
+    <<: *bot-common
+    container_name: bot-extreme
+    environment:
+      - TZ=UTC
+      - BOT_ID=extreme
+      - BOT_STYLE=momentum
+      - BOT_STRATEGIES=compound_momentum,market_open_volatility
+      - DEFAULT_LEVERAGE=20
+      - MAX_CONCURRENT_POSITIONS=10
+      - EXTREME_ENABLED=true
+      - EXTREME_MAX_POSITIONS=10
+      - EXTREME_POSITION_SIZE_PCT=10.0
+      - EXTREME_MIN_HOURLY_MOVE_PCT=3.0
+      - EXTREME_TRAIL_PCT=0.3
+      - EXTREME_LOSER_TIMEOUT_MINUTES=2
+      - EXTREME_EVAL_INTERVAL=15
+      - INITIAL_RISK_AMOUNT=100
+      - TAKE_PROFIT_PCT=8
       - DASHBOARD_ENABLED=false
       - DASHBOARD_HUB_URL=http://bot-momentum:9035
     healthcheck:

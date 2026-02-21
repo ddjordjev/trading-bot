@@ -109,6 +109,8 @@ class MonitorService:
         self._tv_symbols: list[str] = ["BTC/USDT", "ETH/USDT"]
         self._last_tv_refresh = 0.0
         self._last_scanner_refresh = 0.0
+        self._last_symbols_refresh = 0.0
+        self._exchange_symbols: dict[str, set[str]] = {}
 
     async def start(self) -> None:
         logger.info("=" * 50)
@@ -168,6 +170,22 @@ class MonitorService:
 
                 multipliers = INTENSITY_TABLE[self._current_level]
                 now = time.monotonic()
+
+                # Refresh exchange symbols every 5 minutes
+                if now - self._last_symbols_refresh >= 300:
+                    try:
+                        self._exchange_symbols = self.state.read_all_exchange_symbols()
+                        self.signal_gen.update_exchange_symbols(self._exchange_symbols)
+                        total = sum(len(s) for s in self._exchange_symbols.values())
+                        if self._exchange_symbols:
+                            logger.debug(
+                                "Exchange symbols refreshed: {} exchanges, {} total symbols",
+                                len(self._exchange_symbols),
+                                total,
+                            )
+                    except Exception as e:
+                        logger.debug("Exchange symbols refresh error: {}", e)
+                    self._last_symbols_refresh = now
 
                 # TradingView: refresh active symbols
                 tv_interval = self.settings.tv_poll_interval * multipliers["tv"]
@@ -270,6 +288,7 @@ class MonitorService:
 
         Each bot gets only proposals matching its style. If the target bot
         has no capacity or isn't trading, the proposal is skipped (expires).
+        Proposals tagged as unsupported on the bot's exchange are skipped.
         """
         status_by_style: dict[str, BotDeploymentStatus] = {}
         for s in bot_statuses:
@@ -289,6 +308,10 @@ class MonitorService:
             if bot_status and not bot_status.should_trade:
                 continue
             if bot_status and not bot_status.has_capacity:
+                continue
+
+            # Skip if this symbol is unsupported on the target bot's exchange
+            if bot_status and bot_status.exchange and bot_status.exchange in proposal.unsupported_exchanges:
                 continue
 
             bot_id = bot_status.bot_id if bot_status else target
@@ -346,14 +369,25 @@ class MonitorService:
             logger.debug("TV refresh error: {}", e)
 
     def _refresh_scanner_symbols(self) -> None:
-        """Add symbols from CMC/CoinGecko to the TV watch list."""
+        """Add symbols from CMC/CoinGecko to the TV watch list.
+
+        Only includes symbols that exist on at least one connected exchange.
+        """
+        all_tradeable: set[str] = set()
+        for syms in self._exchange_symbols.values():
+            all_tradeable |= syms
+
         extra: set[str] = set()
         for coin in self.cmc.all_interesting[:10]:
             if coin.is_tradable_size:
-                extra.add(f"{coin.symbol.upper()}/USDT")
+                pair = f"{coin.symbol.upper()}/USDT"
+                if not all_tradeable or pair in all_tradeable:
+                    extra.add(pair)
         for coin in self.gecko.all_interesting[:10]:
             if coin.volume_24h >= 1_000_000:
-                extra.add(f"{coin.symbol.upper()}/USDT")
+                pair = f"{coin.symbol.upper()}/USDT"
+                if not all_tradeable or pair in all_tradeable:
+                    extra.add(pair)
 
         base = {"BTC/USDT", "ETH/USDT"}
         self._tv_symbols = sorted(base | extra)
@@ -564,12 +598,21 @@ class MonitorService:
         if not all_coins:
             return
 
+        all_tradeable = set()
+        for syms in self._exchange_symbols.values():
+            all_tradeable |= syms
+
         extreme: list[ExtremeCandidate] = []
         for coin in all_coins:
             hourly_abs = abs(coin.change_1h)
             if hourly_abs < min_hourly:
                 continue
             if coin.volume_24h < min_vol:
+                continue
+
+            pair = coin.trading_pair
+            # Skip coins not available on any known exchange
+            if all_tradeable and pair not in all_tradeable:
                 continue
 
             direction = "bull" if coin.change_1h > 0 else "bear"
@@ -581,15 +624,18 @@ class MonitorService:
                 reasons.append(f"5m: {coin.change_5m:+.1f}%")
             reasons.append(f"vol: ${coin.volume_24h / 1e6:.0f}M")
 
+            unsupported = [ex for ex, syms in self._exchange_symbols.items() if pair not in syms]
+
             extreme.append(
                 ExtremeCandidate(
-                    symbol=coin.trading_pair,
+                    symbol=pair,
                     direction=direction,
                     change_1h=coin.change_1h,
                     change_5m=coin.change_5m,
                     volume_24h=coin.volume_24h,
                     momentum_score=score,
                     reason=" | ".join(reasons),
+                    unsupported_exchanges=unsupported,
                 )
             )
 

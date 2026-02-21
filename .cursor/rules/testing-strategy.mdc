@@ -1,0 +1,32 @@
+---
+description: When to run tests locally vs delegating to CI
+alwaysApply: true
+---
+
+# Testing Strategy
+
+## Local Testing
+
+Run **only** the tests directly related to what you changed:
+
+- Changed `web/server.py` → `pytest tests/test_web_server.py`
+- Changed `services/monitor.py` → `pytest tests/test_services.py`
+- Changed `shared/state.py` → `pytest tests/test_shared.py`
+- Changed only frontend files → `npx tsc --noEmit` (in `web/frontend/`)
+- Changed only `.yml`/`.md`/config → no local tests needed
+
+Use `-k test_name` to narrow further when you touched one function.
+
+## Full Suite
+
+The full test suite (`pytest tests/`) runs **only in CI**. Never run it
+locally unless the user explicitly asks. Push and let GitHub Actions
+handle the full matrix.
+
+## Workflow
+
+1. Make changes
+2. `ruff check` + `ruff format` on changed files
+3. Run targeted tests locally (related to what changed)
+4. Commit & push → CI runs the full suite
+5. If CI fails, fix and amend

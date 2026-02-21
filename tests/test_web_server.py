@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from web.schemas import ActionResponse
 from web.server import _ALLOWED_TABLES, _bot_reports, _get_hub_db, app, report_bot_snapshot, set_bot
 
 # ── Fixtures ─────────────────────────────────────────────────────────
@@ -1837,3 +1838,100 @@ class TestHubPushEndpoints:
         )
         assert r.status_code == 200
         assert r.json()["status"] == "error"
+
+
+# ── Bot Profiles ─────────────────────────────────────────────────────
+
+
+class TestBotProfiles:
+    async def test_list_profiles_returns_all(self, client, mock_bot):
+        set_bot(mock_bot)
+        with patch("web.server.DOCKER_AVAILABLE", False, create=True):
+            r = await client.get("/api/bot-profiles")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) >= 10
+        ids = [p["id"] for p in data]
+        assert "momentum" in ids
+        assert "extreme" in ids
+        assert "scalper" in ids
+        assert "conservative" in ids
+
+    async def test_profiles_contain_expected_fields(self, client, mock_bot):
+        set_bot(mock_bot)
+        r = await client.get("/api/bot-profiles")
+        assert r.status_code == 200
+        for p in r.json():
+            assert "id" in p
+            assert "display_name" in p
+            assert "description" in p
+            assert "style" in p
+            assert "strategies" in p
+            assert "is_hub" in p
+            assert "enabled" in p
+            assert "container_status" in p
+
+    async def test_hub_profile_marked(self, client, mock_bot):
+        set_bot(mock_bot)
+        r = await client.get("/api/bot-profiles")
+        data = r.json()
+        hub = next(p for p in data if p["id"] == "momentum")
+        assert hub["is_hub"] is True
+        non_hub = [p for p in data if not p["is_hub"]]
+        assert len(non_hub) >= 9
+
+    async def test_toggle_hub_rejected(self, client, mock_bot):
+        set_bot(mock_bot)
+        with patch("web.docker_manager.DOCKER_AVAILABLE", True):
+            r = await client.post("/api/bot-profile/momentum/toggle")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["success"] is False
+        assert "Hub" in data["message"]
+
+    async def test_toggle_unknown_profile(self, client, mock_bot):
+        set_bot(mock_bot)
+        with patch("web.docker_manager.DOCKER_AVAILABLE", True):
+            r = await client.post("/api/bot-profile/nonexistent/toggle")
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+
+    @patch("web.docker_manager.stop_container", new_callable=AsyncMock)
+    @patch("web.server._forward_to_bot", new_callable=AsyncMock)
+    @patch("web.docker_manager.get_container_status", return_value="running")
+    @patch("web.docker_manager.DOCKER_AVAILABLE", True)
+    async def test_toggle_disable_calls_stop(self, mock_status, mock_forward, mock_stop, client, mock_bot):
+        set_bot(mock_bot)
+        mock_forward.return_value = ActionResponse(success=True, message="ok")
+        mock_stop.return_value = (True, "Stopped bot-indicators")
+        _bot_reports["indicators"] = {"bot_id": "indicators", "status": {}}
+
+        r = await client.post("/api/bot-profile/indicators/toggle")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["success"] is True
+        assert "Disabled" in data["message"]
+        assert "indicators" not in _bot_reports
+        mock_stop.assert_awaited_once_with("indicators")
+
+    @patch("web.docker_manager.start_container", new_callable=AsyncMock)
+    @patch("web.docker_manager.get_container_status", return_value="missing")
+    @patch("web.docker_manager.DOCKER_AVAILABLE", True)
+    async def test_toggle_enable_calls_start(self, mock_status, mock_start, client, mock_bot):
+        set_bot(mock_bot)
+        mock_start.return_value = (True, "Started bot-scalper")
+
+        r = await client.post("/api/bot-profile/scalper/toggle")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["success"] is True
+        assert "Enabled" in data["message"]
+        mock_start.assert_awaited_once()
+
+    @patch("web.docker_manager.DOCKER_AVAILABLE", False)
+    async def test_toggle_no_docker(self, client, mock_bot):
+        set_bot(mock_bot)
+        r = await client.post("/api/bot-profile/indicators/toggle")
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+        assert "Docker" in r.json()["message"]

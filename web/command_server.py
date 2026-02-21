@@ -41,7 +41,7 @@ async def metrics(_request: web.Request) -> web.Response:
 
     uptime = time.time() - _start_time if _start_time else 0
     body = collect_metrics(_bot, uptime)
-    return web.Response(body=body, content_type="text/plain; version=0.0.4; charset=utf-8")
+    return web.Response(body=body, content_type="text/plain; version=0.0.4", charset="utf-8")
 
 
 async def close_position(request: web.Request) -> web.Response:

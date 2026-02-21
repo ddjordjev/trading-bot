@@ -297,3 +297,47 @@ class TestSharedStateAnalytics:
         state = SharedState(data_dir=tmp_path)
         read = state.read_analytics()
         assert read.weights == []
+
+
+class TestSharedStateExchangeSymbols:
+    def test_write_and_read_exchange_symbols(self, tmp_path):
+        state = SharedState(data_dir=tmp_path)
+        state.write_exchange_symbols("momentum", "BINANCE", ["BTC/USDT", "ETH/USDT"])
+        result = state.read_all_exchange_symbols()
+        assert "BINANCE" in result
+        assert "BTC/USDT" in result["BINANCE"]
+        assert "ETH/USDT" in result["BINANCE"]
+
+    def test_multiple_bots_same_exchange_merges(self, tmp_path):
+        state = SharedState(data_dir=tmp_path)
+        state.write_exchange_symbols("bot1", "BINANCE", ["BTC/USDT", "ETH/USDT"])
+        state.write_exchange_symbols("bot2", "BINANCE", ["ETH/USDT", "SOL/USDT"])
+        result = state.read_all_exchange_symbols()
+        assert "BINANCE" in result
+        assert result["BINANCE"] == {"BTC/USDT", "ETH/USDT", "SOL/USDT"}
+
+    def test_multiple_exchanges(self, tmp_path):
+        state = SharedState(data_dir=tmp_path)
+        state.write_exchange_symbols("bot1", "BINANCE", ["BTC/USDT"])
+        state.write_exchange_symbols("bot2", "MEXC", ["BTC/USDT", "PEPE/USDT"])
+        result = state.read_all_exchange_symbols()
+        assert "BINANCE" in result
+        assert "MEXC" in result
+        assert "BTC/USDT" in result["BINANCE"]
+        assert "PEPE/USDT" in result["MEXC"]
+        assert "PEPE/USDT" not in result["BINANCE"]
+
+    def test_read_empty_returns_empty(self, tmp_path):
+        state = SharedState(data_dir=tmp_path)
+        result = state.read_all_exchange_symbols()
+        assert result == {}
+
+    def test_corrupt_file_skipped(self, tmp_path):
+        state = SharedState(data_dir=tmp_path)
+        state.write_exchange_symbols("good", "BINANCE", ["BTC/USDT"])
+        bad_dir = tmp_path / "bad"
+        bad_dir.mkdir()
+        (bad_dir / "exchange_symbols.json").write_text("not valid json{{{")
+        result = state.read_all_exchange_symbols()
+        assert "BINANCE" in result
+        assert len(result) == 1

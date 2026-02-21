@@ -30,3 +30,10 @@ scrape_configs:
       - targets: ["bot-swing:9035"]
         labels:
           bot_id: "swing"
+
+  - job_name: "bot-extreme"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["bot-extreme:9035"]
+        labels:
+          bot_id: "extreme"
