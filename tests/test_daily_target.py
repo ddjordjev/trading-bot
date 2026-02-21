@@ -22,11 +22,15 @@ class TestTierClassification:
         assert tracker.tier == DailyTier.LOSING
 
     def test_building_tier(self, tracker: DailyTargetTracker):
-        tracker.update_balance(1050.0)
+        tracker.update_balance(1020.0)  # +2% — below secure_target (3%)
         assert tracker.tier == DailyTier.BUILDING
 
+    def test_secured_tier(self, tracker: DailyTargetTracker):
+        tracker.update_balance(1040.0)  # +4% — between secure (3%) and ride (5%)
+        assert tracker.tier == DailyTier.SECURED
+
     def test_strong_tier(self, tracker: DailyTargetTracker):
-        tracker.update_balance(1150.0)
+        tracker.update_balance(1100.0)  # +10% — above ride_target (5%), below 20%
         assert tracker.tier == DailyTier.STRONG
 
     def test_excellent_tier(self, tracker: DailyTargetTracker):
@@ -56,9 +60,9 @@ class TestAggression:
         tracker.update_balance(930.0)
         assert tracker.aggression_multiplier() <= 0.7
 
-    def test_building_ramps_up(self, tracker: DailyTargetTracker):
-        tracker.update_balance(1080.0)
-        assert tracker.aggression_multiplier() >= 0.8
+    def test_building_full_aggression(self, tracker: DailyTargetTracker):
+        tracker.update_balance(1020.0)  # +2% BUILDING
+        assert tracker.aggression_multiplier() == 1.0
 
 
 class TestShouldTrade:

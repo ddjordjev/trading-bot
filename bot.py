@@ -392,9 +392,12 @@ class TradingBot:
                 logger.info("Leverage raised on {} ({})", sym, lev_info)
 
         # 4. PYRAMID: take partial profit on levered-up positions
-        partials = await self.orders.try_partial_take()
+        #    When daily target not yet secured, take profits more aggressively
+        pt_aggression = self.target.profit_taking_aggression
+        self.orders.trailing.set_profit_taking_mode(pt_aggression)
+        partials = await self.orders.try_partial_take(pt_aggression)
         if partials:
-            logger.info("Partial profit taken on {} position(s)", len(partials))
+            logger.info("Partial profit taken on {} position(s) (aggr={:.1f}x)", len(partials), pt_aggression)
 
         # 5. Whale position alert: $100K+ notional at 20%+ profit
         await self._check_whale_positions()
@@ -1559,9 +1562,14 @@ class TradingBot:
         adjusted = sig.model_copy()
         adjusted.strength = min(1.0, sig.strength * aggression)
 
-        if self.target.target_reached and not sig.quick_trade:
+        if self.target.in_ride_mode and not sig.quick_trade:
             adjusted.strength *= 0.3
-            logger.debug("Target reached - reducing signal strength for {}", sig.symbol)
+            logger.debug(
+                "Ride mode (>{:.0f}%) — reducing signal strength for {}", self.target.ride_target_pct, sig.symbol
+            )
+        elif self.target.daily_profit_secured and not sig.quick_trade:
+            adjusted.strength *= 0.6
+            logger.debug("Daily secured — slightly reducing signal strength for {}", sig.symbol)
 
         return adjusted
 
@@ -1759,7 +1767,7 @@ def main() -> None:
     logger.add(sys.stderr, level=settings.log_level)
     logger.add("logs/bot_{time}.log", rotation="1 day", retention="30 days", level="DEBUG")
 
-    bot = TradingBot(settings, daily_target_pct=10.0)
+    bot = TradingBot(settings, daily_target_pct=5.0)
 
     mkt = "futures" if settings.futures_allowed else "spot"
     all_strategies = [

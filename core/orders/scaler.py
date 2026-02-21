@@ -239,7 +239,7 @@ class ScaledPosition(BaseModel):
             )
         return should
 
-    def should_take_partial(self, current_price: float) -> bool:
+    def should_take_partial(self, current_price: float, profit_taking_aggression: float = 1.0) -> bool:
         if self.mode != ScaleMode.PYRAMID:
             return False
         if not self.leverage_raised:
@@ -248,14 +248,16 @@ class ScaledPosition(BaseModel):
             return False
 
         profit_pct = self._current_profit_pct(current_price)
-        threshold = self.profit_to_lever_up_pct * 2
+        base_threshold = self.profit_to_lever_up_pct * 2
+        threshold = base_threshold / max(0.5, profit_taking_aggression)
         should = profit_pct >= threshold
         if should:
             logger.debug(
-                "Scale {}: partial take ready — profit {:.2f}% >= {:.1f}%, taking {:.0f}% off",
+                "Scale {}: partial take ready — profit {:.2f}% >= {:.1f}% (aggr {:.1f}x), taking {:.0f}% off",
                 self.symbol,
                 profit_pct,
                 threshold,
+                profit_taking_aggression,
                 self.partial_take_pct,
             )
         return should
@@ -432,11 +434,13 @@ class PositionScaler:
                 result.append(sym)
         return result
 
-    def get_symbols_for_partial_take(self, prices: dict[str, float]) -> list[tuple[str, float]]:
+    def get_symbols_for_partial_take(
+        self, prices: dict[str, float], profit_taking_aggression: float = 1.0
+    ) -> list[tuple[str, float]]:
         result: list[tuple[str, float]] = []
         for sym, sp in self._positions.items():
             price = prices.get(sym, 0)
-            if price > 0 and sp.should_take_partial(price):
+            if price > 0 and sp.should_take_partial(price, profit_taking_aggression):
                 amount = sp.get_partial_take_amount()
                 if amount > 0:
                     result.append((sym, amount))

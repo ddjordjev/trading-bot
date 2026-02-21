@@ -21,11 +21,16 @@ class DailyRecord(BaseModel):
 
 
 class DailyTier(str, Enum):
-    """Behavior tiers based on daily PnL percentage."""
+    """Behavior tiers based on daily PnL percentage.
+
+    Core goal: secure 3-5% daily profit aggressively, then ride with
+    looser stops once secured.
+    """
 
     LOSING = "losing"  # in the red — capital preservation mode
-    BUILDING = "building"  # 0-10% — working toward base target
-    STRONG = "strong"  # 10-20% — base target hit, still room to grow
+    BUILDING = "building"  # 0% to secure_target — aggressive profit-taking
+    SECURED = "secured"  # secure_target to ride_target — daily goal zone
+    STRONG = "strong"  # ride_target to 20% — let it ride, looser stops
     EXCELLENT = "excellent"  # 20-50% — exceptional day, start tightening
     MONSTER = "monster"  # 50-100% — protect hard, only ride existing
     LEGENDARY = "legendary"  # 100%+ — close all if reversal risk, or email + ride
@@ -34,12 +39,23 @@ class DailyTier(str, Enum):
 class DailyTargetTracker:
     """Tracks progress toward daily return targets with tiered behavior.
 
+    Core goal: secure 3-5% daily profit aggressively, then let it ride.
+
+    Phase 1 — BUILDING (0% to secure_target):
+        Be aggressive with profit-taking. Close winners early to bank the
+        daily 3-5%. Every dollar of realized profit counts toward the target.
+
+    Phase 2 — SECURED / STRONG (above secure_target):
+        Daily profit is banked. Now let remaining and new positions ride
+        with looser trailing stops. Chase profits, don't cut them short.
+        Next day: if positions carry over in profit, secure the new day's
+        3-5% first, then ride again.
+
     Priority hierarchy:
     1. CAPITAL IS SAFE (never risk what you have)
-    2. Target 10% daily (base goal)
-    3. Let it grow to 20%, 50% (reduce activity progressively)
+    2. Secure 3-5% daily (base goal — aggressive profit-taking)
+    3. Once secured, ride with loose stops (let winners run)
     4. At 100%: close all if reversal risk detected, OR email owner
-       explaining why we're letting it ride
 
     Manual override via files in the working directory:
     - Create a file named STOP  → halt all new trades (existing positions ride)
@@ -52,12 +68,16 @@ class DailyTargetTracker:
 
     def __init__(
         self,
-        daily_target_pct: float = 10.0,
+        daily_target_pct: float = 5.0,
         compound: bool = True,
         aggressive_mode: bool = False,
         bot_data_dir: Path | None = None,
+        secure_target_pct: float = 3.0,
+        ride_target_pct: float = 5.0,
     ):
         self.daily_target_pct = daily_target_pct
+        self.secure_target_pct = secure_target_pct
+        self.ride_target_pct = ride_target_pct
         self.compound = compound
         self.aggressive_mode = aggressive_mode
         self._bot_data_dir = bot_data_dir
@@ -191,7 +211,8 @@ class DailyTargetTracker:
 
     @property
     def target_reached(self) -> bool:
-        return self.todays_pnl_pct >= self.daily_target_pct
+        """True when the secure_target_pct is reached (3% default)."""
+        return self.todays_pnl_pct >= self.secure_target_pct
 
     @property
     def total_growth_pct(self) -> float:
@@ -211,12 +232,41 @@ class DailyTargetTracker:
         }
 
     @property
+    def daily_profit_secured(self) -> bool:
+        """True once realized daily PnL reaches secure_target_pct (default 3%)."""
+        return self.adjusted_todays_pnl_pct >= self.secure_target_pct
+
+    @property
+    def in_ride_mode(self) -> bool:
+        """True once daily PnL passes ride_target_pct (default 5%).
+
+        In this mode the bot uses loose stops and lets positions run freely.
+        """
+        return self.adjusted_todays_pnl_pct >= self.ride_target_pct
+
+    @property
+    def profit_taking_aggression(self) -> float:
+        """Multiplier for profit-taking behavior.
+
+        Before daily target is secured: 1.5x (take profits eagerly).
+        In the secure zone (3-5%): 1.0x (normal).
+        After ride target: 0.5x (loose — let winners run).
+        """
+        if not self.daily_profit_secured:
+            return 1.5
+        if not self.in_ride_mode:
+            return 1.0
+        return 0.5
+
+    @property
     def tier(self) -> DailyTier:
         pnl = self.adjusted_todays_pnl_pct
         if pnl < 0:
             return DailyTier.LOSING
-        if pnl < 10:
+        if pnl < self.secure_target_pct:
             return DailyTier.BUILDING
+        if pnl < self.ride_target_pct:
+            return DailyTier.SECURED
         if pnl < 20:
             return DailyTier.STRONG
         if pnl < 50:
@@ -249,12 +299,13 @@ class DailyTargetTracker:
     def aggression_multiplier(self) -> float:
         """Position sizing multiplier based on tier. NEVER above 1.0.
 
-        LOSING:     0.5x  — capital preservation, shrink everything
-        BUILDING:   0.8-1.0x — working toward 10%
-        STRONG:     0.6x  — 10% hit, reduce new entries
-        EXCELLENT:  0.3x  — 20-50%, only very high conviction
-        MONSTER:    0.15x — 50-100%, almost nothing new
-        LEGENDARY:  0.0x  — 100%+, no new trades at all
+        LOSING:     0.5-0.7x — capital preservation, shrink everything
+        BUILDING:   1.0x     — full speed, secure 3-5%
+        SECURED:    0.8x     — daily goal zone, slightly reduce
+        STRONG:     0.6x     — 5%+ banked, riding with loose stops
+        EXCELLENT:  0.3x     — 20-50%, only very high conviction
+        MONSTER:    0.15x    — 50-100%, almost nothing new
+        LEGENDARY:  0.0x     — 100%+, no new trades at all
         """
         if self.aggressive_mode:
             return 1.0
@@ -264,10 +315,9 @@ class DailyTargetTracker:
         if t == DailyTier.LOSING:
             return 0.5 if self.adjusted_todays_pnl_pct < -3 else 0.7
         if t == DailyTier.BUILDING:
-            p = self.progress_pct
-            if p < 50:
-                return 0.8
             return 1.0
+        if t == DailyTier.SECURED:
+            return 0.8
         if t == DailyTier.STRONG:
             return 0.6
         if t == DailyTier.EXCELLENT:
@@ -303,11 +353,18 @@ class DailyTargetTracker:
 
         if t == DailyTier.MONSTER:
             logger.info("MONSTER day ({:+.1f}%) -- only ultra-high conviction", self.todays_pnl_pct)
-            return True  # but aggression is 0.15x so almost nothing will pass
+            return True
 
         if t == DailyTier.EXCELLENT:
             logger.info("EXCELLENT day ({:+.1f}%) -- reducing entries, protecting gains", self.todays_pnl_pct)
-            return True  # aggression 0.3x
+            return True
+
+        if t == DailyTier.SECURED:
+            logger.info(
+                "SECURED ({:+.1f}%) -- daily target zone, slightly reduced entries",
+                self.todays_pnl_pct,
+            )
+            return True
 
         return True
 
@@ -394,10 +451,19 @@ class DailyTargetTracker:
             manual = " ** MANUAL STOP **"
         elif self.manual_close_all:
             manual = " ** CLOSE ALL **"
+
+        mode_tag = ""
+        if self.in_ride_mode:
+            mode_tag = " [RIDING]"
+        elif self.daily_profit_secured:
+            mode_tag = " [SECURED]"
+        else:
+            mode_tag = " [HUNTING]"
+
         return (
-            f"Day {self._day_number} [{self.tier.value.upper()}] | "
+            f"Day {self._day_number} [{self.tier.value.upper()}]{mode_tag} | "
             f"PnL: {self.todays_pnl:+.2f} ({self.todays_pnl_pct:+.1f}%) | "
-            f"Target: {self.daily_target_pct:.1f}% | "
+            f"Target: {self.secure_target_pct:.0f}-{self.ride_target_pct:.0f}% | "
             f"Progress: {self.progress_pct:.0f}% | "
             f"Balance: {self._current_balance:.2f}{manual}"
         )

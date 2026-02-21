@@ -247,9 +247,44 @@ class TrailingStopManager:
     ):
         self.default_initial_pct = default_initial_pct
         self.default_trail_pct = default_trail_pct
+        self._base_trail_pct = default_trail_pct
+        self._base_breakeven_pct = breakeven_pct
         self.activation_pct = activation_pct
         self.breakeven_pct = breakeven_pct
         self._stops: dict[str, TrailingStop] = {}
+        self._profit_taking_aggression: float = 1.0
+
+    def set_profit_taking_mode(self, aggression: float) -> None:
+        """Adjust trail tightness based on daily profit status.
+
+        aggression > 1.0: not yet secured daily target — tighter trails,
+                          lower BE trigger (take profits eagerly).
+        aggression == 1.0: in the daily target zone — normal behavior.
+        aggression < 1.0: daily target secured — wider trails, higher BE
+                          trigger (let winners run).
+        """
+        if aggression == self._profit_taking_aggression:
+            return
+        old = self._profit_taking_aggression
+        self._profit_taking_aggression = aggression
+
+        if aggression > 1.0:
+            self.default_trail_pct = max(0.3, self._base_trail_pct * 0.6)
+            self.breakeven_pct = max(2.0, self._base_breakeven_pct * 0.6)
+        elif aggression < 1.0:
+            self.default_trail_pct = self._base_trail_pct * 1.5
+            self.breakeven_pct = self._base_breakeven_pct * 1.5
+        else:
+            self.default_trail_pct = self._base_trail_pct
+            self.breakeven_pct = self._base_breakeven_pct
+
+        logger.info(
+            "Profit-taking mode: {:.1f}x -> {:.1f}x | trail: {:.2f}% | BE trigger: {:.1f}%",
+            old,
+            aggression,
+            self.default_trail_pct,
+            self.breakeven_pct,
+        )
 
     def register(
         self,

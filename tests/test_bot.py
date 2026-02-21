@@ -579,10 +579,13 @@ class TestSharedStateHelpers:
         out = bot._adjust_for_target(sig, aggression=0.5)
         assert out.strength == 0.4
 
-    def test_adjust_for_target_reduces_when_target_reached(self, bot):
+    def test_adjust_for_target_reduces_when_ride_mode(self, bot):
         from core.risk.daily_target import DailyTargetTracker
 
-        with patch.object(DailyTargetTracker, "target_reached", new_callable=PropertyMock, return_value=True):
+        with (
+            patch.object(DailyTargetTracker, "in_ride_mode", new_callable=PropertyMock, return_value=True),
+            patch.object(DailyTargetTracker, "daily_profit_secured", new_callable=PropertyMock, return_value=True),
+        ):
             sig = Signal(
                 symbol="BTC/USDT",
                 action=SignalAction.BUY,
@@ -594,6 +597,25 @@ class TestSharedStateHelpers:
             )
             out = bot._adjust_for_target(sig, aggression=1.0)
             assert out.strength == pytest.approx(0.8 * 0.3)
+
+    def test_adjust_for_target_slightly_reduces_when_secured(self, bot):
+        from core.risk.daily_target import DailyTargetTracker
+
+        with (
+            patch.object(DailyTargetTracker, "in_ride_mode", new_callable=PropertyMock, return_value=False),
+            patch.object(DailyTargetTracker, "daily_profit_secured", new_callable=PropertyMock, return_value=True),
+        ):
+            sig = Signal(
+                symbol="BTC/USDT",
+                action=SignalAction.BUY,
+                strength=0.8,
+                strategy="x",
+                reason="",
+                market_type="futures",
+                quick_trade=False,
+            )
+            out = bot._adjust_for_target(sig, aggression=1.0)
+            assert out.strength == pytest.approx(0.8 * 0.6)
 
 
 # ── _get_tv_boost ───────────────────────────────────────────────────────────
@@ -1932,8 +1954,11 @@ class TestCloseAllPositionsFailure:
 
 
 class TestAdjustForTarget:
-    def test_adjust_for_target_target_reached_reduces_non_quick_signal(self, bot):
-        with patch.object(type(bot.target), "target_reached", PropertyMock(return_value=True)):
+    def test_adjust_for_target_ride_mode_reduces_non_quick_signal(self, bot):
+        with (
+            patch.object(type(bot.target), "in_ride_mode", PropertyMock(return_value=True)),
+            patch.object(type(bot.target), "daily_profit_secured", PropertyMock(return_value=True)),
+        ):
             sig = Signal(
                 symbol="BTC/USDT",
                 action=SignalAction.BUY,

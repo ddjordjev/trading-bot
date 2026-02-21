@@ -1218,7 +1218,7 @@ class TestDailyTargetTracker:
 
         t = DailyTargetTracker(daily_target_pct=10.0)
         t.reset_day(10000.0)
-        t.update_balance(10500.0)
+        t.update_balance(10200.0)  # +2% — below secure_target (3%)
         assert t.tier == DailyTier.BUILDING
 
     def test_tier_strong(self):
@@ -1267,13 +1267,16 @@ class TestDailyTargetTracker:
         t = DailyTargetTracker(daily_target_pct=10.0)
         t.reset_day(10000.0)
 
-        t.update_balance(10500.0)
-        assert t.aggression_multiplier() >= 0.8
+        t.update_balance(10200.0)  # +2% BUILDING
+        assert t.aggression_multiplier() == 1.0
 
-        t.update_balance(11500.0)
+        t.update_balance(10400.0)  # +4% SECURED
+        assert t.aggression_multiplier() == 0.8
+
+        t.update_balance(11500.0)  # +15% STRONG
         assert t.aggression_multiplier() == 0.6
 
-        t.update_balance(13000.0)
+        t.update_balance(13000.0)  # +30% EXCELLENT
         assert t.aggression_multiplier() == 0.3
 
         t.update_balance(16000.0)
@@ -1399,10 +1402,11 @@ class TestDailyTargetTracker:
 
         t = DailyTargetTracker(daily_target_pct=10.0)
         t.reset_day(10000.0)
-        t.update_balance(10500.0)
+        t.update_balance(10200.0)  # +2% — BUILDING
         report = t.status_report()
         assert "Day 1" in report
         assert "BUILDING" in report
+        assert "HUNTING" in report
 
     def test_compound_report_with_history(self):
         from core.risk.daily_target import DailyTargetTracker

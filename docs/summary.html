@@ -113,6 +113,16 @@
   <strong>Start Small, DCA In, Ride It Out.</strong> Always risk ~$50 to start. Nobody can predict exact bottoms — market makers wick through expected support to grab stop-loss liquidity, then reverse. Instead of getting stopped out, DCA into the wick. Keep adding until $100K notional. When in profit: raise leverage, pull capital out, lock break-even, ride.
 </div>
 
+<div class="principle">
+  <strong>Secure 3-5% Daily, Then Let It Ride.</strong> The bot operates in two distinct phases each day:
+  <ul style="margin-top:0.4rem">
+    <li><strong>Phase 1 — HUNTING (0% to 3%):</strong> Be aggressive with profit-taking. Take partial profits early, use tight trailing stops, lock break-evens quickly. Every realized dollar counts toward the daily target. Full position sizing (1.0x aggression).</li>
+    <li><strong>Phase 2 — SECURED (3-5%):</strong> Daily profit banked. Slightly reduce new entries (0.8x). Transition to normal trailing behavior.</li>
+    <li><strong>Phase 3 — RIDING (5%+):</strong> Let remaining positions run with loose trailing stops (1.5x wider trails). Reduce new entries significantly (0.6x). Chase profits, don't cut them short. Trailing stops protect gains without being greedy.</li>
+    <li><strong>Next day:</strong> If positions carry over in profit, secure the new day's 3-5% first (phase 1 again), then switch back to riding mode.</li>
+  </ul>
+</div>
+
 
 
 <!-- ============================================================ -->
@@ -432,25 +442,31 @@
   <strong>Priority hierarchy:</strong>
   <ol style="margin-top:0.3rem">
     <li>Capital is safe (never risk what you have)</li>
-    <li>Target 10% daily (base goal)</li>
+    <li>Secure 3-5% daily (aggressive profit-taking until banked)</li>
+    <li>Once secured, ride with loose stops (let winners run)</li>
     <li>Let it grow to 20%, 50% (reduce activity progressively)</li>
     <li>At 100%: close all if reversal risk detected, or email owner explaining why we ride</li>
   </ol>
 </div>
 
 <table>
-  <tr><th>Tier</th><th>Daily PnL</th><th>Behavior</th><th>Aggression</th></tr>
-  <tr><td>LOSING</td><td>&lt; 0%</td><td>Capital preservation, shrink positions</td><td>0.5-0.7x</td></tr>
-  <tr><td>BUILDING</td><td>0-10%</td><td>Normal trading, working toward base target</td><td>0.8-1.0x</td></tr>
-  <tr><td>STRONG</td><td>10-20%</td><td>Base target hit, reduce new entries</td><td>0.6x</td></tr>
-  <tr><td>EXCELLENT</td><td>20-50%</td><td>Only very high conviction trades</td><td>0.3x</td></tr>
-  <tr><td>MONSTER</td><td>50-100%</td><td>Almost no new trades, ride existing</td><td>0.15x</td></tr>
-  <tr><td>LEGENDARY</td><td>100%+</td><td>No new trades. Close all if reversal risk, else email + ride</td><td>0.0x</td></tr>
+  <tr><th>Tier</th><th>Daily PnL</th><th>Behavior</th><th>Aggression</th><th>Profit-Taking</th></tr>
+  <tr><td>LOSING</td><td>&lt; 0%</td><td>Capital preservation, shrink positions</td><td>0.5-0.7x</td><td>—</td></tr>
+  <tr><td>BUILDING</td><td>0-3%</td><td>Full speed — secure 3-5% aggressively</td><td>1.0x</td><td>1.5x (tight trails, early partials)</td></tr>
+  <tr><td>SECURED</td><td>3-5%</td><td>Daily goal zone, slightly reduce new entries</td><td>0.8x</td><td>1.0x (normal)</td></tr>
+  <tr><td>STRONG</td><td>5-20%</td><td>Ride existing with loose stops</td><td>0.6x</td><td>0.5x (wide trails, let runners run)</td></tr>
+  <tr><td>EXCELLENT</td><td>20-50%</td><td>Only very high conviction trades</td><td>0.3x</td><td>0.5x</td></tr>
+  <tr><td>MONSTER</td><td>50-100%</td><td>Almost no new trades, ride existing</td><td>0.15x</td><td>0.5x</td></tr>
+  <tr><td>LEGENDARY</td><td>100%+</td><td>No new trades. Close all if reversal risk, else email + ride</td><td>0.0x</td><td>0.5x</td></tr>
 </table>
 
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
-  <tr><td>Tiered behavior (LOSING → LEGENDARY)</td><td><span class="badge done">Done</span></td><td class="file">core/risk/daily_target.py → DailyTier enum</td></tr>
+  <tr><td>Tiered behavior (LOSING → LEGENDARY) with SECURED tier</td><td><span class="badge done">Done</span></td><td class="file">core/risk/daily_target.py → DailyTier enum</td></tr>
+  <tr><td><strong>Secure 3-5% daily profit aggressively (Phase 1: HUNTING)</strong></td><td><span class="badge done">Done</span></td><td class="file">daily_target.py → daily_profit_secured, profit_taking_aggression</td></tr>
+  <tr><td><strong>After target secured, ride with loose stops (Phase 3: RIDING)</strong></td><td><span class="badge done">Done</span></td><td class="file">daily_target.py → in_ride_mode; trailing.py → set_profit_taking_mode()</td></tr>
+  <tr><td><strong>Tighter trails + earlier partials when hunting daily target</strong></td><td><span class="badge done">Done</span></td><td class="file">trailing.py → 0.6x trail when aggr &gt; 1.0; scaler.py → lowered threshold</td></tr>
+  <tr><td><strong>Wider trails + higher BE trigger when riding</strong></td><td><span class="badge done">Done</span></td><td class="file">trailing.py → 1.5x trail when aggr &lt; 1.0</td></tr>
   <tr><td>At 100%+: close all if reversal risk</td><td><span class="badge done">Done</span></td><td class="file">bot.py → legendary day check in _tick()</td></tr>
   <tr><td>At 100%+ no reversal: email explaining why we ride</td><td><span class="badge done">Done</span></td><td class="file">daily_target.py → legendary_ride_reason()</td></tr>
   <tr><td>Daily email with PnL and compound report</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py → send_daily_summary()</td></tr>

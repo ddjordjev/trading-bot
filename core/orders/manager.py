@@ -352,17 +352,20 @@ class OrderManager:
     #  PYRAMID: partial profit take (pull money out)
     # ------------------------------------------------------------------ #
 
-    async def try_partial_take(self) -> list[Order]:
+    async def try_partial_take(self, profit_taking_aggression: float = 1.0) -> list[Order]:
         """For PYRAMID positions: close a portion to pull capital off the table.
 
         After leverage is raised and position is in deeper profit,
         sell e.g. 30% to reduce risk. The remaining 70% rides with trail.
+
+        When profit_taking_aggression > 1.0 (daily target not yet secured),
+        partials trigger at a lower profit threshold — take profits early.
         """
         taken: list[Order] = []
         positions = await self.exchange.fetch_positions()
         prices = {p.symbol: p.current_price for p in positions}
 
-        to_take = self.scaler.get_symbols_for_partial_take(prices)
+        to_take = self.scaler.get_symbols_for_partial_take(prices, profit_taking_aggression)
         for symbol, amount in to_take:
             cd = self._partial_take_cooldowns.get(symbol)
             if cd and (datetime.now(UTC) - cd).total_seconds() < self._ORDER_COOLDOWN_SECS:
