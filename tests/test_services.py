@@ -8,10 +8,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from shared.models import (
+    AnalyticsSnapshot,
     BotDeploymentStatus,
     DeploymentLevel,
     IntelSnapshot,
     SignalPriority,
+    StrategyWeightEntry,
     TradeProposal,
     TradeQueue,
     TrendingSnapshot,
@@ -716,3 +718,338 @@ class TestSignalGenerator:
         gen.generate(snap, empty_queue)
         crit = empty_queue.get_actionable(SignalPriority.CRITICAL)
         assert any("PEPE" in p.symbol for p in crit)
+
+
+# ── SignalGenerator Analytics Feedback ────────────────────────────────
+
+
+class TestSignalGeneratorAnalytics:
+    """Test that analytics data modulates proposal strength."""
+
+    @pytest.fixture
+    def gen(self):
+        from services.signal_generator import SignalGenerator
+
+        return SignalGenerator()
+
+    @pytest.fixture
+    def empty_queue(self):
+        return TradeQueue()
+
+    def _make_analytics(
+        self,
+        weights: list[StrategyWeightEntry] | None = None,
+        patterns: list[dict] | None = None,
+        suggestions: list[dict] | None = None,
+    ) -> AnalyticsSnapshot:
+        return AnalyticsSnapshot(
+            weights=weights or [],
+            patterns=patterns or [],
+            suggestions=suggestions or [],
+            total_trades_logged=50,
+        )
+
+    # --- update_analytics parsing ---
+
+    def test_update_analytics_loads_weights(self, gen):
+        snap = self._make_analytics(
+            weights=[
+                StrategyWeightEntry(strategy="compound_momentum", weight=0.5, streak=-3),
+                StrategyWeightEntry(strategy="swing_opportunity", weight=1.3, streak=4),
+            ]
+        )
+        gen.update_analytics(snap)
+        assert gen._strategy_weights["compound_momentum"] == 0.5
+        assert gen._strategy_weights["swing_opportunity"] == 1.3
+        assert gen._strategy_streaks["compound_momentum"] == -3
+        assert gen._strategy_streaks["swing_opportunity"] == 4
+
+    def test_update_analytics_loads_regime_patterns(self, gen):
+        snap = self._make_analytics(
+            patterns=[{"pattern_type": "market_regime", "data": {"regime": "risk_off", "loss_rate": 0.8}}]
+        )
+        gen.update_analytics(snap)
+        assert "risk_off" in gen._global_bad_regimes
+
+    def test_update_analytics_loads_time_patterns(self, gen):
+        snap = self._make_analytics(patterns=[{"pattern_type": "time_of_day", "data": {"hour": 14, "loss_rate": 0.8}}])
+        gen.update_analytics(snap)
+        assert 14 in gen._global_bad_hours
+
+    def test_update_analytics_loads_combo_penalties(self, gen):
+        snap = self._make_analytics(
+            patterns=[
+                {
+                    "pattern_type": "strategy_symbol",
+                    "affected_strategy": "compound_momentum",
+                    "affected_symbol": "SOL/USDT",
+                    "data": {"loss_rate": 0.8},
+                }
+            ]
+        )
+        gen.update_analytics(snap)
+        assert ("compound_momentum", "SOL/USDT") in gen._combo_penalties
+        assert gen._combo_penalties[("compound_momentum", "SOL/USDT")] == pytest.approx(0.2, abs=0.01)
+
+    def test_update_analytics_loads_quick_trade_penalty(self, gen):
+        snap = self._make_analytics(patterns=[{"pattern_type": "quick_trade", "data": {"loss_rate": 0.7}}])
+        gen.update_analytics(snap)
+        assert gen._quick_trade_penalty == pytest.approx(0.3, abs=0.01)
+
+    def test_update_analytics_loads_per_strategy_regime_filter(self, gen):
+        snap = self._make_analytics(
+            suggestions=[
+                {
+                    "suggestion_type": "regime_filter",
+                    "strategy": "swing_opportunity",
+                    "suggested_value": "skip risk_off",
+                }
+            ]
+        )
+        gen.update_analytics(snap)
+        assert "risk_off" in gen._strat_bad_regimes.get("swing_opportunity", set())
+
+    def test_update_analytics_loads_per_strategy_time_filter(self, gen):
+        snap = self._make_analytics(
+            suggestions=[
+                {
+                    "suggestion_type": "time_filter",
+                    "strategy": "compound_momentum",
+                    "suggested_value": "skip hour 3",
+                }
+            ]
+        )
+        gen.update_analytics(snap)
+        assert 3 in gen._strat_bad_hours.get("compound_momentum", set())
+
+    def test_update_analytics_clears_previous(self, gen):
+        """Calling update_analytics again fully replaces old data."""
+        gen.update_analytics(
+            self._make_analytics(
+                weights=[StrategyWeightEntry(strategy="old_strat", weight=0.1)],
+                patterns=[{"pattern_type": "market_regime", "data": {"regime": "caution"}}],
+            )
+        )
+        assert "old_strat" in gen._strategy_weights
+        assert "caution" in gen._global_bad_regimes
+
+        gen.update_analytics(self._make_analytics(weights=[StrategyWeightEntry(strategy="new_strat", weight=1.5)]))
+        assert "old_strat" not in gen._strategy_weights
+        assert "new_strat" in gen._strategy_weights
+        assert len(gen._global_bad_regimes) == 0
+
+    # --- _analytics_strength_modifier ---
+
+    def test_modifier_no_analytics_returns_1(self, gen):
+        assert gen._analytics_strength_modifier("whatever", "BTC/USDT") == 1.0
+
+    def test_modifier_uses_strategy_weight(self, gen):
+        gen.update_analytics(
+            self._make_analytics(weights=[StrategyWeightEntry(strategy="compound_momentum", weight=0.4)])
+        )
+        mod = gen._analytics_strength_modifier("trending_momentum", "BTC/USDT")
+        assert mod < 1.0
+        assert mod == pytest.approx(0.4, abs=0.01)
+
+    def test_modifier_high_weight_boosts(self, gen):
+        gen.update_analytics(
+            self._make_analytics(weights=[StrategyWeightEntry(strategy="compound_momentum", weight=1.3)])
+        )
+        mod = gen._analytics_strength_modifier("trending_momentum", "BTC/USDT")
+        assert mod == pytest.approx(1.3, abs=0.01)
+
+    def test_modifier_losing_streak_stacks(self, gen):
+        gen.update_analytics(
+            self._make_analytics(weights=[StrategyWeightEntry(strategy="compound_momentum", weight=0.7, streak=-5)])
+        )
+        mod = gen._analytics_strength_modifier("trending_momentum", "BTC/USDT")
+        assert mod < 0.7
+        assert mod == pytest.approx(0.7 * 0.5, abs=0.01)
+
+    def test_modifier_bad_regime_stacks(self, gen):
+        gen.update_analytics(
+            self._make_analytics(
+                weights=[StrategyWeightEntry(strategy="compound_momentum", weight=1.0)],
+                patterns=[{"pattern_type": "market_regime", "data": {"regime": "risk_off"}}],
+            )
+        )
+        gen._current_regime = "risk_off"
+        mod = gen._analytics_strength_modifier("trending_momentum", "BTC/USDT")
+        assert mod == pytest.approx(0.7, abs=0.01)
+
+    def test_modifier_per_strat_bad_regime_stacks(self, gen):
+        gen.update_analytics(
+            self._make_analytics(
+                weights=[StrategyWeightEntry(strategy="swing_opportunity", weight=1.0)],
+                suggestions=[
+                    {
+                        "suggestion_type": "regime_filter",
+                        "strategy": "swing_opportunity",
+                        "suggested_value": "skip caution",
+                    }
+                ],
+            )
+        )
+        gen._current_regime = "caution"
+        mod = gen._analytics_strength_modifier("capitulation_dip_buy", "BTC/USDT")
+        assert mod == pytest.approx(0.6, abs=0.01)
+
+    def test_modifier_bad_hour_stacks(self, gen):
+        gen.update_analytics(
+            self._make_analytics(
+                weights=[StrategyWeightEntry(strategy="compound_momentum", weight=1.0)],
+                patterns=[{"pattern_type": "time_of_day", "data": {"hour": 14}}],
+            )
+        )
+        gen._current_hour = 14
+        mod = gen._analytics_strength_modifier("trending_momentum", "BTC/USDT")
+        assert mod == pytest.approx(0.75, abs=0.01)
+
+    def test_modifier_combo_penalty(self, gen):
+        gen.update_analytics(
+            self._make_analytics(
+                weights=[StrategyWeightEntry(strategy="compound_momentum", weight=1.0)],
+                patterns=[
+                    {
+                        "pattern_type": "strategy_symbol",
+                        "affected_strategy": "compound_momentum",
+                        "affected_symbol": "SOL/USDT",
+                        "data": {"loss_rate": 0.75},
+                    }
+                ],
+            )
+        )
+        mod_sol = gen._analytics_strength_modifier("trending_momentum", "SOL/USDT")
+        mod_btc = gen._analytics_strength_modifier("trending_momentum", "BTC/USDT")
+        assert mod_sol < mod_btc
+        assert mod_sol == pytest.approx(0.25, abs=0.01)
+        assert mod_btc == pytest.approx(1.0, abs=0.01)
+
+    def test_modifier_quick_trade_penalty(self, gen):
+        gen.update_analytics(
+            self._make_analytics(
+                weights=[StrategyWeightEntry(strategy="compound_momentum", weight=1.0)],
+                patterns=[{"pattern_type": "quick_trade", "data": {"loss_rate": 0.7}}],
+            )
+        )
+        mod_quick = gen._analytics_strength_modifier("liq_reversal", "BTC/USDT", is_quick=True)
+        mod_normal = gen._analytics_strength_modifier("trending_momentum", "BTC/USDT", is_quick=False)
+        assert mod_quick < mod_normal
+        assert mod_quick == pytest.approx(0.3, abs=0.01)
+
+    def test_modifier_everything_stacks_to_floor(self, gen):
+        """When all penalties stack, modifier bottoms out at 0.05."""
+        gen.update_analytics(
+            self._make_analytics(
+                weights=[StrategyWeightEntry(strategy="compound_momentum", weight=0.15, streak=-6)],
+                patterns=[
+                    {"pattern_type": "market_regime", "data": {"regime": "risk_off"}},
+                    {"pattern_type": "time_of_day", "data": {"hour": 3}},
+                    {
+                        "pattern_type": "strategy_symbol",
+                        "affected_strategy": "compound_momentum",
+                        "affected_symbol": "BTC/USDT",
+                        "data": {"loss_rate": 0.9},
+                    },
+                    {"pattern_type": "quick_trade", "data": {"loss_rate": 0.8}},
+                ],
+            )
+        )
+        gen._current_regime = "risk_off"
+        gen._current_hour = 3
+        mod = gen._analytics_strength_modifier("liq_reversal", "BTC/USDT", is_quick=True)
+        assert mod == 0.05
+
+    def test_modifier_capped_at_1_5(self, gen):
+        gen.update_analytics(
+            self._make_analytics(weights=[StrategyWeightEntry(strategy="compound_momentum", weight=2.0)])
+        )
+        mod = gen._analytics_strength_modifier("trending_momentum", "BTC/USDT")
+        assert mod == 1.5
+
+    # --- End-to-end: proposals get reduced strength ---
+
+    def test_proposal_strength_reduced_by_analytics(self, gen, empty_queue):
+        """A mass-liq proposal normally has 0.85 strength; with bad analytics it drops."""
+        gen.update_analytics(
+            self._make_analytics(weights=[StrategyWeightEntry(strategy="compound_momentum", weight=0.4, streak=-4)])
+        )
+        snap = IntelSnapshot(
+            mass_liquidation=True,
+            liquidation_24h=2e9,
+            liquidation_bias="long",
+        )
+        gen.generate(snap, empty_queue)
+        crit = empty_queue.get_actionable(SignalPriority.CRITICAL)
+        liq = [p for p in crit if p.strategy == "liq_reversal"]
+        assert len(liq) == 1
+        assert liq[0].strength < 0.85
+        assert liq[0].strength == pytest.approx(0.85 * 0.4 * 0.7, abs=0.01)
+
+    def test_proposal_strength_boosted_by_analytics(self, gen, empty_queue):
+        """A proposal for an outperforming strategy gets boosted strength."""
+        gen.update_analytics(
+            self._make_analytics(weights=[StrategyWeightEntry(strategy="compound_momentum", weight=1.4, streak=5)])
+        )
+        snap = IntelSnapshot(
+            mass_liquidation=True,
+            liquidation_24h=2e9,
+            liquidation_bias="long",
+        )
+        gen.generate(snap, empty_queue)
+        crit = empty_queue.get_actionable(SignalPriority.CRITICAL)
+        liq = [p for p in crit if p.strategy == "liq_reversal"]
+        assert len(liq) == 1
+        assert liq[0].strength > 0.85
+
+    def test_proposal_strength_unaffected_without_analytics(self, gen, empty_queue):
+        """Without analytics loaded, strengths stay at raw values."""
+        snap = IntelSnapshot(
+            mass_liquidation=True,
+            liquidation_24h=2e9,
+            liquidation_bias="long",
+        )
+        gen.generate(snap, empty_queue)
+        crit = empty_queue.get_actionable(SignalPriority.CRITICAL)
+        liq = [p for p in crit if p.strategy == "liq_reversal"]
+        assert len(liq) == 1
+        assert liq[0].strength == pytest.approx(0.85, abs=0.01)
+
+    def test_different_strategies_get_different_modifiers(self, gen, empty_queue):
+        """Momentum and swing get different modifiers based on their analytics names."""
+        gen.update_analytics(
+            self._make_analytics(
+                weights=[
+                    StrategyWeightEntry(strategy="compound_momentum", weight=0.3),
+                    StrategyWeightEntry(strategy="swing_opportunity", weight=1.3),
+                ]
+            )
+        )
+        snap = IntelSnapshot(
+            fear_greed=10,
+            mass_liquidation=True,
+            liquidation_24h=3e9,
+            liquidation_bias="long",
+            preferred_direction="long",
+            regime="risk_on",
+            fear_greed_bias="long",
+            whale_bias="long",
+            tv_btc_consensus="long",
+        )
+        gen.generate(snap, empty_queue)
+
+        crit = empty_queue.get_actionable(SignalPriority.CRITICAL)
+        liq = [p for p in crit if p.strategy == "liq_reversal"]
+        assert len(liq) == 1
+        assert liq[0].strength < 0.5
+
+        swing = empty_queue.get_actionable(SignalPriority.SWING)
+        cap = [p for p in swing if p.strategy == "capitulation_dip_buy"]
+        assert len(cap) == 1
+        assert cap[0].strength > 0.9
+
+    def test_generate_sets_current_regime_and_hour(self, gen, empty_queue):
+        snap = IntelSnapshot(regime="caution")
+        gen.generate(snap, empty_queue)
+        assert gen._current_regime == "caution"
+        assert gen._current_hour >= 0

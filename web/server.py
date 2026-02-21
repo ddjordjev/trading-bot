@@ -708,14 +708,11 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
         hourly = hub.get_hourly_performance()
         regime = hub.get_regime_performance()
     else:
-        scores = [
-            StrategyScoreInfo(**s.model_dump())
-            for s in sorted(_bot.analytics.scores.values(), key=lambda x: x.total_pnl, reverse=True)
-        ]
-        patterns = [PatternInsightInfo(**p.model_dump()) for p in _bot.analytics.patterns]
-        suggestions = [ModificationSuggestionInfo(**s.model_dump()) for s in _bot.analytics.suggestions]
-        hourly = _bot.trade_db.get_hourly_performance()
-        regime = _bot.trade_db.get_regime_performance()
+        scores = []
+        patterns = []
+        suggestions = []
+        hourly = []
+        regime = []
 
     live = []
     # Pull live positions from all bot reports (multibot)
@@ -777,8 +774,7 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
                 )
             )
 
-    hub_count = hub.trade_count()
-    total_logged = max(_bot.trade_db.trade_count(), hub_count)
+    total_logged = hub.trade_count()
 
     return AnalyticsSnapshot(
         strategy_scores=scores,
@@ -797,9 +793,6 @@ async def get_closed_trades(limit: int = 100, _: str = Depends(verify_token)) ->
         return []
     hub = _get_hub_db()
     rows = hub.get_all_trades(limit=limit)
-    if rows:
-        return [r.model_dump() for r in rows if r.closed_at]
-    rows = _bot.trade_db.get_all_trades(limit=limit)
     return [r.model_dump() for r in rows if r.closed_at]
 
 
@@ -811,10 +804,14 @@ async def get_deposits(limit: int = 100, _: str = Depends(verify_token)) -> list
 
 @app.post("/api/analytics/refresh", response_model=ActionResponse)
 async def refresh_analytics(_: str = Depends(verify_token)) -> ActionResponse:
-    if not _bot:
-        return ActionResponse(success=False, message="Bot not initialized")
-    _bot.analytics.refresh()
-    return ActionResponse(success=True, message="Analytics refreshed")
+    hub = _get_hub_db()
+    if hub.trade_count() == 0:
+        return ActionResponse(success=False, message="No trades in hub DB")
+    from analytics.engine import AnalyticsEngine as AE
+
+    ae = AE(hub)
+    ae.refresh()
+    return ActionResponse(success=True, message=f"Analytics refreshed ({len(ae.scores)} strategies)")
 
 
 # --------------- action endpoints ---------------
@@ -1055,16 +1052,23 @@ async def toggle_module(name: str, _: str = Depends(verify_token)) -> ActionResp
 
 @app.get("/api/bot-profiles", response_model=list[BotProfileInfo])
 async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInfo]:
-    """List all bot profiles with their current container status."""
+    """List all bot profiles with their hub-controlled status."""
     from config.bot_profiles import ALL_PROFILES
-    from web.docker_manager import DOCKER_AVAILABLE, get_container_status, list_running_profiles
 
-    running = list_running_profiles() if DOCKER_AVAILABLE else set()
+    hub = _get_hub_db()
+    enabled_map = hub.get_all_bot_enabled()
 
     result: list[BotProfileInfo] = []
     for p in ALL_PROFILES:
-        status = get_container_status(p.id) if DOCKER_AVAILABLE else "unknown"
-        enabled = p.id in running or (p.is_hub and _bot is not None and _bot._running)
+        enabled = enabled_map.get(p.id, p.is_default)
+        rpt = _bot_reports.get(p.id, {})
+        if p.is_hub:
+            container_status = "running" if (_bot is not None and _bot._running) else "idle"
+        elif rpt:
+            container_status = "running" if enabled else "idle"
+        else:
+            container_status = "idle"
+
         result.append(
             BotProfileInfo(
                 id=p.id,
@@ -1075,7 +1079,7 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
                 env_overrides=p.env_overrides,
                 is_hub=p.is_hub,
                 enabled=enabled,
-                container_status=status,
+                container_status=container_status,
             )
         )
     return result
@@ -1083,16 +1087,12 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
 
 @app.post("/api/bot-profile/{profile_id}/toggle", response_model=ActionResponse)
 async def toggle_bot_profile(profile_id: str, _: str = Depends(verify_token)) -> ActionResponse:
-    """Enable or disable a bot profile.
+    """Enable or disable a bot via hub DB config.
 
-    Enable:  start the Docker container, it auto-registers via /internal/report.
-    Disable: stop all trades -> stop bot -> kill container -> purge references.
+    The bot learns its enabled state from the /internal/report response
+    every tick. No file polling, no Docker API — pure HTTP.
     """
     from config.bot_profiles import PROFILES_BY_ID
-    from web.docker_manager import DOCKER_AVAILABLE, get_container_status, start_container, stop_container
-
-    if not DOCKER_AVAILABLE:
-        return ActionResponse(success=False, message="Docker SDK not available")
 
     profile = PROFILES_BY_ID.get(profile_id)
     if not profile:
@@ -1101,42 +1101,14 @@ async def toggle_bot_profile(profile_id: str, _: str = Depends(verify_token)) ->
     if profile.is_hub:
         return ActionResponse(success=False, message="Hub bot cannot be toggled — it runs the dashboard")
 
-    status = get_container_status(profile_id)
-    is_running = status == "running"
+    hub = _get_hub_db()
+    currently_enabled = hub.is_bot_enabled(profile_id)
+    new_enabled = not currently_enabled
+    hub.set_bot_enabled(profile_id, new_enabled)
 
-    if is_running:
-        # --- DISABLE: graceful teardown ---
-        # 1. Stop all trades on this bot
-        close_resp = await _forward_to_bot(profile_id, "/api/close-all", {})
-        if not close_resp.success:
-            logger.warning("Close-all for {} failed: {} (proceeding with shutdown)", profile_id, close_resp.message)
-
-        # 2. Tell bot process to stop
-        stop_resp = await _forward_to_bot(profile_id, "/api/bot/stop", {})
-        if not stop_resp.success:
-            logger.warning("Bot stop for {} failed: {} (killing container)", profile_id, stop_resp.message)
-
-        # Small delay for graceful shutdown
-        await asyncio.sleep(2)
-
-        # 3. Kill the Docker container
-        ok, msg = await stop_container(profile_id)
-        if not ok:
-            return ActionResponse(success=False, message=f"Container stop failed: {msg}")
-
-        # 4. Purge all hub references
-        _bot_reports.pop(profile_id, None)
-        _bot_urls.pop(profile_id, None)
-        _save_bot_registry()
-        nudge_ws()
-
-        return ActionResponse(success=True, message=f"Disabled {profile.display_name}")
-    else:
-        # --- ENABLE: start container ---
-        ok, msg = await start_container(profile)
-        if not ok:
-            return ActionResponse(success=False, message=f"Start failed: {msg}")
-        return ActionResponse(success=True, message=f"Enabled {profile.display_name} — registering...")
+    action = "Enabled" if new_enabled else "Disabled"
+    nudge_ws()
+    return ActionResponse(success=True, message=f"{action} {profile.display_name}")
 
 
 # --------------- DB Explorer (read-only) ---------------
@@ -1147,11 +1119,7 @@ _ALLOWED_TABLES: set[str] = set()
 def _get_db_conn() -> Any:
     """Get the best available DB connection — hub first, local fallback."""
     hub = _get_hub_db()
-    if hub.conn:
-        return hub.conn
-    if _bot and _bot.trade_db._conn:
-        return _bot.trade_db._conn
-    return None
+    return hub.conn
 
 
 def _get_db_tables() -> list[dict[str, Any]]:
@@ -1370,8 +1338,14 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
 
 @app.post("/internal/report")
-async def receive_bot_report(request: Request) -> dict[str, str]:
-    """Bots POST their dashboard snapshots here. No auth — internal network only."""
+async def receive_bot_report(request: Request) -> dict[str, Any]:
+    """Bots POST snapshots here; hub returns all data bots need.
+
+    Bots never touch the shared data volume — the hub acts as a proxy:
+    - Reads intel, analytics, trade_queue, extreme_watchlist on their behalf
+    - Writes bot_status and exchange_symbols on their behalf
+    - Returns enabled flag, confirmed ack keys, and all shared data
+    """
     data = await request.json()
     bot_id = data.get("bot_id", "")
     if bot_id:
@@ -1379,29 +1353,106 @@ async def receive_bot_report(request: Request) -> dict[str, str]:
         if _bot_urls.get(bot_id) != url:
             _bot_urls[bot_id] = url
             _save_bot_registry()
+
+    # --- Proxy writes on behalf of the bot ---
+    state = SharedState(data_dir=Path("data"))
+    bot_state = SharedState(data_dir=Path(f"data/{bot_id}")) if bot_id else None
+
+    if bot_id and bot_state:
+        from shared.models import BotDeploymentStatus
+
+        bot_status_data = data.get("bot_status")
+        if bot_status_data:
+            bot_state.write_bot_status(BotDeploymentStatus(**bot_status_data))
+
+        exchange_symbols = data.get("exchange_symbols")
+        if exchange_symbols:
+            bot_state.write_exchange_symbols(
+                bot_id, exchange_symbols.get("exchange", ""), exchange_symbols.get("symbols", [])
+            )
+
+        queue_updates = data.get("queue_updates")
+        if queue_updates and bot_state:
+            consumed = queue_updates.get("consumed", [])
+            rejected = queue_updates.get("rejected", {})
+            if consumed or rejected:
+                bot_state.apply_trade_queue_updates(consumed, rejected)
+
     report_bot_snapshot(data)
-    return {"status": "ok"}
+    hub = _get_hub_db()
+    confirmed = hub.drain_confirmed_keys(bot_id) if bot_id else []
+    enabled = hub.is_bot_enabled(bot_id) if bot_id else True
+
+    # --- Proxy reads: return shared data the bot needs ---
+    response: dict[str, Any] = {
+        "status": "ok",
+        "confirmed_keys": confirmed,
+        "enabled": enabled,
+    }
+    if bot_id and bot_state:
+        with contextlib.suppress(Exception):
+            response["intel"] = state.read_intel().model_dump()
+        with contextlib.suppress(Exception):
+            response["analytics"] = state.read_analytics().model_dump()
+        with contextlib.suppress(Exception):
+            response["trade_queue"] = bot_state.read_trade_queue().model_dump()
+        with contextlib.suppress(Exception):
+            response["extreme_watchlist"] = state.read_extreme_watchlist().model_dump()
+        response["intel_age"] = state.intel_age_seconds()
+    return response
 
 
 @app.post("/internal/trade")
 async def receive_trade(request: Request) -> dict[str, Any]:
-    """Bots push trade open/close events here. Hub writes to its own DB."""
+    """Bots push trade open/close events here. Hub writes to its own DB.
+
+    Accepts ``request_key`` for idempotent writes and deferred ack.
+    """
     data = await request.json()
     bot_id = data.get("bot_id", "")
     action = data.get("action", "")
     trade = data.get("trade", {})
+    request_key = data.get("request_key", "")
     if not bot_id or not trade:
         return {"status": "error", "detail": "missing bot_id or trade"}
 
     hub = _get_hub_db()
     if action == "close" and trade.get("opened_at"):
-        updated = hub.update_trade_close(bot_id, trade["opened_at"], trade)
+        updated = hub.update_trade_close(bot_id, trade["opened_at"], trade, request_key=request_key)
         if not updated:
-            hub.insert_trade(bot_id, trade)
+            hub.insert_trade(bot_id, trade, request_key=request_key)
     else:
-        hub.insert_trade(bot_id, trade)
+        hub.insert_trade(bot_id, trade, request_key=request_key)
 
-    return {"status": "ok", "action": action}
+    return {"status": "ok", "action": action, "request_key": request_key}
+
+
+@app.get("/internal/trades/{bot_id}/open")
+async def get_bot_open_trades(bot_id: str) -> list[dict[str, Any]]:
+    """Return open (unclosed) trades for a bot — used on bot startup to recover state."""
+    hub = _get_hub_db()
+    trades = hub.get_open_trades_for_bot(bot_id)
+    return [t.model_dump() for t in trades]
+
+
+@app.get("/internal/trades/{bot_id}/stats")
+async def get_bot_strategy_stats(bot_id: str) -> dict[str, dict[str, Any]]:
+    """Return per-strategy stats for a bot, keyed by 'strategy:symbol'."""
+    hub = _get_hub_db()
+    return hub.get_all_strategy_stats_for_bot(bot_id)
+
+
+@app.post("/internal/recovery-close")
+async def recovery_close_trade(request: Request) -> dict[str, Any]:
+    """Bot reports a trade that died while it was down. No exit stats."""
+    data = await request.json()
+    bot_id = data.get("bot_id", "")
+    opened_at = data.get("opened_at", "")
+    if not bot_id or not opened_at:
+        return {"status": "error", "detail": "missing bot_id or opened_at"}
+    hub = _get_hub_db()
+    updated = hub.mark_recovery_close(bot_id, opened_at)
+    return {"status": "ok", "updated": updated}
 
 
 @app.post("/internal/deposit")

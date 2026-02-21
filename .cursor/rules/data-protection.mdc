@@ -5,11 +5,32 @@ alwaysApply: true
 
 # Data Protection
 
+## Architecture — Hub-Centric Persistence
+
+**Trading bots have NO local database.** All trade state is in-memory.
+Only the **hub** (`bot-hub`) persists data to `data/hub.db`.
+
+### Data flow
+
+1. Bot opens/closes a trade → builds `TradeRecord` in memory
+2. Bot pushes the event to hub via `POST /internal/trade` with a `request_key`
+3. Hub writes to `hub.db`, deduplicates by `request_key`
+4. Hub confirms writes by piggybacking `confirmed_keys` on the report response
+5. Bot removes confirmed entries from its pending buffer
+
+### On bot restart
+
+1. Bot calls `GET /internal/trades/{bot_id}/open` → gets open trades from hub
+2. Bot checks each against exchange positions
+3. Still open on exchange → resume managing
+4. Gone (hit SL, liquidated) → `POST /internal/recovery-close` → hub marks
+   with `recovery_close=1` (excluded from performance stats)
+
 ## Persistent DBs — NEVER touch
 
-All trade and analytics databases live on the **host filesystem**, outside
-Docker, via bind mounts. They survive `docker compose down -v`, container
-rebuilds, and even full Docker removal.
+All databases live on the **host filesystem**, outside Docker, via bind
+mounts. They survive `docker compose down -v`, container rebuilds, and
+full Docker removal.
 
 Host paths (set in `.env`):
 
@@ -20,9 +41,10 @@ Host paths (set in `.env`):
 
 Never delete, reset, or wipe these unless the user **explicitly** says to:
 
-- `*/trades.db` (+ `-shm`, `-wal`) — per-bot trade history
-- `hub.db` (+ `-shm`, `-wal`) — hub analytics DB
+- `hub.db` (+ `-shm`, `-wal`) — **sole** persistent trade + analytics DB
 - Daily backups in `/Users/damirdjordjev/workspace/trading-bot-backups/`
+
+Per-bot `trades.db` files **no longer exist**. Bots are stateless.
 
 Infrastructure volumes (Docker-managed, less critical — can be rebuilt):
 

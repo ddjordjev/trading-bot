@@ -19,6 +19,12 @@ const STYLE_COLORS: Record<string, string> = {
   swing: "#f59e0b",
 };
 
+const STATUS_DISPLAY: Record<string, { label: string; color: string }> = {
+  running: { label: "Running", color: "var(--green)" },
+  idle: { label: "Idle", color: "#6e7681" },
+  winding_down: { label: "Winding Down", color: "#f59e0b" },
+};
+
 export function BotProfiles() {
   const [profiles, setProfiles] = useState<BotProfile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -41,7 +47,7 @@ export function BotProfiles() {
     setToggling(id);
     try {
       await post(`/api/bot-profile/${id}/toggle`);
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, 500));
       refresh();
     } catch {
     } finally {
@@ -55,14 +61,15 @@ export function BotProfiles() {
     <div>
       <h3 style={{ color: "var(--heading)", marginBottom: "0.25rem" }}>Bot Profiles</h3>
       <p style={{ color: "var(--text-muted)", fontSize: "0.8rem", marginBottom: "1rem" }}>
-        Enable a profile to spin up a new bot container. Disable to stop all its trades,
-        kill the container, and remove it from the dashboard.
+        All bots run as static containers. Toggle a profile to enable or disable
+        trading — disabled bots stay alive but idle with no open positions.
       </p>
       <div className="module-grid">
         {profiles.map((p) => {
           const isToggling = toggling === p.id;
           const styleColor = STYLE_COLORS[p.style] || "var(--text-muted)";
           const overrideKeys = Object.keys(p.env_overrides);
+          const st = STATUS_DISPLAY[p.container_status] || STATUS_DISPLAY.idle;
 
           return (
             <div
@@ -109,7 +116,7 @@ export function BotProfiles() {
                     className={`toggle ${p.enabled ? "on" : "off"}`}
                     onClick={() => toggle(p.id)}
                     disabled={isToggling}
-                    title={p.enabled ? "Disable — stops trades and kills container" : "Enable — starts a new container"}
+                    title={p.enabled ? "Disable — winds down positions, bot goes idle" : "Enable — bot resumes trading"}
                   />
                 )}
               </div>
@@ -137,22 +144,14 @@ export function BotProfiles() {
                   <span style={{ color: "var(--text-muted)" }}>status</span>
                   <span
                     style={{
-                      color: isToggling
-                        ? "var(--text-muted)"
-                        : p.enabled
-                          ? "var(--green)"
-                          : "#6e7681",
+                      color: isToggling ? "var(--text-muted)" : st.color,
                     }}
                   >
                     {isToggling
                       ? p.enabled
-                        ? "Stopping..."
-                        : "Starting..."
-                      : p.container_status === "running"
-                        ? "Running"
-                        : p.container_status === "exited"
-                          ? "Stopped"
-                          : "Off"}
+                        ? "Disabling..."
+                        : "Enabling..."
+                      : st.label}
                   </span>
                 </div>
                 {overrideKeys.length > 0 && (

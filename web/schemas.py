@@ -290,4 +290,4 @@ class BotProfileInfo(BaseModel):
     env_overrides: dict[str, str] = {}
     is_hub: bool = False
     enabled: bool = False
-    container_status: str = "missing"
+    container_status: str = "idle"  # "running" | "idle" | "winding_down"

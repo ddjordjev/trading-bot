@@ -341,3 +341,43 @@ class TestSharedStateExchangeSymbols:
         result = state.read_all_exchange_symbols()
         assert "BINANCE" in result
         assert len(result) == 1
+
+
+class TestHubBotEnabled:
+    """Tests for HubDB.set_bot_enabled / is_bot_enabled / get_all_bot_enabled."""
+
+    @pytest.fixture
+    def hub(self, tmp_path):
+        from db.hub_store import HubDB
+
+        db = HubDB(path=tmp_path / "test_hub.db")
+        db.connect()
+        yield db
+        db.close()
+
+    def test_default_enabled(self, hub):
+        assert hub.is_bot_enabled("nonexistent") is True
+
+    def test_set_and_read_enabled(self, hub):
+        hub.set_bot_enabled("momentum", True)
+        assert hub.is_bot_enabled("momentum") is True
+
+    def test_set_and_read_disabled(self, hub):
+        hub.set_bot_enabled("meanrev", False)
+        assert hub.is_bot_enabled("meanrev") is False
+
+    def test_toggle_overwrites(self, hub):
+        hub.set_bot_enabled("bot1", True)
+        assert hub.is_bot_enabled("bot1") is True
+        hub.set_bot_enabled("bot1", False)
+        assert hub.is_bot_enabled("bot1") is False
+
+    def test_get_all_bot_enabled(self, hub):
+        hub.set_bot_enabled("a", True)
+        hub.set_bot_enabled("b", False)
+        hub.set_bot_enabled("c", True)
+        result = hub.get_all_bot_enabled()
+        assert result == {"a": True, "b": False, "c": True}
+
+    def test_get_all_empty(self, hub):
+        assert hub.get_all_bot_enabled() == {}

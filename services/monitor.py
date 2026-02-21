@@ -110,6 +110,7 @@ class MonitorService:
         self._last_tv_refresh = 0.0
         self._last_scanner_refresh = 0.0
         self._last_symbols_refresh = 0.0
+        self._last_analytics_refresh = 0.0
         self._exchange_symbols: dict[str, set[str]] = {}
 
     async def start(self) -> None:
@@ -208,6 +209,16 @@ class MonitorService:
                     self._build_extreme_watchlist()
                 except Exception as e:
                     logger.debug("Extreme watchlist error: {}", e)
+
+                # Feed analytics to signal generator (every 60s)
+                if now - self._last_analytics_refresh >= 60:
+                    try:
+                        analytics_snap = self.state.read_analytics()
+                        if analytics_snap.weights:
+                            self.signal_gen.update_analytics(analytics_snap)
+                    except Exception as e:
+                        logger.debug("Analytics feed error: {}", e)
+                    self._last_analytics_refresh = now
 
                 # Generate proposals into a staging queue, then route to per-bot queues
                 try:

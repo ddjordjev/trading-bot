@@ -43,7 +43,7 @@ the code without touching the exchange. Once all checks pass, switch to
 placed on Binance testnet — you can see them on demo.binance.com. The
 testnet pre-funds accounts with $5,000–$10,000 USDT. SESSION_BUDGET=100
 caps the bot's usable balance to $100 (it won't use the full $5K+).
-Trade PnL is tracked per-trade in `trades.db` and the daily target tracker.
+Trade PnL is tracked per-trade in `hub.db` (via the hub) and the daily target tracker.
 
 To reset after a blown account: update the .env to change the SESSION_BUDGET
 or restart to re-read config.
@@ -71,7 +71,7 @@ or restart to re-read config.
 - `intel_state.json` — monitor writes, bot reads
 - `analytics_state.json` — analytics writes, bot reads
 - `trade_queue.json` — monitor writes proposals, bot reads/executes
-- `trades.db` — SQLite trade history (bot writes, analytics reads)
+- `hub.db` — SQLite trade history (hub writes, analytics reads; bots push via HTTP)
 
 **Logs:** `logs/` directory (1-day rotation, 30-day retention)
 
@@ -109,7 +109,7 @@ You are a trading desk operator. You have 10 days and $100. Your job is to:
 
 After each day (or sooner if something is clearly wrong):
 
-1. **Check the numbers:** Query `data/trades.db` for win rate, avg PnL,
+1. **Check the numbers:** Query `data/hub.db` for win rate, avg PnL,
    per-strategy breakdown. Check the analytics dashboard.
 2. **Assess:** Is the bot making money? Which strategies are contributing?
    Which are bleeding? Are positions getting stuck?
@@ -238,10 +238,11 @@ Watch logs for ~10–15 minutes and confirm the full pipeline:
 
 ```
 Strategy generates Signal → RiskManager.check_signal() → OrderManager.execute_signal()
-  → PaperExchange.place_order() → trade logged to trades.db
+  → PaperExchange.place_order() → trade pushed to hub via HTTP (request_key for dedup)
 Monitor polls intel → writes IntelSnapshot → SignalGenerator produces TradeProposals
   → bot reads trade_queue.json → processes proposals
-Analytics reads trades.db → computes strategy weights → writes analytics_state.json
+Hub writes hub.db → Analytics reads hub.db → computes strategy weights → writes analytics_state.json
+Bot startup → asks hub for open trades → reconciles with exchange → recovery-closes dead ones
 ```
 
 If no trades fire naturally (market is quiet), verify the signal path is at least
@@ -413,8 +414,7 @@ Host paths are configured in `.env`:
 
 | Data | Host location | Notes |
 |------|--------------|-------|
-| Trade history | `$HOST_DATA_DIR/trades.db` | Per-bot trade history (critical) |
-| Hub analytics | `$HOST_DATA_DIR/hub.db` | Hub analytics DB (critical) |
+| Hub database | `$HOST_DATA_DIR/hub.db` | **Sole** persistent trade + analytics DB (critical) |
 | Bot status | `$HOST_DATA_DIR/bot_status.json` | Runtime state (ephemeral) |
 | Intel state | `$HOST_DATA_DIR/intel_state.json` | Runtime state (ephemeral) |
 | Analytics | `$HOST_DATA_DIR/analytics_state.json` | Runtime state (ephemeral) |
@@ -425,8 +425,13 @@ Host paths are configured in `.env`:
 | Daily reports | `docs/reports/` | Git (committed) |
 | Daily backups | `/Users/damirdjordjev/workspace/trading-bot-backups/` | Host-side, launchd 3 AM daily |
 
-**Important:** Only `.db` files are critical. JSON/lock files are ephemeral
-state that gets recreated on startup — safe to delete during rebuilds.
+**Important:** Only `hub.db` is critical. Per-bot `trades.db` files no longer
+exist — trading bots are fully stateless (in-memory only). All trade
+persistence flows through the hub via HTTP. Bots recover open positions from
+the hub on startup and mark dead trades via `recovery_close`.
+
+JSON/lock files are ephemeral state that gets recreated on startup — safe
+to delete during rebuilds.
 
 ---
 

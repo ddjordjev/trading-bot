@@ -85,3 +85,52 @@ The point: maintain a meaningful safety net without wasting time writing
 filler tests every commit. The surges build a buffer; the coasts spend it.
 
 **Status:** Active policy. Current coverage: ~91% (post-surge).
+
+---
+
+## WebSocket for Bot ↔ Hub Communication
+
+Replace HTTP POST/GET between trading bots and the hub with persistent
+WebSocket connections.
+
+**Current state:** Bots use `aiohttp.ClientSession` (HTTP keep-alive) to
+POST reports and trade events to the hub every tick. Ack confirmations
+piggyback on the report response. Works fine — sub-millisecond on Docker
+network, keep-alive reuses TCP connections.
+
+**Where WebSocket would NOT help much:**
+- **Report cycle** (bot → hub every few seconds): 2-5KB JSON, HTTP
+  keep-alive already eliminates TCP overhead. WebSocket saves maybe
+  200-500 bytes of header framing. Noise on a local Docker network.
+- **Trade push** (bot → hub on open/close): infrequent events, a few per
+  hour. HTTP request-response is actually ideal — send, get confirmation,
+  done.
+- **Ack confirmations**: currently delayed up to one report cycle (~5s).
+  WebSocket could push instantly, but 5s ack delay has zero operational
+  impact — the pending buffer is just a safety net.
+
+**Where WebSocket WOULD help:**
+- **Hub-initiated commands**: "close all positions NOW", "new opportunity,
+  act fast", "config change — reload". Currently impossible without
+  polling. A persistent WS channel enables real-time push from hub to bots.
+- **Event streaming**: live trade events, position updates, risk alerts
+  pushed to the dashboard without polling.
+- **Reduced connection churn**: if tick frequency increases (sub-second),
+  WS eliminates per-request overhead entirely.
+
+**Verdict:** No performance gain for current architecture. The win is
+enabling new capabilities (hub-initiated commands, real-time event push)
+rather than raw throughput. Worth building if we add hub → bot command
+flow or if tick frequency goes sub-second.
+
+**Status:** Parked. Revisit when hub-initiated commands become a need.
+
+---
+
+## ~~Static Containers with Hub-Controlled Enable/Disable~~ — IMPLEMENTED
+
+Implemented in commit on `develop`.  All bot containers now run statically via
+`docker-compose.yml`.  The hub controls enable/disable through
+`data/{bot_id}/bot_enabled.json`.  `web/docker_manager.py` removed, docker.sock
+mount removed from bot-hub.  Settings page toggles write the config flag —
+bots check every 5s and transition between trading and idle mode.

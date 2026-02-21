@@ -13,6 +13,7 @@ from config.settings import get_settings
 from core.models import Signal, SignalAction
 from core.models.order import Order, OrderSide, OrderStatus, OrderType
 from core.orders.scaler import ScaleMode
+from db.models import TradeRecord
 from intel import MarketCondition
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
@@ -40,19 +41,9 @@ def mock_exchange():
 
 
 @pytest.fixture
-def mock_trade_db():
-    db = MagicMock()
-    db.connect = MagicMock()
-    db.close = MagicMock()
-    db.log_trade = MagicMock()
-    db.trade_count = MagicMock(return_value=0)
-    return db
-
-
-@pytest.fixture
-def bot(settings, mock_exchange, mock_trade_db):
-    """TradingBot with mocked exchange and DB."""
-    with patch("bot.create_exchange", return_value=mock_exchange), patch("bot.TradeDB", return_value=mock_trade_db):
+def bot(settings, mock_exchange):
+    """TradingBot with mocked exchange (no local DB — hub-centric)."""
+    with patch("bot.create_exchange", return_value=mock_exchange):
         from bot import TradingBot
 
         return TradingBot(settings=settings, daily_target_pct=10.0)
@@ -62,9 +53,8 @@ def bot(settings, mock_exchange, mock_trade_db):
 
 
 class TestTradingBotInit:
-    def test_init_creates_subsystems(self, bot, mock_exchange, mock_trade_db):
+    def test_init_creates_subsystems(self, bot, mock_exchange):
         assert bot.exchange is mock_exchange
-        assert bot.trade_db is mock_trade_db
         assert bot.risk is not None
         assert bot.orders is not None
         assert bot.notifier is not None
@@ -73,37 +63,36 @@ class TestTradingBotInit:
         assert bot.target is not None
         assert bot.market_filter is not None
         assert bot.scanner is not None
-        assert bot.analytics is not None
         assert bot.shared is not None
         assert bot._strategies == []
         assert bot._dynamic_strategies == {}
         assert bot._running is False
-        mock_trade_db.connect.assert_called_once()
+        assert isinstance(bot._open_trades, dict)
+        assert isinstance(bot._pending_hub_acks, dict)
+        assert isinstance(bot._strategy_stats, dict)
 
-    def test_init_with_intel_disabled_sets_intel_none(self, settings, mock_exchange, mock_trade_db):
+    def test_init_with_intel_disabled_sets_intel_none(self, settings, mock_exchange):
         settings.intel_enabled = False
         with patch("bot.create_exchange", return_value=mock_exchange):
-            with patch("bot.TradeDB", return_value=mock_trade_db):
-                from bot import TradingBot
+            from bot import TradingBot
 
-                b = TradingBot(settings=settings)
+            b = TradingBot(settings=settings)
         assert b.intel is None
 
-    def test_init_with_intel_enabled_creates_intel(self, mock_exchange, mock_trade_db):
+    def test_init_with_intel_enabled_creates_intel(self, mock_exchange):
         with patch("bot.create_exchange", return_value=mock_exchange):
-            with patch("bot.TradeDB", return_value=mock_trade_db):
-                with patch("bot.MarketIntel") as m_intel:
-                    m_intel.return_value.start = AsyncMock()
-                    m_intel.return_value.stop = AsyncMock()
-                    m_intel.return_value.assess = MagicMock(return_value=None)
-                    m_intel.return_value.full_summary = MagicMock(return_value="")
-                    m_intel.return_value.tradingview = MagicMock()
-                    m_intel.return_value.tradingview.analyze_multi = AsyncMock()
-                    s = get_settings()
-                    s.intel_enabled = True
-                    from bot import TradingBot
+            with patch("bot.MarketIntel") as m_intel:
+                m_intel.return_value.start = AsyncMock()
+                m_intel.return_value.stop = AsyncMock()
+                m_intel.return_value.assess = MagicMock(return_value=None)
+                m_intel.return_value.full_summary = MagicMock(return_value="")
+                m_intel.return_value.tradingview = MagicMock()
+                m_intel.return_value.tradingview.analyze_multi = AsyncMock()
+                s = get_settings()
+                s.intel_enabled = True
+                from bot import TradingBot
 
-                    b = TradingBot(settings=s)
+                b = TradingBot(settings=s)
         assert b.intel is not None
         m_intel.assert_called_once()
 
@@ -122,26 +111,24 @@ class TestTradingBotStrategyManagement:
         with pytest.raises(ValueError, match="Unknown strategy"):
             bot.add_strategy("unknown_strat", "BTC/USDT")
 
-    def test_add_strategy_market_type_not_allowed_fallback_to_spot(self, settings, mock_exchange, mock_trade_db):
+    def test_add_strategy_market_type_not_allowed_fallback_to_spot(self, settings, mock_exchange):
         settings.allowed_market_types = "spot"
         with patch("bot.create_exchange", return_value=mock_exchange):
-            with patch("bot.TradeDB", return_value=mock_trade_db):
-                from bot import TradingBot
+            from bot import TradingBot
 
-                b = TradingBot(settings=settings)
-                b.add_strategy("compound_momentum", "BTC/USDT", market_type="futures")
-                assert len(b._strategies) == 1
-                assert b._strategies[0].market_type == "spot"
+            b = TradingBot(settings=settings)
+            b.add_strategy("compound_momentum", "BTC/USDT", market_type="futures")
+            assert len(b._strategies) == 1
+            assert b._strategies[0].market_type == "spot"
 
-    def test_add_strategy_market_type_not_allowed_skip_when_no_fallback(self, settings, mock_exchange, mock_trade_db):
+    def test_add_strategy_market_type_not_allowed_skip_when_no_fallback(self, settings, mock_exchange):
         settings.allowed_market_types = "futures"
         with patch("bot.create_exchange", return_value=mock_exchange):
-            with patch("bot.TradeDB", return_value=mock_trade_db):
-                from bot import TradingBot
+            from bot import TradingBot
 
-                b = TradingBot(settings=settings)
-                b.add_strategy("compound_momentum", "BTC/USDT", market_type="spot")
-                assert len(b._strategies) == 0
+            b = TradingBot(settings=settings)
+            b.add_strategy("compound_momentum", "BTC/USDT", market_type="spot")
+            assert len(b._strategies) == 0
 
     def test_add_custom_strategy(self, bot):
         from strategies.base import BaseStrategy
@@ -264,7 +251,7 @@ class TestApplyIntelToSignal:
 
 
 class TestLogClosedTrade:
-    def test_log_closed_trade_updates_existing_row(self, bot, mock_trade_db):
+    def test_log_closed_trade_with_open_record(self, bot):
         order = Order(
             symbol="BTC/USDT",
             side=OrderSide.BUY,
@@ -286,27 +273,21 @@ class TestLogClosedTrade:
         bot.orders.scaler.get = MagicMock(return_value=sp)
         bot.intel = None
 
-        bot._open_trade_ids["BTC/USDT"] = 42
-        mock_trade_db.find_open_trade.return_value = MagicMock(id=42, opened_at="2026-02-20T10:00:00+00:00")
+        open_rec = TradeRecord(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="compound_momentum",
+            action="open",
+            opened_at="2026-02-20T10:00:00+00:00",
+        )
+        bot._open_trades["BTC/USDT"] = open_rec
         bot._log_closed_trade(order, "stop")
 
-        mock_trade_db.close_trade.assert_called_once()
-        row_id = mock_trade_db.close_trade.call_args[0][0]
-        record = mock_trade_db.close_trade.call_args[0][1]
-        assert row_id == 42
-        assert record.symbol == "BTC/USDT"
-        assert record.side == "long"
-        assert record.strategy == "compound_momentum"
-        assert record.action == "close"
-        assert record.scale_mode == "pyramid"
-        assert record.dca_count == 2
-        assert record.entry_price == 49_500.0
-        assert record.exit_price == 50_100.0
-        assert record.pnl_usd > 0
-        assert record.is_winner is True
-        assert record.hold_minutes > 0
+        assert "BTC/USDT" not in bot._open_trades
+        stats = bot._strategy_stats.get("compound_momentum:BTC/USDT", {})
+        assert stats.get("total", 0) >= 1
 
-    def test_log_closed_trade_fallback_insert_when_no_open_row(self, bot, mock_trade_db):
+    def test_log_closed_trade_no_open_record(self, bot):
         order = Order(
             symbol="ETH/USDT",
             side=OrderSide.BUY,
@@ -320,16 +301,13 @@ class TestLogClosedTrade:
         )
         bot.orders.scaler.get = MagicMock(return_value=None)
         bot.intel = None
-        mock_trade_db.find_open_trade.return_value = None
 
         bot._log_closed_trade(order, "stop")
 
-        mock_trade_db.log_trade.assert_called_once()
-        record = mock_trade_db.log_trade.call_args[0][0]
-        assert record.action == "close"
-        assert record.symbol == "ETH/USDT"
+        stats = bot._strategy_stats.get("rsi:ETH/USDT", bot._strategy_stats.get("stop:ETH/USDT", {}))
+        assert stats.get("total", 0) >= 1
 
-    def test_log_closed_trade_discards_whale_alerted(self, bot, mock_trade_db):
+    def test_log_closed_trade_discards_whale_alerted(self, bot):
         bot._whale_alerted.add("BTC/USDT")
         order = Order(
             symbol="BTC/USDT",
@@ -342,11 +320,10 @@ class TestLogClosedTrade:
             strategy="compound_momentum",
         )
         bot.orders.scaler.get = MagicMock(return_value=None)
-        mock_trade_db.find_open_trade.return_value = None
         bot._log_closed_trade(order, "stop")
         assert "BTC/USDT" not in bot._whale_alerted
 
-    def test_log_opened_trade_inserts_row(self, bot, mock_trade_db):
+    def test_log_opened_trade_stores_in_memory(self, bot):
         sig = Signal(
             symbol="SOL/USDT",
             action=SignalAction.BUY,
@@ -371,18 +348,16 @@ class TestLogClosedTrade:
         sp.current_leverage = 5
         bot.orders.scaler.get = MagicMock(return_value=sp)
         bot.intel = None
-        mock_trade_db.open_trade.return_value = 99
 
         bot._log_opened_trade(sig, order)
 
-        mock_trade_db.open_trade.assert_called_once()
-        record = mock_trade_db.open_trade.call_args[0][0]
+        assert "SOL/USDT" in bot._open_trades
+        record = bot._open_trades["SOL/USDT"]
         assert record.symbol == "SOL/USDT"
         assert record.strategy == "swing_opportunity"
         assert record.action == "open"
         assert record.entry_price == 150.0
         assert record.opened_at != ""
-        assert bot._open_trade_ids["SOL/USDT"] == 99
 
 
 # ── _check_daily_reset ───────────────────────────────────────────────────────
@@ -500,7 +475,7 @@ class TestSharedStateHelpers:
         from shared.models import TrendingSnapshot
 
         bot._multibot = True
-        bot.shared_intel.intel_age_seconds = MagicMock(return_value=100)
+        bot._hub_intel_age = 100
         snap = MagicMock()
         snap.sources_active = ["fear_greed"]
         snap.regime = "normal"
@@ -524,7 +499,7 @@ class TestSharedStateHelpers:
             TrendingSnapshot(symbol="PEPE", change_1h=5.0, change_24h=20.0, volume_24h=10e6),
         ]
         snap.news_items = []
-        bot.shared_intel.read_intel = MagicMock(return_value=snap)
+        bot._hub_intel = snap
         bot._on_trending = AsyncMock()
         bot._read_shared_intel()
         bot._on_trending.assert_called_once()
@@ -534,7 +509,7 @@ class TestSharedStateHelpers:
 
     def test_read_shared_intel_no_trending_when_no_movers(self, bot):
         bot._multibot = True
-        bot.shared_intel.intel_age_seconds = MagicMock(return_value=100)
+        bot._hub_intel_age = 100
         snap = MagicMock()
         snap.sources_active = ["fear_greed"]
         snap.regime = "normal"
@@ -556,16 +531,15 @@ class TestSharedStateHelpers:
         snap.preferred_direction = "neutral"
         snap.hot_movers = []
         snap.news_items = []
-        bot.shared_intel.read_intel = MagicMock(return_value=snap)
+        bot._hub_intel = snap
         bot._on_trending = AsyncMock()
         bot._read_shared_intel()
         bot._on_trending.assert_not_called()
 
-    def test_read_shared_analytics_weight_fallback_to_engine(self, bot):
+    def test_read_shared_analytics_weight_fallback_returns_default(self, bot):
         bot.shared_intel.read_analytics = MagicMock(return_value=MagicMock(weights=[]))
-        bot.analytics.get_weight = MagicMock(return_value=0.7)
         w = bot._read_shared_analytics_weight("compound_momentum")
-        assert w == 0.7
+        assert w == 1.0
 
     def test_adjust_for_target_caps_strength_by_aggression(self, bot):
         sig = Signal(
@@ -925,12 +899,11 @@ class TestCloseAllAndWhaleAndDeployment:
     @pytest.mark.asyncio
     async def test_write_deployment_status_writes_to_shared(self, bot, mock_exchange):
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
-        bot.shared.write_bot_status = MagicMock()
+        bot.shared = MagicMock()
         await bot._write_deployment_status()
-        bot.shared.write_bot_status.assert_called_once()
-        status = bot.shared.write_bot_status.call_args[0][0]
-        assert status.open_positions == 0
-        assert hasattr(status, "daily_pnl_pct")
+        assert bot._last_bot_status is not None
+        assert bot._last_bot_status.open_positions == 0
+        assert hasattr(bot._last_bot_status, "daily_pnl_pct")
 
 
 # ── _handle_spike / _on_trending / _on_news ──────────────────────────────────
@@ -1147,13 +1120,12 @@ class TestRegisterStrategies:
         assert "BTC/USDT" in symbols
         assert "ETH/USDT" in symbols
 
-    def test_exchange_created_from_settings_in_init(self, settings, mock_exchange, mock_trade_db):
+    def test_exchange_created_from_settings_in_init(self, settings, mock_exchange):
         """Exchange is created via create_exchange(settings) in __init__."""
         with patch("bot.create_exchange", return_value=mock_exchange) as m_create:
-            with patch("bot.TradeDB", return_value=mock_trade_db):
-                from bot import TradingBot
+            from bot import TradingBot
 
-                TradingBot(settings=settings)
+            TradingBot(settings=settings)
         m_create.assert_called_once_with(settings)
 
 
@@ -1405,7 +1377,7 @@ class TestReadSharedIntelExtended:
 
     def test_read_shared_intel_multibot_hydrates_news(self, bot):
         bot._multibot = True
-        bot.shared_intel.intel_age_seconds = MagicMock(return_value=100)
+        bot._hub_intel_age = 100
         snap = MagicMock()
         snap.sources_active = ["fear_greed"]
         snap.regime = "normal"
@@ -1437,7 +1409,7 @@ class TestReadSharedIntelExtended:
                 "sentiment_score": 0.5,
             },
         ]
-        bot.shared_intel.read_intel = MagicMock(return_value=snap)
+        bot._hub_intel = snap
         bot._read_shared_intel()
         assert len(bot._recent_news) == 1
         assert bot._recent_news[0].headline == "BTC pump"
@@ -1453,11 +1425,10 @@ class TestWriteDeploymentStatusLevels:
         from shared.models import DeploymentLevel
 
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
-        bot.shared.write_bot_status = MagicMock()
+        bot.shared = MagicMock()
         await bot._write_deployment_status()
-        status = bot.shared.write_bot_status.call_args[0][0]
-        assert status.level == DeploymentLevel.HUNTING
-        assert status.open_positions == 0
+        assert bot._last_bot_status.level == DeploymentLevel.HUNTING
+        assert bot._last_bot_status.open_positions == 0
 
     @pytest.mark.asyncio
     async def test_write_deployment_status_level_stressed_when_losing(self, bot, mock_exchange):
@@ -1473,11 +1444,10 @@ class TestWriteDeploymentStatusLevels:
             market_type="futures",
         )
         mock_exchange.fetch_positions = AsyncMock(return_value=[pos])
-        bot.shared.write_bot_status = MagicMock()
+        bot.shared = MagicMock()
         await bot._write_deployment_status()
-        status = bot.shared.write_bot_status.call_args[0][0]
-        assert status.level == DeploymentLevel.STRESSED
-        assert status.worst_position_pnl == pytest.approx(-6.0, abs=0.5)
+        assert bot._last_bot_status.level == DeploymentLevel.STRESSED
+        assert bot._last_bot_status.worst_position_pnl == pytest.approx(-6.0, abs=0.5)
 
     @pytest.mark.asyncio
     async def test_write_deployment_status_level_deployed_when_full_and_healthy(self, bot, mock_exchange):
@@ -1508,11 +1478,10 @@ class TestWriteDeploymentStatusLevels:
                 ),
             ]
             mock_exchange.fetch_positions = AsyncMock(return_value=positions)
-            bot.shared.write_bot_status = MagicMock()
+            bot.shared = MagicMock()
             await bot._write_deployment_status()
-        status = bot.shared.write_bot_status.call_args[0][0]
-        assert status.level == DeploymentLevel.DEPLOYED
-        assert status.open_positions == 2
+        assert bot._last_bot_status.level == DeploymentLevel.DEPLOYED
+        assert bot._last_bot_status.open_positions == 2
 
     @pytest.mark.asyncio
     async def test_write_deployment_status_level_active_when_some_positions(self, bot, mock_exchange):
@@ -1533,12 +1502,11 @@ class TestWriteDeploymentStatusLevels:
                 market_type="futures",
             )
             mock_exchange.fetch_positions = AsyncMock(return_value=[pos])
-            bot.shared.write_bot_status = MagicMock()
+            bot.shared = MagicMock()
             await bot._write_deployment_status()
-        status = bot.shared.write_bot_status.call_args[0][0]
-        assert status.level == DeploymentLevel.ACTIVE
-        assert status.open_positions == 1
-        assert status.should_trade is not None
+        assert bot._last_bot_status.level == DeploymentLevel.ACTIVE
+        assert bot._last_bot_status.open_positions == 1
+        assert bot._last_bot_status.should_trade is not None
 
 
 # ── _report_dashboard_snapshot ───────────────────────────────────────────────
@@ -1612,7 +1580,6 @@ class TestStartStopLifecycle:
         await bot.stop()
         assert bot._running is False
         bot.exchange.disconnect.assert_called_once()
-        bot.trade_db.close.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_stop_closes_hub_session_if_open(self, bot):
@@ -1890,14 +1857,15 @@ class TestTickInternals:
 
 class TestStartMultibot:
     @pytest.mark.asyncio
-    async def test_start_multibot_skips_scanner_news_intel_start(self, settings, mock_exchange, mock_trade_db):
+    async def test_start_multibot_skips_scanner_news_intel_start(self, settings, mock_exchange):
         settings.bot_id = "worker-1"
-        with patch("bot.create_exchange", return_value=mock_exchange), patch("bot.TradeDB", return_value=mock_trade_db):
+        with patch("bot.create_exchange", return_value=mock_exchange):
             from bot import TradingBot
 
             bot = TradingBot(settings=settings)
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 100.0})
         bot._run_loop = AsyncMock()
+        bot._recover_state_from_hub = AsyncMock()
         bot.notifier.start = AsyncMock()
         with patch("bot.get_market_schedule") as m_sched:
             m_sched.return_value.configure = MagicMock()
@@ -2249,8 +2217,14 @@ class TestTickStrategyLoop:
         sp.adds = 0
         bot.orders.scaler.get = MagicMock(return_value=sp)
         bot.orders._closed_scalers = {}
-        bot._open_trade_ids["BTC/USDT"] = 42
-        bot.trade_db.find_open_trade.return_value = MagicMock(id=42, opened_at="2026-02-20T10:00:00+00:00")
+        open_rec = TradeRecord(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="compound_momentum",
+            action="open",
+            opened_at="2026-02-20T10:00:00+00:00",
+        )
+        bot._open_trades["BTC/USDT"] = open_rec
 
         with patch.object(type(bot.target), "manual_close_all", PropertyMock(return_value=False)):
             bot.orders.check_stops = AsyncMock(return_value=[closed_order])
@@ -2271,7 +2245,6 @@ class TestTickStrategyLoop:
             await bot._tick()
 
         bot.notifier.alert_stop_loss.assert_called_once()
-        assert bot.trade_db.close_trade.called or bot.trade_db.log_trade.called
 
     @pytest.mark.asyncio
     async def test_tick_hedge_enabled_try_hedge_called(self, bot, mock_exchange):
@@ -2358,15 +2331,16 @@ class TestTickStrategyLoop:
 
 class TestStartNonMultibotSymbolsException:
     @pytest.mark.asyncio
-    async def test_start_logs_warning_when_get_available_symbols_raises(self, settings, mock_exchange, mock_trade_db):
+    async def test_start_logs_warning_when_get_available_symbols_raises(self, settings, mock_exchange):
         settings.bot_id = ""
-        with patch("bot.create_exchange", return_value=mock_exchange), patch("bot.TradeDB", return_value=mock_trade_db):
+        with patch("bot.create_exchange", return_value=mock_exchange):
             from bot import TradingBot
 
             bot = TradingBot(settings=settings)
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 100.0})
         mock_exchange.get_available_symbols = AsyncMock(side_effect=RuntimeError("api down"))
         bot._run_loop = AsyncMock()
+        bot._recover_state_from_hub = AsyncMock()
         bot.notifier.start = AsyncMock()
         with patch("bot.get_market_schedule") as m_sched:
             m_sched.return_value.configure = MagicMock()
@@ -2404,7 +2378,7 @@ class TestPostToHubAndIntelNews:
 
     def test_read_shared_intel_news_items_invalid_published_skipped(self, bot):
         bot._multibot = True
-        bot.shared_intel.intel_age_seconds = MagicMock(return_value=100)
+        bot._hub_intel_age = 100
         snap = MagicMock()
         snap.sources_active = ["fear_greed"]
         snap.regime = "normal"
@@ -2426,7 +2400,7 @@ class TestPostToHubAndIntelNews:
         snap.preferred_direction = "neutral"
         snap.hot_movers = []
         snap.news_items = [{"published": "not-a-valid-date", "headline": "x", "matched_symbols": []}]
-        bot.shared_intel.read_intel = MagicMock(return_value=snap)
+        bot._hub_intel = snap
         cond = bot._read_shared_intel()
         assert cond is not None
         assert len(bot._recent_news) == 0
@@ -2562,3 +2536,84 @@ class TestProcessTradeQueueStrengthReject:
 
         assert queue.mark_rejected.called
         assert "strength" in queue.mark_rejected.call_args[0][1].lower()
+
+
+class TestIdleMode:
+    """Tests for hub-controlled enable/disable (static containers)."""
+
+    def test_check_enabled_standalone_always_true(self, bot):
+        """Non-multibot mode always returns enabled."""
+        bot._multibot = False
+        assert bot._check_enabled() is True
+
+    def test_check_enabled_reads_hub_flag(self, bot):
+        """Multibot reads _hub_enabled set by the report response."""
+        bot._multibot = True
+        bot._hub_enabled = False
+        assert bot._check_enabled() is False
+        bot._hub_enabled = True
+        assert bot._check_enabled() is True
+
+    @pytest.mark.asyncio
+    async def test_idle_tick_writes_idle_status(self, bot):
+        bot.settings.bot_id = "momentum"
+        bot.shared = MagicMock()
+        bot._report_dashboard_snapshot = AsyncMock()
+
+        await bot._idle_tick()
+
+        assert bot._last_bot_status is not None
+        assert bot._last_bot_status.level.value == "idle"
+        assert bot._last_bot_status.should_trade is False
+        assert bot._last_bot_status.bot_id == "momentum"
+
+    @pytest.mark.asyncio
+    async def test_wind_down_closes_positions(self, bot, mock_exchange):
+        pos = MagicMock()
+        pos.amount = 0.01
+        pos.symbol = "BTC/USDT"
+        mock_exchange.fetch_positions = AsyncMock(return_value=[pos])
+        bot.shared = MagicMock()
+        bot._close_all_positions = AsyncMock()
+
+        await bot._wind_down()
+
+        assert bot._last_bot_status is not None
+        assert bot._last_bot_status.level.value == "winding_down"
+        bot._close_all_positions.assert_awaited_once_with("hub_disabled")
+
+    @pytest.mark.asyncio
+    async def test_wind_down_no_positions_skips(self, bot, mock_exchange):
+        mock_exchange.fetch_positions = AsyncMock(return_value=[])
+        bot._close_all_positions = AsyncMock()
+
+        await bot._wind_down()
+
+        bot._close_all_positions.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_loop_transitions_to_idle(self, bot):
+        """When enabled goes False, bot should wind down then idle."""
+        call_count = 0
+
+        def mock_check():
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 1:
+                return True
+            bot._running = False  # stop after transition
+            return False
+
+        bot._check_enabled = mock_check
+        bot._enabled = True
+        bot._running = True
+        bot._tick = AsyncMock()
+        bot._idle_tick = AsyncMock()
+        bot._wind_down = AsyncMock()
+        bot._update_tick_interval = MagicMock()
+        bot._tick_interval = 0.01
+
+        with patch("bot.record_tick", create=True), patch("bot.record_event_loop_lag", create=True):
+            await bot._run_loop()
+
+        bot._wind_down.assert_awaited_once()

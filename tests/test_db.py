@@ -456,3 +456,139 @@ class TestHubDB:
 
     def test_conn_property(self, hub: HubDB):
         assert hub.conn is not None
+
+    def test_request_key_dedup(self, hub: HubDB):
+        row1 = hub.insert_trade(
+            "bot1",
+            {"symbol": "A", "side": "l", "strategy": "s", "action": "open", "opened_at": "2026-01-01"},
+            request_key="rk-1",
+        )
+        row2 = hub.insert_trade(
+            "bot1",
+            {"symbol": "A", "side": "l", "strategy": "s", "action": "open", "opened_at": "2026-01-01"},
+            request_key="rk-1",
+        )
+        assert row1 == row2
+        assert hub.trade_count() == 1
+
+    def test_get_open_trades_for_bot(self, hub: HubDB):
+        hub.insert_trade(
+            "bot1",
+            {"symbol": "BTC/USDT", "side": "long", "strategy": "rsi", "action": "open", "opened_at": "2026-01-01"},
+        )
+        hub.insert_trade(
+            "bot1",
+            {
+                "symbol": "ETH/USDT",
+                "side": "long",
+                "strategy": "macd",
+                "action": "close",
+                "opened_at": "2026-01-02",
+                "closed_at": "2026-01-03",
+            },
+        )
+        hub.insert_trade(
+            "bot2",
+            {"symbol": "SOL/USDT", "side": "long", "strategy": "rsi", "action": "open", "opened_at": "2026-01-04"},
+        )
+        open_trades = hub.get_open_trades_for_bot("bot1")
+        assert len(open_trades) == 1
+        assert open_trades[0].symbol == "BTC/USDT"
+
+    def test_get_strategy_stats_for_bot(self, hub: HubDB):
+        for i in range(2):
+            hub.insert_trade(
+                "b1",
+                {
+                    "symbol": "X",
+                    "side": "l",
+                    "strategy": "rsi",
+                    "action": "close",
+                    "pnl_usd": 10,
+                    "is_winner": True,
+                    "closed_at": f"2026-01-0{i + 1}",
+                },
+            )
+        hub.insert_trade(
+            "b2",
+            {
+                "symbol": "X",
+                "side": "l",
+                "strategy": "rsi",
+                "action": "close",
+                "pnl_usd": -5,
+                "is_winner": False,
+                "closed_at": "2026-01-05",
+            },
+        )
+        stats = hub.get_strategy_stats_for_bot("b1", "rsi")
+        assert stats["total"] == 2
+        assert stats["winners"] == 2
+
+    def test_get_all_strategy_stats_for_bot(self, hub: HubDB):
+        hub.insert_trade(
+            "b1",
+            {
+                "symbol": "BTC/USDT",
+                "side": "l",
+                "strategy": "rsi",
+                "action": "close",
+                "pnl_usd": 10,
+                "is_winner": True,
+                "closed_at": "2026-01-01",
+            },
+        )
+        hub.insert_trade(
+            "b1",
+            {
+                "symbol": "ETH/USDT",
+                "side": "l",
+                "strategy": "macd",
+                "action": "close",
+                "pnl_usd": -3,
+                "is_winner": False,
+                "closed_at": "2026-01-02",
+            },
+        )
+        all_stats = hub.get_all_strategy_stats_for_bot("b1")
+        assert "rsi:BTC/USDT" in all_stats
+        assert "macd:ETH/USDT" in all_stats
+
+    def test_mark_recovery_close(self, hub: HubDB):
+        hub.insert_trade(
+            "bot1",
+            {
+                "symbol": "BTC/USDT",
+                "side": "long",
+                "strategy": "rsi",
+                "action": "open",
+                "opened_at": "2026-01-01T10:00:00",
+            },
+        )
+        updated = hub.mark_recovery_close("bot1", "2026-01-01T10:00:00")
+        assert updated is True
+        open_trades = hub.get_open_trades_for_bot("bot1")
+        assert len(open_trades) == 0
+
+    def test_drain_confirmed_keys(self, hub: HubDB):
+        hub.insert_trade(
+            "bot1",
+            {"symbol": "X", "side": "l", "strategy": "s", "action": "open", "opened_at": "2026-01-01"},
+            request_key="k1",
+        )
+        hub.insert_trade(
+            "bot1",
+            {"symbol": "Y", "side": "l", "strategy": "s", "action": "open", "opened_at": "2026-01-02"},
+            request_key="k2",
+        )
+        keys = hub.drain_confirmed_keys("bot1")
+        assert set(keys) == {"k1", "k2"}
+        assert hub.drain_confirmed_keys("bot1") == []
+
+    def test_recovery_close_excluded_from_stats(self, hub: HubDB):
+        hub.insert_trade(
+            "b1", {"symbol": "X", "side": "l", "strategy": "rsi", "action": "open", "opened_at": "2026-01-01T10:00:00"}
+        )
+        hub.mark_recovery_close("b1", "2026-01-01T10:00:00")
+        stats = hub.get_strategy_stats_for_bot("b1", "rsi")
+        assert stats.get("total", 0) == 0

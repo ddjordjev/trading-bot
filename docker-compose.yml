@@ -40,7 +40,6 @@ services:
     volumes:
     - ${HOST_DATA_DIR}:/app/data
     - ${HOST_LOGS_DIR}:/app/logs
-    - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
       interval: 30s

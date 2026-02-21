@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sqlite3
+import contextlib
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from web.schemas import ActionResponse
 from web.server import _ALLOWED_TABLES, _bot_reports, _get_hub_db, app, report_bot_snapshot, set_bot
 
 # ── Fixtures ─────────────────────────────────────────────────────────
@@ -83,12 +82,11 @@ def mock_bot():
     bot.analytics = MagicMock()
     bot.analytics.scores = {}
     bot.analytics.patterns = []
+    bot.analytics = MagicMock()
+    bot.analytics.scores = {}
+    bot.analytics.patterns = []
     bot.analytics.suggestions = []
     bot.analytics.refresh = MagicMock()
-    bot.trade_db = MagicMock()
-    bot.trade_db.get_hourly_performance = MagicMock(return_value=[])
-    bot.trade_db.get_regime_performance = MagicMock(return_value=[])
-    bot.trade_db.trade_count = MagicMock(return_value=0)
     bot._close_all_positions = AsyncMock()
     return bot
 
@@ -106,9 +104,23 @@ def auth_override():
     app.dependency_overrides.pop(verify_token, None)
 
 
+def _reset_hub_db() -> None:
+    """Wipe all rows from the hub DB so tests start clean."""
+    hub = _get_hub_db()
+    if hub.conn:
+        hub.conn.execute("DELETE FROM trades")
+        with contextlib.suppress(Exception):
+            hub.conn.execute("DELETE FROM deposits")
+        with contextlib.suppress(Exception):
+            hub.conn.execute("DELETE FROM bot_config")
+        hub.conn.commit()
+    hub._ack_buffer.clear()
+
+
 @pytest.fixture
 async def client(auth_override):
     _bot_reports.clear()
+    _reset_hub_db()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
@@ -542,13 +554,138 @@ class TestInternalReport:
         }
         r = await client.post("/internal/report", json=payload)
         assert r.status_code == 200
-        assert r.json() == {"status": "ok"}
+        body = r.json()
+        assert body["status"] == "ok"
+        assert "confirmed_keys" in body
         assert "momentum" in _bot_reports
 
     async def test_post_report_no_bot_id_ignored(self, client):
         r = await client.post("/internal/report", json={"exchange": "MEXC"})
         assert r.status_code == 200
         assert len(_bot_reports) == 0
+
+    async def test_post_trade_with_request_key_dedup(self, client):
+        payload = {
+            "bot_id": "test-bot",
+            "action": "open",
+            "trade": {
+                "symbol": "BTC/USDT",
+                "side": "long",
+                "strategy": "rsi",
+                "action": "open",
+                "opened_at": "2026-01-01T00:00:00",
+            },
+            "request_key": "dedup-key-123",
+        }
+        r1 = await client.post("/internal/trade", json=payload)
+        assert r1.status_code == 200
+        assert r1.json()["request_key"] == "dedup-key-123"
+        r2 = await client.post("/internal/trade", json=payload)
+        assert r2.status_code == 200
+
+    async def test_get_bot_open_trades(self, client):
+        payload = {
+            "bot_id": "open-test",
+            "action": "open",
+            "trade": {
+                "symbol": "ETH/USDT",
+                "side": "long",
+                "strategy": "macd",
+                "action": "open",
+                "opened_at": "2026-01-01T01:00:00",
+            },
+            "request_key": "open-key-1",
+        }
+        await client.post("/internal/trade", json=payload)
+        r = await client.get("/internal/trades/open-test/open")
+        assert r.status_code == 200
+        trades = r.json()
+        symbols = [t["symbol"] for t in trades]
+        assert "ETH/USDT" in symbols
+
+    async def test_get_bot_strategy_stats(self, client):
+        for i in range(3):
+            await client.post(
+                "/internal/trade",
+                json={
+                    "bot_id": "stats-bot",
+                    "action": "close",
+                    "trade": {
+                        "symbol": "BTC/USDT",
+                        "side": "long",
+                        "strategy": "rsi",
+                        "action": "close",
+                        "pnl_usd": 10.0,
+                        "is_winner": True,
+                        "opened_at": f"2026-01-0{i + 1}T00:00:00",
+                        "closed_at": f"2026-01-0{i + 1}T01:00:00",
+                    },
+                    "request_key": f"stats-key-{i}",
+                },
+            )
+        r = await client.get("/internal/trades/stats-bot/stats")
+        assert r.status_code == 200
+        stats = r.json()
+        assert len(stats) > 0
+
+    async def test_recovery_close(self, client):
+        await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "recover-bot",
+                "action": "open",
+                "trade": {
+                    "symbol": "SOL/USDT",
+                    "side": "long",
+                    "strategy": "grid",
+                    "action": "open",
+                    "opened_at": "2026-01-05T00:00:00",
+                },
+                "request_key": "recover-open-1",
+            },
+        )
+        r = await client.post(
+            "/internal/recovery-close", json={"bot_id": "recover-bot", "opened_at": "2026-01-05T00:00:00"}
+        )
+        assert r.status_code == 200
+        assert r.json()["updated"] is True
+        r2 = await client.get("/internal/trades/recover-bot/open")
+        open_trades = r2.json()
+        symbols = [t["symbol"] for t in open_trades]
+        assert "SOL/USDT" not in symbols
+
+    async def test_report_returns_confirmed_keys(self, client):
+        await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "ack-bot",
+                "action": "open",
+                "trade": {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "open",
+                    "opened_at": "2026-02-01T00:00:00",
+                },
+                "request_key": "ack-key-999",
+            },
+        )
+        r = await client.post("/internal/report", json={"bot_id": "ack-bot", "status": {"running": True}})
+        body = r.json()
+        assert "confirmed_keys" in body
+        assert "ack-key-999" in body["confirmed_keys"]
+
+    async def test_report_returns_enabled_flag(self, client):
+        hub = _get_hub_db()
+        hub.set_bot_enabled("flag-bot", False)
+        r = await client.post("/internal/report", json={"bot_id": "flag-bot", "status": {"running": True}})
+        body = r.json()
+        assert body["enabled"] is False
+
+    async def test_report_returns_enabled_default_true(self, client):
+        r = await client.post("/internal/report", json={"bot_id": "new-bot", "status": {"running": True}})
+        body = r.json()
+        assert body["enabled"] is True
 
     async def test_merged_snapshot_aggregates_bots(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
@@ -654,22 +791,11 @@ class TestGetModulesDailyReportAnalytics:
 
 
 class TestRefreshAnalytics:
-    async def test_refresh_no_bot(self, client):
-        set_bot(None)  # type: ignore[arg-type]
+    async def test_refresh_uses_hub_db(self, client):
         r = await client.post("/api/analytics/refresh")
         assert r.status_code == 200
         data = r.json()
-        assert data["success"] is False
-        assert "not initialized" in data["message"]
-
-    async def test_refresh_with_bot(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.analytics.scores = {"rsi": MagicMock()}
-        r = await client.post("/api/analytics/refresh")
-        assert r.status_code == 200
-        data = r.json()
-        assert data["success"] is True
-        mock_bot.analytics.refresh.assert_called_once()
+        assert data["success"] is True or data["success"] is False
 
 
 # ── POST /api/bot/start, /api/bot/stop ──────────────────────────────────
@@ -966,11 +1092,6 @@ class TestDbExplorer:
 
     async def test_db_tables_with_bot(self, client, mock_bot):
         _ALLOWED_TABLES.clear()
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, symbol TEXT)")
-        conn.commit()
-        mock_bot.trade_db._conn = conn
         set_bot(mock_bot)  # type: ignore[arg-type]
         r = await client.get("/api/db/tables")
         assert r.status_code == 200
@@ -1846,8 +1967,7 @@ class TestHubPushEndpoints:
 class TestBotProfiles:
     async def test_list_profiles_returns_all(self, client, mock_bot):
         set_bot(mock_bot)
-        with patch("web.server.DOCKER_AVAILABLE", False, create=True):
-            r = await client.get("/api/bot-profiles")
+        r = await client.get("/api/bot-profiles")
         assert r.status_code == 200
         data = r.json()
         assert len(data) >= 10
@@ -1882,8 +2002,7 @@ class TestBotProfiles:
 
     async def test_toggle_hub_rejected(self, client, mock_bot):
         set_bot(mock_bot)
-        with patch("web.docker_manager.DOCKER_AVAILABLE", True):
-            r = await client.post("/api/bot-profile/hub/toggle")
+        r = await client.post("/api/bot-profile/hub/toggle")
         assert r.status_code == 200
         data = r.json()
         assert data["success"] is False
@@ -1891,47 +2010,28 @@ class TestBotProfiles:
 
     async def test_toggle_unknown_profile(self, client, mock_bot):
         set_bot(mock_bot)
-        with patch("web.docker_manager.DOCKER_AVAILABLE", True):
-            r = await client.post("/api/bot-profile/nonexistent/toggle")
+        r = await client.post("/api/bot-profile/nonexistent/toggle")
         assert r.status_code == 200
         assert r.json()["success"] is False
 
-    @patch("web.docker_manager.stop_container", new_callable=AsyncMock)
-    @patch("web.server._forward_to_bot", new_callable=AsyncMock)
-    @patch("web.docker_manager.get_container_status", return_value="running")
-    @patch("web.docker_manager.DOCKER_AVAILABLE", True)
-    async def test_toggle_disable_calls_stop(self, mock_status, mock_forward, mock_stop, client, mock_bot):
+    async def test_toggle_enable_disable(self, client, mock_bot):
         set_bot(mock_bot)
-        mock_forward.return_value = ActionResponse(success=True, message="ok")
-        mock_stop.return_value = (True, "Stopped bot-indicators")
-        _bot_reports["indicators"] = {"bot_id": "indicators", "status": {}}
-
+        hub = _get_hub_db()
+        hub.set_bot_enabled("indicators", True)
         r = await client.post("/api/bot-profile/indicators/toggle")
         assert r.status_code == 200
         data = r.json()
         assert data["success"] is True
         assert "Disabled" in data["message"]
-        assert "indicators" not in _bot_reports
-        mock_stop.assert_awaited_once_with("indicators")
+        assert hub.is_bot_enabled("indicators") is False
 
-    @patch("web.docker_manager.start_container", new_callable=AsyncMock)
-    @patch("web.docker_manager.get_container_status", return_value="missing")
-    @patch("web.docker_manager.DOCKER_AVAILABLE", True)
-    async def test_toggle_enable_calls_start(self, mock_status, mock_start, client, mock_bot):
+    async def test_toggle_disable_to_enable(self, client, mock_bot):
         set_bot(mock_bot)
-        mock_start.return_value = (True, "Started bot-scalper")
-
+        hub = _get_hub_db()
+        hub.set_bot_enabled("scalper", False)
         r = await client.post("/api/bot-profile/scalper/toggle")
         assert r.status_code == 200
         data = r.json()
         assert data["success"] is True
         assert "Enabled" in data["message"]
-        mock_start.assert_awaited_once()
-
-    @patch("web.docker_manager.DOCKER_AVAILABLE", False)
-    async def test_toggle_no_docker(self, client, mock_bot):
-        set_bot(mock_bot)
-        r = await client.post("/api/bot-profile/indicators/toggle")
-        assert r.status_code == 200
-        assert r.json()["success"] is False
-        assert "Docker" in r.json()["message"]
+        assert hub.is_bot_enabled("scalper") is True

@@ -1,11 +1,11 @@
 """Standalone analytics service.
 
-Runs independently. Reads trade history from data/trades.db,
-computes strategy scores, detects patterns, generates suggestions,
-and writes results to data/analytics_state.json.
+Runs independently. Reads trade history from data/hub.db (the central
+hub database), computes strategy scores, detects patterns, generates
+suggestions, and writes results to data/analytics_state.json.
 
-The bot reads analytics_state.json to get strategy weights without
-needing to run the analytics engine itself.
+Trading bots read analytics_state.json for strategy weights.
+They have no local DB — all persistence flows through the hub.
 """
 
 from __future__ import annotations

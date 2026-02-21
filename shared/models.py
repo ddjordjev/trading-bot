@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 class DeploymentLevel(str, Enum):
     """How busy the bot is -- controls monitoring intensity."""
 
+    IDLE = "idle"  # disabled via hub config — running but not trading
+    WINDING_DOWN = "winding_down"  # closing positions before going idle
     HUNTING = "hunting"  # no/few positions, looking for entries → max monitoring
     ACTIVE = "active"  # some positions, still has capacity → normal monitoring
     DEPLOYED = "deployed"  # fully deployed, positions running well → low monitoring

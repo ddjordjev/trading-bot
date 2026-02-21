@@ -5,6 +5,7 @@ import contextlib
 import signal
 import sys
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,6 @@ from typing import Any
 import aiohttp
 from loguru import logger
 
-from analytics import AnalyticsEngine
 from config.settings import Settings, get_settings
 from core.exchange import BaseExchange, create_exchange
 from core.extreme import ExtremeWatcher
@@ -26,7 +26,6 @@ from core.patterns import PatternDetector, StructureAnalyzer
 from core.risk import RiskManager
 from core.risk.daily_target import DailyTargetTracker, DailyTier
 from core.risk.market_filter import LiquidityTier, MarketQualityFilter
-from db import TradeDB
 from db.models import TradeRecord
 from intel import MarketCondition, MarketIntel
 from intel.market_intel import MarketRegime
@@ -34,10 +33,14 @@ from news import NewsItem, NewsMonitor
 from notifications import NotificationType, Notifier
 from scanner import TrendingCoin, TrendingScanner
 from shared.models import (
+    AnalyticsSnapshot,
     BotDeploymentStatus,
     DeploymentLevel,
+    ExtremeWatchlist,
+    IntelSnapshot,
     SignalPriority,
     TradeProposal,
+    TradeQueue,
 )
 from shared.state import SharedState
 from strategies import BUILTIN_STRATEGIES
@@ -115,12 +118,20 @@ class TradingBot:
                 intel=self.intel,
             )
 
-        bot_data = Path(self.settings.data_dir)
-        self.trade_db = TradeDB(path=bot_data / "trades.db")
-        self.trade_db.connect()
-        self.analytics = AnalyticsEngine(self.trade_db)
-        self.shared = SharedState(data_dir=bot_data)
-        self.shared_intel = SharedState(data_dir=Path("data"))
+        if not self._multibot:
+            bot_data = Path(self.settings.data_dir)
+            self.shared = SharedState(data_dir=bot_data)
+            self.shared_intel = SharedState(data_dir=Path("data"))
+        else:
+            self.shared = None  # type: ignore[assignment]
+            self.shared_intel = None  # type: ignore[assignment]
+        self._hub_intel: IntelSnapshot | None = None
+        self._hub_analytics: AnalyticsSnapshot | None = None
+        self._hub_trade_queue: TradeQueue | None = None
+        self._hub_extreme_watchlist: ExtremeWatchlist | None = None
+        self._hub_intel_age: float = 999999
+        self._hub_queue_updates: dict[str, Any] = {"consumed": [], "rejected": {}}
+        self._last_bot_status: BotDeploymentStatus | None = None
         self.pattern_detector = PatternDetector(
             structure=StructureAnalyzer(swing_lookback=5, zone_tolerance_pct=0.3),
             min_confidence=0.3,
@@ -131,7 +142,9 @@ class TradingBot:
         self._active_signals: list[Signal] = []
         self._recent_news: list[NewsItem] = []
         self._whale_alerted: set[str] = set()
-        self._open_trade_ids: dict[str, int] = {}
+        self._open_trades: dict[str, TradeRecord] = {}
+        self._pending_hub_acks: dict[str, dict[str, Any]] = {}
+        self._strategy_stats: dict[str, dict[str, Any]] = {}
         self._running = False
         self._tick_interval = self.settings.tick_interval_idle
         self._status_interval = 300
@@ -146,6 +159,8 @@ class TradingBot:
         self.extreme_watcher = ExtremeWatcher(self.exchange, self.settings)
         self._last_extreme_eval: float = 0.0
         self._available_symbols: set[str] = set()
+        self._enabled: bool = True  # hub-controlled enable flag
+        self._hub_enabled: bool = True  # latest value from hub report response
 
     # -- Strategy Management --
 
@@ -208,13 +223,10 @@ class TradingBot:
         )
         logger.info("Gambling budget: {}% for low-liq coins", self.settings.gambling_budget_pct)
         logger.info("Intel: {}", "ENABLED" if self.intel else "disabled")
-        logger.info("Analytics DB: {} trades logged", self.trade_db.trade_count())
         self._check_data_dir_size()
         logger.info("=" * 60)
 
-        self.analytics.refresh()
-        if self.analytics.scores:
-            logger.info(self.analytics.summary())
+        await self._recover_state_from_hub()
 
         schedule = get_market_schedule()
         schedule.configure(fmp_api_key=self.settings.fmp_api_key)
@@ -223,14 +235,14 @@ class TradingBot:
 
         await self.exchange.connect()
 
-        # Publish available symbols so the monitor can filter proposals
         self._available_symbols = set()
         try:
             futures_syms = await self.exchange.get_available_symbols(MarketType.FUTURES)
             spot_syms = await self.exchange.get_available_symbols(MarketType.SPOT)
             self._available_symbols = set(futures_syms) | set(spot_syms)
-            bot_id = self.settings.bot_id or "default"
-            self.shared.write_exchange_symbols(bot_id, self.settings.exchange, list(self._available_symbols))
+            if self.shared:
+                bot_id = self.settings.bot_id or "default"
+                self.shared.write_exchange_symbols(bot_id, self.settings.exchange, list(self._available_symbols))
             logger.info("Published {} available symbols for {}", len(self._available_symbols), self.settings.exchange)
         except Exception as e:
             logger.warning("Could not publish exchange symbols: {}", e)
@@ -295,7 +307,6 @@ class TradingBot:
             await self.news.stop()
         await self.notifier.stop()
         await self.exchange.disconnect()
-        self.trade_db.close()
         if self._hub_session:
             await self._hub_session.close()
             self._hub_session = None
@@ -304,20 +315,82 @@ class TradingBot:
     async def _run_loop(self) -> None:
         while self._running:
             try:
-                t0 = time.perf_counter()
-                await self._tick()
-                from web.metrics import record_event_loop_lag, record_tick
+                was_enabled = self._enabled
+                self._enabled = self._check_enabled()
 
-                record_tick(time.perf_counter() - t0)
-                self._update_tick_interval()
-                loop_start = time.perf_counter()
-                await asyncio.sleep(self._tick_interval)
-                record_event_loop_lag(time.perf_counter() - loop_start - self._tick_interval)
+                if not was_enabled and self._enabled:
+                    logger.info("Bot ENABLED by hub — resuming trading")
+
+                if was_enabled and not self._enabled:
+                    logger.info("Bot DISABLED by hub — winding down")
+                    await self._wind_down()
+
+                if self._enabled:
+                    t0 = time.perf_counter()
+                    await self._tick()
+                    from web.metrics import record_event_loop_lag, record_tick
+
+                    record_tick(time.perf_counter() - t0)
+                    self._update_tick_interval()
+                    loop_start = time.perf_counter()
+                    await asyncio.sleep(self._tick_interval)
+                    record_event_loop_lag(time.perf_counter() - loop_start - self._tick_interval)
+                else:
+                    await self._idle_tick()
+                    await asyncio.sleep(10)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.exception("Error in main loop: {}", e)
                 await asyncio.sleep(10)
+
+    def _check_enabled(self) -> bool:
+        """Check hub-controlled enable flag (received via /internal/report response)."""
+        if not self._multibot:
+            return True
+        return self._hub_enabled
+
+    async def _idle_tick(self) -> None:
+        """Minimal tick when disabled — report IDLE status so hub sees us."""
+        status = BotDeploymentStatus(
+            bot_id=self.settings.bot_id or "default",
+            bot_style=self.settings.bot_style,
+            exchange=self.settings.exchange.upper(),
+            level=DeploymentLevel.IDLE,
+            open_positions=0,
+            max_positions=self.settings.effective_max_concurrent_positions,
+            capacity_pct=100.0,
+            daily_pnl_pct=0.0,
+            daily_tier="idle",
+            should_trade=False,
+            manual_stop=False,
+        )
+        self._last_bot_status = status
+        if self.shared:
+            self.shared.write_bot_status(status)
+        await self._report_dashboard_snapshot([])
+
+    async def _wind_down(self) -> None:
+        """Close all positions before going idle."""
+        positions = await self.exchange.fetch_positions()
+        active = [p for p in positions if p.amount > 0]
+        if not active:
+            logger.info("No open positions — going idle immediately")
+            return
+        logger.info("Winding down: closing {} positions", len(active))
+        status = BotDeploymentStatus(
+            bot_id=self.settings.bot_id or "default",
+            bot_style=self.settings.bot_style,
+            exchange=self.settings.exchange.upper(),
+            level=DeploymentLevel.WINDING_DOWN,
+            open_positions=len(active),
+            max_positions=self.settings.effective_max_concurrent_positions,
+            should_trade=False,
+        )
+        self._last_bot_status = status
+        if self.shared:
+            self.shared.write_bot_status(status)
+        await self._close_all_positions("hub_disabled")
 
     async def _fast_monitor_loop(self) -> None:
         """Sub-second stop-loss monitor for scalp and momentum positions.
@@ -803,11 +876,16 @@ class TradingBot:
                 )
                 return
 
-        try:
-            queue = self.shared.read_trade_queue()
-        except Exception as e:
-            logger.warning("Failed to read trade queue: {}", e)
-            return
+        if self._multibot:
+            queue = self._hub_trade_queue
+            if not queue:
+                return
+        else:
+            try:
+                queue = self.shared.read_trade_queue()
+            except Exception as e:
+                logger.warning("Failed to read trade queue: {}", e)
+                return
 
         if queue.pending_count == 0:
             return
@@ -933,7 +1011,11 @@ class TradingBot:
                     rejected[proposal.id] = "swing execution failed"
 
         if consumed_ids or rejected:
-            self.shared.apply_trade_queue_updates(consumed_ids, rejected)
+            if self._multibot:
+                self._hub_queue_updates["consumed"].extend(consumed_ids)
+                self._hub_queue_updates["rejected"].update(rejected)
+            else:
+                self.shared.apply_trade_queue_updates(consumed_ids, rejected)
 
         if executed > 0:
             logger.info(
@@ -1113,7 +1195,7 @@ class TradingBot:
             logger.info("Data dir: {:.2f} MB", size_mb)
 
     def _log_opened_trade(self, signal: Signal, order: Order, *, low_liquidity: bool = False) -> None:
-        """INSERT a row into the DB when a position first opens."""
+        """Record a trade open in memory and push to hub."""
         try:
             now = datetime.now(UTC)
             sp = self.orders.scaler.get(signal.symbol)
@@ -1138,9 +1220,8 @@ class TradingBot:
                 day_of_week=now.weekday(),
                 opened_at=now.isoformat(),
             )
-            row_id = self.trade_db.open_trade(record)
-            self._open_trade_ids[signal.symbol] = row_id
-            logger.debug("DB: opened trade #{} for {}", row_id, signal.symbol)
+            self._open_trades[signal.symbol] = record
+            logger.debug("Opened trade for {} (in-memory)", signal.symbol)
             task = asyncio.ensure_future(self._push_trade_to_hub(record))
             self._hub_tasks.add(task)
             task.add_done_callback(self._hub_tasks.discard)
@@ -1168,7 +1249,7 @@ class TradingBot:
         return 0.0
 
     def _log_closed_trade(self, order: Order, close_reason: str = "") -> None:
-        """Update the open DB row with exit data, or INSERT if no open row exists."""
+        """Record a trade close in memory and push to hub."""
         try:
             now = datetime.now(UTC)
             sp = self.orders.scaler.get(order.symbol)
@@ -1194,20 +1275,9 @@ class TradingBot:
                     pnl_usd = (entry_price - exit_price) * amount
                     pnl_pct = (entry_price - exit_price) / entry_price * 100
 
-            open_row_id = self._open_trade_ids.pop(order.symbol, 0)
-            opened_at = ""
+            open_rec = self._open_trades.pop(order.symbol, None)
+            opened_at = open_rec.opened_at if open_rec else ""
             hold_minutes = 0.0
-            if open_row_id:
-                existing = self.trade_db.find_open_trade(order.symbol)
-                if existing and existing.opened_at:
-                    opened_at = existing.opened_at
-
-            if not open_row_id:
-                existing = self.trade_db.find_open_trade(order.symbol)
-                if existing:
-                    open_row_id = existing.id
-                    opened_at = existing.opened_at
-
             if opened_at:
                 try:
                     from datetime import datetime as dt
@@ -1245,12 +1315,8 @@ class TradingBot:
                 closed_at=now.isoformat(),
             )
 
-            if open_row_id:
-                self.trade_db.close_trade(open_row_id, record)
-                logger.debug("DB: closed trade #{} for {} PnL={:.2f}", open_row_id, order.symbol, pnl_usd)
-            else:
-                self.trade_db.log_trade(record)
-                logger.debug("DB: logged close (no open row) for {} PnL={:.2f}", order.symbol, pnl_usd)
+            self._update_strategy_stats(record)
+            logger.debug("Closed trade for {} PnL={:.2f} (in-memory)", order.symbol, pnl_usd)
 
             task = asyncio.ensure_future(self._push_trade_to_hub(record))
             self._hub_tasks.add(task)
@@ -1365,7 +1431,9 @@ class TradingBot:
             should_trade=self.target.should_trade(),
             manual_stop=self.target.manual_stop,
         )
-        self.shared.write_bot_status(status)
+        self._last_bot_status = status
+        if self.shared:
+            self.shared.write_bot_status(status)
         await self._report_dashboard_snapshot(active)
 
     async def _report_dashboard_snapshot(self, active_positions: list[Any]) -> None:
@@ -1415,7 +1483,7 @@ class TradingBot:
         strat_list = []
         open_syms = set(self.orders.scaler.active_positions.keys())
         for s in self._strategies:
-            stats = self.trade_db.get_strategy_stats(s.name, s.symbol)
+            stats = self._get_strategy_stats(s.name, s.symbol)
             strat_list.append(
                 {
                     "name": s.name,
@@ -1430,7 +1498,7 @@ class TradingBot:
                 }
             )
         for _sym, s in self._dynamic_strategies.items():
-            stats = self.trade_db.get_strategy_stats(s.name, s.symbol)
+            stats = self._get_strategy_stats(s.name, s.symbol)
             strat_list.append(
                 {
                     "name": s.name,
@@ -1495,6 +1563,17 @@ class TradingBot:
             "daily_report": daily_report,
         }
 
+        if self._multibot:
+            payload["queue_updates"] = self._hub_queue_updates
+            self._hub_queue_updates = {"consumed": [], "rejected": {}}
+            if self._last_bot_status:
+                payload["bot_status"] = self._last_bot_status.model_dump()
+            if self._available_symbols:
+                payload["exchange_symbols"] = {
+                    "exchange": self.settings.exchange.upper(),
+                    "symbols": list(self._available_symbols),
+                }
+
         hub_url = self.settings.dashboard_hub_url
         if hub_url:
             await self._post_to_hub(hub_url, payload)
@@ -1504,37 +1583,58 @@ class TradingBot:
             report_bot_snapshot(payload)
 
     async def _post_to_hub(self, hub_url: str, payload: dict[str, Any]) -> None:
-        """POST snapshot to the central dashboard via HTTP."""
+        """POST snapshot to hub. Hub returns all data bots need (zero direct file access)."""
         if not self._hub_session:
-            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
+            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
         try:
             url = f"{hub_url.rstrip('/')}/internal/report"
             async with self._hub_session.post(url, json=payload) as resp:
                 if resp.status != 200:
                     logger.debug("Hub report failed: {}", resp.status)
+                    return
+                body = await resp.json()
+                for key in body.get("confirmed_keys", []):
+                    self._pending_hub_acks.pop(key, None)
+                if "enabled" in body:
+                    self._hub_enabled = body["enabled"]
+                if "intel" in body:
+                    self._hub_intel = IntelSnapshot(**body["intel"])
+                if "analytics" in body:
+                    self._hub_analytics = AnalyticsSnapshot(**body["analytics"])
+                if "trade_queue" in body:
+                    self._hub_trade_queue = TradeQueue(**body["trade_queue"])
+                if "extreme_watchlist" in body:
+                    self._hub_extreme_watchlist = ExtremeWatchlist(**body["extreme_watchlist"])
+                if "intel_age" in body:
+                    self._hub_intel_age = body["intel_age"]
         except Exception as e:
             logger.debug("Hub report error: {}", e)
+        self._retry_pending_hub_trades()
 
-    async def _push_trade_to_hub(self, record: TradeRecord) -> None:
-        """Push a trade open/close event to the hub's DB via HTTP."""
+    async def _push_trade_to_hub(self, record: TradeRecord, request_key: str = "") -> None:
+        """Push a trade open/close event to the hub's DB via HTTP with idempotency key."""
         hub_url = self.settings.dashboard_hub_url
         target = hub_url or ("http://localhost:9035" if self.settings.dashboard_enabled else "")
         if not target:
             return
+        if not request_key:
+            request_key = uuid.uuid4().hex
         if not self._hub_session:
             self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
+        payload = {
+            "bot_id": self.settings.bot_id or "default",
+            "action": record.action,
+            "trade": record.model_dump(),
+            "request_key": request_key,
+        }
+        self._pending_hub_acks[request_key] = payload
         try:
             url = f"{target.rstrip('/')}/internal/trade"
-            payload = {
-                "bot_id": self.settings.bot_id or "default",
-                "action": record.action,
-                "trade": record.model_dump(),
-            }
             async with self._hub_session.post(url, json=payload) as resp:
                 if resp.status != 200:
-                    logger.debug("Hub trade push failed: {}", resp.status)
+                    logger.debug("Hub trade push failed: {} (key={})", resp.status, request_key[:8])
         except Exception as e:
-            logger.debug("Hub trade push error: {}", e)
+            logger.debug("Hub trade push error: {} (key={}, will retry)", e, request_key[:8])
 
     async def _push_deposit_to_hub(self, amount: float, balance_before: float, balance_after: float) -> None:
         """Push a deposit/withdrawal detection event to the hub."""
@@ -1560,18 +1660,131 @@ class TradingBot:
         except Exception as e:
             logger.debug("Hub deposit push error: {}", e)
 
+    # ---- Hub state recovery & in-memory stats ----
+
+    async def _recover_state_from_hub(self) -> None:
+        """On startup, fetch open trades and strategy stats from the hub."""
+        hub_url = self.settings.dashboard_hub_url
+        target = hub_url or ("http://localhost:9035" if self.settings.dashboard_enabled else "")
+        if not target:
+            logger.info("No hub URL — starting with empty state")
+            return
+        bot_id = self.settings.bot_id or "default"
+        if not self._hub_session:
+            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+        try:
+            async with self._hub_session.get(f"{target.rstrip('/')}/internal/trades/{bot_id}/open") as resp:
+                if resp.status == 200:
+                    open_trades = await resp.json()
+                    await self._reconcile_open_trades(open_trades, target, bot_id)
+                else:
+                    logger.warning("Hub returned {} for open trades", resp.status)
+        except Exception as e:
+            logger.warning("Could not fetch open trades from hub: {}", e)
+
+        try:
+            async with self._hub_session.get(f"{target.rstrip('/')}/internal/trades/{bot_id}/stats") as resp:
+                if resp.status == 200:
+                    self._strategy_stats = await resp.json()
+                    total = sum(s.get("total", 0) for s in self._strategy_stats.values())
+                    logger.info(
+                        "Loaded strategy stats from hub: {} strategies, {} trades", len(self._strategy_stats), total
+                    )
+        except Exception as e:
+            logger.warning("Could not fetch strategy stats from hub: {}", e)
+
+    async def _reconcile_open_trades(self, hub_open: list[dict[str, Any]], hub_target: str, bot_id: str) -> None:
+        """Check each hub-reported open trade against the exchange. Recovery-close dead ones."""
+        if not hub_open:
+            logger.info("Hub reports 0 open trades — clean start")
+            return
+
+        exchange_positions: dict[str, Any] = {}
+        if not self.settings.is_paper_local():
+            try:
+                positions = await self.exchange.fetch_positions()
+                for p in positions:
+                    if p.amount > 0:
+                        exchange_positions[p.symbol] = p
+            except Exception as e:
+                logger.warning("Could not fetch exchange positions for reconciliation: {}", e)
+
+        recovered = 0
+        dead = 0
+        for td in hub_open:
+            symbol = td.get("symbol", "")
+            if not symbol:
+                continue
+            if symbol in exchange_positions or (self.settings.is_paper_local() is False and not exchange_positions):
+                rec = TradeRecord(**{k: v for k, v in td.items() if k in TradeRecord.model_fields})
+                self._open_trades[symbol] = rec
+                recovered += 1
+            else:
+                opened_at = td.get("opened_at", "")
+                if opened_at:
+                    try:
+                        async with self._hub_session.post(  # type: ignore[union-attr]
+                            f"{hub_target.rstrip('/')}/internal/recovery-close",
+                            json={"bot_id": bot_id, "opened_at": opened_at},
+                        ) as resp:
+                            if resp.status == 200:
+                                dead += 1
+                    except Exception:
+                        dead += 1
+                else:
+                    dead += 1
+
+        if recovered:
+            logger.info("Recovered {} open trades from hub", recovered)
+        if dead:
+            logger.info("Marked {} dead trades as recovery_close (no longer on exchange)", dead)
+
+    def _get_strategy_stats(self, strategy: str, symbol: str = "") -> dict[str, Any]:
+        """Look up strategy stats from in-memory cache (seeded from hub on startup)."""
+        key = f"{strategy}:{symbol}" if symbol else strategy
+        return self._strategy_stats.get(key, {})
+
+    def _update_strategy_stats(self, record: TradeRecord) -> None:
+        """Increment in-memory strategy stats after a trade close."""
+        key = f"{record.strategy}:{record.symbol}" if record.symbol else record.strategy
+        stats = self._strategy_stats.setdefault(key, {"total": 0, "winners": 0, "losers": 0, "total_pnl": 0.0})
+        stats["total"] = (stats.get("total") or 0) + 1
+        if record.is_winner:
+            stats["winners"] = (stats.get("winners") or 0) + 1
+        elif record.pnl_usd != 0:
+            stats["losers"] = (stats.get("losers") or 0) + 1
+        stats["total_pnl"] = (stats.get("total_pnl") or 0.0) + record.pnl_usd
+
+    def _retry_pending_hub_trades(self) -> None:
+        """Re-send any trade events that haven't been ack'd yet."""
+        if not self._pending_hub_acks:
+            return
+        stale = list(self._pending_hub_acks.values())
+        if len(stale) > 20:
+            logger.warning("Hub ack buffer has {} unconfirmed trades", len(stale))
+        for payload in stale[:5]:
+            rk = payload.get("request_key", "")
+            record_data = payload.get("trade", {})
+            rec = TradeRecord(**{k: v for k, v in record_data.items() if k in TradeRecord.model_fields})
+            task = asyncio.ensure_future(self._push_trade_to_hub(rec, request_key=rk))
+            self._hub_tasks.add(task)
+            task.add_done_callback(self._hub_tasks.discard)
+
     def _read_shared_intel(self) -> MarketCondition | None:
         """Read intel from shared state file (written by monitor service).
 
         If the monitor is running, we use its data instead of running our
         own intel clients. Falls back to in-process intel if stale or missing.
         """
-        intel_age = self.shared_intel.intel_age_seconds()
-        if intel_age > 600:  # stale after 10 minutes
-            return None  # fall back to in-process
-
-        snap = self.shared_intel.read_intel()
-        if not snap.sources_active:
+        if self._multibot:
+            intel_age = self._hub_intel_age
+            snap = self._hub_intel
+        else:
+            intel_age = self.shared_intel.intel_age_seconds()
+            snap = self.shared_intel.read_intel()
+        if intel_age > 600:
+            return None
+        if not snap or not snap.sources_active:
             return None
 
         # Hydrate news from shared state (monitor collects it centrally)
@@ -1634,9 +1847,9 @@ class TradingBot:
         If the analytics service is running, use its weights.
         Falls back to in-process analytics engine.
         """
-        snap = self.shared_intel.read_analytics()
-        if not snap.weights:
-            return self.analytics.get_weight(strategy)
+        snap = self._hub_analytics if self._multibot else self.shared_intel.read_analytics()
+        if not snap or not snap.weights:
+            return 1.0
 
         for w in snap.weights:
             if w.strategy == strategy:
@@ -1645,7 +1858,9 @@ class TradingBot:
 
     def _get_tv_boost(self, symbol: str, side: str) -> float:
         """Get TradingView signal boost, preferring shared state."""
-        snap = self.shared_intel.read_intel()
+        snap = self._hub_intel if self._multibot else self.shared_intel.read_intel()
+        if not snap:
+            return self.intel.tv_signal_boost(symbol, side) if self.intel else 1.0
         for tv in snap.tv_analyses:
             if tv.symbol == symbol and tv.interval == "1h":
                 return tv.signal_boost_long if side == "long" else tv.signal_boost_short
@@ -1984,7 +2199,9 @@ class TradingBot:
 
     async def _evaluate_extreme_candidates(self) -> None:
         """Read extreme watchlist from shared state, approve candidates for WS subscription."""
-        watchlist = self.shared_intel.read_extreme_watchlist()
+        watchlist = self._hub_extreme_watchlist if self._multibot else self.shared_intel.read_extreme_watchlist()
+        if not watchlist:
+            return
         if not watchlist.candidates:
             if self.extreme_watcher.active_count > 0:
                 await self.extreme_watcher.sync_watchlist({})
@@ -2109,8 +2326,6 @@ class TradingBot:
             logger.info("=== DAILY SUMMARY ===")
             logger.info(self.target.status_report())
             logger.info("Total growth since start: {:.1f}%", self.target.total_growth_pct)
-
-            self.analytics.refresh()
 
             await self.notifier.send_daily_summary(
                 balance=raw_balance,
