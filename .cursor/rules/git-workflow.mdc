@@ -58,26 +58,31 @@ Both run in one go, no questions asked.
 
 ## Merging develop → master
 
-**Never** use `git merge` (including `--squash`) — it does a three-way
-merge and WILL conflict when develop has amended/force-pushed commits.
-
-Instead, overwrite master's tree with develop's content directly:
+Develop is always one squashed commit ahead of master (via `csp`).
+Merging is a **fast-forward** — zero conflicts, zero merge commits:
 
 ```bash
 git checkout master
-git checkout develop -- .
-git add -A
-git commit -m "descriptive message"
+git merge develop
 git push origin master
 git checkout develop
 ```
 
-This takes exactly what's on develop and applies it as one commit on
-master. Zero merge logic, zero conflicts, guaranteed.
+**CRITICAL**: Only merge to master AFTER all work is done and CI is
+green. Never merge, then amend develop — that diverges the branches.
+
+If branches somehow diverge, fix with:
+```bash
+git checkout master
+git reset --hard develop
+git push --force origin master
+git checkout develop
+```
 
 ## Rules
 
 - Only amend commits you created in the current session
-- Only force push to `develop`, never to `master`
-- ALWAYS squash when merging develop → master
+- Only force push to `develop` (force push `master` only to fix divergence)
+- Merge to master = fast-forward only, never `--squash`
+- Never merge to master mid-work — finish everything first
 - Never run exploratory git commands — you know what you changed

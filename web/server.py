@@ -1262,6 +1262,9 @@ def _build_merged_snapshot() -> dict[str, Any]:
         bid = rpt.get("bot_id", "")
         ex_name = rpt.get("exchange", "")
 
+        if bid == "hub":
+            continue
+
         if not first_status:
             first_status = s
 
