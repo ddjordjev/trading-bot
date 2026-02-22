@@ -189,6 +189,9 @@ class MonitorService:
                     try:
                         self._exchange_symbols = self.state.read_all_exchange_symbols()
                         self.signal_gen.update_exchange_symbols(self._exchange_symbols)
+                        all_syms = [s for syms in self._exchange_symbols.values() for s in syms]
+                        if all_syms:
+                            self.scanner.set_exchange_symbols(all_syms)
                         total = sum(len(s) for s in self._exchange_symbols.values())
                         if self._exchange_symbols:
                             logger.debug(
@@ -231,6 +234,16 @@ class MonitorService:
                     except Exception as e:
                         logger.debug("Analytics feed error: {}", e)
                     self._last_analytics_refresh = now
+
+                # Feed rejection history so signal generator avoids re-proposing rejected combos
+                try:
+                    rej_records = self.state.get_rejection_history()
+                    if rej_records:
+                        rej_tuples = {k: (r.reason, r.timestamp, r.count) for k, r in rej_records.items()}
+                        self.signal_gen.update_rejections(rej_tuples)
+                    self.state.purge_old_rejections()
+                except Exception as e:
+                    logger.debug("Rejection feed error: {}", e)
 
                 # Generate proposals into a staging queue, then route to per-bot queues
                 try:

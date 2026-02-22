@@ -977,7 +977,10 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
 
         bot_status_data = data.get("bot_status")
         if bot_status_data:
-            _hub_state_ref.write_bot_status(BotDeploymentStatus(**bot_status_data))
+            try:
+                _hub_state_ref.write_bot_status(BotDeploymentStatus(**bot_status_data))
+            except Exception:
+                logger.debug("Ignoring malformed bot_status from {}", bot_id)
 
         exchange_symbols = data.get("exchange_symbols")
         if exchange_symbols:
@@ -1132,6 +1135,9 @@ async def serve_summary() -> HTMLResponse:
         return HTMLResponse(summary_path.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>Summary not found</h1>", status_code=404)
 
+
+if DOCS_DIR.exists():
+    app.mount("/docs-static", StaticFiles(directory=DOCS_DIR), name="docs-static")
 
 if FRONTEND_DIR.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="assets")

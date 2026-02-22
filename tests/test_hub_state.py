@@ -163,7 +163,8 @@ class TestHubStateTradeQueue:
         read = state.read_trade_queue()
         assert read.pending_count == 0
 
-    def test_read_queue_for_bot_style_filters(self, state):
+    def test_read_queue_for_bot_style_pops_matching(self, state):
+        """Reading pops matching proposals from the shared queue."""
         p1 = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
@@ -192,11 +193,20 @@ class TestHubStateTradeQueue:
         assert len(momentum_q.critical) == 1
         assert momentum_q.critical[0].symbol == "BTC/USDT"
 
+        # BTC proposal was popped — only ETH remains in shared queue
+        remaining = state.read_trade_queue()
+        assert remaining.pending_count == 1
+        assert remaining.critical[0].symbol == "ETH/USDT"
+
         swing_q = state.read_queue_for_bot_style("swing")
         assert len(swing_q.critical) == 1
         assert swing_q.critical[0].symbol == "ETH/USDT"
 
+        # Both popped — shared queue is now empty
+        assert state.read_trade_queue().pending_count == 0
+
     def test_read_queue_for_bot_style_includes_untagged(self, state):
+        """Untagged proposals go to any style and are popped on read."""
         p = TradeProposal(
             priority=SignalPriority.DAILY,
             symbol="SOL/USDT",
@@ -213,8 +223,11 @@ class TestHubStateTradeQueue:
 
         result = state.read_queue_for_bot_style("momentum")
         assert len(result.daily) == 1
+        # Popped from shared queue
+        assert state.read_trade_queue().pending_count == 0
 
-    def test_bot_queue_updates_affect_shared_queue(self, state):
+    def test_rejection_tracking(self, state):
+        """Rejections are recorded with escalating counts."""
         p = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
@@ -226,8 +239,66 @@ class TestHubStateTradeQueue:
         )
         q = TradeQueue()
         q.critical.append(p)
-        state.write_trade_queue(q)
+        state.write_bot_trade_queue("bot1", q)
+
+        state.apply_bot_queue_updates("bot1", consumed_ids=[], rejected={p.id: "no free slots"})
+        history = state.get_rejection_history()
+        assert "BTC/USDT|m" in history
+        assert history["BTC/USDT|m"].count == 1
+
+        state.apply_bot_queue_updates("bot1", consumed_ids=[], rejected={p.id: "no free slots"})
+        assert history["BTC/USDT|m"].count == 2
+
+    def test_rejection_requeues_for_remaining_styles(self, state):
+        """Multi-target proposal is re-inserted for remaining styles on rejection."""
+        # Register bot1 as momentum style
+        state.write_bot_status(BotDeploymentStatus(bot_id="bot1", bot_style="momentum"))
+
+        p = TradeProposal(
+            priority=SignalPriority.CRITICAL,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="m",
+            reason="r",
+            strength=0.8,
+            market_type="futures",
+            target_bot="momentum,extreme",
+        )
+        # Momentum bot popped it — put it in the per-bot queue for lookup
         state.write_bot_trade_queue("bot1", TradeQueue(critical=[p]))
 
-        state.apply_bot_queue_updates("bot1", consumed_ids=[p.id], rejected={})
+        # Shared queue is empty (was popped)
+        assert state.read_trade_queue().pending_count == 0
+
+        # Bot1 (momentum) rejects it
+        state.apply_bot_queue_updates("bot1", consumed_ids=[], rejected={p.id: "no free slots"})
+
+        # Shared queue now has a re-inserted copy for "extreme" only
+        shared = state.read_trade_queue()
+        assert shared.pending_count == 1
+        requeued = shared.critical[0]
+        assert requeued.target_bot == "extreme"
+        assert requeued.symbol == "BTC/USDT"
+        assert requeued.id != p.id  # fresh ID
+        assert not requeued.rejected
+
+    def test_rejection_single_style_no_requeue(self, state):
+        """Single-target proposal is NOT re-inserted on rejection."""
+        state.write_bot_status(BotDeploymentStatus(bot_id="bot1", bot_style="momentum"))
+
+        p = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="ETH/USDT",
+            side="long",
+            strategy="x",
+            reason="r",
+            strength=0.6,
+            market_type="futures",
+            target_bot="momentum",
+        )
+        state.write_bot_trade_queue("bot1", TradeQueue(daily=[p]))
+
+        state.apply_bot_queue_updates("bot1", consumed_ids=[], rejected={p.id: "no free slots"})
+
+        # Nothing re-inserted — only one style, nowhere else to send it
         assert state.read_trade_queue().pending_count == 0

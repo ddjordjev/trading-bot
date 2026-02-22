@@ -83,6 +83,12 @@ class SignalGenerator:
         self._exchange_symbols: dict[str, set[str]] = {}  # {EXCHANGE: {symbols}}
         self._all_tradeable: set[str] = set()  # union of all exchange symbols
 
+        # Rejection feedback — populated by monitor from HubState each tick.
+        # Maps "symbol|strategy" → (reason, timestamp, consecutive_count).
+        self._rejection_history: dict[str, tuple[str, datetime, int]] = {}
+        self._rejection_base_cooldown = 300  # 5min base, doubles per consecutive rejection
+        self._rejection_max_cooldown = 7200  # cap at 2 hours
+
         # Analytics feedback state (updated by monitor each tick)
         self._analytics: AnalyticsSnapshot | None = None
         self._strategy_weights: dict[str, float] = {}  # analytics engine weight per strategy
@@ -176,6 +182,35 @@ class SignalGenerator:
                 self._global_bad_regimes or "none",
                 self._global_bad_hours or "none",
             )
+
+    def update_rejections(self, rejections: dict[str, tuple[str, datetime, int]]) -> None:
+        """Ingest rejection history from HubState.
+
+        Called by the monitor each tick. The signal generator uses this to
+        apply escalating cooldowns on symbol+strategy combos that bots keep
+        rejecting — breaks the propose→reject→propose loop.
+        """
+        self._rejection_history = rejections
+
+    def _rejection_cooldown_active(self, symbol: str, strategy: str) -> bool:
+        """Check if a symbol+strategy is on rejection cooldown."""
+        rkey = f"{symbol}|{strategy}"
+        entry = self._rejection_history.get(rkey)
+        if not entry:
+            return False
+        _reason, ts, count = entry
+        cooldown = min(self._rejection_base_cooldown * (2 ** (count - 1)), self._rejection_max_cooldown)
+        elapsed = (datetime.now(UTC) - ts).total_seconds()
+        if elapsed < cooldown:
+            logger.debug(
+                "Rejection cooldown active for {}|{} (rejected {}x, {}s remaining)",
+                symbol,
+                strategy,
+                count,
+                int(cooldown - elapsed),
+            )
+            return True
+        return False
 
     def _analytics_strength_modifier(self, strategy: str, symbol: str, is_quick: bool = False) -> float:
         """Compute a strength multiplier from analytics feedback.
@@ -840,6 +875,9 @@ class SignalGenerator:
         """
         if not self._symbol_tradeable(proposal.symbol):
             logger.debug("Skipping {}: not on any known exchange", proposal.symbol)
+            return
+
+        if self._rejection_cooldown_active(proposal.symbol, proposal.strategy):
             return
 
         if not proposal.target_bot:

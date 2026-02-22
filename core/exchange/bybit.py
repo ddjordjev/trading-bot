@@ -138,9 +138,11 @@ class BybitExchange(BaseExchange):
             if amt == 0:
                 continue
             side_str = p.get("side", "long")
+            raw_sym = p.get("symbol", symbol or "")
+            norm_sym = raw_sym.split(":")[0] if ":" in raw_sym else raw_sym
             positions.append(
                 Position(
-                    symbol=p.get("symbol", symbol or ""),
+                    symbol=norm_sym or (symbol or ""),
                     side=OrderSide.BUY if side_str == "long" else OrderSide.SELL,
                     amount=amt,
                     entry_price=float(p.get("entryPrice", 0) or 0),
