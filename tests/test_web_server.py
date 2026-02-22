@@ -1508,7 +1508,7 @@ class TestBroadcastActions:
 
 
 class TestTradeQueueLifecycle:
-    async def test_trade_queue_shows_only_pending(self, client):
+    async def test_trade_queue_shows_all_statuses(self, client):
         from shared.models import SignalPriority, TradeProposal, TradeQueue
 
         hub_state = MagicMock()
@@ -1546,15 +1546,16 @@ class TestTradeQueueLifecycle:
             ),
         ]
         hub_state.read_trade_queue.return_value = q
+        hub_state.read_dispatched_proposals.return_value = []
         with patch("web.server._hub_state_ref", hub_state):
             r = await client.get("/api/trade-queue")
         assert r.status_code == 200
         data = r.json()
-        assert len(data) == 1
-        assert data[0]["symbol"] == "BTC/USDT"
-        assert data[0]["status"] == "pending"
-        assert not any(d["symbol"] == "SOL/USDT" for d in data)
-        assert not any(d["symbol"] == "ETH/USDT" for d in data)
+        assert len(data) == 3
+        by_sym = {d["symbol"]: d for d in data}
+        assert by_sym["BTC/USDT"]["status"] == "pending"
+        assert by_sym["ETH/USDT"]["status"] == "consumed"
+        assert by_sym["SOL/USDT"]["status"] == "rejected"
 
 
 # ── Analytics with Multibot Positions ───────────────────────────────────

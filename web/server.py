@@ -309,21 +309,30 @@ async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem
 
     if _hub_state_ref is None:
         return []
+
+    # Shared queue (not yet dispatched) + recently dispatched to bots
     q = _hub_state_ref.read_trade_queue()
     for bucket in (q.critical, q.daily, q.swing):
         all_proposals.extend(bucket)
+    all_proposals.extend(_hub_state_ref.read_dispatched_proposals())
 
-    pending = [p for p in all_proposals if not p.consumed and not p.rejected and not p.is_expired]
+    active = [p for p in all_proposals if not p.is_expired]
 
-    seen: set[tuple[str, ...]] = set()
+    seen: set[str] = set()
     unique = []
-    for p in pending:
-        key = (p.symbol, p.side, p.strategy or "")
-        if key not in seen:
-            seen.add(key)
+    for p in active:
+        if p.id not in seen:
+            seen.add(p.id)
             unique.append(p)
 
     unique.sort(key=lambda p: p.created_at, reverse=True)
+
+    def _status(p: Any) -> str:
+        if p.consumed:
+            return "consumed"
+        if p.rejected:
+            return "rejected"
+        return "pending"
 
     return [
         TradeQueueItem(
@@ -332,7 +341,7 @@ async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem
             strategy=p.strategy or "",
             strength=p.strength,
             age_seconds=p.age_seconds,
-            status="pending",
+            status=_status(p),
             reason=p.reason or "",
         )
         for p in unique

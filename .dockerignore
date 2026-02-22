@@ -19,6 +19,7 @@ logs/
 data/
 docs/*
 !docs/summary.html
+!docs/architecture.jpg
 tests/
 *.md
 docker-compose*.yml

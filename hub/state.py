@@ -57,6 +57,8 @@ class HubState:
         self._trade_queue: TradeQueue = TradeQueue()
         self._bot_queues: dict[str, TradeQueue] = {}
         self._rejections: dict[str, RejectionRecord] = {}  # "symbol|strategy" → record
+        self._dispatched: list[TradeProposal] = []  # recently popped proposals for dashboard display
+        self._dispatched_max = 50
 
         self._bot_statuses: dict[str, BotDeploymentStatus] = {}
         self._exchange_symbols: dict[str, dict] = {}
@@ -235,6 +237,14 @@ class HubState:
                 q.mark_rejected(pid, reason)
             q.updated_at = datetime.now(UTC).isoformat()
 
+        # Update dispatched list so dashboard shows consumed/rejected status
+        for dp in self._dispatched:
+            if dp.id in consumed_ids:
+                dp.consumed = True
+            elif dp.id in rejected:
+                dp.rejected = True
+                dp.reject_reason = rejected[dp.id]
+
         bot_status = self._bot_statuses.get(bot_id)
         rejecting_style = bot_status.bot_style if bot_status else ""
 
@@ -309,7 +319,21 @@ class HubState:
             setattr(self._trade_queue, bucket_name, keep)
         popped.updated_at = self._trade_queue.updated_at
         self._trade_queue.updated_at = datetime.now(UTC).isoformat()
+
+        # Track dispatched proposals so the dashboard can display them
+        dispatched = popped.critical + popped.daily + popped.swing
+        if dispatched:
+            self._dispatched = (dispatched + self._dispatched)[: self._dispatched_max]
+
         return popped
+
+    def read_dispatched_proposals(self) -> list[TradeProposal]:
+        """Recent proposals dispatched to bots — for dashboard display."""
+        cutoff = datetime.now(UTC) - timedelta(minutes=30)
+        self._dispatched = [
+            p for p in self._dispatched if p.created_at and datetime.fromisoformat(p.created_at) > cutoff
+        ]
+        return self._dispatched
 
     def get_rejection_history(self) -> dict[str, RejectionRecord]:
         """Return rejection records for signal generator to consult."""
