@@ -12,12 +12,14 @@ Analytics feedback loop:
   uses strategy weights, detected patterns, and modification suggestions to
   modulate proposal strength, skip losing combos, and boost outperformers.
 
-The proposals are written to data/trade_queue.json and consumed by the bot.
+The proposals are stored in HubState (in-memory) and delivered to bots
+via the /internal/report HTTP response.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
@@ -30,6 +32,9 @@ from shared.models import (
     TradeQueue,
     TrendingSnapshot,
 )
+
+if TYPE_CHECKING:
+    from hub.candle_fetcher import CandleFetcher
 
 MAJOR_SYMBOLS = {"BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT"}
 
@@ -708,6 +713,113 @@ class SignalGenerator:
                 )
                 existing_syms.add(sym)
                 added += 1
+
+    # ------------------------------------------------------------------
+    # Technical Analysis (hub-side strategy execution)
+    # ------------------------------------------------------------------
+
+    _STRATEGY_BOT_TARGETS: dict[str, str] = {
+        "rsi": "indicators,momentum",
+        "macd": "indicators,momentum",
+        "bollinger": "indicators,momentum",
+        "mean_reversion": "meanrev",
+        "compound_momentum": "momentum,extreme",
+        "market_open_volatility": "momentum,extreme",
+        "swing_opportunity": "swing",
+        "grid": "swing",
+    }
+
+    async def generate_technical_signals(
+        self,
+        candidates: list[str],
+        fetcher: CandleFetcher,
+        queue: TradeQueue,
+        strategies: list[str] | None = None,
+    ) -> TradeQueue:
+        """Run technical analysis strategies on candidate symbols centrally.
+
+        This replaces the per-bot strategy execution loop (old bot.py step 12).
+        The hub fetches candles once and runs all strategies, producing
+        TradeProposal objects tagged with target bot types.
+
+        Args:
+            candidates: Symbols to analyze (e.g. ["BTC/USDT", "ETH/USDT"])
+            fetcher: CandleFetcher for market data
+            queue: TradeQueue to add proposals to
+            strategies: Which strategies to run (None = all built-in)
+        """
+        import asyncio
+
+        from core.models import SignalAction
+        from strategies import BUILTIN_STRATEGIES
+
+        strat_classes = BUILTIN_STRATEGIES
+        if strategies:
+            strat_classes = {k: v for k, v in strat_classes.items() if k in strategies}
+
+        if not strat_classes or not candidates:
+            return queue
+
+        mkt = self._preferred_market_type
+        analyzed = 0
+
+        for symbol in candidates:
+            if not fetcher.has_symbol(symbol):
+                continue
+
+            candles = await fetcher.fetch_candles(symbol, "1m", limit=200)
+            if len(candles) < 30:
+                continue
+
+            ticker = await fetcher.fetch_ticker(symbol)
+            await asyncio.sleep(0)
+
+            for strat_name, strat_cls in strat_classes.items():
+                try:
+                    instance = strat_cls(symbol=symbol, market_type=mkt, leverage=10)
+                    for c in candles:
+                        instance.feed_candle(c)
+
+                    sig = instance.analyze(candles, ticker)
+                    if not sig:
+                        continue
+                    if sig.action not in (SignalAction.BUY, SignalAction.SELL):
+                        continue
+
+                    side = "long" if sig.action == SignalAction.BUY else "short"
+                    is_quick = sig.quick_trade
+                    priority = SignalPriority.CRITICAL if is_quick else SignalPriority.DAILY
+                    if strat_name == "swing_opportunity":
+                        priority = SignalPriority.SWING
+
+                    target_bots = self._STRATEGY_BOT_TARGETS.get(strat_name, "momentum")
+
+                    self._propose(
+                        queue,
+                        TradeProposal(
+                            priority=priority,
+                            symbol=symbol,
+                            side=side,
+                            strategy=f"ta_{strat_name}",
+                            reason=sig.reason[:200] if sig.reason else f"{strat_name} signal on {symbol}",
+                            strength=sig.strength,
+                            market_type=sig.market_type,
+                            leverage=sig.leverage,
+                            quick_trade=is_quick,
+                            max_hold_minutes=sig.max_hold_minutes or 0,
+                            max_age_seconds=14400 if priority == SignalPriority.DAILY else 300,
+                            tick_urgency=sig.tick_urgency.value,
+                            target_bot=target_bots,
+                            source="hub_ta",
+                        ),
+                    )
+                    analyzed += 1
+                except Exception as e:
+                    logger.debug("TA {} on {} failed: {}", strat_name, symbol, e)
+
+        if analyzed:
+            logger.info("Technical analysis: {} signals from {} candidates", analyzed, len(candidates))
+        return queue
 
     # ------------------------------------------------------------------
     # Helpers

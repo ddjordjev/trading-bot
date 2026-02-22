@@ -378,12 +378,13 @@ class TestPaperExchange:
     # ── PaperExchange coverage: margin edge cases, full close, balance filter ──
 
     @pytest.mark.asyncio
-    async def test_fetch_balance_omits_zero_balances(self):
+    async def test_fetch_balance_always_includes_usdt(self):
         real = _mock_real_exchange(100.0)
         paper = PaperExchange(real, starting_balance=0.0)
         paper._balances["USDT"] = 0.0
         bal = await paper.fetch_balance()
-        assert "USDT" not in bal or bal.get("USDT", 0) > 0
+        assert "USDT" in bal
+        assert bal["USDT"] == 0.0
 
     @pytest.mark.asyncio
     async def test_futures_new_position_insufficient_margin_returns_failed(self):

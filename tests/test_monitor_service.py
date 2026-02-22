@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from hub.state import HubState
 from shared.models import (
     BotDeploymentStatus,
     DeploymentLevel,
@@ -355,7 +356,10 @@ class TestRouteToBotsMonitor:
     def test_routes_by_style(self, monitor, tmp_path):
         from shared.models import SignalPriority, TradeProposal
 
-        monitor.state._data_dir = tmp_path
+        hub_state = HubState()
+        hub_state.write_trade_queue = MagicMock()
+        monitor.state = hub_state
+
         staging = TradeQueue()
         p = TradeProposal(
             priority=SignalPriority.DAILY,
@@ -369,12 +373,15 @@ class TestRouteToBotsMonitor:
             BotDeploymentStatus(bot_id="bot-momentum", bot_style="momentum", should_trade=True, has_capacity=True),
         ]
         monitor._route_to_bots(staging, statuses)
-        monitor.state.write_bot_trade_queue.assert_called()
+        hub_state.write_trade_queue.assert_called_once()
 
     def test_skips_consumed_proposals(self, monitor, tmp_path):
         from shared.models import SignalPriority, TradeProposal
 
-        monitor.state._data_dir = tmp_path
+        hub_state = HubState()
+        hub_state.write_trade_queue = MagicMock()
+        monitor.state = hub_state
+
         staging = TradeQueue()
         p = TradeProposal(
             priority=SignalPriority.DAILY,
@@ -385,12 +392,17 @@ class TestRouteToBotsMonitor:
         )
         staging.add(p)
         monitor._route_to_bots(staging, [])
-        monitor.state.write_bot_trade_queue.assert_not_called()
+        hub_state.write_trade_queue.assert_called_once()
+        call_queue = hub_state.write_trade_queue.call_args[0][0]
+        assert call_queue.pending_count == 0
 
-    def test_skips_bot_without_capacity(self, monitor, tmp_path):
+    def test_merges_to_shared_queue_even_when_bot_at_capacity(self, monitor, tmp_path):
         from shared.models import SignalPriority, TradeProposal
 
-        monitor.state._data_dir = tmp_path
+        hub_state = HubState()
+        hub_state.write_trade_queue = MagicMock()
+        monitor.state = hub_state
+
         staging = TradeQueue()
         p = TradeProposal(
             priority=SignalPriority.DAILY,
@@ -406,37 +418,9 @@ class TestRouteToBotsMonitor:
             ),
         ]
         monitor._route_to_bots(staging, statuses)
-        monitor.state.write_bot_trade_queue.assert_not_called()
-
-
-# ── _read_bot_queue ──────────────────────────────────────────────────
-
-
-class TestReadBotQueue:
-    def test_read_nonexistent_returns_empty(self, monitor, tmp_path):
-        monitor.state._data_dir = tmp_path
-        result = monitor._read_bot_queue("nonexistent")
-        assert result.pending_count == 0
-
-    def test_read_existing_queue(self, monitor, tmp_path):
-        from shared.models import SignalPriority, TradeProposal
-
-        monitor.state._data_dir = tmp_path
-        bot_dir = tmp_path / "momentum"
-        bot_dir.mkdir()
-        q = TradeQueue()
-        q.add(TradeProposal(priority=SignalPriority.DAILY, symbol="BTC/USDT", side="long", strength=0.8))
-        (bot_dir / "trade_queue.json").write_text(q.model_dump_json())
-        result = monitor._read_bot_queue("momentum")
-        assert len(result.daily) == 1
-
-    def test_read_corrupt_queue_returns_empty(self, monitor, tmp_path):
-        monitor.state._data_dir = tmp_path
-        bot_dir = tmp_path / "broken"
-        bot_dir.mkdir()
-        (bot_dir / "trade_queue.json").write_text("{bad json")
-        result = monitor._read_bot_queue("broken")
-        assert result.pending_count == 0
+        hub_state.write_trade_queue.assert_called_once()
+        call_queue = hub_state.write_trade_queue.call_args[0][0]
+        assert call_queue.pending_count >= 1
 
 
 # ── _on_news ─────────────────────────────────────────────────────────

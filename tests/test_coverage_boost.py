@@ -417,6 +417,7 @@ class TestAnalyticsService:
     @pytest.mark.asyncio
     async def test_start_and_stop(self):
         from services.analytics_service import AnalyticsService
+        from shared.models import AnalyticsSnapshot
 
         svc = AnalyticsService(refresh_interval=1)
         svc.db = MagicMock()
@@ -428,6 +429,7 @@ class TestAnalyticsService:
         mock_engine.patterns = []
         mock_engine.suggestions = []
         svc.state = MagicMock()
+        svc.state.read_analytics.return_value = AnalyticsSnapshot()
 
         async def stop_soon():
             await asyncio.sleep(0.05)

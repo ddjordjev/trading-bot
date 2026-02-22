@@ -49,10 +49,6 @@ class CompoundMomentumStrategy(BaseStrategy):
         # Breakout quick trade timing
         self.breakout_max_hold = int(params.get("breakout_max_hold", 15))
 
-        # Trailing stop config
-        self.initial_stop_pct = float(params.get("initial_stop_pct", 1.0))
-        self.trail_pct = float(params.get("trail_pct", 0.5))
-
         # Exit signals
         self.exit_rsi_overbought = float(params.get("exit_rsi_overbought", 75))
         self.exit_rsi_oversold = float(params.get("exit_rsi_oversold", 25))

@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
 
 import pytest
 
 from web.metrics import (
     _collect_process,
     _collect_system,
-    _collect_trading,
     _is_coroutine_function,
     collect_metrics,
     record_event_loop_lag,
@@ -112,55 +110,12 @@ class TestCollect:
     def test_collect_process(self) -> None:
         _collect_process()
 
-    def test_collect_trading_none(self) -> None:
-        _collect_trading(None)
-
-    def test_collect_trading_with_bot(self) -> None:
-        bot = MagicMock()
-        bot.target._current_balance = 100.0
-        bot.target.todays_pnl = 5.0
-        bot.target.todays_pnl_pct = 5.0
-        bot.risk.daily_loss_pct = 0.5
-        bot.orders.trailing.active_stops = {"BTC/USDT": MagicMock()}
-        bot.risk._total_trades_today = 3
-        bot.risk.win_rate_today = 66.7
-        bot._strategies = [MagicMock(), MagicMock()]
-        bot._dynamic_strategies = {}
-        bot.intel = None
-        _collect_trading(bot)
-
-    def test_collect_trading_with_intel(self) -> None:
-        bot = MagicMock()
-        bot.target._current_balance = 200.0
-        bot.target.todays_pnl = 10.0
-        bot.target.todays_pnl_pct = 5.0
-        bot.risk.daily_loss_pct = 1.0
-        bot.orders.trailing.active_stops = {}
-        bot.risk._total_trades_today = 0
-        bot.risk.win_rate_today = 0.0
-        bot._strategies = []
-        bot._dynamic_strategies = {}
-        bot.intel = MagicMock()
-        bot.intel.condition.fear_greed = 25
-        _collect_trading(bot)
-
     def test_collect_metrics_returns_bytes(self) -> None:
         result = collect_metrics(None, 100.0)
         assert isinstance(result, bytes)
         assert b"system_cpu_percent" in result
 
-    def test_collect_metrics_with_bot(self) -> None:
-        bot = MagicMock()
-        bot.target._current_balance = 100.0
-        bot.target.todays_pnl = 0.0
-        bot.target.todays_pnl_pct = 0.0
-        bot.risk.daily_loss_pct = 0.0
-        bot.orders.trailing.active_stops = {}
-        bot.risk._total_trades_today = 0
-        bot.risk.win_rate_today = 0.0
-        bot._strategies = []
-        bot._dynamic_strategies = {}
-        bot.intel = None
-        result = collect_metrics(bot, 60.0)
+    def test_collect_metrics_hub_mode(self) -> None:
+        result = collect_metrics(None, 60.0)
         assert isinstance(result, bytes)
-        assert b"trading_bot_balance" in result
+        assert b"system_cpu_percent" in result

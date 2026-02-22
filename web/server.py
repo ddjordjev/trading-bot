@@ -14,7 +14,6 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from config.settings import get_settings
-from shared.state import SharedState
 from web.auth import verify_token, verify_ws_token
 from web.schemas import (
     ActionResponse,
@@ -27,7 +26,6 @@ from web.schemas import (
     IntelSnapshot,
     LivePositionInfo,
     LogEntry,
-    MacroEventInfo,
     ModificationSuggestionInfo,
     ModuleStatus,
     NewsItemInfo,
@@ -45,10 +43,10 @@ from web.schemas import (
 )
 
 if TYPE_CHECKING:
-    from bot import TradingBot
     from db.hub_store import HubDB
+    from hub.state import HubState
 
-_bot: TradingBot | None = None
+_hub_state_ref: HubState | None = None
 _start_time: float = 0.0
 _log_buffer: deque[dict[str, Any]] = deque(maxlen=200)
 _background_tasks: list[asyncio.Task[None]] = []
@@ -110,15 +108,17 @@ def setup_log_capture() -> None:
     logger.add(_log_sink, level="DEBUG", format="{message}")
 
 
-def set_bot(bot: TradingBot) -> None:
-    global _bot, _start_time
-    _bot = bot
-    _start_time = time.time()
-    if bot:
-        local_id = bot.settings.bot_id or "default"
-        if local_id not in _bot_urls:
-            _bot_urls[local_id] = f"http://bot-{local_id}:9035"
-            _save_bot_registry()
+def set_bot(bot: Any) -> None:
+    """No-op kept for test compatibility. Hub mode has no local bot."""
+    pass
+
+
+def set_hub_state(state: HubState) -> None:
+    """Called by hub_main.py to inject the in-memory state shared with monitor/analytics."""
+    global _hub_state_ref, _start_time
+    _hub_state_ref = state
+    if not _start_time:
+        _start_time = time.time()
 
 
 FRONTEND_DIR = Path(__file__).parent / "frontend" / "dist"
@@ -137,158 +137,45 @@ app.add_middleware(
 
 
 def _bot_status() -> BotStatus:
-    if not _bot:
+    if _hub_state_ref is None:
         return BotStatus()
-    total_balance = _bot.target._current_balance
-    margin_used = 0.0
-    for pos in _bot.orders.scaler.active_positions.values():
-        margin_used += pos.avg_entry_price * pos.current_size / max(pos.current_leverage, 1)
+
+    merged = _build_merged_snapshot()
+    s = merged.get("status", {})
     return BotStatus(
-        bot_id=_bot.settings.bot_id or "default",
-        running=_bot._running,
-        trading_mode=_bot.settings.trading_mode,
-        exchange_name=_bot.settings.exchange.upper(),
-        exchange_url=_bot.settings.platform_url,
-        balance=total_balance,
-        available_margin=max(0.0, total_balance - margin_used),
-        daily_pnl=_bot.target.todays_pnl,
-        daily_pnl_pct=_bot.target.todays_pnl_pct,
-        tier=_bot.target.tier.value,
-        tier_progress_pct=_bot.target.progress_pct,
-        daily_target_pct=_bot.target.daily_target_pct,
-        total_growth_pct=_bot.target.total_growth_pct,
-        total_growth_usd=_bot.target._current_balance - _bot.target._initial_capital,
+        bot_id="hub",
+        running=True,
+        trading_mode=get_settings().trading_mode,
+        exchange_name=s.get("exchange_name", ""),
+        balance=s.get("balance", 0),
+        available_margin=s.get("available_margin", 0),
+        daily_pnl=s.get("daily_pnl", 0),
+        daily_pnl_pct=s.get("daily_pnl_pct", 0),
+        tier=s.get("tier", "building"),
+        total_growth_pct=s.get("total_growth_pct", 0),
+        total_growth_usd=s.get("total_growth_usd", 0),
         uptime_seconds=time.time() - _start_time if _start_time else 0,
-        manual_stop_active=_bot.target.manual_stop,
-        strategies_count=len(_bot._strategies),
-        dynamic_strategies_count=len(_bot._dynamic_strategies),
-        profit_buffer_pct=_bot.target.profit_buffer_pct,
+        strategies_count=s.get("strategies_count", 0),
+        dynamic_strategies_count=0,
+        profit_buffer_pct=s.get("profit_buffer_pct", 0),
     )
 
 
 async def _positions() -> list[PositionInfo]:
-    if not _bot:
-        return []
-    try:
-        positions = await _bot.exchange.fetch_positions()
-    except Exception:
-        return []
-    result = []
-    for pos in positions:
-        if pos.amount <= 0:
-            continue
-        ts = _bot.orders.trailing.active_stops.get(pos.symbol)
-        sp = _bot.orders.scaler.get(pos.symbol)
-        result.append(
-            PositionInfo(
-                symbol=pos.symbol,
-                side=pos.side.value,
-                amount=pos.amount,
-                entry_price=pos.entry_price,
-                current_price=pos.current_price,
-                pnl_pct=pos.pnl_pct,
-                pnl_usd=pos.unrealized_pnl,
-                leverage=pos.leverage,
-                market_type=pos.market_type,
-                strategy=pos.strategy,
-                stop_loss=ts.current_stop if ts else pos.stop_loss,
-                notional_value=pos.notional_value,
-                age_minutes=(time.time() - pos.opened_at.timestamp()) / 60 if pos.opened_at else 0,
-                breakeven_locked=ts.breakeven_locked if ts else False,
-                scale_mode=sp.mode.value if sp else "",
-                scale_phase=sp.phase.value if sp else "",
-                dca_count=sp.adds if sp else 0,
-                trade_url=_bot.settings.symbol_platform_url(pos.symbol, pos.market_type),
-            )
-        )
-    return result
+    return []
 
 
 def _intel_snapshot() -> IntelSnapshot | None:
-    if not _bot:
+    if _hub_state_ref is None:
         return None
-
-    # Multibot: read from shared state written by the monitor service
-    if not _bot.intel:
-        try:
-            _hub_state = SharedState(data_dir=Path("data"))
-            snap = _hub_state.read_intel()
-            if not snap.sources_active:
-                return None
-            return IntelSnapshot(
-                regime=snap.regime,
-                fear_greed=snap.fear_greed,
-                fear_greed_bias=snap.fear_greed_bias,
-                liquidation_24h=snap.liquidation_24h,
-                mass_liquidation=snap.mass_liquidation,
-                liquidation_bias=snap.liquidation_bias,
-                macro_event_imminent=snap.macro_event_imminent,
-                macro_exposure_mult=snap.macro_exposure_mult,
-                macro_spike_opportunity=snap.macro_spike_opportunity,
-                next_macro_event=snap.next_macro_event,
-                whale_bias=snap.whale_bias,
-                overleveraged_side=snap.overleveraged_side,
-                position_size_multiplier=snap.position_size_multiplier,
-                should_reduce_exposure=snap.should_reduce_exposure,
-                preferred_direction=snap.preferred_direction,
-            )
-        except Exception:
-            return None
-
-    c = _bot.intel.condition
-    if c is None:
+    snap = _hub_state_ref.read_intel()
+    if not snap.sources_active:
         return None
-    macro_events_raw = []
-    try:
-        upcoming = _bot.intel.macro.upcoming_high_impact
-        macro_events_raw = [
-            MacroEventInfo(
-                title=ev.title,
-                impact=ev.impact.value,
-                hours_until=round(ev.hours_until, 1),
-                date_iso=ev.date.isoformat(),
-            )
-            for ev in upcoming[:15]
-        ]
-    except Exception:
-        pass
-
-    return IntelSnapshot(
-        regime=c.regime.value,
-        fear_greed=c.fear_greed,
-        fear_greed_bias=c.fear_greed_bias,
-        liquidation_24h=c.liquidation_24h,
-        mass_liquidation=c.mass_liquidation,
-        liquidation_bias=c.liquidation_bias,
-        macro_event_imminent=c.macro_event_imminent,
-        macro_exposure_mult=c.macro_exposure_mult,
-        macro_spike_opportunity=c.macro_spike_opportunity,
-        next_macro_event=c.next_macro_event,
-        macro_events=macro_events_raw,
-        whale_bias=c.whale_bias,
-        overleveraged_side=c.overleveraged_side,
-        position_size_multiplier=c.position_size_multiplier,
-        should_reduce_exposure=c.should_reduce_exposure,
-        preferred_direction=c.preferred_direction,
-    )
+    return snap
 
 
 def _wick_scalps() -> list[WickScalpInfo]:
-    if not _bot:
-        return []
-    result = []
-    for sym, ws in _bot.orders.wick_scalper.active_scalps.items():
-        result.append(
-            WickScalpInfo(
-                symbol=sym,
-                scalp_side=ws.scalp_side,
-                entry_price=ws.entry_price,
-                amount=ws.amount,
-                age_minutes=ws.age_minutes,
-                max_hold_minutes=ws.max_hold_minutes,
-            )
-        )
-    return result
+    return []
 
 
 def _recent_logs() -> list[LogEntry]:
@@ -300,13 +187,12 @@ def _recent_logs() -> list[LogEntry]:
 
 @app.get("/health", response_model=None)
 async def health() -> dict[str, Any]:
-    return {"status": "ok", "bot_running": _bot._running if _bot else False}
+    return {"status": "ok", "bot_running": True, "mode": "hub"}
 
 
 @app.get("/api/grafana-url", response_model=None)
 async def grafana_url(_: str = Depends(verify_token)) -> dict[str, Any]:
-    port = _bot.settings.grafana_port if _bot else 3001
-    return {"port": port, "dashboard_uid": "trading-bot"}
+    return {"port": get_settings().grafana_port, "dashboard_uid": "trading-bot"}
 
 
 @app.get("/api/system-metrics", response_model=None)
@@ -314,7 +200,7 @@ async def system_metrics(_: str = Depends(verify_token)) -> dict[str, Any]:
     from web.metrics import get_metrics_json
 
     uptime = time.time() - _start_time if _start_time else 0
-    return get_metrics_json(_bot, uptime)
+    return get_metrics_json(None, uptime)
 
 
 @app.get("/metrics", response_model=None)
@@ -322,7 +208,7 @@ async def metrics() -> Response:
     from web.metrics import collect_metrics
 
     uptime = time.time() - _start_time if _start_time else 0
-    body = collect_metrics(_bot, uptime)
+    body = collect_metrics(None, uptime)
     return Response(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
@@ -361,16 +247,6 @@ async def get_bots(_: str = Depends(verify_token)) -> list[BotInstance]:
                 strategies=strat_names,
             )
         )
-    if not bots and _bot:
-        bots.append(
-            BotInstance(
-                bot_id=_bot.settings.bot_id or "default",
-                label="Default",
-                port=0,
-                exchange=_bot.settings.exchange.upper(),
-                strategies=_bot.settings.bot_strategy_list,
-            )
-        )
     return bots
 
 
@@ -381,27 +257,10 @@ async def get_positions(_: str = Depends(verify_token)) -> list[PositionInfo]:
 
 @app.get("/api/trades", response_model=list[TradeRecord])
 async def get_trades(_: str = Depends(verify_token)) -> list[TradeRecord]:
-    if not _bot:
-        return []
     records = []
     # Aggregate trade logs from all bot reports
     for rpt in _bot_reports.values():
         for t in rpt.get("trade_log", []):
-            records.append(
-                TradeRecord(
-                    timestamp=t.get("timestamp", ""),
-                    symbol=t.get("symbol", ""),
-                    side=t.get("side", ""),
-                    action=t.get("action", ""),
-                    amount=t.get("amount", 0),
-                    price=t.get("price", 0),
-                    strategy=t.get("strategy", ""),
-                    pnl=t.get("pnl", 0),
-                )
-            )
-    if not records:
-        # Fallback: local bot's in-memory log
-        for t in _bot.orders._trade_log[-100:]:
             records.append(
                 TradeRecord(
                     timestamp=t.get("timestamp", ""),
@@ -425,52 +284,34 @@ async def get_intel(_: str = Depends(verify_token)) -> IntelSnapshot | None:
 
 @app.get("/api/news", response_model=list[NewsItemInfo])
 async def get_news(_: str = Depends(verify_token)) -> list[NewsItemInfo]:
-    if not _bot:
+    # Hub mode: read news from in-memory intel snapshot
+    if _hub_state_ref is None:
         return []
+    snap = _hub_state_ref.read_intel()
     return [
         NewsItemInfo(
-            headline=n.headline,
-            source=n.source,
-            url=n.url,
-            published=n.published.isoformat() if n.published else "",
-            matched_symbols=n.matched_symbols,
-            sentiment=n.sentiment,
-            sentiment_score=n.sentiment_score,
+            headline=n.get("headline", ""),
+            source=n.get("source", ""),
+            url=n.get("url", ""),
+            published=n.get("published", ""),
+            matched_symbols=n.get("matched_symbols", []),
+            sentiment=n.get("sentiment", "neutral"),
+            sentiment_score=n.get("sentiment_score", 0.0),
         )
-        for n in reversed(_bot._recent_news[-50:])
+        for n in reversed(snap.news_items[-50:])
     ]
 
 
 @app.get("/api/trade-queue", response_model=list[TradeQueueItem])
 async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem]:
     """Return all recent trade proposals across all bot queues with lifecycle status."""
-    from shared.models import TradeQueue as TQ
-
-    state = SharedState()
     all_proposals: list[Any] = []
 
-    data_dir = state._data_dir
-    found_bot_dirs = False
-    for child in sorted(data_dir.iterdir()):
-        if not child.is_dir():
-            continue
-        qf = child / "trade_queue.json"
-        if not qf.exists():
-            continue
-        found_bot_dirs = True
-        try:
-            q = TQ.model_validate_json(qf.read_text())
-            for bucket in (q.critical, q.daily, q.swing):
-                for p in bucket:
-                    all_proposals.append(p)
-        except Exception:
-            continue
-
-    if not found_bot_dirs:
-        queue = state.read_trade_queue()
-        for bucket in (queue.critical, queue.daily, queue.swing):
-            for p in bucket:
-                all_proposals.append(p)
+    if _hub_state_ref is None:
+        return []
+    q = _hub_state_ref.read_trade_queue()
+    for bucket in (q.critical, q.daily, q.swing):
+        all_proposals.extend(bucket)
 
     pending = [p for p in all_proposals if not p.consumed and not p.rejected and not p.is_expired]
 
@@ -500,28 +341,9 @@ async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem
 
 @app.get("/api/trending", response_model=list[TrendingCoinInfo])
 async def get_trending(_: str = Depends(verify_token)) -> list[TrendingCoinInfo]:
-    if not _bot:
+    if _hub_state_ref is None:
         return []
-
-    if _bot.scanner:
-        return [
-            TrendingCoinInfo(
-                symbol=coin.symbol,
-                name=coin.name,
-                price=coin.price,
-                volume_24h=coin.volume_24h,
-                market_cap=coin.market_cap,
-                change_1h=coin.change_1h,
-                change_24h=coin.change_24h,
-                is_low_liquidity=coin.is_low_liquidity,
-                has_dynamic_strategy=coin.trading_pair in _bot._dynamic_strategies,
-            )
-            for coin in _bot.scanner.hot_movers
-        ]
-
-    # Multi-bot: read from shared intel state (hub-local, not bot's)
-    _hub_state = SharedState(data_dir=Path("data"))
-    snap = _hub_state.read_intel()
+    snap = _hub_state_ref.read_intel()
     return [
         TrendingCoinInfo(
             symbol=m.symbol,
@@ -541,6 +363,8 @@ async def get_trending(_: str = Depends(verify_token)) -> list[TrendingCoinInfo]
 @app.get("/api/strategies", response_model=list[StrategyInfo])
 async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
     grouped: dict[tuple[str, bool], StrategyInfo] = {}
+
+    # Source 1: live bot reports (strategies currently running on connected bots)
     for rpt in _bot_reports.values():
         for s in rpt.get("strategies", []):
             name = s.get("name", "")
@@ -565,78 +389,72 @@ async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
                 existing = {x.strip() for x in g.symbol.split(",") if x.strip()}
                 if sym not in existing:
                     g.symbol = ", ".join(sorted(existing | {sym})) if existing else sym
+
+    # Source 2: analytics weights (hub-side strategy performance from trade history)
+    if _hub_state_ref is not None:
+        analytics = _hub_state_ref.read_analytics()
+        for w in analytics.weights:
+            key = (w.strategy, False)
+            if key not in grouped:
+                grouped[key] = StrategyInfo(
+                    name=w.strategy,
+                    symbol="",
+                    market_type="futures",
+                    leverage=10,
+                    mode="pyramid",
+                    applied_count=w.total_trades,
+                    success_count=round(w.win_rate * w.total_trades) if w.total_trades else 0,
+                    fail_count=w.total_trades - round(w.win_rate * w.total_trades) if w.total_trades else 0,
+                )
+            elif not grouped[key].applied_count and w.total_trades:
+                g = grouped[key]
+                g.applied_count = w.total_trades
+                g.success_count = round(w.win_rate * w.total_trades)
+                g.fail_count = w.total_trades - g.success_count
+
     return list(grouped.values())
 
 
 @app.get("/api/modules", response_model=list[ModuleStatus])
 async def get_modules(_: str = Depends(verify_token)) -> list[ModuleStatus]:
-    if not _bot:
+    if _hub_state_ref is None:
         return []
-    shared = _bot._multibot
-    snap = SharedState(data_dir=Path("data")).read_intel() if shared else None
+    snap = _hub_state_ref.read_intel()
     return [
         ModuleStatus(
             name="intel",
             display_name="Market Intelligence",
-            enabled=shared or (_bot.intel is not None and _bot.settings.intel_enabled),
-            description="Fear & Greed, liquidations, macro calendar, whale sentiment"
-            + (" (via monitor service)" if shared else ""),
-            stats={
-                "regime": snap.regime
-                if snap
-                else (_bot.intel.condition.regime.value if _bot.intel and _bot.intel.condition else "off")
-            },
+            enabled=True,
+            description="Fear & Greed, liquidations, macro calendar, whale sentiment (in-process)",
+            stats={"regime": snap.regime},
         ),
         ModuleStatus(
             name="scanner",
             display_name="Trending Scanner",
             enabled=True,
-            description="CryptoBubbles-style trending coin scanner" + (" (via monitor service)" if shared else ""),
-            stats={
-                "trending_count": len(snap.hot_movers)
-                if snap
-                else (len(_bot.scanner.hot_movers) if _bot.scanner else 0)
-            },
+            description="CryptoBubbles-style trending coin scanner (in-process)",
+            stats={"trending_count": len(snap.hot_movers)},
         ),
         ModuleStatus(
             name="news",
             display_name="News Monitor",
-            enabled=shared or _bot.settings.news_enabled,
-            description="RSS feed monitoring for spike correlation" + (" (via monitor service)" if shared else ""),
-            stats={"recent_count": len(_bot._recent_news)},
+            enabled=True,
+            description="RSS feed monitoring for spike correlation (in-process)",
+            stats={"recent_count": len(snap.news_items)},
         ),
         ModuleStatus(
-            name="volatility",
-            display_name="Volatility Detector",
+            name="analytics",
+            display_name="Analytics Engine",
             enabled=True,
-            description="Price spike detection engine",
-            stats={"threshold": _bot.settings.spike_threshold_pct},
+            description="Strategy scoring, pattern detection, suggestions (in-process)",
+            stats={"strategies_scored": len(_hub_state_ref.read_analytics().weights)},
         ),
     ]
-
-
-def _compound_projection(target: Any) -> str:
-    """Single consolidated projection block for the dashboard."""
-    p = target.projected_balance
-    pct = target.daily_target_pct
-    bal = target._current_balance
-    growth = target.total_growth_pct
-    day = target._day_number
-    lines = [
-        f"  Balance: {bal:,.2f} USDT  |  Growth: {growth:+.1f}%  |  Day {day}",
-        f"  Daily target: {pct:.1f}%",
-        "",
-        "  Compound projections (if target hit daily):",
-        f"    1 week:   {p['1_week']:>12,.2f} USDT",
-        f"    1 month:  {p['1_month']:>12,.2f} USDT",
-        f"    3 months: {p['3_months']:>12,.2f} USDT",
-    ]
-    return "\n".join(lines)
 
 
 @app.get("/api/daily-report", response_model=DailyReportData)
 async def get_daily_report(_: str = Depends(verify_token)) -> DailyReportData:
-    if not _bot:
+    if _hub_state_ref is None:
         return DailyReportData()
     # Aggregate daily report data across all bots
     total_winning = 0
@@ -666,25 +484,10 @@ async def get_daily_report(_: str = Depends(verify_token)) -> DailyReportData:
         if wd and (not worst_day or wd.get("pnl_pct", 0) < worst_day.get("pnl_pct", 0)):
             worst_day = wd
     if not all_pnl_pcts:
-        # Fallback: local bot only
-        t = _bot.target
-        history = [r.model_dump() for r in t.history]
-        best = t.best_day
-        worst = t.worst_day
-        return DailyReportData(
-            compound_report=_compound_projection(_bot.target),
-            history=history,
-            winning_days=t.winning_days,
-            losing_days=t.losing_days,
-            target_hit_days=t.target_hit_days,
-            avg_daily_pnl_pct=t.avg_daily_pnl_pct,
-            best_day=best.model_dump() if best else None,
-            worst_day=worst.model_dump() if worst else None,
-            projected=t.projected_balance,
-        )
+        return DailyReportData()
 
     return DailyReportData(
-        compound_report=_compound_projection(_bot.target),
+        compound_report="",
         history=all_history,
         winning_days=total_winning,
         losing_days=total_losing,
@@ -692,7 +495,7 @@ async def get_daily_report(_: str = Depends(verify_token)) -> DailyReportData:
         avg_daily_pnl_pct=sum(all_pnl_pcts) / len(all_pnl_pcts) if all_pnl_pcts else 0,
         best_day=best_day,
         worst_day=worst_day,
-        projected=_bot.target.projected_balance,
+        projected={},
     )
 
 
@@ -701,7 +504,7 @@ async def get_daily_report(_: str = Depends(verify_token)) -> DailyReportData:
 
 @app.get("/api/analytics", response_model=AnalyticsSnapshot)
 async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
-    if not _bot:
+    if _hub_state_ref is None:
         return AnalyticsSnapshot()
 
     hub = _get_hub_db()
@@ -752,39 +555,6 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
                     dca_count=p.get("dca_count", 0),
                 )
             )
-    # Fallback: local bot positions if no reports
-    if not live:
-        positions = await _bot.exchange.fetch_positions()
-        price_map = {p.symbol: p.current_price for p in positions if p.amount > 0}
-        for sym, sp in _bot.orders.scaler.active_positions.items():
-            current_price = price_map.get(sym, sp.last_add_price or sp.avg_entry_price)
-            if sp.avg_entry_price > 0:
-                if sp.side == "long":
-                    pnl_pct = (current_price - sp.avg_entry_price) / sp.avg_entry_price * 100
-                else:
-                    pnl_pct = (sp.avg_entry_price - current_price) / sp.avg_entry_price * 100
-            else:
-                pnl_pct = 0.0
-            notional = sp.current_size * current_price * sp.current_leverage
-            pnl_usd = notional * pnl_pct / 100 if sp.current_leverage > 0 else 0
-            _opened = getattr(sp, "opened_at", 0)
-            age = (time.time() - _opened) / 60 if _opened else 0
-            live.append(
-                LivePositionInfo(
-                    symbol=sym,
-                    side=sp.side,
-                    strategy=sp.strategy or "unknown",
-                    entry_price=sp.avg_entry_price,
-                    current_price=current_price,
-                    pnl_pct=pnl_pct,
-                    pnl_usd=pnl_usd,
-                    notional=notional,
-                    leverage=sp.current_leverage,
-                    age_minutes=age,
-                    dca_count=sp.adds,
-                )
-            )
-
     total_logged = hub.trade_count()
 
     return AnalyticsSnapshot(
@@ -800,17 +570,9 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
 
 @app.get("/api/closed-trades")
 async def get_closed_trades(limit: int = 100, _: str = Depends(verify_token)) -> list[dict[str, Any]]:
-    if not _bot:
-        return []
     hub = _get_hub_db()
     rows = hub.get_all_trades(limit=limit)
     return [r.model_dump() for r in rows if r.closed_at]
-
-
-@app.get("/api/deposits")
-async def get_deposits(limit: int = 100, _: str = Depends(verify_token)) -> list[dict[str, Any]]:
-    hub = _get_hub_db()
-    return hub.get_deposits(limit=limit)
 
 
 @app.post("/api/analytics/refresh", response_model=ActionResponse)
@@ -831,231 +593,77 @@ async def refresh_analytics(_: str = Depends(verify_token)) -> ActionResponse:
 @app.post("/api/bot/start", response_model=ActionResponse)
 async def bot_start(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
     bid = (body.bot_id if body else "") or ""
-    if not _bot:
-        return ActionResponse(success=False, message="Bot instance not initialized")
-    if bid and not _is_local_bot(bid):
+    if bid and bid != "all":
         return await _forward_to_bot(bid, "/api/bot/start", {})
-    if bid == "all" or not bid:
-        results = []
-        if not _bot._running:
-            _background_tasks[:] = [t for t in _background_tasks if not t.done()]
-            _background_tasks.append(asyncio.create_task(_bot.start()))
-            results.append("local: starting")
-        else:
-            results.append("local: already running")
-        if not bid or bid == "all":
-            remote = await _broadcast_to_remote_bots("/api/bot/start", {})
-            if remote:
-                results.append(remote)
-        return ActionResponse(success=True, message="; ".join(results))
-    if _bot._running:
-        return ActionResponse(success=False, message="Bot is already running")
-    _background_tasks[:] = [t for t in _background_tasks if not t.done()]
-    _background_tasks.append(asyncio.create_task(_bot.start()))
-    return ActionResponse(success=True, message="Bot starting")
+    result = await _broadcast_to_remote_bots("/api/bot/start", {})
+    return ActionResponse(success=True, message=result or "broadcast sent")
 
 
 @app.post("/api/bot/stop", response_model=ActionResponse)
 async def bot_stop(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
     bid = (body.bot_id if body else "") or ""
-    if not _bot:
-        return ActionResponse(success=False, message="Bot instance not initialized")
-    if bid and not _is_local_bot(bid) and bid != "all":
+    if bid and bid != "all":
         return await _forward_to_bot(bid, "/api/bot/stop", {})
-    results = []
-    if _bot._running:
-        await _bot.stop()
-        results.append("local: stopped")
-    else:
-        results.append("local: already stopped")
-    if not bid or bid == "all":
-        remote = await _broadcast_to_remote_bots("/api/bot/stop", {})
-        if remote:
-            results.append(remote)
-    return ActionResponse(success=True, message="; ".join(results))
+    result = await _broadcast_to_remote_bots("/api/bot/stop", {})
+    return ActionResponse(success=True, message=result or "broadcast sent")
 
 
 @app.post("/api/position/close", response_model=ActionResponse)
 async def close_position(body: PositionCloseBody, _: str = Depends(verify_token)) -> ActionResponse:
-    if not _bot:
-        return ActionResponse(success=False, message="Bot not initialized")
-    if not _is_local_bot(body.bot_id):
-        return await _forward_to_bot(body.bot_id, "/api/position/close", {"symbol": body.symbol})
-    from core.models import Signal, SignalAction
-
-    symbol = body.symbol
-    sig = Signal(
-        symbol=symbol,
-        action=SignalAction.CLOSE,
-        strategy="dashboard",
-        reason="Manual close from dashboard",
-    )
-    try:
-        await _bot.orders.execute_signal(sig)
-        nudge_ws()
-        return ActionResponse(success=True, message=f"Closed {symbol}")
-    except Exception as e:
-        return ActionResponse(success=False, message=str(e))
+    return await _forward_to_bot(body.bot_id, "/api/position/close", {"symbol": body.symbol})
 
 
 @app.post("/api/position/take-profit", response_model=ActionResponse)
 async def take_profit(body: PositionTakeProfitBody, _: str = Depends(verify_token)) -> ActionResponse:
-    if not _bot:
-        return ActionResponse(success=False, message="Bot not initialized")
-    if not _is_local_bot(body.bot_id):
-        return await _forward_to_bot(body.bot_id, "/api/position/take-profit", {"symbol": body.symbol, "pct": body.pct})
-    symbol = body.symbol
-    pct = max(1, min(100, body.pct))
-    try:
-        positions = await _bot.exchange.fetch_positions()
-        pos = next((p for p in positions if p.symbol == symbol and p.amount > 0), None)
-        if not pos:
-            return ActionResponse(success=False, message=f"No open position for {symbol}")
-        close_amount = pos.amount * (pct / 100)
-        from core.models import MarketType, OrderSide, OrderType
-
-        close_side = OrderSide.SELL if pos.side.value == "buy" else OrderSide.BUY
-        mkt = MarketType(pos.market_type) if pos.market_type in ("spot", "futures") else MarketType.SPOT
-        _result = await _bot.exchange.place_order(
-            symbol=symbol,
-            side=close_side,
-            order_type=OrderType.MARKET,
-            amount=close_amount,
-            leverage=pos.leverage,
-            market_type=mkt,
-        )
-        nudge_ws()
-        return ActionResponse(success=True, message=f"Took {pct}% profit on {symbol} ({close_amount:.6f})")
-    except Exception as e:
-        return ActionResponse(success=False, message=str(e))
+    return await _forward_to_bot(body.bot_id, "/api/position/take-profit", {"symbol": body.symbol, "pct": body.pct})
 
 
 @app.post("/api/position/tighten-stop", response_model=ActionResponse)
 async def tighten_stop(body: PositionTightenStopBody, _: str = Depends(verify_token)) -> ActionResponse:
-    if not _bot:
-        return ActionResponse(success=False, message="Bot not initialized")
-    if not _is_local_bot(body.bot_id):
-        return await _forward_to_bot(
-            body.bot_id, "/api/position/tighten-stop", {"symbol": body.symbol, "pct": body.pct}
-        )
-    symbol = body.symbol
-    pct = max(0.1, min(50, body.pct))
-    ts = _bot.orders.trailing.active_stops.get(symbol)
-    if not ts:
-        return ActionResponse(success=False, message=f"No trailing stop for {symbol}")
-    positions = await _bot.exchange.fetch_positions()
-    pos = next((p for p in positions if p.symbol == symbol), None)
-    if not pos:
-        return ActionResponse(success=False, message=f"No position for {symbol}")
-    if not pos.current_price:
-        return ActionResponse(success=False, message="No current price available")
-    new_stop = pos.current_price * (1 - pct / 100) if pos.side.value == "buy" else pos.current_price * (1 + pct / 100)
-    ts.current_stop = new_stop
-    nudge_ws()
-    return ActionResponse(success=True, message=f"Stop tightened to {new_stop:.6f} ({pct}% from current)")
+    return await _forward_to_bot(body.bot_id, "/api/position/tighten-stop", {"symbol": body.symbol, "pct": body.pct})
 
 
 @app.post("/api/close-all", response_model=ActionResponse)
 async def close_all(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
     bid = (body.bot_id if body else "") or ""
-    if not _bot:
-        return ActionResponse(success=False, message="Bot not initialized")
-    if bid and not _is_local_bot(bid) and bid != "all":
+    if bid and bid != "all":
         return await _forward_to_bot(bid, "/api/close-all", {})
-    results = []
-    await _bot._close_all_positions("Dashboard: close all")
-    results.append("local: closed")
-    if not bid or bid == "all":
-        remote = await _broadcast_to_remote_bots("/api/close-all", {})
-        if remote:
-            results.append(remote)
+    result = await _broadcast_to_remote_bots("/api/close-all", {})
     nudge_ws()
-    return ActionResponse(success=True, message="; ".join(results))
+    return ActionResponse(success=True, message=result or "broadcast sent")
 
 
 @app.post("/api/stop-trading", response_model=ActionResponse)
 async def stop_trading(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
     bid = (body.bot_id if body else "") or ""
-    if not _bot:
-        return ActionResponse(success=False, message="Bot not initialized")
-    if bid and not _is_local_bot(bid) and bid != "all":
+    if bid and bid != "all":
         return await _forward_to_bot(bid, "/api/stop-trading", {})
-    _bot.target.STOP_FILE.touch()
-    results = ["local: halted"]
-    if not bid or bid == "all":
-        remote = await _broadcast_to_remote_bots("/api/stop-trading", {})
-        if remote:
-            results.append(remote)
+    result = await _broadcast_to_remote_bots("/api/stop-trading", {})
     nudge_ws()
-    return ActionResponse(success=True, message="; ".join(results))
+    return ActionResponse(success=True, message=result or "broadcast sent")
 
 
 @app.post("/api/resume-trading", response_model=ActionResponse)
 async def resume_trading(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
     bid = (body.bot_id if body else "") or ""
-    if not _bot:
-        return ActionResponse(success=False, message="Bot not initialized")
-    if bid and not _is_local_bot(bid) and bid != "all":
+    if bid and bid != "all":
         return await _forward_to_bot(bid, "/api/resume-trading", {})
-    _bot.target.STOP_FILE.unlink(missing_ok=True)
-    results = ["local: resumed"]
-    if not bid or bid == "all":
-        remote = await _broadcast_to_remote_bots("/api/resume-trading", {})
-        if remote:
-            results.append(remote)
+    result = await _broadcast_to_remote_bots("/api/resume-trading", {})
     nudge_ws()
-    return ActionResponse(success=True, message="; ".join(results))
+    return ActionResponse(success=True, message=result or "broadcast sent")
 
 
 @app.post("/api/reset-profit-buffer", response_model=ActionResponse)
 async def reset_profit_buffer(_: str = Depends(verify_token)) -> ActionResponse:
-    if not _bot:
-        return ActionResponse(success=False, message="Bot not initialized")
-    old = _bot.target.profit_buffer_pct
-    _bot.target._profit_buffer_pct = 0.0
-    _bot.risk.max_daily_loss_pct = _bot.risk._base_max_daily_loss_pct
-    return ActionResponse(success=True, message=f"Profit buffer reset (was {old:.1f}%). Daily loss limit back to base.")
+    result = await _broadcast_to_remote_bots("/api/reset-profit-buffer", {})
+    return ActionResponse(success=True, message=result or "broadcast sent")
 
 
 @app.post("/api/module/{name}/toggle", response_model=ActionResponse)
 async def toggle_module(name: str, _: str = Depends(verify_token)) -> ActionResponse:
-    if not _bot:
-        return ActionResponse(success=False, message="Bot not initialized")
-    if name == "intel":
-        if _bot._multibot:
-            return ActionResponse(success=False, message="Intel is managed by the monitor service")
-        if _bot.intel:
-            await _bot.intel.stop()
-            _bot.intel = None
-            return ActionResponse(success=True, message="Intel disabled")
-        else:
-            from intel import MarketIntel
-
-            _bot.intel = MarketIntel(
-                coinglass_key=_bot.settings.coinglass_api_key,
-                symbols=_bot.settings.intel_symbol_list,
-                tv_exchange=_bot.settings.tv_exchange,
-                cmc_api_key=_bot.settings.cmc_api_key,
-                coingecko_api_key=_bot.settings.coingecko_api_key,
-            )
-            await _bot.intel.start()
-            return ActionResponse(success=True, message="Intel enabled")
-    elif name == "news":
-        if _bot._multibot:
-            return ActionResponse(success=False, message="News is managed by the monitor service")
-        if not _bot.news:
-            return ActionResponse(success=False, message="News monitor not available")
-        _bot.settings.news_enabled = not _bot.settings.news_enabled
-        _bot.news.enabled = _bot.settings.news_enabled
-        if _bot.settings.news_enabled:
-            if not _bot.news._running:
-                await _bot.news.start()
-            state = "enabled"
-        else:
-            await _bot.news.stop()
-            state = "disabled"
-        return ActionResponse(success=True, message=f"News {state}")
-    return ActionResponse(success=False, message=f"Unknown module: {name}")
+    if name not in ("intel", "news", "scanner", "analytics"):
+        return ActionResponse(success=False, message=f"Unknown module: {name}")
+    return ActionResponse(success=False, message=f"{name} is managed by the hub — toggle not supported")
 
 
 # --------------- Bot Profiles (dynamic container management) ---------------
@@ -1071,14 +679,11 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
 
     result: list[BotProfileInfo] = []
     for p in ALL_PROFILES:
+        if p.is_hub:
+            continue
         enabled = enabled_map.get(p.id, p.is_default)
         rpt = _bot_reports.get(p.id, {})
-        if p.is_hub:
-            container_status = "running" if (_bot is not None and _bot._running) else "idle"
-        elif rpt:
-            container_status = "running" if enabled else "idle"
-        else:
-            container_status = "idle"
+        container_status = ("running" if enabled else "idle") if rpt else "idle"
 
         result.append(
             BotProfileInfo(
@@ -1225,22 +830,11 @@ async def _forward_to_bot(bot_id: str, path: str, body: dict[str, Any]) -> Actio
 
 async def _broadcast_to_remote_bots(path: str, body: dict[str, Any]) -> str:
     """Send an action to all registered remote bots. Returns summary."""
-    local_id = (_bot.settings.bot_id or "default") if _bot else ""
     results = []
     for bid in _bot_urls:
-        if bid == local_id:
-            continue
         resp = await _forward_to_bot(bid, path, body)
         results.append(f"{bid}: {'ok' if resp.success else resp.message}")
     return "; ".join(results)
-
-
-def _is_local_bot(bot_id: str) -> bool:
-    """True when bot_id refers to the bot running on this process."""
-    if not _bot:
-        return False
-    local_id = _bot.settings.bot_id or "default"
-    return not bot_id or bot_id == local_id
 
 
 def _build_merged_snapshot() -> dict[str, Any]:
@@ -1378,29 +972,25 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
             _bot_urls[bot_id] = url
             _save_bot_registry()
 
-    # --- Proxy writes on behalf of the bot ---
-    state = SharedState(data_dir=Path("data"))
-    bot_state = SharedState(data_dir=Path(f"data/{bot_id}")) if bot_id else None
-
-    if bot_id and bot_state:
+    if bot_id and _hub_state_ref is not None:
         from shared.models import BotDeploymentStatus
 
         bot_status_data = data.get("bot_status")
         if bot_status_data:
-            bot_state.write_bot_status(BotDeploymentStatus(**bot_status_data))
+            _hub_state_ref.write_bot_status(BotDeploymentStatus(**bot_status_data))
 
         exchange_symbols = data.get("exchange_symbols")
         if exchange_symbols:
-            bot_state.write_exchange_symbols(
+            _hub_state_ref.write_exchange_symbols(
                 bot_id, exchange_symbols.get("exchange", ""), exchange_symbols.get("symbols", [])
             )
 
         queue_updates = data.get("queue_updates")
-        if queue_updates and bot_state:
+        if queue_updates:
             consumed = queue_updates.get("consumed", [])
             rejected = queue_updates.get("rejected", {})
             if consumed or rejected:
-                bot_state.apply_trade_queue_updates(consumed, rejected)
+                _hub_state_ref.apply_bot_queue_updates(bot_id, consumed, rejected)
 
     report_bot_snapshot(data)
     hub = _get_hub_db()
@@ -1420,16 +1010,25 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
         "confirmed_keys": confirmed,
         "enabled": enabled,
     }
-    if bot_id and bot_state:
+    if bot_id:
         with contextlib.suppress(Exception):
-            response["intel"] = state.read_intel().model_dump()
+            if _hub_state_ref is not None:
+                response["intel"] = _hub_state_ref.read_intel().model_dump()
         with contextlib.suppress(Exception):
-            response["analytics"] = state.read_analytics().model_dump()
+            if _hub_state_ref is not None:
+                response["analytics"] = _hub_state_ref.read_analytics().model_dump()
         with contextlib.suppress(Exception):
-            response["trade_queue"] = bot_state.read_trade_queue().model_dump()
+            if _hub_state_ref is not None:
+                # Filter shared queue by bot's style tag
+                bot_style = data.get("bot_style", bot_id)
+                response["trade_queue"] = _hub_state_ref.read_queue_for_bot_style(bot_style).model_dump()
         with contextlib.suppress(Exception):
-            response["extreme_watchlist"] = state.read_extreme_watchlist().model_dump()
-        response["intel_age"] = state.intel_age_seconds()
+            if _hub_state_ref is not None:
+                response["extreme_watchlist"] = _hub_state_ref.read_extreme_watchlist().model_dump()
+        if _hub_state_ref is not None:
+            response["intel_age"] = _hub_state_ref.intel_age_seconds()
+        else:
+            response["intel_age"] = 999999.0
     return response
 
 
@@ -1484,28 +1083,6 @@ async def recovery_close_trade(request: Request) -> dict[str, Any]:
     hub = _get_hub_db()
     updated = hub.mark_recovery_close(bot_id, opened_at)
     return {"status": "ok", "updated": updated}
-
-
-@app.post("/internal/deposit")
-async def receive_deposit(request: Request) -> dict[str, Any]:
-    """Bots push deposit/withdrawal detection events here."""
-    data = await request.json()
-    bot_id = data.get("bot_id", "")
-    amount = data.get("amount", 0)
-    if not bot_id:
-        return {"status": "error", "detail": "missing bot_id"}
-
-    hub = _get_hub_db()
-    row_id = hub.insert_deposit(
-        bot_id=bot_id,
-        amount=amount,
-        exchange=data.get("exchange", ""),
-        detected_at=data.get("detected_at", ""),
-        balance_before=data.get("balance_before", 0),
-        balance_after=data.get("balance_after", 0),
-        notes=data.get("notes", ""),
-    )
-    return {"status": "ok", "deposit_id": row_id}
 
 
 # --------------- WebSocket ---------------

@@ -1,16 +1,19 @@
-"""Standalone analytics service.
+"""Incremental analytics service.
 
-Runs independently. Reads trade history from data/hub.db (the central
-hub database), computes strategy scores, detects patterns, generates
-suggestions, and writes results to data/analytics_state.json.
+Reads trade history from data/hub.db, computes strategy scores, detects
+patterns, generates suggestions, and persists results via HubState
+(which writes analytics_state.json to disk).
 
-Trading bots read analytics_state.json for strategy weights.
-They have no local DB — all persistence flows through the hub.
+On startup the previously persisted snapshot is already loaded by HubState,
+so scores/patterns/suggestions are available immediately.  A full recompute
+only happens when new trades are detected or on a periodic cadence (default
+every 30 minutes) to pick up time-sensitive shifts like streak cooloff.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 from loguru import logger
@@ -22,26 +25,32 @@ from shared.state import SharedState
 
 HUB_DB = Path("data/hub.db")
 
+_FULL_REFRESH_INTERVAL = 1800  # 30 min — periodic recompute even without new trades
+
 
 class AnalyticsService:
-    """Standalone analytics process.
+    """Incremental analytics process.
 
-    Refreshes periodically (default every 5 minutes) and after
-    detecting new trades in the database.
+    - On boot: persisted snapshot is already in HubState (loaded from disk).
+      If new trades arrived while the hub was down, recompute immediately.
+      Otherwise skip the expensive full refresh.
+    - On each tick: check trade count.  Only recompute when new trades exist.
+    - Every 30 min: force a recompute regardless (streak cooloff, time shifts).
     """
 
-    def __init__(self, refresh_interval: int = 300):
+    def __init__(self, refresh_interval: int = 300, state: SharedState | None = None):
         self.refresh_interval = refresh_interval
-        self.state = SharedState()
+        self.state: SharedState = state or SharedState()
         self.db = TradeDB(path=HUB_DB)
         self.engine: AnalyticsEngine | None = None
         self._running = False
         self._last_trade_count = 0
+        self._last_full_refresh: float = 0.0
 
     async def start(self) -> None:
         logger.info("=" * 50)
-        logger.info("ANALYTICS SERVICE v1.0")
-        logger.info("Refresh interval: {}s", self.refresh_interval)
+        logger.info("ANALYTICS SERVICE v2.0 (incremental)")
+        logger.info("Tick interval: {}s | Full refresh: {}s", self.refresh_interval, _FULL_REFRESH_INTERVAL)
         logger.info("=" * 50)
 
         self.db.connect()
@@ -49,8 +58,21 @@ class AnalyticsService:
         self._last_trade_count = self.db.trade_count()
         self._running = True
 
-        self._do_refresh()
-        logger.info("Initial refresh: {} trades, {} strategies scored", self._last_trade_count, len(self.engine.scores))
+        existing = self.state.read_analytics()
+        if existing.weights and existing.total_trades_logged == self._last_trade_count:
+            logger.info(
+                "Analytics loaded from disk: {} strategies, {} patterns — no new trades, skipping recompute",
+                len(existing.weights),
+                len(existing.patterns),
+            )
+        else:
+            new = self._last_trade_count - existing.total_trades_logged
+            logger.info(
+                "Analytics: {} new trade(s) since last persist (disk had {}), recomputing...",
+                max(new, 0),
+                existing.total_trades_logged,
+            )
+            self._do_refresh()
 
         await self._run_loop()
 
@@ -64,14 +86,15 @@ class AnalyticsService:
             try:
                 current_count = self.db.trade_count()
                 new_trades = current_count - self._last_trade_count
+                now = time.monotonic()
+                force_periodic = (now - self._last_full_refresh) >= _FULL_REFRESH_INTERVAL
 
                 if new_trades > 0:
                     logger.info("Detected {} new trade(s) (total: {}), refreshing...", new_trades, current_count)
                     self._do_refresh()
                     self._last_trade_count = current_count
-                else:
-                    # Periodic refresh even without new trades (scores may shift
-                    # due to time-based factors like streak cooloff)
+                elif force_periodic:
+                    logger.debug("Periodic analytics refresh (no new trades)")
                     self._do_refresh()
 
                 await asyncio.sleep(self.refresh_interval)
@@ -84,6 +107,7 @@ class AnalyticsService:
     def _do_refresh(self) -> None:
         assert self.engine is not None
         self.engine.refresh()
+        self._last_full_refresh = time.monotonic()
 
         weights = []
         for name, score in self.engine.scores.items():

@@ -93,7 +93,6 @@ class DailyTargetTracker:
         self._pyramid_unrealized_pnl: float = 0.0
         self._profit_buffer_pct: float = 0.0
         self._realized_pnl_today: float = 0.0
-        self._total_deposits: float = 0.0
 
     def record_trade(self, realized_pnl: float = 0.0) -> None:
         self._todays_trades += 1
@@ -141,50 +140,9 @@ class DailyTargetTracker:
             self.total_growth_pct,
         )
 
-    def update_balance(
-        self,
-        balance: float,
-        unrealized_pnl: float | None = None,
-    ) -> float | None:
-        """Update current balance, detecting deposits/withdrawals.
-
-        When *unrealized_pnl* is provided (from ``fetch_positions``), the
-        method compares the actual balance to what's expected from trading
-        activity.  Any large unexplained jump is treated as an external
-        deposit (or withdrawal) and the day-start balance is adjusted so
-        daily PnL percentages remain accurate.
-
-        If *unrealized_pnl* is ``None`` (the default), deposit detection
-        is skipped — only the balance value is stored.
-
-        Returns the deposit amount if one was detected, else ``None``.
-        """
-        if self._current_balance <= 0 or self._day_start_balance <= 0:
-            self._current_balance = balance
-            return None
-
+    def update_balance(self, balance: float) -> None:
+        """Update current balance snapshot."""
         self._current_balance = balance
-
-        if unrealized_pnl is None:
-            return None
-
-        expected_balance = self._day_start_balance + unrealized_pnl + self._realized_pnl_today
-        unexplained = balance - expected_balance
-
-        noise_threshold = max(50.0, self._day_start_balance * 0.05)
-
-        if abs(unexplained) > noise_threshold:
-            deposit = unexplained
-            self._day_start_balance += deposit
-            self._total_deposits += deposit
-            logger.info(
-                "DEPOSIT DETECTED: {:+.2f} USDT | Day-start adjusted: {:.2f} | Total deposits: {:+.2f}",
-                deposit,
-                self._day_start_balance,
-                self._total_deposits,
-            )
-            return deposit
-        return None
 
     def update_pyramid_unrealized(self, pnl: float) -> None:
         """Store the combined unrealized PnL of all PYRAMID-mode positions.
@@ -264,8 +222,7 @@ class DailyTargetTracker:
     def total_growth_pct(self) -> float:
         if self._initial_capital == 0:
             return 0.0
-        trading_profit = self._current_balance - self._initial_capital - self._total_deposits
-        return trading_profit / self._initial_capital * 100
+        return (self._current_balance - self._initial_capital) / self._initial_capital * 100
 
     @property
     def projected_balance(self) -> dict[str, float]:
@@ -306,11 +263,6 @@ class DailyTargetTracker:
         return 0.5
 
     @property
-    def total_deposits(self) -> float:
-        """Total external deposits/withdrawals detected since inception."""
-        return self._total_deposits
-
-    @property
     def tier(self) -> DailyTier:
         pnl = self.adjusted_todays_pnl_pct
         if pnl < 0:
@@ -347,6 +299,8 @@ class DailyTargetTracker:
         """Remove the CLOSE_ALL file after positions are closed."""
         with contextlib.suppress(OSError):
             self.CLOSE_ALL_FILE.unlink(missing_ok=True)
+            if self._bot_data_dir:
+                (self._bot_data_dir / "CLOSE_ALL").unlink(missing_ok=True)
 
     def aggression_multiplier(self) -> float:
         """Position sizing multiplier based on tier. NEVER above 1.0.
@@ -512,13 +466,12 @@ class DailyTargetTracker:
         else:
             mode_tag = " [HUNTING]"
 
-        deposit_tag = f" | Deposits: {self._total_deposits:+.2f}" if self._total_deposits != 0 else ""
         return (
             f"Day {self._day_number} [{self.tier.value.upper()}]{mode_tag} | "
             f"PnL: {self.todays_pnl:+.2f} ({self.todays_pnl_pct:+.1f}%) | "
             f"Target: {self.secure_target_pct:.0f}-{self.ride_target_pct:.0f}% | "
             f"Progress: {self.progress_pct:.0f}% | "
-            f"Balance: {self._current_balance:.2f}{deposit_tag}{manual}"
+            f"Balance: {self._current_balance:.2f}{manual}"
         )
 
     def compound_report(self) -> str:
@@ -529,8 +482,6 @@ class DailyTargetTracker:
         lines.append("=" * 55)
         lines.append("")
         lines.append(f"  Initial capital:     {self._initial_capital:>12.2f} USDT")
-        if self._total_deposits != 0:
-            lines.append(f"  Total deposits:      {self._total_deposits:>+12.2f} USDT")
         lines.append(f"  Current balance:     {self._current_balance:>12.2f} USDT")
         lines.append(f"  Total growth:        {self.total_growth_pct:>+11.1f}%")
         lines.append(f"  Days running:        {self._day_number:>12d}")

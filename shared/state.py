@@ -159,6 +159,8 @@ class SharedState:
 
     def write_bot_trade_queue(self, bot_id: str, queue: TradeQueue) -> None:
         """Write a queue file into a specific bot's data directory."""
+        if not bot_id:
+            return
         bot_dir = self._data_dir / bot_id
         bot_dir.mkdir(parents=True, exist_ok=True)
         queue.updated_at = datetime.now(UTC).isoformat()

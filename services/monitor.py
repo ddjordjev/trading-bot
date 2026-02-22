@@ -19,6 +19,7 @@ there's no need to hammer APIs for new opportunities.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from datetime import UTC, datetime
 
@@ -60,9 +61,9 @@ INTENSITY_TABLE: dict[DeploymentLevel, dict[str, float]] = {
 class MonitorService:
     """Standalone monitoring process with adaptive poll rates."""
 
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, settings: Settings | None = None, state: SharedState | None = None):
         self.settings = settings or get_settings()
-        self.state = SharedState()
+        self.state: SharedState = state or SharedState()
 
         # Clients
         self.fear_greed = FearGreedClient(poll_interval=3600)
@@ -111,7 +112,9 @@ class MonitorService:
         self._last_scanner_refresh = 0.0
         self._last_symbols_refresh = 0.0
         self._last_analytics_refresh = 0.0
+        self._last_ta_refresh = 0.0
         self._exchange_symbols: dict[str, set[str]] = {}
+        self._candle_fetcher: object | None = None
 
     async def start(self) -> None:
         logger.info("=" * 50)
@@ -121,6 +124,20 @@ class MonitorService:
         logger.info("=" * 50)
 
         self._running = True
+
+        # Initialize candle fetcher for hub-side technical analysis
+        from hub.state import HubState
+
+        if isinstance(self.state, HubState):
+            try:
+                from hub.candle_fetcher import CandleFetcher
+
+                exchange_id = self.settings.exchange if hasattr(self.settings, "exchange") else "binance"
+                sandbox = self.settings.trading_mode in ("paper_live",)
+                self._candle_fetcher = CandleFetcher(exchange_id=exchange_id, sandbox=sandbox)
+                logger.info("Candle fetcher initialized: {} (sandbox={})", exchange_id, sandbox)
+            except Exception as e:
+                logger.warning("Candle fetcher init failed (TA disabled): {}", e)
 
         await self.fear_greed.start()
         await self.liquidations.start()
@@ -137,6 +154,9 @@ class MonitorService:
 
     async def stop(self) -> None:
         self._running = False
+        if self._candle_fetcher is not None:
+            with contextlib.suppress(Exception):
+                await self._candle_fetcher.close()
         await self.fear_greed.stop()
         await self.liquidations.stop()
         await self.macro.stop()
@@ -224,9 +244,23 @@ class MonitorService:
                 try:
                     staging_queue = TradeQueue()
                     staging_queue = self.signal_gen.generate(snapshot, staging_queue)
+
+                    # Hub-side technical analysis (every 120s when candle fetcher is available)
+                    ta_interval = 120 * multipliers.get("tv", 1.0)
+                    if self._candle_fetcher and now - self._last_ta_refresh >= ta_interval:
+                        try:
+                            ta_candidates = self._build_ta_candidates(snapshot)
+                            if ta_candidates:
+                                staging_queue = await self.signal_gen.generate_technical_signals(
+                                    ta_candidates, self._candle_fetcher, staging_queue
+                                )
+                        except Exception as e:
+                            logger.debug("Technical analysis error: {}", e)
+                        self._last_ta_refresh = now
+
                     self._route_to_bots(staging_queue, all_statuses)
                 except Exception as e:
-                    logger.debug("Signal generator error: {}", e)
+                    logger.warning("Signal generation/routing error: {}", e)
 
                 if tick_count % 10 == 0:
                     bot_queues = {s.bot_id: s for s in all_statuses}
@@ -295,58 +329,37 @@ class MonitorService:
         staging: TradeQueue,
         bot_statuses: list[BotDeploymentStatus],
     ) -> None:
-        """Route proposals from staging queue to per-bot queues by target_bot.
+        """Route proposals from staging queue to the shared hub queue.
 
-        Each bot gets only proposals matching its style. If the target bot
-        has no capacity or isn't trading, the proposal is skipped (expires).
-        Proposals tagged as unsupported on the bot's exchange are skipped.
+        Filtering by bot style happens at read time in /internal/report.
         """
-        status_by_style: dict[str, BotDeploymentStatus] = {}
-        for s in bot_statuses:
-            if s.bot_style:
-                status_by_style[s.bot_style] = s
+        from hub.state import HubState
 
-        bot_queues: dict[str, TradeQueue] = {}
+        if not isinstance(self.state, HubState):
+            logger.warning("_route_to_bots called without HubState (got {}) — skipping", type(self.state).__name__)
+            return
 
+        existing = self.state.read_trade_queue()
+        new_count = 0
         all_proposals = staging.critical + staging.daily + staging.swing
         for proposal in all_proposals:
             if proposal.consumed or proposal.rejected or proposal.is_expired:
                 continue
-
-            target = proposal.target_bot or "momentum"
-            bot_status = status_by_style.get(target)
-
-            if bot_status and not bot_status.should_trade:
-                continue
-            if bot_status and not bot_status.has_capacity:
-                continue
-
-            # Skip if this symbol is unsupported on the target bot's exchange
-            if bot_status and bot_status.exchange and bot_status.exchange in proposal.unsupported_exchanges:
-                continue
-
-            bot_id = bot_status.bot_id if bot_status else target
-            if bot_id not in bot_queues:
-                existing = self._read_bot_queue(bot_id)
-                bot_queues[bot_id] = existing
-
-            bot_queues[bot_id].add(proposal)
-
-        for bot_id, queue in bot_queues.items():
-            queue.purge_stale()
-            self.state.write_bot_trade_queue(bot_id, queue)
-
-    def _read_bot_queue(self, bot_id: str) -> TradeQueue:
-        """Read existing queue for a bot so we don't overwrite unconsumed proposals."""
-        bot_dir = self.state._data_dir / bot_id
-        queue_file = bot_dir / "trade_queue.json"
-        if not queue_file.exists():
-            return TradeQueue()
-        try:
-            raw = queue_file.read_text()
-            return TradeQueue.model_validate_json(raw)
-        except Exception:
-            return TradeQueue()
+            before = len(existing.critical) + len(existing.daily) + len(existing.swing)
+            existing.add(proposal)
+            after = len(existing.critical) + len(existing.daily) + len(existing.swing)
+            if after > before:
+                new_count += 1
+        purged = existing.purge_stale()
+        self.state.write_trade_queue(existing)
+        if new_count or purged:
+            logger.info(
+                "Trade queue updated: +{} new, -{} purged, {} total ({} pending)",
+                new_count,
+                purged,
+                existing.total,
+                existing.pending_count,
+            )
 
     async def _refresh_tv(self, bot_status: BotDeploymentStatus) -> None:
         """Refresh TradingView analysis, adapting to deployment state."""
@@ -598,6 +611,34 @@ class MonitorService:
         if votes["short"] > votes["long"] and votes["short"] > votes["neutral"]:
             return "short"
         return "neutral"
+
+    def _build_ta_candidates(self, snap: IntelSnapshot) -> list[str]:
+        """Build list of symbols for hub-side technical analysis.
+
+        Combines major coins, trending movers, and extreme candidates.
+        Limited to avoid API rate limits.
+        """
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        for sym in self.signal_gen._major_symbols:
+            if sym not in seen:
+                candidates.append(sym)
+                seen.add(sym)
+
+        for mover in snap.hot_movers[:10]:
+            sym = f"{mover.symbol.upper()}/USDT"
+            if sym not in seen and not mover.is_low_liquidity:
+                candidates.append(sym)
+                seen.add(sym)
+
+        for mover in snap.cmc_trending[:5]:
+            sym = f"{mover.symbol.upper()}/USDT"
+            if sym not in seen:
+                candidates.append(sym)
+                seen.add(sym)
+
+        return candidates[:20]
 
     def _build_extreme_watchlist(self) -> None:
         """Filter scanner data for extreme movers and write to shared state."""

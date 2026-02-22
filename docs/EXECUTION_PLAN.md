@@ -2,15 +2,15 @@
 
 ## Goal
 
-Run 5 trading bots on Binance testnet for 10+ continuous days, each starting
-with $1,000 (total system capital: $5,000). A 6th container (the Hub) runs
+Run 10 trading bots on Binance testnet for 10+ continuous days, each starting
+with $1,000 (total system capital: $10,000). An 11th container (the Hub) runs
 with $0 balance — it handles dashboard, coordination, and trade persistence
 only.
 
 The agent operating this plan has full autonomy to add, remove, or reconfigure
 strategies at any time based on observed results. The only hard constraints are:
 
-1. **Starting capital: $1,000 per bot × 5 bots = $5,000 total**
+1. **Starting capital: $1,000 per bot × 10 bots = $10,000 total**
    (SESSION_BUDGET=1000 per bot, hub SESSION_BUDGET=0)
 2. **Don't blow up** — if any bot's balance drops below $600, halt it and
    reassess. If a bot hits $0, log what happened, analyze why, archive
@@ -27,25 +27,20 @@ Everything else — which strategies to run, when to change them, leverage,
 risk params, symbols — is at the agent's discretion. Use the analytics
 engine, trade DB, and logs to make data-driven decisions.
 
-### Default Bots (5 active)
+### All Bots (10 active)
 
-| Bot | Profile | Strategies | Style |
-|-----|---------|-----------|-------|
-| bot-extreme | Extreme Mover | compound_momentum, market_open_volatility | momentum |
-| bot-momentum | Momentum | compound_momentum, market_open_volatility | momentum |
-| bot-indicators | Technical Indicators | rsi, macd | momentum |
-| bot-meanrev | Mean Reversion | bollinger, mean_reversion | meanrev |
-| bot-swing | Swing / Grid | swing_opportunity, grid | swing |
-
-### Idle Bots (can be activated from Settings page)
-
-| Bot | Profile |
-|-----|---------|
-| bot-scalper | Scalper |
-| bot-fullstack | Full Stack |
-| bot-conservative | Conservative |
-| bot-aggressive | Aggressive |
-| bot-hedger | Hedge Heavy |
+| Bot | Profile | Strategies | Style | Notable Overrides |
+|-----|---------|-----------|-------|-------------------|
+| bot-extreme | Extreme Mover | compound_momentum, market_open_volatility | momentum | 20x leverage, 10 max positions, extreme mode on |
+| bot-momentum | Momentum | compound_momentum, market_open_volatility | momentum | defaults |
+| bot-indicators | Technical Indicators | rsi, macd | momentum | defaults |
+| bot-meanrev | Mean Reversion | bollinger, mean_reversion | meanrev | slower tick (120s idle / 60s active) |
+| bot-swing | Swing / Grid | swing_opportunity, grid | swing | slowest tick (600s idle / 300s active) |
+| bot-scalper | Scalper | compound_momentum | momentum | fast tick (15s), tight SL (0.8%), low TP (2%) |
+| bot-fullstack | Full Stack | all 8 strategies | momentum | 10 max positions |
+| bot-conservative | Conservative | rsi, bollinger | meanrev | 3x leverage, $20 risk, 1% SL |
+| bot-aggressive | Aggressive | compound_momentum, rsi | momentum | 20x leverage, $100 risk, 10% TP |
+| bot-hedger | Hedge Heavy | compound_momentum, mean_reversion | momentum | hedge on (40% ratio, 2% min profit) |
 
 ### Hub (no trading)
 
@@ -91,45 +86,49 @@ SESSION_BUDGET=1000 and starts fresh with a new PaperExchange balance.
 │  Reads/writes shared JSON on behalf of bots                 │
 └────────┬───────────────────────────────────────┬────────────┘
          │  HTTP POST/response                   │
-    ┌────┴────────────────────────┐              │
-    │  5 trading bots (in-memory) │              │
-    │  bot-extreme   $1000        │              │
-    │  bot-momentum  $1000        │              │
-    │  bot-indicators $1000       │              │
-    │  bot-meanrev   $1000        │              │
-    │  bot-swing     $1000        │              │
-    │  (+ 5 idle containers)      │              │
-    │                             │              │
-    │  Each bot:                  │              │
-    │  - Strategies + Orders      │              │
-    │  - Risk mgmt + Exchange     │    ┌────────┴──────────┐
-    │  - Zero file I/O            │    │  data/ (shared vol)│
-    │  - Reports to hub via HTTP  │    │  intel_state.json  │
-    └─────────────────────────────┘    │  analytics_state   │
-                                       │  trade_queue.json  │
-    ┌──────────────┐  ┌──────────────┐ │  bot_status.json   │
-    │   monitor    │  │  analytics   │ │  hub.db            │
-    │ - Intel feeds│  │ - Scores     │ │                    │
-    │ - Scanning   │  │ - Patterns   │ └────────────────────┘
-    │ - Queue gen  │  │ - Feedback   │        ▲
-    └──────┬───────┘  └──────┬───────┘        │
-           └─────────────────┴────── read/write ┘
+    ┌────┴────────────────────────────┐           │
+    │  10 trading bots (in-memory)    │           │
+    │  bot-extreme      $1000         │           │
+    │  bot-momentum     $1000         │           │
+    │  bot-indicators   $1000         │           │
+    │  bot-meanrev      $1000         │           │
+    │  bot-swing        $1000         │           │
+    │  bot-scalper      $1000         │           │
+    │  bot-fullstack    $1000         │           │
+    │  bot-conservative $1000         │           │
+    │  bot-aggressive   $1000         │           │
+    │  bot-hedger       $1000         │           │
+    │                                │           │
+    │  Each bot:                     │           │
+    │  - Strategies + Orders         │           │
+    │  - Risk mgmt + Exchange        │ ┌────────┴──────────┐
+    │  - Zero file I/O               │ │  data/ (shared vol)│
+    │  - Reports to hub via HTTP     │ │  analytics_state   │
+    └────────────────────────────────┘ │  hub.db            │
+                                       └────────────────────┘
+    ┌──────────────┐  ┌──────────────┐
+    │   monitor    │  │  analytics   │  All in-process inside
+    │ - Intel feeds│  │ - Scores     │  the hub. Trade queue,
+    │ - Scanning   │  │ - Patterns   │  intel, bot status are
+    │ - Queue gen  │  │ - Feedback   │  in-memory (HubState).
+    └──────────────┘  └──────────────┘
 ```
 
 **Data flow:**
 - Trading bots are **stateless** — in-memory only, zero file access
-- All shared data (intel, analytics, trade queue, extreme watchlist) flows
-  through the hub's `/internal/report` HTTP endpoint
-- Bots POST their snapshots to hub → hub writes to shared volume on their behalf
-- Hub reads intel/analytics/queue from shared volume → returns in HTTP response
+- All shared data (intel, analytics, trade queue, extreme watchlist) lives
+  in `HubState` (in-memory) and flows to bots via `/internal/report` HTTP
+- Bots POST their snapshots to hub → hub stores in RAM
+- Hub returns intel/analytics/queue to bots in the HTTP response
 - `hub.db` is the sole persistent trade DB; bots push trades via HTTP
+- `analytics_state.json` is persisted to disk for restart survival
 
-**Shared files in `data/` (hub + monitor + analytics read/write):**
-- `bot_status.json` — hub writes (proxied from bots), monitor reads
-- `intel_state.json` — monitor writes, hub reads (proxied to bots)
-- `analytics_state.json` — analytics writes, hub reads (proxied to bots)
-- `trade_queue.json` — monitor writes proposals, hub reads (proxied to bots)
+**Persistent files in `data/`:**
 - `hub.db` — SQLite trade history (hub writes, analytics reads)
+- `analytics_state.json` — strategy scores/patterns (survives restarts)
+
+**In-memory only (HubState):**
+- Intel snapshots, trade queue, bot status, extreme watchlist
 
 **Logs:** `logs/` directory (1-day rotation, 30-day retention)
 
@@ -156,7 +155,7 @@ All use PYRAMID mode (DCA in): start small → DCA on dips → lever up on recov
 
 ### Mindset
 
-You are a trading desk operator. You have 10 days and $5,000 across 5 bots. Your job is to:
+You are a trading desk operator. You have 10 days and $10,000 across 10 bots. Your job is to:
 - Keep the system running 24/7
 - Watch what the strategies are doing
 - Cut what's losing, double down on what's working
@@ -198,8 +197,8 @@ is ranging and grid trading looks promising, try it. Be adaptive.
 
 ### What "Working" Means
 
-- **Minimum:** Total balance stays above $3,000 after 10 days (didn't blow up)
-- **Good:** Total balance grows to $6,000+ (20% over 10 days)
+- **Minimum:** Total balance stays above $6,000 after 10 days (didn't blow up)
+- **Good:** Total balance grows to $12,000+ (20% over 10 days)
 - **Great:** Consistent daily positive PnL across most bots, even if small
 - **Target:** Hit the 10% daily target at least a few times per bot
 
@@ -235,7 +234,7 @@ At minimum, review:
 - `strategies/` — all strategy implementations
 - `services/` — monitor, analytics, signal generator
 - `config/settings.py` — all configuration knobs
-- `docker-compose.yml` and `Dockerfile` — container setup
+- `docker-compose.yml`, `Dockerfile.hub`, `Dockerfile.bot` — container setup
 - `docs/EXECUTION_PLAN.md` — this file (you're reading it)
 
 **Optional:** `.cursor/chat_history.md` has previous session context and
@@ -277,21 +276,20 @@ Fix any failures before proceeding.
 ```bash
 docker compose build
 docker compose up -d
-docker compose ps          # all 3 services should be "healthy"
-docker compose logs --tail 20 trading-bot
-docker compose logs --tail 20 monitor
-docker compose logs --tail 20 analytics
+docker compose ps          # hub + active bots should be "healthy"
+docker compose logs --tail 20 bot-hub
+docker compose logs --tail 20 bot-momentum
 ```
 
 Verify:
 - No crash loops or repeating errors
 - Dashboard loads at http://localhost:9035
-- All 5 trading bots + hub show healthy in `docker compose ps`
+- All 10 trading bots + hub show healthy in `docker compose ps`
 - Each bot connects to Binance testnet (check per-bot logs)
-- Dashboard total balance shows ~$5,000 (5 × $1,000; hub excluded)
+- Dashboard total balance shows ~$10,000 (10 × $1,000; hub excluded)
 - Hub balance is $0
-- Monitor is writing `data/intel_state.json` (intel feeds polling)
-- Analytics is writing `data/analytics_state.json`
+- Monitor is populating intel data (check hub logs for intel polling)
+- Analytics is computing strategy scores (check hub logs or `data/analytics_state.json`)
 
 ### 4. End-to-End Signal Flow
 
@@ -300,9 +298,9 @@ Watch logs for ~10–15 minutes and confirm the full pipeline:
 ```
 Strategy generates Signal → RiskManager.check_signal() → OrderManager.execute_signal()
   → PaperExchange.place_order() → trade pushed to hub via HTTP (request_key for dedup)
-Monitor polls intel → writes IntelSnapshot → SignalGenerator produces TradeProposals
-  → bot reads trade_queue.json → processes proposals
-Hub writes hub.db → Analytics reads hub.db → computes strategy weights → writes analytics_state.json
+Monitor polls intel → writes IntelSnapshot to HubState → SignalGenerator produces TradeProposals
+  → proposals stored in HubState trade queue → bots receive via /internal/report response
+Hub writes hub.db → Analytics reads hub.db → computes strategy weights → persists to analytics_state.json
 Bot startup → asks hub for open trades → reconciles with exchange → recovery-closes dead ones
 ```
 
@@ -348,8 +346,8 @@ docker compose up -d
 ### Step 3: Verify
 - Dashboard loads at http://localhost:9035
 - All containers healthy: `docker compose ps`
-- 5 trading bots + hub + monitor + analytics running
-- Total balance ~$5,000 (5 × $1,000 per bot; hub $0)
+- 10 trading bots + hub running (monitor + analytics are in-process inside hub)
+- Total balance ~$10,000 (10 × $1,000 per bot; hub $0)
 - Each bot has its strategies registered (check Strategies tab / dropdown)
 - Check demo.binance.com — trades should appear there
 
@@ -379,8 +377,8 @@ docker compose build
 # Start all services
 docker compose up -d
 
-# Live logs
-docker compose logs -f trading-bot
+# Live logs (all bots)
+docker compose logs -f
 
 # Health check
 docker compose ps
@@ -399,14 +397,11 @@ docker compose down
 ### Direct Python (for debugging only)
 
 ```bash
-# Terminal 1: Monitor
-python run_monitor.py
+# Terminal 1: Hub (dashboard + monitor + analytics)
+python hub_main.py
 
-# Terminal 2: Analytics
-python run_analytics.py
-
-# Terminal 3: Bot + Dashboard
-python bot.py
+# Terminal 2: Bot
+BOT_ID=momentum BOT_STYLE=momentum python bot.py
 ```
 
 ---
@@ -419,7 +414,7 @@ If the system crashes, Cursor restarts, or you're a new agent picking this up:
 ```bash
 cd /Users/damirdjordjev/workspace/trading-bot
 docker compose ps
-docker compose logs --tail 50 trading-bot
+docker compose logs --tail 50 bot-hub
 ```
 
 ### 2. Check persisted state
@@ -433,8 +428,8 @@ db = TradeDB(); db.connect()
 print(f'Trades: {db.trade_count()}')
 "
 
-# Last bot status
-cat $HOST_DATA_DIR/bot_status.json
+# Bot status (via hub API — bot status is in-memory)
+curl -s http://localhost:9035/health
 ```
 
 ### 3. Read the daily log
@@ -476,10 +471,7 @@ Host paths are configured in `.env`:
 | Data | Host location | Notes |
 |------|--------------|-------|
 | Hub database | `$HOST_DATA_DIR/hub.db` | **Sole** persistent trade + analytics DB (critical) |
-| Bot status | `$HOST_DATA_DIR/bot_status.json` | Runtime state (ephemeral) |
-| Intel state | `$HOST_DATA_DIR/intel_state.json` | Runtime state (ephemeral) |
-| Analytics | `$HOST_DATA_DIR/analytics_state.json` | Runtime state (ephemeral) |
-| Trade queue | `$HOST_DATA_DIR/trade_queue.json` | Runtime state (ephemeral) |
+| Analytics | `$HOST_DATA_DIR/analytics_state.json` | Persisted strategy scores (survives restarts) |
 | Bot logs | `$HOST_LOGS_DIR/bot_*.log` | 1-day rotation, 30-day retention |
 | Monitor logs | `$HOST_LOGS_DIR/monitor_*.log` | 1-day rotation, 30-day retention |
 | Analytics logs | `$HOST_LOGS_DIR/analytics_*.log` | 1-day rotation, 30-day retention |
@@ -558,7 +550,7 @@ variables. The hub has `SESSION_BUDGET=0` hardcoded. Individual bots
 
 ## Strategy Change Procedure
 
-1. Edit `bot.py` → `main()` function (around line 1091)
+1. Edit `config/bot_profiles.py` → update strategies for the target bot profile
 2. `docker compose build && docker compose up -d`
 3. Verify in dashboard → Strategies tab
 4. Log the change in `docs/reports/daily_log.md`
@@ -572,11 +564,12 @@ variables. The hub has `SESSION_BUDGET=0` hardcoded. Individual bots
 | Start | `docker compose up -d` |
 | Stop | `docker compose down` |
 | Rebuild | `docker compose build && docker compose up -d` |
-| Logs (bot) | `docker compose logs -f trading-bot` |
+| Logs (hub) | `docker compose logs -f bot-hub` |
+| Logs (bot) | `docker compose logs -f bot-momentum` |
 | Logs (all) | `docker compose logs -f` |
 | Health | `docker compose ps` |
-| Restart | `docker compose restart trading-bot` |
-| Preflight | `python scripts/preflight_check.py` |
+| Restart | `docker compose restart bot-hub` |
+| Preflight | `.venv/bin/python scripts/preflight_check.py` |
 | Snapshot | `./scripts/run_session.sh snapshot` |
 | Dashboard | http://localhost:9035 |
 | Exchange | https://demo.binance.com/en/futures |

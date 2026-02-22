@@ -39,8 +39,8 @@ export function App() {
   }, [snapshot?.bots]);
 
   const exchanges = useMemo(() => {
-    const fromBots = [...new Set(bots.map((b) => b.exchange.toUpperCase()).filter(Boolean))];
-    return fromBots.length > 0 ? fromBots.sort() : FALLBACK_EXCHANGES;
+    const fromBots = bots.map((b) => b.exchange.toUpperCase()).filter(Boolean);
+    return [...new Set([...FALLBACK_EXCHANGES, ...fromBots])].sort();
   }, [bots]);
 
   const dashboardData: FullSnapshot | null = useMemo(() => {

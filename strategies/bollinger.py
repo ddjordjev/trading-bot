@@ -38,6 +38,8 @@ class BollingerStrategy(BaseStrategy):
 
         if math.isnan(price) or math.isnan(upper) or math.isnan(lower):
             return None
+        if price <= 0:
+            return None
         band_width = upper - lower
         if band_width == 0:
             return None

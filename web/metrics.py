@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from functools import wraps
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import Any, TypeVar
 
 import psutil
 from prometheus_client import (
@@ -29,9 +29,6 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-
-if TYPE_CHECKING:
-    from bot import TradingBot
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -108,15 +105,6 @@ _tick_total = Counter("bot_ticks_total", "Total ticks executed", registry=regist
 
 # ── Application: trading state ────────────────────────────────────────────────
 
-_balance = Gauge("trading_bot_balance", "Current account balance (USD)", registry=registry)
-_daily_pnl = Gauge("trading_bot_daily_pnl_usd", "Today's PnL in USD", registry=registry)
-_daily_pnl_pct = Gauge("trading_bot_daily_pnl_pct", "Today's PnL %", registry=registry)
-_daily_loss_pct = Gauge("trading_bot_daily_loss_pct", "Unrealized daily loss %", registry=registry)
-_open_positions = Gauge("trading_bot_open_positions", "Number of open positions", registry=registry)
-_trades_today = Gauge("trading_bot_trades_today", "Trades executed today", registry=registry)
-_win_rate = Gauge("trading_bot_win_rate", "Win rate today (%)", registry=registry)
-_fear_greed = Gauge("trading_bot_fear_greed", "Fear & Greed index (0-100)", registry=registry)
-_strategies_count = Gauge("trading_bot_strategies", "Registered strategies", registry=registry)
 _event_loop_lag = Gauge("bot_event_loop_lag_seconds", "Async event loop lag", registry=registry)
 
 # Pre-create generation labels
@@ -308,37 +296,17 @@ def _collect_process() -> None:
         pass
 
 
-def _collect_trading(bot: TradingBot | None) -> None:
-    if not bot:
-        return
-    _balance.set(bot.target._current_balance)
-    _daily_pnl.set(bot.target.todays_pnl)
-    _daily_pnl_pct.set(bot.target.todays_pnl_pct)
-    _daily_loss_pct.set(bot.risk.daily_loss_pct)
-    _open_positions.set(len(bot.orders.scaler.active_positions))
-    _trades_today.set(bot.risk._total_trades_today)
-    _win_rate.set(bot.risk.win_rate_today)
-    _strategies_count.set(len(bot._strategies) + len(bot._dynamic_strategies))
-
-    if bot.intel and bot.intel.condition:
-        _fear_greed.set(bot.intel.condition.fear_greed)
-    else:
-        _fear_greed.set(50)
-
-
-def collect_metrics(bot: TradingBot | None, uptime: float) -> bytes:
+def collect_metrics(bot: Any = None, uptime: float = 0.0) -> bytes:
     """Refresh all gauges and return Prometheus text exposition."""
     _collect_system()
     _collect_process()
-    _collect_trading(bot)
     return generate_latest(registry)
 
 
-def get_metrics_json(bot: TradingBot | None, uptime: float) -> dict[str, Any]:
+def get_metrics_json(bot: Any = None, uptime: float = 0.0) -> dict[str, Any]:
     """Return key metrics as JSON for the built-in monitoring dashboard."""
     _collect_system()
     _collect_process()
-    _collect_trading(bot)
 
     def _val(g: Gauge) -> float:
         try:

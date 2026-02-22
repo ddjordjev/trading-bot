@@ -41,24 +41,10 @@ class HubDB(TradeDB):
     def _create_hub_tables(self) -> None:
         assert self._conn
         self._conn.executescript("""
-            CREATE TABLE IF NOT EXISTS deposits (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                bot_id TEXT NOT NULL,
-                amount REAL NOT NULL,
-                exchange TEXT DEFAULT '',
-                detected_at TEXT NOT NULL,
-                balance_before REAL DEFAULT 0,
-                balance_after REAL DEFAULT 0,
-                notes TEXT DEFAULT ''
-            );
-
             CREATE TABLE IF NOT EXISTS bot_config (
                 bot_id TEXT PRIMARY KEY,
                 enabled INTEGER NOT NULL DEFAULT 1
             );
-
-            CREATE INDEX IF NOT EXISTS idx_deposits_bot ON deposits(bot_id);
-            CREATE INDEX IF NOT EXISTS idx_deposits_date ON deposits(detected_at);
         """)
         self._ensure_bot_id_column()
         self._ensure_request_key_column()
@@ -271,33 +257,6 @@ class HubDB(TradeDB):
         """Return and clear all confirmed request_keys for a bot."""
         keys = list(self._ack_buffer.pop(bot_id, set()))
         return keys
-
-    # ---- Deposit ingestion ----
-
-    def insert_deposit(
-        self,
-        bot_id: str,
-        amount: float,
-        exchange: str,
-        detected_at: str,
-        balance_before: float = 0,
-        balance_after: float = 0,
-        notes: str = "",
-    ) -> int:
-        assert self._conn
-        cursor = self._conn.execute(
-            """INSERT INTO deposits (bot_id, amount, exchange, detected_at,
-               balance_before, balance_after, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (bot_id, amount, exchange, detected_at, balance_before, balance_after, notes),
-        )
-        self._conn.commit()
-        return cursor.lastrowid or 0
-
-    def get_deposits(self, limit: int = 100) -> list[dict[str, Any]]:
-        assert self._conn
-        rows = self._conn.execute("SELECT * FROM deposits ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-        return [dict(r) for r in rows]
 
     # ---- Bot enable/disable ----
 

@@ -83,8 +83,7 @@ class DeFiLlamaClient:
             await asyncio.sleep(self.poll_interval)
 
     async def _fetch(self) -> None:
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
             chains = await self._fetch_chains(session)
             if chains:
 

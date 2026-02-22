@@ -40,7 +40,7 @@ class GridStrategy(BaseStrategy):
             return None
 
         price = df["close"].iloc[-1]
-        if math.isnan(price):
+        if math.isnan(price) or price <= 0:
             return None
 
         if self._center_price is None:

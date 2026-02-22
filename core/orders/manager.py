@@ -168,51 +168,50 @@ class OrderManager:
             self._active_orders.append(order)
             return order
 
-        if order.status == OrderStatus.FILLED:
-            order.strategy = signal.strategy
-            sp.record_add(order.filled, order.average_price)
-            self._log_trade(signal, order, "open")
-            logger.info(
-                "Opened {} {} {} @ {:.6f} (phase: {}, mode: {})",
-                signal.market_type,
-                side.value,
-                signal.symbol,
-                order.average_price,
-                sp.phase.value,
-                sp.mode.value,
-            )
+        order.strategy = signal.strategy
+        sp.record_add(order.filled, order.average_price)
+        self._log_trade(signal, order, "open")
+        logger.info(
+            "Opened {} {} {} @ {:.6f} (phase: {}, mode: {})",
+            signal.market_type,
+            side.value,
+            signal.symbol,
+            order.average_price,
+            sp.phase.value,
+            sp.mode.value,
+        )
 
-            pos = Position(
-                symbol=signal.symbol,
-                side=side,
-                amount=order.filled,
-                entry_price=order.average_price,
-                current_price=order.average_price,
-                leverage=actual_leverage,
-                market_type=market_type.value,
+        pos = Position(
+            symbol=signal.symbol,
+            side=side,
+            amount=order.filled,
+            entry_price=order.average_price,
+            current_price=order.average_price,
+            leverage=actual_leverage,
+            market_type=market_type.value,
+        )
+        tightened = signal.tightened_stop or 0.0
+        if pyramid:
+            is_major = signal.symbol in self.settings.major_symbol_list
+            pyramid_stop = max(sp.dca_interval_pct * 3, 5.0) if is_major else max(sp.dca_interval_pct * 8, 15.0)
+            self.trailing.register(
+                pos,
+                initial_stop_pct=pyramid_stop,
+                low_liquidity=low_liquidity,
+                tightened_stop=tightened,
             )
-            tightened = signal.tightened_stop or 0.0
-            if pyramid:
-                is_major = signal.symbol in self.settings.major_symbol_list
-                pyramid_stop = max(sp.dca_interval_pct * 3, 5.0) if is_major else max(sp.dca_interval_pct * 8, 15.0)
-                self.trailing.register(
-                    pos,
-                    initial_stop_pct=pyramid_stop,
-                    low_liquidity=low_liquidity,
-                    tightened_stop=tightened,
-                )
-                logger.info(
-                    "PYRAMID stop for {}: {:.1f}% ({})",
-                    signal.symbol,
-                    pyramid_stop,
-                    "major — tighter" if is_major else "alt — wide DCA zone",
-                )
-            else:
-                self.trailing.register(
-                    pos,
-                    low_liquidity=low_liquidity,
-                    tightened_stop=tightened,
-                )
+            logger.info(
+                "PYRAMID stop for {}: {:.1f}% ({})",
+                signal.symbol,
+                pyramid_stop,
+                "major — tighter" if is_major else "alt — wide DCA zone",
+            )
+        else:
+            self.trailing.register(
+                pos,
+                low_liquidity=low_liquidity,
+                tightened_stop=tightened,
+            )
 
         self._active_orders.append(order)
         return order
@@ -679,7 +678,7 @@ class OrderManager:
                     else:
                         pnl = (entry_price - exit_price) * scalp.amount
                 self.risk.record_pnl(pnl)
-                self.wick_scalper.close(sym)
+                self.wick_scalper.close(sym, pnl)
                 self.trailing.remove(f"{sym}:wick")
                 self._log_trade(
                     Signal(
@@ -893,7 +892,7 @@ class OrderManager:
                 else:
                     pnl = (entry_price - exit_price) * scalp.amount
             self.risk.record_pnl(pnl)
-            self.wick_scalper.close(symbol)
+            self.wick_scalper.close(symbol, pnl)
             self._log_trade(
                 Signal(symbol=symbol, action=SignalAction.CLOSE, strategy="wick_scalp", reason="wick_stop_hit"),
                 order,

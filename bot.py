@@ -18,20 +18,19 @@ from core.exchange import BaseExchange, create_exchange
 from core.extreme import ExtremeWatcher
 from core.market_schedule import get_market_schedule
 from core.models import Candle, MarketType, Signal, SignalAction
-from core.models.order import Order, OrderSide
+from core.models.order import Order
 from core.models.signal import TickUrgency
 from core.orders import OrderManager
 from core.orders.scaler import ScaleMode
 from core.patterns import PatternDetector, StructureAnalyzer
 from core.risk import RiskManager
 from core.risk.daily_target import DailyTargetTracker, DailyTier
-from core.risk.market_filter import LiquidityTier, MarketQualityFilter
+from core.risk.market_filter import MarketQualityFilter
 from db.models import TradeRecord
-from intel import MarketCondition, MarketIntel
+from intel import MarketCondition
 from intel.market_intel import MarketRegime
-from news import NewsItem, NewsMonitor
+from news import NewsItem
 from notifications import NotificationType, Notifier
-from scanner import TrendingCoin, TrendingScanner
 from shared.models import (
     AnalyticsSnapshot,
     BotDeploymentStatus,
@@ -42,9 +41,9 @@ from shared.models import (
     TradeProposal,
     TradeQueue,
 )
-from shared.state import SharedState
 from strategies import BUILTIN_STRATEGIES
 from strategies.base import BaseStrategy
+from validators import ValidationResult, get_validator
 from volatility import SpikeEvent, VolatilityDetector
 
 # PYRAMID (DCA in) is the DEFAULT for all strategies. Nobody can predict exact
@@ -94,37 +93,11 @@ class TradingBot:
 
         self._multibot = bool(self.settings.bot_id)
 
-        # In multi-bot mode the monitor service handles all external data.
-        # Bots only read shared state — no duplicate API calls.
-        self.news: NewsMonitor | None = None
-        self.intel: MarketIntel | None = None
-        self.scanner: TrendingScanner | None = None
-        if not self._multibot:
-            self.news = NewsMonitor(self.settings)
-            if self.settings.intel_enabled:
-                self.intel = MarketIntel(
-                    coinglass_key=self.settings.coinglass_api_key,
-                    symbols=self.settings.intel_symbol_list,
-                    tv_exchange=self.settings.tv_exchange,
-                    cmc_api_key=self.settings.cmc_api_key,
-                    coingecko_api_key=self.settings.coingecko_api_key,
-                )
-            self.scanner = TrendingScanner(
-                poll_interval=60,
-                min_volume_24h=5_000_000,
-                min_market_cap=50_000_000,
-                min_hourly_move_pct=2.0,
-                min_daily_move_pct=5.0,
-                intel=self.intel,
-            )
-
-        if not self._multibot:
-            bot_data = Path(self.settings.data_dir)
-            self.shared = SharedState(data_dir=bot_data)
-            self.shared_intel = SharedState(data_dir=Path("data"))
-        else:
-            self.shared = None  # type: ignore[assignment]
-            self.shared_intel = None  # type: ignore[assignment]
+        self.news = None
+        self.intel = None
+        self.scanner = None
+        self.shared = None  # type: ignore[assignment]
+        self.shared_intel = None  # type: ignore[assignment]
         self._hub_intel: IntelSnapshot | None = None
         self._hub_analytics: AnalyticsSnapshot | None = None
         self._hub_trade_queue: TradeQueue | None = None
@@ -138,7 +111,6 @@ class TradingBot:
         )
 
         self._strategies: list[BaseStrategy] = []
-        self._dynamic_strategies: dict[str, BaseStrategy] = {}
         self._active_signals: list[Signal] = []
         self._recent_news: list[NewsItem] = []
         self._whale_alerted: set[str] = set()
@@ -161,6 +133,7 @@ class TradingBot:
         self._available_symbols: set[str] = set()
         self._enabled: bool = True  # hub-controlled enable flag
         self._hub_enabled: bool = True  # latest value from hub report response
+        self._validator = get_validator(self.settings.bot_style)
 
     # -- Strategy Management --
 
@@ -222,10 +195,68 @@ class TradingBot:
             self.settings.max_notional_position / 1000,
         )
         logger.info("Gambling budget: {}% for low-liq coins", self.settings.gambling_budget_pct)
-        logger.info("Intel: {}", "ENABLED" if self.intel else "disabled")
         self._check_data_dir_size()
         logger.info("=" * 60)
 
+        # Early activation check: if hub says we're disabled, start in lean idle
+        if self._multibot and not await self._check_initial_activation():
+            logger.info("Bot NOT activated by hub — starting in lean idle mode")
+            self._running = True
+            self._started_at = datetime.now(UTC)
+            await self._lean_idle_loop()
+            return
+
+        await self._full_start()
+
+    async def _check_initial_activation(self) -> bool:
+        """Query the hub for this bot's enabled status before heavy init."""
+        from config.bot_profiles import PROFILES_BY_ID
+
+        bot_id = self.settings.bot_id or "default"
+        profile = PROFILES_BY_ID.get(bot_id)
+        if profile and profile.is_default:
+            return True
+
+        hub_url = self.settings.dashboard_hub_url
+        if not hub_url:
+            return True
+
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as sess:
+                payload = {"bot_id": bot_id, "bot_style": self.settings.bot_style}
+                async with sess.post(f"{hub_url}/internal/report", json=payload) as resp:
+                    data = await resp.json()
+                    enabled = data.get("enabled", True)
+                    self._hub_enabled = enabled
+                    return enabled
+        except Exception:
+            return True
+
+    async def _lean_idle_loop(self) -> None:
+        """Minimal loop for inactive bots — no exchange, no strategies.
+
+        Periodically checks hub for activation. When activated, breaks out
+        and runs _full_start() for full initialization.
+        """
+        while self._running:
+            try:
+                await self._idle_tick()
+
+                self._enabled = self._check_enabled()
+                if self._enabled:
+                    logger.info("Bot ACTIVATED by hub — performing full initialization")
+                    await self._full_start()
+                    return
+
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug("Lean idle error: {}", e)
+                await asyncio.sleep(10)
+
+    async def _full_start(self) -> None:
+        """Full initialization: exchange connect, strategy load, enter main loop."""
         await self._recover_state_from_hub()
 
         schedule = get_market_schedule()
@@ -240,33 +271,11 @@ class TradingBot:
             futures_syms = await self.exchange.get_available_symbols(MarketType.FUTURES)
             spot_syms = await self.exchange.get_available_symbols(MarketType.SPOT)
             self._available_symbols = set(futures_syms) | set(spot_syms)
-            if self.shared:
-                bot_id = self.settings.bot_id or "default"
-                self.shared.write_exchange_symbols(bot_id, self.settings.exchange, list(self._available_symbols))
             logger.info("Published {} available symbols for {}", len(self._available_symbols), self.settings.exchange)
         except Exception as e:
             logger.warning("Could not publish exchange symbols: {}", e)
 
         await self.notifier.start()
-
-        if self._multibot:
-            logger.info("Multi-bot mode: external data from monitor service (no local intel/news/scanner)")
-        else:
-            try:
-                futures_symbols = await self.exchange.get_available_symbols(MarketType.FUTURES)
-                if self.scanner:
-                    self.scanner.set_exchange_symbols(futures_symbols)
-            except Exception as e:
-                logger.warning("Could not load exchange symbols for scanner filter: {}", e)
-
-            if self.news:
-                await self.news.start()
-                self.news.on_news(self._on_news)
-            if self.scanner:
-                await self.scanner.start()
-                self.scanner.on_trending(self._on_trending)
-            if self.intel:
-                await self.intel.start()
 
         balance_map = await self.exchange.fetch_balance()
         balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
@@ -299,12 +308,6 @@ class TradingBot:
                 await self._monitor_task
             self._monitor_task = None
         await self.extreme_watcher.stop()
-        if self.intel:
-            await self.intel.stop()
-        if self.scanner:
-            await self.scanner.stop()
-        if self.news:
-            await self.news.stop()
         await self.notifier.stop()
         await self.exchange.disconnect()
         if self._hub_session:
@@ -346,8 +349,6 @@ class TradingBot:
 
     def _check_enabled(self) -> bool:
         """Check hub-controlled enable flag (received via /internal/report response)."""
-        if not self._multibot:
-            return True
         return self._hub_enabled
 
     async def _idle_tick(self) -> None:
@@ -366,8 +367,6 @@ class TradingBot:
             manual_stop=False,
         )
         self._last_bot_status = status
-        if self.shared:
-            self.shared.write_bot_status(status)
         await self._report_dashboard_snapshot([])
 
     async def _wind_down(self) -> None:
@@ -388,19 +387,46 @@ class TradingBot:
             should_trade=False,
         )
         self._last_bot_status = status
-        if self.shared:
-            self.shared.write_bot_status(status)
         await self._close_all_positions("hub_disabled")
 
     async def _fast_monitor_loop(self) -> None:
-        """Sub-second stop-loss monitor for scalp and momentum positions.
+        """Sub-second monitor for all time-critical actions.
 
-        Runs concurrently with the main tick loop. Only checks trailing
-        stops and expires quick trades — never runs strategies or fetches
-        candles, so each iteration completes in <1s.
+        Runs every 1-2s, independent of the main tick interval. Handles:
+        - CLOSE_ALL / STOP manual overrides (immediate)
+        - Legendary day + reversal risk close (immediate)
+        - Trailing stops, break-even, liquidation (via check_stops)
+        - Expired quick trades
+        - Extreme mover entries
         """
         while self._running:
             try:
+                # --- Emergency overrides (always checked, even with no positions) ---
+
+                if self.target.manual_close_all:
+                    logger.critical("CLOSE_ALL detected (fast loop) — closing all positions NOW")
+                    await self._close_all_positions("Manual CLOSE_ALL file")
+                    self.target.clear_close_all()
+                    await asyncio.sleep(2)
+                    continue
+
+                if self.target.tier.value == "legendary":
+                    intel = self._read_shared_intel()
+                    reversal_risk = intel is not None and intel.should_reduce_exposure
+                    should_close, reason = self.target.should_close_all(reversal_risk)
+                    if should_close:
+                        logger.critical("LEGENDARY + REVERSAL (fast loop) — closing all: {}", reason)
+                        await self._close_all_positions(reason)
+                        await self.notifier.send(
+                            NotificationType.DAILY_SUMMARY,
+                            f"LEGENDARY DAY CLOSED: {self.target.todays_pnl_pct:+.1f}%",
+                            reason,
+                        )
+                        await asyncio.sleep(2)
+                        continue
+
+                # --- Position management (only when positions exist) ---
+
                 if not self.orders.trailing.active_stops and not self.orders.wick_scalper.active_scalps:
                     await asyncio.sleep(2)
                     continue
@@ -489,12 +515,7 @@ class TradingBot:
         balance = self.settings.cap_balance(raw_balance)
 
         positions = await self.exchange.fetch_positions()
-        total_unrealized = sum(p.unrealized_pnl for p in positions if p.amount > 0)
-        unrealized_for_deposit = None if self.settings.is_paper_local() else total_unrealized
-        deposit_amount = self.target.update_balance(raw_balance, unrealized_pnl=unrealized_for_deposit)
-        if deposit_amount is not None:
-            balance_before = raw_balance - deposit_amount
-            await self._push_deposit_to_hub(deposit_amount, balance_before, raw_balance)
+        self.target.update_balance(raw_balance)
 
         pyramid_pnl = sum(
             p.unrealized_pnl
@@ -504,19 +525,17 @@ class TradingBot:
         self.target.update_pyramid_unrealized(pyramid_pnl)
 
         logger.debug(
-            "=== TICK === bal=${:.2f} pnl={:+.2f}% tier={} aggr={:.2f} strats={} dynamic={} trade={}",
+            "=== TICK === bal=${:.2f} pnl={:+.2f}% tier={} aggr={:.2f} trade={}",
             balance,
             self.target.todays_pnl_pct,
             self.target.tier.value,
             self.target.aggression_multiplier(),
-            len(self._strategies),
-            len(self._dynamic_strategies),
             self.target.should_trade(),
         )
 
-        # 0. Manual override check
+        # 0. Manual override (fast loop checks every ~1-2s; this is a fallback)
         if self.target.manual_close_all:
-            logger.critical("CLOSE_ALL detected -- closing all positions NOW")
+            logger.critical("CLOSE_ALL detected — closing all positions NOW")
             await self._close_all_positions("Manual CLOSE_ALL file")
             self.target.clear_close_all()
             return
@@ -599,26 +618,15 @@ class TradingBot:
         # 8. Process trade queue (CRITICAL -> DAILY -> SWING)
         await self._process_trade_queue()
 
-        # 9. Assess market intelligence
-        # Prefer shared state from monitor service; fall back to in-process
+        # 9. Read market intelligence from hub (no local fallback)
         intel_condition = self._read_shared_intel()
-        if intel_condition is None and self.intel:
-            intel_condition = self.intel.assess()
-            active_symbols = list(self.orders.scaler.active_positions.keys())
-            if active_symbols:
-                try:
-                    await self.intel.tradingview.analyze_multi(active_symbols, "1h")
-                except Exception as e:
-                    logger.debug("TV multi-analyze error: {}", e)
-        elif intel_condition and self.intel:
-            self.intel._condition = intel_condition
 
-        # 10. Legendary day check: at 100%+ decide whether to close or ride
+        # 10. Legendary day check (fast loop handles close; tick sends ride email)
         if self.target.tier.value == "legendary":
             reversal_risk = intel_condition is not None and intel_condition.should_reduce_exposure
             should_close, reason = self.target.should_close_all(reversal_risk)
             if should_close:
-                logger.critical("LEGENDARY DAY + REVERSAL RISK -- closing all: {}", reason)
+                logger.critical("LEGENDARY + REVERSAL (tick fallback) — closing all: {}", reason)
                 await self._close_all_positions(reason)
                 await self.notifier.send(
                     NotificationType.DAILY_SUMMARY,
@@ -628,12 +636,11 @@ class TradingBot:
                 return
 
             if not self.target.legendary_email_sent:
-                intel_text = self.intel.full_summary() if self.intel else "Intel disabled"
-                ride_reason = self.target.legendary_ride_reason(intel_text)
-                logger.info("LEGENDARY DAY -- letting it ride, emailing owner")
+                ride_reason = self.target.legendary_ride_reason("Intel via hub")
+                logger.info("LEGENDARY DAY — letting it ride, emailing owner")
                 await self.notifier.send(
                     NotificationType.DAILY_SUMMARY,
-                    f"LEGENDARY DAY RIDING: {self.target.todays_pnl_pct:+.1f}% -- positions open",
+                    f"LEGENDARY DAY RIDING: {self.target.todays_pnl_pct:+.1f}% — positions open",
                     ride_reason,
                 )
 
@@ -671,157 +678,29 @@ class TradingBot:
 
         await asyncio.sleep(0)
 
-        # 12. Run all strategies (collect candles for hedge analysis)
+        # 12. Fetch candles for held positions only (hedge + volatility checks)
+        # Strategy execution is now centralized in the hub's SignalGenerator.
+        # New entries come from the trade queue (step 8).
         candles_map: dict[str, list[Candle]] = {}
-        all_strategies = list(self._strategies) + list(self._dynamic_strategies.values())
         positions = await self.exchange.fetch_positions()
 
         if self.orders.has_stale_losers(positions):
             aggression *= 0.5
             logger.info("Stale short-term losers detected — halving aggression to {:.3f}", aggression)
-        pos_map = {p.symbol: p for p in positions if p.amount > 0}
-        for strategy in all_strategies:
+
+        held_symbols = [p.symbol for p in positions if p.amount > 0]
+        for sym in held_symbols:
             try:
-                # Sync position state so strategies survive restarts
-                pos = pos_map.get(strategy.symbol)
-                if pos:
-                    side = "long" if pos.side == OrderSide.BUY else "short"
-                    strategy.set_position_state(True, side)
-                else:
-                    strategy.set_position_state(False)
-
-                candles = await self.exchange.fetch_candles(strategy.symbol, "1m", limit=200)
-                ticker = await self.exchange.fetch_ticker(strategy.symbol)
-                candles_map[strategy.symbol] = candles
-
-                for c in candles:
-                    strategy.feed_candle(c)
-
-                await asyncio.sleep(0)  # yield so dashboard stays responsive
+                candles = await self.exchange.fetch_candles(sym, "1m", limit=200)
+                ticker = await self.exchange.fetch_ticker(sym)
+                candles_map[sym] = candles
 
                 spike = self.volatility.update(ticker)
                 if spike:
                     await self._handle_spike(spike)
-
-                from web.metrics import timed_block
-
-                with timed_block(f"strategy.{strategy.name}.analyze"):
-                    sig = strategy.analyze(candles, ticker)
-                if not sig:
-                    logger.debug("Strategy '{}' on {} — no signal this tick", strategy.name, strategy.symbol)
-                    continue
-
-                logger.debug(
-                    "Signal: {} {} {} str={:.2f} strat={} reason={} quick={} mkt={}",
-                    sig.action.value,
-                    sig.symbol,
-                    sig.market_type,
-                    sig.strength,
-                    sig.strategy,
-                    sig.reason[:50],
-                    sig.quick_trade,
-                    sig.market_type,
-                )
-
-                if sig.action == SignalAction.CLOSE:
-                    await self._process_signal(sig)
-                    continue
-
-                if not self.settings.is_market_type_allowed(sig.market_type):
-                    logger.debug("Skipping {} signal — market type '{}' not allowed", strategy.symbol, sig.market_type)
-                    continue
-
-                is_swing = sig.strategy == "swing_opportunity"
-                use_pyramid = sig.strategy not in SCALP_ONLY_STRATEGIES
-
-                liq = self.market_filter.assess_liquidity(candles, ticker)
-                is_low_liq = liq.tier in (LiquidityTier.LOW, LiquidityTier.DEAD)
-
-                if is_low_liq and not allow_gambling:
-                    logger.info("Skipping {} -- low liquidity and not in gambling mode", strategy.symbol)
-                    continue
-
-                if is_low_liq and allow_gambling:
-                    logger.info("GAMBLING BET on {} (low-liq, already had a good day)", strategy.symbol)
-                    await self._process_signal(sig, low_liquidity=True)
-                    continue
-
-                if not allow_new_entries and not is_swing:
-                    logger.debug("Skipping entry signal -- target/risk says sit out")
-                    continue
-
-                # Intel: direction filter -- don't go against strong crowd consensus
-                if intel_condition and sig.action in (SignalAction.BUY, SignalAction.SELL):
-                    sig = self._apply_intel_to_signal(sig, intel_condition)
-                    if sig.strength <= 0:
-                        continue
-
-                tradeable, reason = self.market_filter.is_tradeable(candles, ticker)
-                if not tradeable:
-                    logger.info("Skipping {} -- {}", strategy.symbol, reason)
-                    continue
-
-                # Intel: boost signals during capitulation / mass liquidation reversal
-                if intel_condition and intel_condition.macro_spike_opportunity:
-                    logger.info("MACRO SPIKE OPPORTUNITY -- boosting signal for {}", sig.symbol)
-                    sig = sig.model_copy()
-                    sig.quick_trade = True
-                    sig.max_hold_minutes = 15
-                    sig.tick_urgency = TickUrgency.SCALP
-
-                # TradingView alignment: boost/penalize based on TV technical analysis
-                side = "long" if sig.action == SignalAction.BUY else "short"
-                tv_boost = self._get_tv_boost(sig.symbol, side)
-                if tv_boost != 1.0:
-                    sig = sig.model_copy()
-                    sig.strength *= tv_boost
-                    logger.debug(
-                        "TV boost for {} {}: {:.2f}x -> strength={:.2f}", sig.symbol, side, tv_boost, sig.strength
-                    )
-
-                # Analytics weight: reduce signal strength for underperforming strategies
-                strat_weight = self._read_shared_analytics_weight(sig.strategy)
-                if strat_weight < 1.0:
-                    sig = sig.model_copy()
-                    sig.strength *= strat_weight
-                    if sig.strength <= 0:
-                        logger.info(
-                            "Analytics: {} weight {:.2f} killed signal for {}", sig.strategy, strat_weight, sig.symbol
-                        )
-                        continue
-
-                # News factor: volatility indicator, buy-rumor/sell-news, force quick trades
-                news_mult, news_force_quick = self._get_news_factor(sig.symbol, side, sig.quick_trade)
-                if news_mult != 1.0 or news_force_quick:
-                    sig = sig.model_copy()
-                    sig.strength *= news_mult
-                    if news_force_quick and not sig.quick_trade:
-                        sig.quick_trade = True
-                        sig.max_hold_minutes = min(sig.max_hold_minutes or 15, 15)
-
-                # Pattern detection: smart SL/TP from chart structure
-                pattern_boost = self._apply_pattern_analysis(sig, candles, is_low_liq)
-
-                sig = self._adjust_for_target(sig, aggression)
-
-                logger.debug(
-                    "Final signal: {} {} str={:.3f} (tv={:.2f} analytics={:.2f} news={:.2f} pattern={:.2f} aggr={:.2f}) pyramid={} | executing",
-                    sig.action.value,
-                    sig.symbol,
-                    sig.strength,
-                    tv_boost,
-                    strat_weight,
-                    news_mult,
-                    pattern_boost,
-                    aggression,
-                    use_pyramid,
-                )
-                await self._process_signal(sig, pyramid=use_pyramid)
-
             except Exception as e:
-                logger.error("Strategy '{}' error for {}: {}", strategy.name, strategy.symbol, e)
-            finally:
-                await asyncio.sleep(0)  # yield after each strategy for dashboard
+                logger.debug("Candle fetch for {} failed: {}", sym, e)
+            await asyncio.sleep(0)
 
         # 13. Hedge check: open counter-positions on reversal signals
         if self.settings.hedge_enabled:
@@ -854,6 +733,7 @@ class TradingBot:
     # -- Trade Queue Consumer (advisory, never forced) -- #
 
     MAX_QUEUE_EXECUTIONS_PER_TICK = 1
+    _PENDING_HUB_ACKS_MAX = 200
 
     async def _process_trade_queue(self) -> None:
         """Consume proposals from the monitor's trade queue.
@@ -877,16 +757,9 @@ class TradingBot:
                 )
                 return
 
-        if self._multibot:
-            queue = self._hub_trade_queue
-            if not queue:
-                return
-        else:
-            try:
-                queue = self.shared.read_trade_queue()
-            except Exception as e:
-                logger.warning("Failed to read trade queue: {}", e)
-                return
+        queue = self._hub_trade_queue
+        if not queue:
+            return
 
         if queue.pending_count == 0:
             return
@@ -902,10 +775,22 @@ class TradingBot:
         pnl_pct = self.target.todays_pnl_pct
 
         avg_health = 0.0
+        all_in_profit = False
         if active_count > 0:
             pnls = [p.pnl_pct for p in positions if p.amount > 0]
             avg_health = sum(pnls) / len(pnls)
+            all_in_profit = all(pnl >= 0 for pnl in pnls)
         positions_secured = active_count == 0 or avg_health >= 0
+
+        if all_in_profit and active_count > 0 and not self.target.manual_stop:
+            allow_new = True
+            aggression = max(aggression, 1.0)
+            logger.info(
+                "All {} positions in profit — all-in mode: aggression={:.2f}, free_slots={}, available for new entries",
+                active_count,
+                aggression,
+                free_slots,
+            )
 
         executed = 0
         tick_limit = self.MAX_QUEUE_EXECUTIONS_PER_TICK
@@ -950,7 +835,12 @@ class TradingBot:
                 rejected[proposal.id] = "execution failed"
 
         # --- DAILY: need at least 1 free slot and tier allows trading ---
-        budget_ok = tier in (DailyTier.BUILDING, DailyTier.LOSING) or (tier == DailyTier.STRONG and positions_secured)
+        # All positions green = capital is safe, always allow new entries
+        budget_ok = (
+            all_in_profit
+            or tier in (DailyTier.BUILDING, DailyTier.LOSING)
+            or (tier == DailyTier.STRONG and positions_secured)
+        )
 
         if allow_new and free_slots >= 1 and budget_ok:
             for proposal in queue.get_actionable(SignalPriority.DAILY):
@@ -982,7 +872,7 @@ class TradingBot:
                     rejected[proposal.id] = "execution failed"
 
         # --- SWING: need at least 1 free slot and not deeply in the red ---
-        swing_ok = free_slots >= 1 and pnl_pct >= -3.0
+        swing_ok = free_slots >= 1 and (all_in_profit or pnl_pct >= -3.0)
 
         if allow_new and swing_ok:
             for proposal in queue.get_actionable(SignalPriority.SWING):
@@ -1012,11 +902,8 @@ class TradingBot:
                     rejected[proposal.id] = "swing execution failed"
 
         if consumed_ids or rejected:
-            if self._multibot:
-                self._hub_queue_updates["consumed"].extend(consumed_ids)
-                self._hub_queue_updates["rejected"].update(rejected)
-            else:
-                self.shared.apply_trade_queue_updates(consumed_ids, rejected)
+            self._hub_queue_updates["consumed"].extend(consumed_ids)
+            self._hub_queue_updates["rejected"].update(rejected)
 
         if executed > 0:
             logger.info(
@@ -1027,6 +914,16 @@ class TradingBot:
                 len(queue.get_actionable(SignalPriority.SWING)),
             )
 
+    async def _validate_proposal(self, proposal: TradeProposal) -> ValidationResult:
+        """Run the bot-type-specific validator on a single proposal."""
+        try:
+            candles = await self.exchange.fetch_candles(proposal.symbol, "1m", limit=50)
+            ticker = await self.exchange.fetch_ticker(proposal.symbol)
+        except Exception as e:
+            return ValidationResult(valid=False, reason=f"data fetch failed: {e}")
+
+        return self._validator.validate(candles, ticker, proposal.side, proposal.strategy)
+
     async def _execute_proposal(self, proposal: TradeProposal, aggression: float) -> bool:
         """Convert a queue proposal into a trading signal and execute it."""
         my_exchange = self.settings.exchange.upper()
@@ -1035,6 +932,11 @@ class TradingBot:
             return False
         if not self._symbol_available(proposal.symbol):
             logger.debug("Queue skip {}: not on {}", proposal.symbol, my_exchange)
+            return False
+
+        result = await self._validate_proposal(proposal)
+        if not result.valid:
+            logger.info("Queue reject {}: validator says '{}' ({})", proposal.symbol, result.reason, proposal.strategy)
             return False
 
         try:
@@ -1094,6 +996,11 @@ class TradingBot:
             logger.debug("Swing skip {}: not on {}", proposal.symbol, my_exchange)
             return False
 
+        result = await self._validate_proposal(proposal)
+        if not result.valid:
+            logger.info("Swing reject {}: validator says '{}' ({})", proposal.symbol, result.reason, proposal.strategy)
+            return False
+
         plan = proposal.entry_plan
         strength = min(1.0, proposal.strength * aggression)
 
@@ -1138,51 +1045,6 @@ class TradingBot:
             logger.error("Swing execution error for {}: {}", proposal.symbol, e)
             return False
 
-    def _apply_intel_to_signal(self, sig: Signal, condition: MarketCondition) -> Signal:
-        """Adjust signal based on external market intelligence."""
-        adjusted = sig.model_copy()
-
-        preferred = condition.preferred_direction
-        if preferred == "neutral":
-            return adjusted
-
-        is_long = sig.action == SignalAction.BUY
-        is_short = sig.action == SignalAction.SELL
-
-        # Going against mass liquidation reversal bias = bad idea
-        if condition.mass_liquidation and ((preferred == "long" and is_short) or (preferred == "short" and is_long)):
-            logger.info(
-                "Intel BLOCKED {} {} -- mass liq bias is {} (reversal zone)", sig.action.value, sig.symbol, preferred
-            )
-            adjusted.strength = 0
-            return adjusted
-
-        # Going against extreme fear/greed = reduce strength but don't block
-        if (condition.fear_greed <= 25 and is_short) or (condition.fear_greed >= 75 and is_long):
-            adjusted.strength *= 0.5
-            logger.info(
-                "Intel REDUCED {} {} -- F&G={} (contrarian says {})",
-                sig.action.value,
-                sig.symbol,
-                condition.fear_greed,
-                preferred,
-            )
-
-        # Going against whale positioning = slight caution
-        if condition.overleveraged_side:
-            if condition.overleveraged_side == "longs" and is_long:
-                adjusted.strength *= 0.7
-                logger.info("Intel CAUTION {} long -- longs overleveraged (contrarian says short)", sig.symbol)
-            elif condition.overleveraged_side == "shorts" and is_short:
-                adjusted.strength *= 0.7
-                logger.info("Intel CAUTION {} short -- shorts overleveraged (contrarian says long)", sig.symbol)
-
-        # Aligned with intel = slight boost
-        if (preferred == "long" and is_long) or (preferred == "short" and is_short):
-            adjusted.strength = min(1.0, adjusted.strength * 1.15)
-
-        return adjusted
-
     def _check_data_dir_size(self) -> None:
         """Log data directory size on startup. Warn if > 10 MB."""
         data_path = Path(self.settings.data_dir)
@@ -1200,7 +1062,7 @@ class TradingBot:
         try:
             now = datetime.now(UTC)
             sp = self.orders.scaler.get(signal.symbol)
-            intel_cond = self.intel.condition if self.intel else None
+            hub_intel = self._hub_intel
 
             record = TradeRecord(
                 symbol=signal.symbol,
@@ -1212,8 +1074,8 @@ class TradingBot:
                 amount=order.filled or order.amount,
                 leverage=order.leverage or (sp.current_leverage if sp else 1),
                 was_low_liquidity=low_liquidity or (sp.low_liquidity if sp else False),
-                market_regime=intel_cond.regime.value if intel_cond else "",
-                fear_greed=intel_cond.fear_greed if intel_cond else 50,
+                market_regime=hub_intel.regime if hub_intel else "",
+                fear_greed=hub_intel.fear_greed if hub_intel else 50,
                 daily_tier=self.target.tier.value,
                 daily_pnl_at_entry=self.target.todays_pnl_pct,
                 signal_strength=signal.strength,
@@ -1257,7 +1119,7 @@ class TradingBot:
             if not sp:
                 stashed = self.orders._closed_scalers.get(order.symbol, [])
                 sp = stashed.pop(0) if stashed else None
-            intel_cond = self.intel.condition if self.intel else None
+            hub_intel = self._hub_intel
 
             exit_price = order.average_price or order.price or 0
             entry_price = sp.avg_entry_price if sp and sp.avg_entry_price > 0 else exit_price
@@ -1305,8 +1167,8 @@ class TradingBot:
                 dca_count=sp.adds if sp else 0,
                 was_quick_trade=False,
                 was_low_liquidity=sp.low_liquidity if sp else False,
-                market_regime=intel_cond.regime.value if intel_cond else "",
-                fear_greed=intel_cond.fear_greed if intel_cond else 50,
+                market_regime=hub_intel.regime if hub_intel else "",
+                fear_greed=hub_intel.fear_greed if hub_intel else 50,
                 daily_tier=self.target.tier.value,
                 daily_pnl_at_entry=self.target.todays_pnl_pct,
                 signal_strength=0,
@@ -1433,8 +1295,6 @@ class TradingBot:
             manual_stop=self.target.manual_stop,
         )
         self._last_bot_status = status
-        if self.shared:
-            self.shared.write_bot_status(status)
         await self._report_dashboard_snapshot(active)
 
     async def _report_dashboard_snapshot(self, active_positions: list[Any]) -> None:
@@ -1498,22 +1358,6 @@ class TradingBot:
                     "fail_count": stats.get("losers") or 0,
                 }
             )
-        for _sym, s in self._dynamic_strategies.items():
-            stats = self._get_strategy_stats(s.name, s.symbol)
-            strat_list.append(
-                {
-                    "name": s.name,
-                    "symbol": s.symbol,
-                    "market_type": s.market_type,
-                    "leverage": s.leverage,
-                    "is_dynamic": True,
-                    "open_now": 1 if s.symbol in open_syms else 0,
-                    "applied_count": stats.get("total") or 0,
-                    "success_count": stats.get("winners") or 0,
-                    "fail_count": stats.get("losers") or 0,
-                }
-            )
-
         margin_used = 0.0
         for sp in self.orders.scaler.active_positions.values():
             margin_used += sp.avg_entry_price * sp.current_size / max(sp.current_leverage, 1)
@@ -1553,7 +1397,6 @@ class TradingBot:
                 "total_growth_usd": total_balance - self.target._initial_capital,
                 "uptime_seconds": time.time() - self._started_at.timestamp() if self._started_at else 0,
                 "strategies_count": len(self._strategies),
-                "dynamic_strategies_count": len(self._dynamic_strategies),
                 "profit_buffer_pct": self.target.profit_buffer_pct,
                 "manual_stop_active": self.target.manual_stop,
             },
@@ -1578,10 +1421,6 @@ class TradingBot:
         hub_url = self.settings.dashboard_hub_url
         if hub_url:
             await self._post_to_hub(hub_url, payload)
-        elif self.settings.dashboard_enabled:
-            from web.server import report_bot_snapshot
-
-            report_bot_snapshot(payload)
 
     async def _post_to_hub(self, hub_url: str, payload: dict[str, Any]) -> None:
         """POST snapshot to hub. Hub returns all data bots need (zero direct file access)."""
@@ -1615,9 +1454,9 @@ class TradingBot:
     async def _push_trade_to_hub(self, record: TradeRecord, request_key: str = "") -> None:
         """Push a trade open/close event to the hub's DB via HTTP with idempotency key."""
         hub_url = self.settings.dashboard_hub_url
-        target = hub_url or ("http://localhost:9035" if self.settings.dashboard_enabled else "")
-        if not target:
+        if not hub_url:
             return
+        target = hub_url
         if not request_key:
             request_key = uuid.uuid4().hex
         if not self._hub_session:
@@ -1637,39 +1476,15 @@ class TradingBot:
         except Exception as e:
             logger.debug("Hub trade push error: {} (key={}, will retry)", e, request_key[:8])
 
-    async def _push_deposit_to_hub(self, amount: float, balance_before: float, balance_after: float) -> None:
-        """Push a deposit/withdrawal detection event to the hub."""
-        hub_url = self.settings.dashboard_hub_url
-        target = hub_url or ("http://localhost:9035" if self.settings.dashboard_enabled else "")
-        if not target:
-            return
-        if not self._hub_session:
-            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
-        try:
-            url = f"{target.rstrip('/')}/internal/deposit"
-            payload = {
-                "bot_id": self.settings.bot_id or "default",
-                "amount": amount,
-                "exchange": self.settings.exchange,
-                "detected_at": datetime.now(UTC).isoformat(),
-                "balance_before": balance_before,
-                "balance_after": balance_after,
-            }
-            async with self._hub_session.post(url, json=payload) as resp:
-                if resp.status != 200:
-                    logger.debug("Hub deposit push failed: {}", resp.status)
-        except Exception as e:
-            logger.debug("Hub deposit push error: {}", e)
-
     # ---- Hub state recovery & in-memory stats ----
 
     async def _recover_state_from_hub(self) -> None:
         """On startup, fetch open trades and strategy stats from the hub."""
         hub_url = self.settings.dashboard_hub_url
-        target = hub_url or ("http://localhost:9035" if self.settings.dashboard_enabled else "")
-        if not target:
+        if not hub_url:
             logger.info("No hub URL — starting with empty state")
             return
+        target = hub_url
         bot_id = self.settings.bot_id or "default"
         if not self._hub_session:
             self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
@@ -1716,7 +1531,7 @@ class TradingBot:
             symbol = td.get("symbol", "")
             if not symbol:
                 continue
-            if symbol in exchange_positions or (self.settings.is_paper_local() is False and not exchange_positions):
+            if self.settings.is_paper_local() or symbol in exchange_positions or (not exchange_positions):
                 rec = TradeRecord(**{k: v for k, v in td.items() if k in TradeRecord.model_fields})
                 self._open_trades[symbol] = rec
                 recovered += 1
@@ -1760,6 +1575,10 @@ class TradingBot:
         """Re-send any trade events that haven't been ack'd yet."""
         if not self._pending_hub_acks:
             return
+        # Cap size to avoid unbounded growth if hub stops confirming (e.g. down or DB errors)
+        while len(self._pending_hub_acks) > self._PENDING_HUB_ACKS_MAX:
+            oldest_key = next(iter(self._pending_hub_acks))
+            self._pending_hub_acks.pop(oldest_key, None)
         stale = list(self._pending_hub_acks.values())
         if len(stale) > 20:
             logger.warning("Hub ack buffer has {} unconfirmed trades", len(stale))
@@ -1777,19 +1596,14 @@ class TradingBot:
         If the monitor is running, we use its data instead of running our
         own intel clients. Falls back to in-process intel if stale or missing.
         """
-        if self._multibot:
-            intel_age = self._hub_intel_age
-            snap = self._hub_intel
-        else:
-            intel_age = self.shared_intel.intel_age_seconds()
-            snap = self.shared_intel.read_intel()
+        intel_age = self._hub_intel_age
+        snap = self._hub_intel
         if intel_age > 600:
             return None
         if not snap or not snap.sources_active:
             return None
 
-        # Hydrate news from shared state (monitor collects it centrally)
-        if self._multibot and snap.news_items:
+        if snap.news_items:
             self._recent_news = []
             for nd in snap.news_items:
                 try:
@@ -1807,20 +1621,6 @@ class TradingBot:
                     )
                 except Exception:
                     pass
-
-        if self._multibot and snap.hot_movers:
-            movers = [
-                TrendingCoin(
-                    symbol=m.symbol,
-                    name=m.name,
-                    volume_24h=m.volume_24h,
-                    market_cap=m.market_cap,
-                    change_1h=m.change_1h,
-                    change_24h=m.change_24h,
-                )
-                for m in snap.hot_movers
-            ]
-            self._trending_task = asyncio.ensure_future(self._on_trending(movers))
 
         return MarketCondition(
             regime=MarketRegime(snap.regime),
@@ -1841,110 +1641,6 @@ class TradingBot:
             should_reduce_exposure=snap.should_reduce_exposure,
             preferred_direction=snap.preferred_direction,
         )
-
-    def _read_shared_analytics_weight(self, strategy: str) -> float:
-        """Read strategy weight from shared analytics state.
-
-        If the analytics service is running, use its weights.
-        Falls back to in-process analytics engine.
-        """
-        snap = self._hub_analytics if self._multibot else self.shared_intel.read_analytics()
-        if not snap or not snap.weights:
-            return 1.0
-
-        for w in snap.weights:
-            if w.strategy == strategy:
-                return w.weight
-        return 1.0
-
-    def _get_tv_boost(self, symbol: str, side: str) -> float:
-        """Get TradingView signal boost, preferring shared state."""
-        snap = self._hub_intel if self._multibot else self.shared_intel.read_intel()
-        if not snap:
-            return self.intel.tv_signal_boost(symbol, side) if self.intel else 1.0
-        for tv in snap.tv_analyses:
-            if tv.symbol == symbol and tv.interval == "1h":
-                return tv.signal_boost_long if side == "long" else tv.signal_boost_short
-        if self.intel:
-            return self.intel.tv_signal_boost(symbol, side)
-        return 1.0
-
-    def _get_news_factor(self, symbol: str, side: str, is_quick_trade: bool) -> tuple[float, bool]:
-        """Compute signal multiplier from recent news for a symbol.
-
-        Returns (multiplier, should_force_quick) where:
-        - multiplier adjusts signal strength (0.5-1.5x)
-        - should_force_quick=True means news makes this a short-term play only
-
-        Philosophy:
-        - News = volatility indicator, not directional oracle
-        - "Buy the rumor, sell the news": strong bullish news on a BUY
-          signal is actually risky (sell-the-news dump), so we penalize
-          longer holds and force quick_trade
-        - Bearish news + BUY = contrarian, small boost if short-term
-        - Any strong news = monitor closely, force quick trade
-        - No long-term decisions based on news alone
-        """
-        now = datetime.now(UTC)
-        cutoff_seconds = 300 if is_quick_trade else 900
-        relevant = [
-            n
-            for n in self._recent_news
-            if symbol in n.matched_symbols and (now - n.published).total_seconds() < cutoff_seconds
-        ]
-        if not relevant:
-            return 1.0, False
-
-        avg_score = sum(n.sentiment_score for n in relevant) / len(relevant)
-        news_count = len(relevant)
-        force_quick = False
-
-        if side == "long":
-            if avg_score > 0.3:
-                # "Sell the news" — bullish news on a long is risky, likely
-                # to dump after initial spike. Slight boost for scalps,
-                # penalize anything longer.
-                if is_quick_trade:
-                    mult = 1.15
-                else:
-                    mult = 0.7
-                    force_quick = True
-            elif avg_score < -0.3:
-                # Bearish news + long = contrarian. Small scalp boost only.
-                mult = 1.1 if is_quick_trade else 0.6
-                force_quick = True
-            else:
-                mult = 1.0
-        else:  # short
-            if avg_score < -0.3:
-                # Bearish news + short = obvious, everyone shorts the panic.
-                # Risky due to snap-back rallies. Quick scalp only.
-                mult = 1.15 if is_quick_trade else 0.7
-                force_quick = True
-            elif avg_score > 0.3:
-                # Bullish news + short = contrarian "sell the news" play.
-                mult = 1.2 if is_quick_trade else 0.8
-                force_quick = True
-            else:
-                mult = 1.0
-
-        # More headlines = higher volatility = tighter hold
-        if news_count >= 3:
-            force_quick = True
-            mult = min(mult * 1.1, 1.5)
-
-        if mult != 1.0 or force_quick:
-            logger.info(
-                "News factor for {} {}: {:.2f}x (avg_sentiment={:.2f}, headlines={}, force_quick={})",
-                symbol,
-                side,
-                mult,
-                avg_score,
-                news_count,
-                force_quick,
-            )
-
-        return round(mult, 3), force_quick
 
     def _apply_pattern_analysis(
         self,
@@ -2060,78 +1756,6 @@ class TradingBot:
     async def _handle_spike(self, spike: SpikeEvent) -> None:
         await self.notifier.alert_spike(spike.symbol, spike.change_pct, spike.direction, spike.price)
 
-        news_item = self.news.correlate_spike(spike.symbol, self._recent_news) if self.news else None
-        if news_item:
-            spike.confirmed_by_news = True
-            spike.news_headline = news_item.headline
-            logger.info("Spike on {} confirmed by news: {}", spike.symbol, news_item.headline)
-
-    async def _on_trending(self, movers: list[TrendingCoin]) -> None:
-        available = set()
-        with contextlib.suppress(Exception):
-            available = set(await self.exchange.get_available_symbols())
-
-        current_symbols = {m.trading_pair for m in movers}
-        for sym in list(self._dynamic_strategies.keys()):
-            if sym not in current_symbols:
-                del self._dynamic_strategies[sym]
-                logger.info("Removed dynamic strategy for {} (no longer trending)", sym)
-
-        for coin in movers:
-            pair = coin.trading_pair
-            if pair in self._dynamic_strategies:
-                continue
-            if available and pair not in available:
-                continue
-            if any(s.symbol == pair for s in self._strategies):
-                continue
-
-            if coin.is_low_liquidity:
-                logger.info(
-                    "Trending {} is LOW-LIQ (vol:{:.0f}M, cap:{:.0f}M) -- gambling only",
-                    pair,
-                    coin.volume_24h / 1e6,
-                    coin.market_cap / 1e6,
-                )
-
-            from strategies.compound_momentum import CompoundMomentumStrategy
-
-            mkt = "futures" if self.settings.futures_allowed else "spot"
-            lev = self.settings.default_leverage if mkt == "futures" else 1
-            strategy = CompoundMomentumStrategy(
-                symbol=pair,
-                market_type=mkt,
-                leverage=lev,
-                spike_pct=1.0,
-                spike_max_hold=10,
-            )
-            self._dynamic_strategies[pair] = strategy
-            direction = "BULL" if coin.momentum_score > 0 else "BEAR"
-            liq_tag = " [LOW-LIQ]" if coin.is_low_liquidity else ""
-            logger.info(
-                "Dynamic strategy added: {} [{}]{} (1h:{:+.1f}% 24h:{:+.1f}%)",
-                pair,
-                direction,
-                liq_tag,
-                coin.change_1h,
-                coin.change_24h,
-            )
-
-    async def _on_news(self, item: NewsItem) -> None:
-        self._recent_news.append(item)
-        if len(self._recent_news) > 200:
-            self._recent_news = self._recent_news[-200:]
-
-        if item.matched_symbols and abs(item.sentiment_score) > 0.3:
-            logger.info(
-                "News [{}]: {} (symbols: {}, sentiment: {})",
-                item.source,
-                item.headline,
-                item.matched_symbols,
-                item.sentiment,
-            )
-            await self.notifier.alert_news(item.headline, item.matched_symbols, item.source)
-
     async def _log_status(self) -> None:
         now = datetime.now(UTC)
         if self._last_status_log and (now - self._last_status_log).total_seconds() < self._status_interval:
@@ -2140,11 +1764,6 @@ class TradingBot:
 
         logger.info(self.target.status_report())
         logger.info(self.risk.risk_summary())
-        if self.scanner:
-            logger.info(self.scanner.scan_summary())
-        if self.intel:
-            logger.info(self.intel.full_summary())
-        logger.info("Active strategies: {} static + {} dynamic", len(self._strategies), len(self._dynamic_strategies))
 
         for _sym, sp in self.orders.scaler.active_positions.items():
             logger.info("  {}", sp.status_line())
@@ -2200,7 +1819,7 @@ class TradingBot:
 
     async def _evaluate_extreme_candidates(self) -> None:
         """Read extreme watchlist from shared state, approve candidates for WS subscription."""
-        watchlist = self._hub_extreme_watchlist if self._multibot else self.shared_intel.read_extreme_watchlist()
+        watchlist = self._hub_extreme_watchlist
         if not watchlist:
             return
         if not watchlist.candidates:
@@ -2318,25 +1937,12 @@ class TradingBot:
                 return
             balance_map = await self.exchange.fetch_balance()
             raw_balance = balance_map.get("USDT", 0.0)
-            positions = await self.exchange.fetch_positions()
-            total_unrealized = sum(p.unrealized_pnl for p in positions if p.amount > 0)
-            unrealized_for_dep = None if self.settings.is_paper_local() else total_unrealized
-            dep = self.target.update_balance(raw_balance, unrealized_pnl=unrealized_for_dep)
-            if dep is not None:
-                await self._push_deposit_to_hub(dep, raw_balance - dep, raw_balance)
+            self.target.update_balance(raw_balance)
 
-            logger.info("=== DAILY SUMMARY ===")
+            logger.info("=== DAILY RESET ===")
             logger.info(self.target.status_report())
             logger.info("Total growth since start: {:.1f}%", self.target.total_growth_pct)
 
-            await self.notifier.send_daily_summary(
-                balance=raw_balance,
-                pnl=self.target.todays_pnl,
-                pnl_pct=self.target.todays_pnl_pct,
-                trades=self.target._todays_trades,
-                open_positions=len(positions),
-                target_hit=self.target.target_reached,
-            )
             self.risk.reset_daily(raw_balance, profit_buffer_pct=self.target.profit_buffer_pct)
             self.target.reset_day(raw_balance)
 
@@ -2354,27 +1960,10 @@ def main() -> None:
     if settings.hub_only:
         logger.info("Bot [{}]: HUB-ONLY mode — dashboard and coordination, no trading", bot_label)
     else:
-        mkt = "futures" if settings.futures_allowed else "spot"
-        all_strategies = [
-            "compound_momentum",
-            "market_open_volatility",
-            "swing_opportunity",
-            "rsi",
-            "macd",
-            "bollinger",
-            "mean_reversion",
-            "grid",
-        ]
-        allowed = settings.bot_strategy_list
-        active_strategies = [s for s in all_strategies if s in allowed] if allowed else all_strategies
-        for symbol in settings.major_symbol_list:
-            for strat_name in active_strategies:
-                bot.add_strategy(strat_name, symbol, market_type=mkt)
         logger.info(
-            "Bot [{}]: registered {} strategies across {} major symbols",
+            "Bot [{}]: style={} — trade entries come from hub queue",
             bot_label,
-            len(active_strategies),
-            len(settings.major_symbol_list),
+            settings.bot_style,
         )
 
     loop = asyncio.new_event_loop()
@@ -2387,62 +1976,21 @@ def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    if settings.dashboard_enabled:
-        import uvicorn
+    from web.command_server import start_command_server
 
-        from web.server import app, set_bot, setup_log_capture
-
-        setup_log_capture()
-        set_bot(bot)
-        config = uvicorn.Config(
-            app,
-            host=settings.dashboard_host,
-            port=settings.dashboard_port,
-            log_level="warning",
-            loop="none",
-        )
-        server = uvicorn.Server(config)
-
-        async def _run_all() -> None:
-            bot_task = asyncio.create_task(bot.start())
-            web_task = asyncio.create_task(server.serve())
-            logger.info("Dashboard: http://{}:{}", settings.dashboard_host, settings.dashboard_port)
-            _done, pending = await asyncio.wait(
-                [bot_task, web_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-
+    async def _run_with_cmd_server() -> None:
+        runner = await start_command_server(bot, settings.dashboard_host, settings.dashboard_port)
         try:
-            loop.run_until_complete(_run_all())
-        except KeyboardInterrupt:
-            loop.run_until_complete(bot.stop())
+            await bot.start()
         finally:
-            loop.close()
-    elif settings.dashboard_hub_url:
-        from web.command_server import start_command_server
+            await runner.cleanup()
 
-        async def _run_with_cmd_server() -> None:
-            runner = await start_command_server(bot, settings.dashboard_host, settings.dashboard_port)
-            try:
-                await bot.start()
-            finally:
-                await runner.cleanup()
-
-        try:
-            loop.run_until_complete(_run_with_cmd_server())
-        except KeyboardInterrupt:
-            loop.run_until_complete(bot.stop())
-        finally:
-            loop.close()
-    else:
-        try:
-            loop.run_until_complete(bot.start())
-        except KeyboardInterrupt:
-            loop.run_until_complete(bot.stop())
-        finally:
-            loop.close()
+    try:
+        loop.run_until_complete(_run_with_cmd_server())
+    except KeyboardInterrupt:
+        loop.run_until_complete(bot.stop())
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":

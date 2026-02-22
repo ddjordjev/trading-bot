@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -133,6 +134,9 @@ class ExtremeWatcher:
     def _handle_tick(self, symbol: str, ticker: Ticker) -> None:
         ws = self._watched.get(symbol)
         if not ws:
+            return
+
+        if not (math.isfinite(ticker.last) and ticker.last > 0):
             return
 
         tick = PriceTick(

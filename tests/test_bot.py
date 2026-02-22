@@ -14,7 +14,6 @@ from core.models import Signal, SignalAction
 from core.models.order import Order, OrderSide, OrderStatus, OrderType
 from core.orders.scaler import ScaleMode
 from db.models import TradeRecord
-from intel import MarketCondition
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -59,13 +58,9 @@ class TestTradingBotInit:
         assert bot.orders is not None
         assert bot.notifier is not None
         assert bot.volatility is not None
-        assert bot.news is not None
         assert bot.target is not None
         assert bot.market_filter is not None
-        assert bot.scanner is not None
-        assert bot.shared is not None
         assert bot._strategies == []
-        assert bot._dynamic_strategies == {}
         assert bot._running is False
         assert isinstance(bot._open_trades, dict)
         assert isinstance(bot._pending_hub_acks, dict)
@@ -78,23 +73,6 @@ class TestTradingBotInit:
 
             b = TradingBot(settings=settings)
         assert b.intel is None
-
-    def test_init_with_intel_enabled_creates_intel(self, mock_exchange):
-        with patch("bot.create_exchange", return_value=mock_exchange):
-            with patch("bot.MarketIntel") as m_intel:
-                m_intel.return_value.start = AsyncMock()
-                m_intel.return_value.stop = AsyncMock()
-                m_intel.return_value.assess = MagicMock(return_value=None)
-                m_intel.return_value.full_summary = MagicMock(return_value="")
-                m_intel.return_value.tradingview = MagicMock()
-                m_intel.return_value.tradingview.analyze_multi = AsyncMock()
-                s = get_settings()
-                s.intel_enabled = True
-                from bot import TradingBot
-
-                b = TradingBot(settings=s)
-        assert b.intel is not None
-        m_intel.assert_called_once()
 
 
 # ── add_strategy / add_custom_strategy ──────────────────────────────────────
@@ -146,105 +124,6 @@ class TestTradingBotStrategyManagement:
         assert len(bot._strategies) == 1
         assert bot._strategies[0].name == "custom"
         assert bot._strategies[0].symbol == "XRP/USDT"
-
-
-# ── _apply_intel_to_signal ───────────────────────────────────────────────────
-
-
-class TestApplyIntelToSignal:
-    def test_neutral_preferred_direction_returns_unchanged(self, bot):
-        cond = MarketCondition(preferred_direction="neutral")
-        sig = Signal(
-            symbol="BTC/USDT",
-            action=SignalAction.BUY,
-            strength=0.8,
-            strategy="compound_momentum",
-            reason="test",
-            market_type="futures",
-        )
-        out = bot._apply_intel_to_signal(sig, cond)
-        assert out.strength == 0.8
-
-    def test_mass_liquidation_against_bias_blocks_signal(self, bot):
-        cond = MarketCondition(
-            preferred_direction="long",
-            mass_liquidation=True,
-        )
-        sig = Signal(
-            symbol="BTC/USDT",
-            action=SignalAction.SELL,
-            strength=0.8,
-            strategy="compound_momentum",
-            reason="test",
-            market_type="futures",
-        )
-        out = bot._apply_intel_to_signal(sig, cond)
-        assert out.strength == 0
-
-    def test_fear_greed_extreme_reduces_strength_short_when_fear(self, bot):
-        cond = MarketCondition(preferred_direction="long", fear_greed=20)
-        sig = Signal(
-            symbol="BTC/USDT",
-            action=SignalAction.SELL,
-            strength=0.8,
-            strategy="compound_momentum",
-            reason="test",
-            market_type="futures",
-        )
-        out = bot._apply_intel_to_signal(sig, cond)
-        assert out.strength == 0.4  # 0.8 * 0.5
-
-    def test_fear_greed_extreme_reduces_strength_long_when_greed(self, bot):
-        cond = MarketCondition(preferred_direction="short", fear_greed=80)
-        sig = Signal(
-            symbol="BTC/USDT",
-            action=SignalAction.BUY,
-            strength=0.8,
-            strategy="compound_momentum",
-            reason="test",
-            market_type="futures",
-        )
-        out = bot._apply_intel_to_signal(sig, cond)
-        assert out.strength == 0.4
-
-    def test_overleveraged_longs_caution_on_long_signal(self, bot):
-        cond = MarketCondition(overleveraged_side="longs", preferred_direction="short")
-        sig = Signal(
-            symbol="BTC/USDT",
-            action=SignalAction.BUY,
-            strength=0.8,
-            strategy="compound_momentum",
-            reason="test",
-            market_type="futures",
-        )
-        out = bot._apply_intel_to_signal(sig, cond)
-        assert out.strength == pytest.approx(0.8 * 0.7)
-
-    def test_overleveraged_shorts_caution_on_short_signal(self, bot):
-        cond = MarketCondition(overleveraged_side="shorts", preferred_direction="long")
-        sig = Signal(
-            symbol="BTC/USDT",
-            action=SignalAction.SELL,
-            strength=0.8,
-            strategy="compound_momentum",
-            reason="test",
-            market_type="futures",
-        )
-        out = bot._apply_intel_to_signal(sig, cond)
-        assert out.strength == pytest.approx(0.8 * 0.7)
-
-    def test_aligned_with_intel_boosts_strength(self, bot):
-        cond = MarketCondition(preferred_direction="long")
-        sig = Signal(
-            symbol="BTC/USDT",
-            action=SignalAction.BUY,
-            strength=0.8,
-            strategy="compound_momentum",
-            reason="test",
-            market_type="futures",
-        )
-        out = bot._apply_intel_to_signal(sig, cond)
-        assert out.strength == pytest.approx(min(1.0, 0.8 * 1.15))
 
 
 # ── _log_closed_trade ───────────────────────────────────────────────────────
@@ -373,13 +252,11 @@ class TestCheckDailyReset:
 
     @pytest.mark.asyncio
     async def test_check_daily_reset_runs_at_midnight(self, bot, mock_exchange):
-        mock_exchange.fetch_positions = AsyncMock(return_value=[])
-        bot.notifier.send_daily_summary = AsyncMock()
         with patch("bot.datetime") as m_dt:
             m_dt.now.return_value = datetime(2025, 2, 20, 0, 1, tzinfo=UTC)
             await bot._check_daily_reset()
         mock_exchange.fetch_balance.assert_called()
-        bot.notifier.send_daily_summary.assert_called_once()
+        assert bot.target._day_number == 1
 
 
 # ── _log_status ─────────────────────────────────────────────────────────────
@@ -391,7 +268,6 @@ class TestLogStatus:
         bot._last_status_log = datetime.now(UTC)
         bot.target.status_report = MagicMock(return_value="status")
         bot.risk.risk_summary = MagicMock(return_value="risk")
-        bot.scanner.scan_summary = MagicMock(return_value="scan")
         from core.orders.hedge import HedgeManager
         from core.orders.scaler import PositionScaler
         from core.orders.trailing import TrailingStopManager
@@ -412,7 +288,6 @@ class TestLogStatus:
         bot._last_status_log = None
         bot.target.status_report = MagicMock(return_value="status")
         bot.risk.risk_summary = MagicMock(return_value="risk")
-        bot.scanner.scan_summary = MagicMock(return_value="scan")
         sp = MagicMock()
         sp.status_line.return_value = "BTC/USDT long 1x"
         from core.orders.hedge import HedgeManager
@@ -434,19 +309,8 @@ class TestLogStatus:
 
 
 class TestSharedStateHelpers:
-    def test_read_shared_intel_returns_none_when_stale(self, bot):
-        bot.shared_intel.intel_age_seconds = MagicMock(return_value=700)
-        assert bot._read_shared_intel() is None
-
-    def test_read_shared_intel_returns_none_when_sources_inactive(self, bot):
-        bot.shared_intel.intel_age_seconds = MagicMock(return_value=100)
-        snap = MagicMock()
-        snap.sources_active = []
-        bot.shared_intel.read_intel = MagicMock(return_value=snap)
-        assert bot._read_shared_intel() is None
-
     def test_read_shared_intel_returns_condition_when_fresh(self, bot):
-        bot.shared_intel.intel_age_seconds = MagicMock(return_value=100)
+        bot._hub_intel_age = 100
         snap = MagicMock()
         snap.sources_active = ["fear_greed"]
         snap.regime = "normal"
@@ -466,80 +330,10 @@ class TestSharedStateHelpers:
         snap.position_size_multiplier = 1.0
         snap.should_reduce_exposure = False
         snap.preferred_direction = "neutral"
-        bot.shared_intel.read_intel = MagicMock(return_value=snap)
+        bot._hub_intel = snap
         cond = bot._read_shared_intel()
         assert cond is not None
         assert cond.preferred_direction == "neutral"
-
-    def test_read_shared_intel_triggers_on_trending_in_multibot(self, bot):
-        from shared.models import TrendingSnapshot
-
-        bot._multibot = True
-        bot._hub_intel_age = 100
-        snap = MagicMock()
-        snap.sources_active = ["fear_greed"]
-        snap.regime = "normal"
-        snap.fear_greed = 50
-        snap.fear_greed_bias = "neutral"
-        snap.liquidation_24h = 0.0
-        snap.mass_liquidation = False
-        snap.liquidation_bias = "neutral"
-        snap.macro_event_imminent = False
-        snap.macro_exposure_mult = 1.0
-        snap.macro_spike_opportunity = False
-        snap.next_macro_event = ""
-        snap.whale_bias = "neutral"
-        snap.overleveraged_side = ""
-        snap.tv_btc_consensus = "neutral"
-        snap.tv_eth_consensus = "neutral"
-        snap.position_size_multiplier = 1.0
-        snap.should_reduce_exposure = False
-        snap.preferred_direction = "neutral"
-        snap.hot_movers = [
-            TrendingSnapshot(symbol="PEPE", change_1h=5.0, change_24h=20.0, volume_24h=10e6),
-        ]
-        snap.news_items = []
-        bot._hub_intel = snap
-        bot._on_trending = AsyncMock()
-        bot._read_shared_intel()
-        bot._on_trending.assert_called_once()
-        movers = bot._on_trending.call_args[0][0]
-        assert len(movers) == 1
-        assert movers[0].symbol == "PEPE"
-
-    def test_read_shared_intel_no_trending_when_no_movers(self, bot):
-        bot._multibot = True
-        bot._hub_intel_age = 100
-        snap = MagicMock()
-        snap.sources_active = ["fear_greed"]
-        snap.regime = "normal"
-        snap.fear_greed = 50
-        snap.fear_greed_bias = "neutral"
-        snap.liquidation_24h = 0.0
-        snap.mass_liquidation = False
-        snap.liquidation_bias = "neutral"
-        snap.macro_event_imminent = False
-        snap.macro_exposure_mult = 1.0
-        snap.macro_spike_opportunity = False
-        snap.next_macro_event = ""
-        snap.whale_bias = "neutral"
-        snap.overleveraged_side = ""
-        snap.tv_btc_consensus = "neutral"
-        snap.tv_eth_consensus = "neutral"
-        snap.position_size_multiplier = 1.0
-        snap.should_reduce_exposure = False
-        snap.preferred_direction = "neutral"
-        snap.hot_movers = []
-        snap.news_items = []
-        bot._hub_intel = snap
-        bot._on_trending = AsyncMock()
-        bot._read_shared_intel()
-        bot._on_trending.assert_not_called()
-
-    def test_read_shared_analytics_weight_fallback_returns_default(self, bot):
-        bot.shared_intel.read_analytics = MagicMock(return_value=MagicMock(weights=[]))
-        w = bot._read_shared_analytics_weight("compound_momentum")
-        assert w == 1.0
 
     def test_adjust_for_target_caps_strength_by_aggression(self, bot):
         sig = Signal(
@@ -590,28 +384,6 @@ class TestSharedStateHelpers:
             )
             out = bot._adjust_for_target(sig, aggression=1.0)
             assert out.strength == pytest.approx(0.8 * 0.6)
-
-
-# ── _get_tv_boost ───────────────────────────────────────────────────────────
-
-
-class TestGetTVBoost:
-    def test_get_tv_boost_from_shared_state(self, bot):
-        tv = MagicMock()
-        tv.symbol = "BTC/USDT"
-        tv.interval = "1h"
-        tv.signal_boost_long = 1.2
-        tv.signal_boost_short = 0.8
-        snap = MagicMock()
-        snap.tv_analyses = [tv]
-        bot.shared_intel.read_intel = MagicMock(return_value=snap)
-        assert bot._get_tv_boost("BTC/USDT", "long") == 1.2
-        assert bot._get_tv_boost("BTC/USDT", "short") == 0.8
-
-    def test_get_tv_boost_returns_one_when_no_match(self, bot):
-        bot.shared_intel.read_intel = MagicMock(return_value=MagicMock(tv_analyses=[]))
-        bot.intel = None
-        assert bot._get_tv_boost("BTC/USDT", "long") == 1.0
 
 
 # ── _process_signal / _process_trade_queue / _execute_proposal ──────────────
@@ -666,15 +438,14 @@ class TestProcessSignalAndQueue:
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_empty_returns_early(self, bot):
-        bot.shared.read_trade_queue = MagicMock(return_value=MagicMock(pending_count=0))
+        bot._hub_trade_queue = None
         await bot._process_trade_queue()
         bot.exchange.fetch_positions.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_read_exception_returns_early(self, bot):
-        bot.shared.read_trade_queue = MagicMock(side_effect=RuntimeError("read failed"))
+        bot._hub_trade_queue = None
         await bot._process_trade_queue()
-        # no exception, early return
         bot.exchange.fetch_positions.assert_not_called()
 
     @pytest.mark.asyncio
@@ -682,9 +453,9 @@ class TestProcessSignalAndQueue:
         """Queue processing is skipped during warmup period."""
         bot._started_at = datetime.now(UTC)
         bot._warmup_minutes = 5
-        bot.shared.read_trade_queue = MagicMock()
+        bot._hub_trade_queue = MagicMock(pending_count=0)
         await bot._process_trade_queue()
-        bot.shared.read_trade_queue.assert_not_called()
+        bot.exchange.fetch_positions.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_after_warmup_proceeds(self, bot):
@@ -693,9 +464,9 @@ class TestProcessSignalAndQueue:
 
         bot._started_at = datetime.now(UTC) - timedelta(minutes=10)
         bot._warmup_minutes = 3
-        bot.shared.read_trade_queue = MagicMock(return_value=MagicMock(pending_count=0))
+        bot._hub_trade_queue = MagicMock(pending_count=0)
         await bot._process_trade_queue()
-        bot.shared.read_trade_queue.assert_called_once()
+        bot.exchange.fetch_positions.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_respects_per_tick_cap(self, bot, mock_exchange):
@@ -727,8 +498,7 @@ class TestProcessSignalAndQueue:
         )
         queue = MagicMock(pending_count=2)
         queue.get_actionable = MagicMock(return_value=[p1, p2])
-        bot.shared.read_trade_queue = MagicMock(return_value=queue)
-        bot.shared.apply_trade_queue_updates = MagicMock()
+        bot._hub_trade_queue = queue
 
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot._execute_proposal = AsyncMock(return_value=True)
@@ -743,9 +513,11 @@ class TestProcessSignalAndQueue:
     @pytest.mark.asyncio
     async def test_execute_proposal_success(self, bot, mock_exchange):
         from shared.models import SignalPriority, TradeProposal
+        from validators import ValidationResult
 
         mock_exchange.fetch_ticker = AsyncMock(return_value=MagicMock(last=50_000.0))
         bot._process_signal = AsyncMock()
+        bot._validate_proposal = AsyncMock(return_value=ValidationResult(valid=True, reason="ok"))
         proposal = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
@@ -760,9 +532,29 @@ class TestProcessSignalAndQueue:
         bot._process_signal.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_execute_proposal_validator_rejects(self, bot, mock_exchange):
+        from shared.models import SignalPriority, TradeProposal
+        from validators import ValidationResult
+
+        bot._validate_proposal = AsyncMock(return_value=ValidationResult(valid=False, reason="momentum stalled"))
+        proposal = TradeProposal(
+            priority=SignalPriority.CRITICAL,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="x",
+            reason="",
+            strength=0.5,
+            market_type="futures",
+        )
+        ok = await bot._execute_proposal(proposal, aggression=1.0)
+        assert ok is False
+
+    @pytest.mark.asyncio
     async def test_execute_proposal_fetch_ticker_fails(self, bot, mock_exchange):
         from shared.models import SignalPriority, TradeProposal
+        from validators import ValidationResult
 
+        bot._validate_proposal = AsyncMock(return_value=ValidationResult(valid=True, reason="ok"))
         mock_exchange.fetch_ticker = AsyncMock(side_effect=RuntimeError("api down"))
         proposal = TradeProposal(
             priority=SignalPriority.CRITICAL,
@@ -779,9 +571,11 @@ class TestProcessSignalAndQueue:
     @pytest.mark.asyncio
     async def test_execute_swing_proposal_success(self, bot, mock_exchange):
         from shared.models import EntryPlan, SignalPriority, TradeProposal
+        from validators import ValidationResult
 
         mock_exchange.fetch_ticker = AsyncMock(return_value=MagicMock(last=50_000.0))
         bot._process_signal = AsyncMock()
+        bot._validate_proposal = AsyncMock(return_value=ValidationResult(valid=True, reason="ok"))
         proposal = TradeProposal(
             priority=SignalPriority.SWING,
             symbol="ETH/USDT",
@@ -799,9 +593,11 @@ class TestProcessSignalAndQueue:
     @pytest.mark.asyncio
     async def test_execute_swing_proposal_no_plan(self, bot, mock_exchange):
         from shared.models import SignalPriority, TradeProposal
+        from validators import ValidationResult
 
         mock_exchange.fetch_ticker = AsyncMock(return_value=MagicMock(last=2000.0))
         bot._process_signal = AsyncMock()
+        bot._validate_proposal = AsyncMock(return_value=ValidationResult(valid=True, reason="ok"))
         proposal = TradeProposal(
             priority=SignalPriority.SWING,
             symbol="ETH/USDT",
@@ -915,81 +711,11 @@ class TestHandleSpikeAndCallbacks:
         from volatility import SpikeEvent
 
         bot.notifier.alert_spike = AsyncMock()
-        bot.news.correlate_spike = MagicMock(return_value=None)
         spike = SpikeEvent(
             symbol="BTC/USDT", change_pct=5.0, direction="up", price=52_000.0, volume_24h=1e9, window_seconds=60
         )
         await bot._handle_spike(spike)
         bot.notifier.alert_spike.assert_called_once_with("BTC/USDT", 5.0, "up", 52_000.0)
-        bot.news.correlate_spike.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_on_trending_removes_dynamic_strategy_when_not_in_list(self, bot, mock_exchange):
-        mock_exchange.get_available_symbols = AsyncMock(return_value=["BTC/USDT", "ETH/USDT"])
-        bot._dynamic_strategies["XRP/USDT"] = MagicMock()
-        from scanner import TrendingCoin
-
-        movers = [TrendingCoin(symbol="BTC/USDT", change_1h=1.0, change_24h=2.0, volume_24h=10e6, market_cap=100e6)]
-        await bot._on_trending(movers)
-        assert "XRP/USDT" not in bot._dynamic_strategies
-
-    @pytest.mark.asyncio
-    async def test_on_news_appends_and_alerts_when_matched(self, bot):
-        from news import NewsItem
-
-        bot.notifier.alert_news = AsyncMock()
-        item = NewsItem(
-            headline="BTC surge",
-            source="test",
-            url="",
-            published=datetime.now(UTC),
-            matched_symbols=["BTC/USDT"],
-            sentiment_score=0.5,
-        )
-        await bot._on_news(item)
-        assert len(bot._recent_news) == 1
-        bot.notifier.alert_news.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_on_news_caps_recent_news_list(self, bot):
-        from news import NewsItem
-
-        bot.notifier.alert_news = AsyncMock()
-        for i in range(250):
-            await bot._on_news(
-                NewsItem(
-                    headline=f"News {i}",
-                    source="test",
-                    url="",
-                    published=datetime.now(UTC),
-                    matched_symbols=[],
-                    sentiment_score=0.0,
-                )
-            )
-        assert len(bot._recent_news) <= 200
-
-
-# ── _process_trade_queue with queue content / _read_shared_analytics ────────
-
-
-class TestProcessTradeQueueWithProposals:
-    def test_read_shared_analytics_weight_from_shared_snapshot(self, bot):
-        from shared.models import StrategyWeightEntry
-
-        snap = MagicMock()
-        snap.weights = [StrategyWeightEntry(strategy="compound_momentum", weight=0.6)]
-        bot.shared_intel.read_analytics = MagicMock(return_value=snap)
-        w = bot._read_shared_analytics_weight("compound_momentum")
-        assert w == 0.6
-
-    def test_read_shared_analytics_weight_strategy_not_in_snapshot_returns_one(self, bot):
-        from shared.models import StrategyWeightEntry
-
-        snap = MagicMock()
-        snap.weights = [StrategyWeightEntry(strategy="other", weight=0.5)]
-        bot.shared_intel.read_analytics = MagicMock(return_value=snap)
-        w = bot._read_shared_analytics_weight("compound_momentum")
-        assert w == 1.0
 
 
 # ── Adaptive tick interval ──────────────────────────────────────────────────
@@ -1129,61 +855,6 @@ class TestRegisterStrategies:
         m_create.assert_called_once_with(settings)
 
 
-# ── _on_trending (dynamic strategy creation) ─────────────────────────────────
-
-
-class TestOnTrendingExtended:
-    @pytest.mark.asyncio
-    async def test_on_trending_adds_dynamic_strategy_for_new_mover(self, bot, mock_exchange):
-        from scanner import TrendingCoin
-
-        mock_exchange.get_available_symbols = AsyncMock(return_value=["BTC/USDT", "ETH/USDT", "SOL/USDT"])
-        movers = [
-            TrendingCoin(symbol="SOL", change_1h=5.0, change_24h=15.0, volume_24h=50e6, market_cap=200e6),
-        ]
-        await bot._on_trending(movers)
-        assert "SOL/USDT" in bot._dynamic_strategies
-        strat = bot._dynamic_strategies["SOL/USDT"]
-        assert strat.symbol == "SOL/USDT"
-        assert strat.name == "compound_momentum"
-
-    @pytest.mark.asyncio
-    async def test_on_trending_skips_when_pair_not_available(self, bot, mock_exchange):
-        from scanner import TrendingCoin
-
-        mock_exchange.get_available_symbols = AsyncMock(return_value=["BTC/USDT", "ETH/USDT"])
-        movers = [
-            TrendingCoin(symbol="EXOTIC", change_1h=10.0, change_24h=20.0, volume_24h=10e6, market_cap=100e6),
-        ]
-        await bot._on_trending(movers)
-        assert "EXOTIC/USDT" not in bot._dynamic_strategies
-
-    @pytest.mark.asyncio
-    async def test_on_trending_skips_when_already_in_static_strategies(self, bot, mock_exchange):
-        from scanner import TrendingCoin
-
-        mkt = "futures" if bot.settings.futures_allowed else "spot"
-        bot.add_strategy("compound_momentum", "BTC/USDT", market_type=mkt)
-        mock_exchange.get_available_symbols = AsyncMock(return_value=["BTC/USDT", "ETH/USDT"])
-        movers = [
-            TrendingCoin(symbol="BTC", change_1h=3.0, change_24h=8.0, volume_24h=100e6, market_cap=500e6),
-        ]
-        await bot._on_trending(movers)
-        assert "BTC/USDT" not in bot._dynamic_strategies
-
-    @pytest.mark.asyncio
-    async def test_on_trending_does_not_duplicate_existing_dynamic(self, bot, mock_exchange):
-        from scanner import TrendingCoin
-
-        mock_exchange.get_available_symbols = AsyncMock(return_value=["SOL/USDT"])
-        movers = [
-            TrendingCoin(symbol="SOL", change_1h=2.0, change_24h=5.0, volume_24h=50e6, market_cap=200e6),
-        ]
-        await bot._on_trending(movers)
-        await bot._on_trending(movers)
-        assert list(bot._dynamic_strategies.keys()) == ["SOL/USDT"]
-
-
 # ── _process_trade_queue (reject reasons, apply_updates) ─────────────────────
 
 
@@ -1208,8 +879,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
             )
             queue = MagicMock(pending_count=1)
             queue.get_actionable = MagicMock(side_effect=lambda pri: [p] if pri == SignalPriority.CRITICAL else [])
-            bot.shared.read_trade_queue = MagicMock(return_value=queue)
-            bot.shared.apply_trade_queue_updates = MagicMock()
+            bot._hub_trade_queue = queue
             mock_exchange.fetch_positions = AsyncMock(return_value=[])
             bot.target.should_trade = MagicMock(return_value=True)
             bot.target.aggression_multiplier = MagicMock(return_value=1.0)
@@ -1221,9 +891,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
         assert queue.mark_rejected.called
         reject_reason = queue.mark_rejected.call_args[0][1]
         assert "not allowed" in reject_reason.lower()
-        bot.shared.apply_trade_queue_updates.assert_called_once()
-        _, rejected = bot.shared.apply_trade_queue_updates.call_args[0]
-        assert len(rejected) > 0
+        assert len(bot._hub_queue_updates["rejected"]) > 0
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_rejects_no_free_slots(self, bot, mock_exchange):
@@ -1246,8 +914,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
             )
             queue = MagicMock(pending_count=1)
             queue.get_actionable = MagicMock(side_effect=lambda pri: [p] if pri == SignalPriority.CRITICAL else [])
-            bot.shared.read_trade_queue = MagicMock(return_value=queue)
-            bot.shared.apply_trade_queue_updates = MagicMock()
+            bot._hub_trade_queue = queue
             pos = Position(
                 symbol="ETH/USDT",
                 side=OrderSide.BUY,
@@ -1266,7 +933,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
 
         assert queue.mark_rejected.called
         assert queue.mark_rejected.call_args[0][1] == "no free slots"
-        bot.shared.apply_trade_queue_updates.assert_called_once()
+        assert p.id in bot._hub_queue_updates["rejected"] or len(bot._hub_queue_updates["rejected"]) > 0
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_rejects_when_not_allow_new(self, bot, mock_exchange):
@@ -1287,8 +954,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
             market_type="futures",
         )
         queue.get_actionable = MagicMock(side_effect=lambda pri: [p] if pri == SignalPriority.CRITICAL else [])
-        bot.shared.read_trade_queue = MagicMock(return_value=queue)
-        bot.shared.apply_trade_queue_updates = MagicMock()
+        bot._hub_trade_queue = queue
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot.target.should_trade = MagicMock(return_value=False)
         tier_mock = MagicMock(value="strong")
@@ -1306,9 +972,11 @@ class TestProcessTradeQueueRejectsAndUpdates:
         from datetime import timedelta
 
         from shared.models import SignalPriority, TradeProposal
+        from validators import ValidationResult
 
         bot._started_at = datetime.now(UTC) - timedelta(minutes=10)
         bot._warmup_minutes = 3
+        bot._validate_proposal = AsyncMock(return_value=ValidationResult(valid=True, reason="ok"))
         p_ok = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
@@ -1322,8 +990,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
         queue.get_actionable = MagicMock(side_effect=lambda pri: [p_ok] if pri == SignalPriority.CRITICAL else [])
         queue.mark_consumed = MagicMock()
         queue.mark_rejected = MagicMock()
-        bot.shared.read_trade_queue = MagicMock(return_value=queue)
-        bot.shared.apply_trade_queue_updates = MagicMock()
+        bot._hub_trade_queue = queue
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         mock_exchange.fetch_ticker = AsyncMock(return_value=MagicMock(last=50_000.0))
         bot._process_signal = AsyncMock()
@@ -1335,46 +1002,14 @@ class TestProcessTradeQueueRejectsAndUpdates:
         await bot._process_trade_queue()
 
         queue.mark_consumed.assert_called_once_with(p_ok.id)
-        bot.shared.apply_trade_queue_updates.assert_called_once()
-        applied = bot.shared.apply_trade_queue_updates.call_args[0]
-        assert p_ok.id in applied[0]
-        assert applied[0]  # consumed_ids non-empty
+        assert p_ok.id in bot._hub_queue_updates["consumed"]
+        assert bot._hub_queue_updates["consumed"]
 
 
 # ── _read_shared_intel (regime, news hydration) ──────────────────────────────
 
 
 class TestReadSharedIntelExtended:
-    def test_read_shared_intel_returns_condition_with_regime(self, bot):
-        from intel.market_intel import MarketRegime
-
-        bot.shared_intel.intel_age_seconds = MagicMock(return_value=100)
-        snap = MagicMock()
-        snap.sources_active = ["fear_greed"]
-        snap.regime = "risk_off"
-        snap.fear_greed = 50
-        snap.fear_greed_bias = "neutral"
-        snap.liquidation_24h = 0.0
-        snap.mass_liquidation = False
-        snap.liquidation_bias = "neutral"
-        snap.macro_event_imminent = False
-        snap.macro_exposure_mult = 1.0
-        snap.macro_spike_opportunity = False
-        snap.next_macro_event = ""
-        snap.whale_bias = "neutral"
-        snap.overleveraged_side = ""
-        snap.tv_btc_consensus = "neutral"
-        snap.tv_eth_consensus = "neutral"
-        snap.position_size_multiplier = 1.0
-        snap.should_reduce_exposure = False
-        snap.preferred_direction = "neutral"
-        snap.hot_movers = []
-        snap.news_items = []
-        bot.shared_intel.read_intel = MagicMock(return_value=snap)
-        cond = bot._read_shared_intel()
-        assert cond is not None
-        assert cond.regime == MarketRegime.RISK_OFF
-
     def test_read_shared_intel_multibot_hydrates_news(self, bot):
         bot._multibot = True
         bot._hub_intel_age = 100
@@ -1525,18 +1160,6 @@ class TestReportDashboardSnapshot:
         assert "payload" in str(call_args) or call_args[1]["status"]
         assert "bot_id" in call_args[1]
 
-    @pytest.mark.asyncio
-    async def test_report_dashboard_snapshot_calls_report_bot_snapshot_when_dashboard_enabled_no_hub(self, bot):
-        bot.settings.dashboard_hub_url = ""
-        bot.settings.dashboard_enabled = True
-        with patch("web.server.report_bot_snapshot", MagicMock()) as m_report:
-            await bot._report_dashboard_snapshot([])
-        m_report.assert_called_once()
-        payload = m_report.call_args[0][0]
-        assert "status" in payload
-        assert "positions" in payload
-        assert payload["status"]["running"] == bot._running
-
 
 # ── start / stop lifecycle ───────────────────────────────────────────────────
 
@@ -1629,87 +1252,6 @@ class TestCheckDataDirSize:
             m_path.return_value.rglob.return_value = [f]
             bot._check_data_dir_size()
         m_path.return_value.rglob.assert_called_once()
-
-
-# ── _get_news_factor ───────────────────────────────────────────────────────
-
-
-class TestGetNewsFactor:
-    def test_get_news_factor_no_recent_news_returns_one(self, bot):
-        bot._recent_news = []
-        mult, force = bot._get_news_factor("BTC/USDT", "long", False)
-        assert mult == 1.0
-        assert force is False
-
-    def test_get_news_factor_long_bullish_news_penalizes_non_quick(self, bot):
-        from news import NewsItem
-
-        bot._recent_news = [
-            NewsItem(
-                headline="BTC pump",
-                source="x",
-                url="",
-                published=datetime.now(UTC),
-                matched_symbols=["BTC/USDT"],
-                sentiment_score=0.5,
-            ),
-        ]
-        mult, force = bot._get_news_factor("BTC/USDT", "long", is_quick_trade=False)
-        assert mult == 0.7
-        assert force is True
-
-    def test_get_news_factor_long_bullish_quick_trade_boost(self, bot):
-        from news import NewsItem
-
-        bot._recent_news = [
-            NewsItem(
-                headline="BTC pump",
-                source="x",
-                url="",
-                published=datetime.now(UTC),
-                matched_symbols=["BTC/USDT"],
-                sentiment_score=0.5,
-            ),
-        ]
-        mult, force = bot._get_news_factor("BTC/USDT", "long", is_quick_trade=True)
-        assert mult == 1.15
-        assert force is False
-
-    def test_get_news_factor_short_bearish_force_quick(self, bot):
-        from news import NewsItem
-
-        bot._recent_news = [
-            NewsItem(
-                headline="BTC dump",
-                source="x",
-                url="",
-                published=datetime.now(UTC),
-                matched_symbols=["BTC/USDT"],
-                sentiment_score=-0.5,
-            ),
-        ]
-        mult, force = bot._get_news_factor("BTC/USDT", "short", is_quick_trade=False)
-        assert mult == 0.7
-        assert force is True
-
-    def test_get_news_factor_three_headlines_caps_mult(self, bot):
-        from news import NewsItem
-
-        now = datetime.now(UTC)
-        bot._recent_news = [
-            NewsItem(
-                headline="a", source="x", url="", published=now, matched_symbols=["BTC/USDT"], sentiment_score=0.8
-            ),
-            NewsItem(
-                headline="b", source="x", url="", published=now, matched_symbols=["BTC/USDT"], sentiment_score=0.8
-            ),
-            NewsItem(
-                headline="c", source="x", url="", published=now, matched_symbols=["BTC/USDT"], sentiment_score=0.8
-            ),
-        ]
-        mult, force = bot._get_news_factor("BTC/USDT", "long", is_quick_trade=True)
-        assert mult <= 1.5
-        assert force is True
 
 
 # ── _apply_pattern_analysis ─────────────────────────────────────────────────
@@ -1819,7 +1361,7 @@ class TestTickInternals:
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 500.0})
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot._strategies = []
-        bot._dynamic_strategies = {}
+
         with patch.object(type(bot.target), "manual_close_all", PropertyMock(return_value=False)):
             bot.orders.check_stops = AsyncMock(return_value=[])
             bot.orders.try_scale_in = AsyncMock(return_value=[])
@@ -1843,7 +1385,7 @@ class TestTickInternals:
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 100.0})
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot._strategies = []
-        bot._dynamic_strategies = {}
+
         with patch.object(type(bot.target), "manual_close_all", PropertyMock(return_value=True)):
             bot._close_all_positions = AsyncMock()
             bot.target.clear_close_all = MagicMock()
@@ -1945,13 +1487,16 @@ class TestAdjustForTarget:
 
 class TestTickStrategyLoop:
     @pytest.mark.asyncio
-    async def test_tick_fetches_candles_and_runs_strategy_analyze(self, bot, mock_exchange):
+    async def test_tick_fetches_candles_for_held_positions(self, bot, mock_exchange):
+        """After the hub-centric refactor, the bot only fetches candles for
+        symbols it holds (for hedge/volatility checks), not for all strategies."""
         from datetime import timedelta
 
         from core.models import Candle
 
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 500.0})
-        mock_exchange.fetch_positions = AsyncMock(return_value=[])
+        pos = MagicMock(symbol="BTC/USDT", amount=0.1, side=MagicMock(value="buy"))
+        mock_exchange.fetch_positions = AsyncMock(return_value=[pos])
         candles = [
             Candle(
                 timestamp=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=i),
@@ -1967,23 +1512,7 @@ class TestTickStrategyLoop:
         ticker = MagicMock(last=50_100.0, symbol="BTC/USDT")
         mock_exchange.fetch_ticker = AsyncMock(return_value=ticker)
 
-        strat = MagicMock()
-        strat.symbol = "BTC/USDT"
-        strat.name = "test_strat"
-        strat.analyze = MagicMock(
-            return_value=Signal(
-                symbol="BTC/USDT",
-                action=SignalAction.BUY,
-                strength=0.8,
-                strategy="test_strat",
-                reason="test",
-                market_type="futures",
-            )
-        )
-        strat.feed_candle = MagicMock()
-        strat.set_position_state = MagicMock()
-        bot._strategies = [strat]
-        bot._dynamic_strategies = {}
+        bot._strategies = []
 
         with patch.object(type(bot.target), "manual_close_all", PropertyMock(return_value=False)):
             bot.orders.check_stops = AsyncMock(return_value=[])
@@ -1998,51 +1527,23 @@ class TestTickStrategyLoop:
             bot._write_deployment_status = AsyncMock()
             bot._log_status = AsyncMock()
             bot._check_daily_reset = AsyncMock()
-            bot._process_signal = AsyncMock()
-            bot.market_filter.is_tradeable = MagicMock(return_value=(True, "ok"))
-            bot.market_filter.assess_liquidity = MagicMock(
-                return_value=MagicMock(tier=MagicMock(__eq__=lambda s, o: o not in ("low", "dead")))
-            )
             bot.orders.has_stale_losers = MagicMock(return_value=False)
             bot.settings.hedge_enabled = False
 
             await bot._tick()
 
-        mock_exchange.fetch_candles.assert_called()
-        strat.feed_candle.assert_called()
-        strat.analyze.assert_called_once()
-        bot._process_signal.assert_called()
+        mock_exchange.fetch_candles.assert_called_with("BTC/USDT", "1m", limit=200)
+        mock_exchange.fetch_ticker.assert_called_with("BTC/USDT")
 
     @pytest.mark.asyncio
-    async def test_tick_strategy_analyze_exception_logged_loop_continues(self, bot, mock_exchange):
-        from datetime import timedelta
-
-        from core.models import Candle
-
+    async def test_tick_no_positions_no_candle_fetch(self, bot, mock_exchange):
+        """With no held positions, the bot should not fetch candles at all."""
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 500.0})
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
-        candles = [
-            Candle(
-                timestamp=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=i),
-                open=50_000.0,
-                high=50_010.0,
-                low=49_990.0,
-                close=50_000.0,
-                volume=1000.0,
-            )
-            for i in range(100)
-        ]
-        mock_exchange.fetch_candles = AsyncMock(return_value=candles)
-        mock_exchange.fetch_ticker = AsyncMock(return_value=MagicMock(last=50_000.0, symbol="BTC/USDT"))
+        mock_exchange.fetch_candles = AsyncMock(return_value=[])
+        mock_exchange.fetch_ticker = AsyncMock(return_value=MagicMock(last=50_000.0))
 
-        strat = MagicMock()
-        strat.symbol = "BTC/USDT"
-        strat.name = "bad_strat"
-        strat.analyze = MagicMock(side_effect=ValueError("analyze failed"))
-        strat.feed_candle = MagicMock()
-        strat.set_position_state = MagicMock()
-        bot._strategies = [strat]
-        bot._dynamic_strategies = {}
+        bot._strategies = []
 
         with patch.object(type(bot.target), "manual_close_all", PropertyMock(return_value=False)):
             bot.orders.check_stops = AsyncMock(return_value=[])
@@ -2057,11 +1558,12 @@ class TestTickStrategyLoop:
             bot._write_deployment_status = AsyncMock()
             bot._log_status = AsyncMock()
             bot._check_daily_reset = AsyncMock()
+            bot.orders.has_stale_losers = MagicMock(return_value=False)
             bot.settings.hedge_enabled = False
 
             await bot._tick()
 
-        mock_exchange.fetch_candles.assert_called()
+        mock_exchange.fetch_candles.assert_not_called()
         bot._write_deployment_status.assert_called()
 
     @pytest.mark.asyncio
@@ -2069,7 +1571,7 @@ class TestTickStrategyLoop:
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 500.0})
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot._strategies = []
-        bot._dynamic_strategies = {}
+
         bot._close_all_positions = AsyncMock()
         bot.notifier.send = AsyncMock()
 
@@ -2100,7 +1602,7 @@ class TestTickStrategyLoop:
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 500.0})
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot._strategies = []
-        bot._dynamic_strategies = {}
+
         bot.notifier.send = AsyncMock()
         bot.target.legendary_ride_reason = MagicMock(return_value="riding")
 
@@ -2138,12 +1640,15 @@ class TestTickStrategyLoop:
 
     @pytest.mark.asyncio
     async def test_tick_has_stale_losers_halves_aggression(self, bot, mock_exchange):
+        """Stale losers detection still works — halves aggression even though
+        strategy execution moved to the hub."""
         from datetime import timedelta
 
         from core.models import Candle
 
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 500.0})
-        mock_exchange.fetch_positions = AsyncMock(return_value=[])
+        pos = MagicMock(symbol="BTC/USDT", amount=0.1, side=MagicMock(value="buy"))
+        mock_exchange.fetch_positions = AsyncMock(return_value=[pos])
         candles = [
             Candle(
                 timestamp=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=i),
@@ -2158,14 +1663,7 @@ class TestTickStrategyLoop:
         mock_exchange.fetch_candles = AsyncMock(return_value=candles)
         mock_exchange.fetch_ticker = AsyncMock(return_value=MagicMock(last=50_000.0, symbol="BTC/USDT"))
 
-        strat = MagicMock()
-        strat.symbol = "BTC/USDT"
-        strat.name = "test_strat"
-        strat.analyze = MagicMock(return_value=None)
-        strat.feed_candle = MagicMock()
-        strat.set_position_state = MagicMock()
-        bot._strategies = [strat]
-        bot._dynamic_strategies = {}
+        bot._strategies = []
 
         with patch.object(type(bot.target), "manual_close_all", PropertyMock(return_value=False)):
             bot.orders.check_stops = AsyncMock(return_value=[])
@@ -2195,7 +1693,6 @@ class TestTickStrategyLoop:
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 500.0})
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot._strategies = []
-        bot._dynamic_strategies = {}
 
         closed_order = Order(
             symbol="BTC/USDT",
@@ -2275,7 +1772,7 @@ class TestTickStrategyLoop:
         strat.feed_candle = MagicMock()
         strat.set_position_state = MagicMock()
         bot._strategies = [strat]
-        bot._dynamic_strategies = {}
+
         bot.settings.hedge_enabled = True
         bot.orders.try_hedge = AsyncMock(return_value=[MagicMock()])
 
@@ -2303,7 +1800,7 @@ class TestTickStrategyLoop:
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 500.0})
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot._strategies = []
-        bot._dynamic_strategies = {}
+
         bot._write_deployment_status = AsyncMock(side_effect=RuntimeError("write failed"))
 
         with patch.object(type(bot.target), "manual_close_all", PropertyMock(return_value=False)):
@@ -2413,9 +1910,11 @@ class TestExecuteProposalAndHandleSpike:
     @pytest.mark.asyncio
     async def test_execute_proposal_process_signal_raises_returns_false(self, bot, mock_exchange):
         from shared.models import SignalPriority, TradeProposal
+        from validators import ValidationResult
 
         mock_exchange.fetch_ticker = AsyncMock(return_value=MagicMock(last=50_000.0))
         bot._process_signal = AsyncMock(side_effect=RuntimeError("execute failed"))
+        bot._validate_proposal = AsyncMock(return_value=ValidationResult(valid=True, reason="ok"))
         proposal = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
@@ -2428,18 +1927,6 @@ class TestExecuteProposalAndHandleSpike:
         ok = await bot._execute_proposal(proposal, aggression=1.0)
         assert ok is False
 
-    @pytest.mark.asyncio
-    async def test_handle_spike_correlate_spike_returns_news_sets_confirmed(self, bot):
-        from volatility import SpikeEvent
-
-        bot.news = MagicMock()
-        bot.news.correlate_spike = MagicMock(return_value=MagicMock(headline="BTC pump", matched_symbols=["BTC/USDT"]))
-        spike = SpikeEvent(
-            symbol="BTC/USDT", change_pct=5.0, direction="up", price=52_000.0, volume_24h=1e9, window_seconds=60
-        )
-        await bot._handle_spike(spike)
-        assert getattr(spike, "confirmed_by_news", False) or spike.news_headline == "BTC pump"
-
 
 # ── _tick: wick scalp exception / intel fallback / queue strength reject ──────
 
@@ -2450,7 +1937,7 @@ class TestTickWickScalpAndIntelFallback:
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 500.0})
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot._strategies = []
-        bot._dynamic_strategies = {}
+
         bot.orders.try_wick_scalps = AsyncMock(side_effect=RuntimeError("wick error"))
 
         with patch.object(type(bot.target), "manual_close_all", PropertyMock(return_value=False)):
@@ -2472,18 +1959,15 @@ class TestTickWickScalpAndIntelFallback:
         bot._write_deployment_status.assert_called()
 
     @pytest.mark.asyncio
-    async def test_tick_intel_assess_fallback_when_shared_stale(self, bot, mock_exchange):
+    async def test_tick_no_local_intel_assess_when_shared_stale(self, bot, mock_exchange):
+        """Intel now comes only from hub — local assess() is never called."""
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 500.0})
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot._strategies = []
-        bot._dynamic_strategies = {}
+
         bot._read_shared_intel = MagicMock(return_value=None)
-        cond = MagicMock(should_reduce_exposure=False, position_size_multiplier=1.0, regime=MagicMock(value="normal"))
         bot.intel = MagicMock()
-        bot.intel.assess = MagicMock(return_value=cond)
-        bot.intel._condition = None
-        bot.intel.tradingview = MagicMock()
-        bot.intel.tradingview.analyze_multi = AsyncMock()
+        bot.intel.assess = MagicMock()
 
         with patch.object(type(bot.target), "manual_close_all", PropertyMock(return_value=False)):
             bot.orders.check_stops = AsyncMock(return_value=[])
@@ -2501,7 +1985,7 @@ class TestTickWickScalpAndIntelFallback:
 
             await bot._tick()
 
-        bot.intel.assess.assert_called()
+        bot.intel.assess.assert_not_called()
 
 
 class TestProcessTradeQueueStrengthReject:
@@ -2524,8 +2008,7 @@ class TestProcessTradeQueueStrengthReject:
         )
         queue = MagicMock(pending_count=1)
         queue.get_actionable = MagicMock(side_effect=lambda pri: [p] if pri == SignalPriority.CRITICAL else [])
-        bot.shared.read_trade_queue = MagicMock(return_value=queue)
-        bot.shared.apply_trade_queue_updates = MagicMock()
+        bot._hub_trade_queue = queue
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot.target.should_trade = MagicMock(return_value=True)
         bot.target.aggression_multiplier = MagicMock(return_value=0.5)

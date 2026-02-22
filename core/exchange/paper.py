@@ -86,7 +86,10 @@ class PaperExchange(BaseExchange):
             except Exception:
                 pnl = pos.unrealized_pnl or 0
             total["USDT"] = total.get("USDT", 0) + margin + pnl
-        return {k: v for k, v in total.items() if v > 0}
+        # Always expose USDT (even if negative after a losing close) so the bot sees real balance
+        result = {k: v for k, v in total.items() if k != "USDT" and v > 0}
+        result["USDT"] = total.get("USDT", 0.0)
+        return result
 
     @timed("exchange.fetch_positions")
     async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
@@ -244,23 +247,27 @@ class PaperExchange(BaseExchange):
         if order.leverage <= 0:
             logger.error("[PAPER] Invalid leverage {} for {} — clamping to 1", order.leverage, order.symbol)
             order.leverage = 1
-        existing = next((p for p in self._positions if p.symbol == order.symbol), None)
-        if existing and existing.leverage <= 0:
-            existing.leverage = 1
+        # Match by symbol AND side: close opposite-side position first (hedge/main same symbol).
+        to_close = next((p for p in self._positions if p.symbol == order.symbol and p.side != order.side), None)
+        existing_same = next((p for p in self._positions if p.symbol == order.symbol and p.side == order.side), None)
+        if to_close and to_close.leverage <= 0:
+            to_close.leverage = 1
+        if existing_same and existing_same.leverage <= 0:
+            existing_same.leverage = 1
 
-        if existing and existing.side != order.side:
-            close_amount = min(order.amount, existing.amount)
-            if existing.side == OrderSide.BUY:
-                pnl = (fill_price - existing.entry_price) * close_amount
+        if to_close:
+            close_amount = min(order.amount, to_close.amount)
+            if to_close.side == OrderSide.BUY:
+                pnl = (fill_price - to_close.entry_price) * close_amount
             else:
-                pnl = (existing.entry_price - fill_price) * close_amount
-            margin_returned = existing.entry_price * close_amount / existing.leverage
+                pnl = (to_close.entry_price - fill_price) * close_amount
+            margin_returned = to_close.entry_price * close_amount / to_close.leverage
             self._balances["USDT"] += margin_returned + pnl
 
-            if close_amount >= existing.amount:
-                self._positions.remove(existing)
+            if close_amount >= to_close.amount:
+                self._positions.remove(to_close)
             else:
-                existing.amount -= close_amount
+                to_close.amount -= close_amount
 
             logger.info("[PAPER] Closed {:.6f} of {} PnL: {:.2f}", close_amount, order.symbol, pnl)
 
@@ -288,8 +295,8 @@ class PaperExchange(BaseExchange):
                 )
             return True
 
-        if existing and existing.side == order.side:
-            total_amount = existing.amount + order.amount
+        if existing_same:
+            total_amount = existing_same.amount + order.amount
             if total_amount <= 0:
                 logger.warning("[PAPER] DCA total amount is 0 for {}", order.symbol)
                 return False
@@ -298,11 +305,11 @@ class PaperExchange(BaseExchange):
                 logger.warning("[PAPER] Insufficient margin for DCA {} {}", order.amount, order.symbol)
                 return False
             self._balances["USDT"] -= margin_needed
-            avg_entry = (existing.entry_price * existing.amount + fill_price * order.amount) / total_amount
-            existing.amount = total_amount
-            existing.entry_price = avg_entry
-            existing.current_price = fill_price
-            existing.leverage = max(existing.leverage, order.leverage)
+            avg_entry = (existing_same.entry_price * existing_same.amount + fill_price * order.amount) / total_amount
+            existing_same.amount = total_amount
+            existing_same.entry_price = avg_entry
+            existing_same.current_price = fill_price
+            existing_same.leverage = max(existing_same.leverage, order.leverage)
             logger.info(
                 "[PAPER] DCA into {} — avg entry: {:.6f}, total: {:.6f}",
                 order.symbol,

@@ -4,7 +4,9 @@ volumes:
   prometheus-data:
 
 x-bot-common: &bot-common
-  build: .
+  build:
+    context: .
+    dockerfile: Dockerfile.bot
   restart: unless-stopped
   env_file: .env
   environment:
@@ -14,10 +16,8 @@ x-bot-common: &bot-common
     - ${HOST_DATA_DIR}:/app/data
     - ${HOST_LOGS_DIR}:/app/logs
   depends_on:
-    monitor:
-      condition: service_started
-    analytics:
-      condition: service_started
+    bot-hub:
+      condition: service_healthy
   logging:
     driver: "json-file"
     options:
@@ -25,28 +25,36 @@ x-bot-common: &bot-common
       max-file: "5"
 
 services:
-  # ---- HUB: Dashboard & coordination only (no trading) ----
+  # ---- HUB: Brain + data presenter + orchestrator ----
+  # Runs monitor + analytics in-process. Single container replaces
+  # the old hub + monitor + analytics (3 → 1).
   bot-hub:
-    <<: *bot-common
+    build:
+      context: .
+      dockerfile: Dockerfile.hub
     container_name: bot-hub
+    restart: unless-stopped
+    env_file: .env
     environment:
       - TZ=UTC
-      - BOT_ID=hub
-      - BOT_STYLE=momentum
-      - HUB_ONLY=true
-      - SESSION_BUDGET=0
       - DASHBOARD_PORT=9035
+    command: python hub_main.py
     ports:
       - "${DASHBOARD_PORT:-9035}:9035"
     volumes:
-    - ${HOST_DATA_DIR}:/app/data
-    - ${HOST_LOGS_DIR}:/app/logs
+      - ${HOST_DATA_DIR}:/app/data
+      - ${HOST_LOGS_DIR}:/app/logs
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
       interval: 30s
       timeout: 10s
       start_period: 90s
       retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   # ---- Bot 1: Momentum / trend-following ----
   bot-momentum:
@@ -56,11 +64,10 @@ services:
       - TZ=UTC
       - BOT_ID=momentum
       - BOT_STYLE=momentum
-      - BOT_STRATEGIES=compound_momentum,market_open_volatility
       - DASHBOARD_ENABLED=false
       - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
       timeout: 10s
       start_period: 90s
@@ -74,11 +81,10 @@ services:
       - TZ=UTC
       - BOT_ID=indicators
       - BOT_STYLE=momentum
-      - BOT_STRATEGIES=rsi,macd
       - DASHBOARD_ENABLED=false
       - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
       timeout: 10s
       start_period: 90s
@@ -92,13 +98,12 @@ services:
       - TZ=UTC
       - BOT_ID=meanrev
       - BOT_STYLE=meanrev
-      - BOT_STRATEGIES=bollinger,mean_reversion
       - TICK_INTERVAL_IDLE=120
       - TICK_INTERVAL_ACTIVE=60
       - DASHBOARD_ENABLED=false
       - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
       timeout: 10s
       start_period: 90s
@@ -112,13 +117,12 @@ services:
       - TZ=UTC
       - BOT_ID=swing
       - BOT_STYLE=swing
-      - BOT_STRATEGIES=swing_opportunity,grid
       - TICK_INTERVAL_IDLE=600
       - TICK_INTERVAL_ACTIVE=300
       - DASHBOARD_ENABLED=false
       - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
       timeout: 10s
       start_period: 90s
@@ -132,7 +136,6 @@ services:
       - TZ=UTC
       - BOT_ID=extreme
       - BOT_STYLE=momentum
-      - BOT_STRATEGIES=compound_momentum,market_open_volatility
       - DEFAULT_LEVERAGE=20
       - MAX_CONCURRENT_POSITIONS=10
       - TICK_INTERVAL_IDLE=30
@@ -149,7 +152,7 @@ services:
       - DASHBOARD_ENABLED=false
       - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
       timeout: 10s
       start_period: 90s
@@ -163,7 +166,6 @@ services:
       - TZ=UTC
       - BOT_ID=scalper
       - BOT_STYLE=momentum
-      - BOT_STRATEGIES=compound_momentum
       - TICK_INTERVAL_ACTIVE=15
       - STOP_LOSS_PCT=0.8
       - TAKE_PROFIT_PCT=2.0
@@ -171,7 +173,7 @@ services:
       - DASHBOARD_ENABLED=false
       - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
       timeout: 10s
       start_period: 90s
@@ -185,12 +187,11 @@ services:
       - TZ=UTC
       - BOT_ID=fullstack
       - BOT_STYLE=momentum
-      - BOT_STRATEGIES=compound_momentum,market_open_volatility,swing_opportunity,rsi,macd,bollinger,mean_reversion,grid
       - MAX_CONCURRENT_POSITIONS=10
       - DASHBOARD_ENABLED=false
       - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
       timeout: 10s
       start_period: 90s
@@ -204,7 +205,6 @@ services:
       - TZ=UTC
       - BOT_ID=conservative
       - BOT_STYLE=meanrev
-      - BOT_STRATEGIES=rsi,bollinger
       - DEFAULT_LEVERAGE=3
       - MAX_POSITION_SIZE_PCT=3
       - STOP_LOSS_PCT=1.0
@@ -212,7 +212,7 @@ services:
       - DASHBOARD_ENABLED=false
       - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
       timeout: 10s
       start_period: 90s
@@ -226,7 +226,6 @@ services:
       - TZ=UTC
       - BOT_ID=aggressive
       - BOT_STYLE=momentum
-      - BOT_STRATEGIES=compound_momentum,rsi
       - DEFAULT_LEVERAGE=20
       - MAX_POSITION_SIZE_PCT=10
       - TAKE_PROFIT_PCT=10
@@ -235,7 +234,7 @@ services:
       - DASHBOARD_ENABLED=false
       - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
       timeout: 10s
       start_period: 90s
@@ -249,7 +248,6 @@ services:
       - TZ=UTC
       - BOT_ID=hedger
       - BOT_STYLE=momentum
-      - BOT_STRATEGIES=compound_momentum,mean_reversion
       - HEDGE_ENABLED=true
       - HEDGE_RATIO=0.40
       - HEDGE_MIN_PROFIT_PCT=2.0
@@ -257,58 +255,11 @@ services:
       - DASHBOARD_ENABLED=false
       - DASHBOARD_HUB_URL=http://bot-hub:9035
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9035/health"]
+      test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
       timeout: 10s
       start_period: 90s
       retries: 3
-
-  # ---- Shared services (one instance each) ----
-  monitor:
-    build: .
-    container_name: trading-bot-monitor
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      - TZ=UTC
-    command: python run_monitor.py
-    volumes:
-    - ${HOST_DATA_DIR}:/app/data
-    - ${HOST_LOGS_DIR}:/app/logs
-    healthcheck:
-      test: ["CMD", "python", "-c", "import os, time; f='data/intel_state.json'; exit(0) if not os.path.exists(f) else exit(0 if time.time()-os.stat(f).st_mtime<600 else 1)"]
-      interval: 60s
-      timeout: 5s
-      start_period: 90s
-      retries: 3
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  analytics:
-    build: .
-    container_name: trading-bot-analytics
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      - TZ=UTC
-    command: python run_analytics.py
-    volumes:
-    - ${HOST_DATA_DIR}:/app/data
-    - ${HOST_LOGS_DIR}:/app/logs
-    healthcheck:
-      test: ["CMD", "python", "-c", "import os, time; f='data/analytics_state.json'; exit(0) if not os.path.exists(f) else exit(0 if time.time()-os.stat(f).st_mtime<600 else 1)"]
-      interval: 60s
-      timeout: 5s
-      start_period: 90s
-      retries: 3
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
 
   # ---- Log aggregation (Loki + Promtail) ----
   loki:

@@ -402,21 +402,6 @@ class TestHubDB:
         updated = hub.update_trade_close("ghost", "2026-01-01T00:00:00", {"closed_at": "now"})
         assert updated is False
 
-    def test_insert_and_query_deposit(self, hub: HubDB):
-        dep_id = hub.insert_deposit(
-            bot_id="momentum",
-            amount=500.0,
-            exchange="mexc",
-            detected_at="2026-02-20T14:00:00",
-            balance_before=1000.0,
-            balance_after=1500.0,
-        )
-        assert dep_id > 0
-        deposits = hub.get_deposits()
-        assert len(deposits) == 1
-        assert deposits[0]["amount"] == 500.0
-        assert deposits[0]["exchange"] == "mexc"
-
     def test_strategy_stats(self, hub: HubDB):
         for i in range(3):
             hub.insert_trade(

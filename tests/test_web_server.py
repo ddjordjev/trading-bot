@@ -110,8 +110,6 @@ def _reset_hub_db() -> None:
     if hub.conn:
         hub.conn.execute("DELETE FROM trades")
         with contextlib.suppress(Exception):
-            hub.conn.execute("DELETE FROM deposits")
-        with contextlib.suppress(Exception):
             hub.conn.execute("DELETE FROM bot_config")
         hub.conn.commit()
     hub._ack_buffer.clear()
@@ -132,21 +130,21 @@ async def client(auth_override):
 
 class TestHealth:
     async def test_health_no_bot(self, client):
-        set_bot(None)  # type: ignore[arg-type]
         r = await client.get("/health")
         assert r.status_code == 200
         data = r.json()
         assert data["status"] == "ok"
-        assert data["bot_running"] is False
+        assert data["bot_running"] is True
+        assert data.get("mode") == "hub"
 
     async def test_health_with_bot(self, client, mock_bot):
-        mock_bot._running = True
         set_bot(mock_bot)  # type: ignore[arg-type]
         r = await client.get("/health")
         assert r.status_code == 200
         data = r.json()
         assert data["status"] == "ok"
         assert data["bot_running"] is True
+        assert data.get("mode") == "hub"
 
     async def test_health_no_auth_required(self):
         """Health endpoint works without auth override."""
@@ -186,18 +184,11 @@ class TestGetBots:
         assert bot0["exchange"] == "MEXC"
         _bot_reports.clear()
 
-    async def test_bots_fallback_to_current_bot(self, client, mock_bot):
-        mock_bot.settings.bot_id = "solo"
-        mock_bot.settings.dashboard_port = 9035
-        mock_bot.settings.bot_strategy_list = ["rsi"]
-        set_bot(mock_bot)  # type: ignore[arg-type]
+    async def test_bots_empty_when_no_reports(self, client):
         _bot_reports.clear()
         r = await client.get("/api/bots")
         assert r.status_code == 200
-        bots = r.json()
-        assert len(bots) == 1
-        assert bots[0]["bot_id"] == "solo"
-        assert bots[0]["exchange"] == "MEXC"
+        assert r.json() == []
 
 
 # ── GET /api/status ───────────────────────────────────────────────────
@@ -213,24 +204,74 @@ class TestGetStatus:
         assert "balance" in data
 
     async def test_status_with_bot(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        r = await client.get("/api/status")
-        assert r.status_code == 200
-        data = r.json()
-        assert data["trading_mode"] == "paper_local"
-        assert data["exchange_name"] == "MEXC"
-        assert data["balance"] == 10_000.0
-        assert data["daily_pnl"] == 500.0
-        assert data["strategies_count"] == 0
+        hub_state = MagicMock()
+        with patch("web.server._hub_state_ref", hub_state):
+            _bot_reports.clear()
+            report_bot_snapshot(
+                {
+                    "bot_id": "solo",
+                    "exchange": "MEXC",
+                    "status": {
+                        "running": True,
+                        "balance": 10_000.0,
+                        "available_margin": 5_000.0,
+                        "daily_pnl": 500.0,
+                        "daily_pnl_pct": 5.0,
+                        "total_growth_usd": 1000.0,
+                        "total_growth_pct": 25.0,
+                        "trading_mode": "paper_local",
+                        "exchange_name": "MEXC",
+                        "strategies_count": 0,
+                    },
+                    "positions": [],
+                    "wick_scalps": [],
+                    "strategies": [],
+                }
+            )
+            try:
+                r = await client.get("/api/status")
+                assert r.status_code == 200
+                data = r.json()
+                assert data["trading_mode"] == "paper_local"
+                assert data["exchange_name"] == "MEXC"
+                assert data["balance"] == 10_000.0
+                assert data["daily_pnl"] == 500.0
+                assert data["strategies_count"] == 0
+            finally:
+                _bot_reports.clear()
 
-    async def test_status_includes_total_growth_usd(self, client, mock_bot):
-        mock_bot.target._current_balance = 10000.0
-        mock_bot.target._initial_capital = 9000.0
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        r = await client.get("/api/status")
-        assert r.status_code == 200
-        data = r.json()
-        assert data["total_growth_usd"] == pytest.approx(1000.0)
+    async def test_status_includes_total_growth_usd(self, client):
+        hub_state = MagicMock()
+        with patch("web.server._hub_state_ref", hub_state):
+            _bot_reports.clear()
+            report_bot_snapshot(
+                {
+                    "bot_id": "solo",
+                    "exchange": "MEXC",
+                    "status": {
+                        "running": True,
+                        "balance": 10000.0,
+                        "available_margin": 5000.0,
+                        "daily_pnl": 0,
+                        "daily_pnl_pct": 0,
+                        "total_growth_usd": 1000.0,
+                        "total_growth_pct": 0,
+                        "trading_mode": "paper_local",
+                        "exchange_name": "MEXC",
+                        "strategies_count": 0,
+                    },
+                    "positions": [],
+                    "wick_scalps": [],
+                    "strategies": [],
+                }
+            )
+            try:
+                r = await client.get("/api/status")
+                assert r.status_code == 200
+                data = r.json()
+                assert data["total_growth_usd"] == pytest.approx(1000.0)
+            finally:
+                _bot_reports.clear()
 
 
 # ── GET /api/positions ────────────────────────────────────────────────
@@ -250,34 +291,14 @@ class TestGetPositions:
         assert r.status_code == 200
         assert r.json() == []
 
-    async def test_positions_with_position(self, client, mock_bot):
-        from core.models import OrderSide, Position
-
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        pos = Position(
-            symbol="BTC/USDT",
-            side=OrderSide.BUY,
-            amount=0.1,
-            entry_price=50_000.0,
-            current_price=52_000.0,
-            leverage=10,
-            market_type="futures",
-            unrealized_pnl=200.0,
-            strategy="rsi",
-            opened_at=datetime.now(UTC),
-        )
-        mock_bot.exchange.fetch_positions = AsyncMock(return_value=[pos])
+    async def test_positions_always_empty_from_hub(self, client):
+        """Hub mode: positions endpoint always returns [] (no local exchange)."""
         r = await client.get("/api/positions")
         assert r.status_code == 200
-        data = r.json()
-        assert len(data) == 1
-        assert data[0]["symbol"] == "BTC/USDT"
-        assert data[0]["side"] == "buy"
-        assert data[0]["amount"] == 0.1
+        assert r.json() == []
 
     async def test_positions_fetch_exception_returns_empty(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.exchange.fetch_positions = AsyncMock(side_effect=Exception("API error"))
         r = await client.get("/api/positions")
         assert r.status_code == 200
         assert r.json() == []
@@ -293,26 +314,39 @@ class TestGetTrades:
         assert r.status_code == 200
         assert r.json() == []
 
-    async def test_trades_with_log(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.orders._trade_log = [
+    async def test_trades_with_log(self, client):
+        _bot_reports.clear()
+        report_bot_snapshot(
             {
-                "timestamp": "2024-01-01T12:00:00",
-                "symbol": "BTC/USDT",
-                "side": "buy",
-                "action": "open",
-                "amount": 0.1,
-                "price": 50000,
-                "strategy": "rsi",
-                "pnl": 0,
-            },
-        ]
-        r = await client.get("/api/trades")
-        assert r.status_code == 200
-        data = r.json()
-        assert len(data) == 1
-        assert data[0]["symbol"] == "BTC/USDT"
-        assert data[0]["action"] == "open"
+                "bot_id": "test",
+                "exchange": "MEXC",
+                "status": {},
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [],
+                "trade_log": [
+                    {
+                        "timestamp": "2024-01-01T12:00:00",
+                        "symbol": "BTC/USDT",
+                        "side": "buy",
+                        "action": "open",
+                        "amount": 0.1,
+                        "price": 50000,
+                        "strategy": "rsi",
+                        "pnl": 0,
+                    },
+                ],
+            }
+        )
+        try:
+            r = await client.get("/api/trades")
+            assert r.status_code == 200
+            data = r.json()
+            assert len(data) == 1
+            assert data[0]["symbol"] == "BTC/USDT"
+            assert data[0]["action"] == "open"
+        finally:
+            _bot_reports.clear()
 
 
 # ── GET /api/trade-queue ────────────────────────────────────────────────
@@ -320,34 +354,27 @@ class TestGetTrades:
 
 class TestGetTradeQueue:
     async def test_trade_queue_returns_list(self, client):
-        with patch("web.server.SharedState") as MockSharedState:
-            mock_state = MagicMock()
-            from shared.models import TradeQueue
-
-            mock_state.read_trade_queue.return_value = TradeQueue()
-            MockSharedState.return_value = mock_state
-            r = await client.get("/api/trade-queue")
+        r = await client.get("/api/trade-queue")
         assert r.status_code == 200
         assert r.json() == []
 
     async def test_trade_queue_returns_pending_proposals(self, client):
         from shared.models import SignalPriority, TradeProposal, TradeQueue
 
-        with patch("web.server.SharedState") as MockSharedState:
-            mock_state = MagicMock()
-            q = TradeQueue()
-            q.critical = [
-                TradeProposal(
-                    priority=SignalPriority.CRITICAL,
-                    symbol="BTC/USDT",
-                    side="long",
-                    strategy="momentum",
-                    strength=0.9,
-                    created_at=datetime.now(UTC).isoformat(),
-                ),
-            ]
-            mock_state.read_trade_queue.return_value = q
-            MockSharedState.return_value = mock_state
+        hub_state = MagicMock()
+        q = TradeQueue()
+        q.critical = [
+            TradeProposal(
+                priority=SignalPriority.CRITICAL,
+                symbol="BTC/USDT",
+                side="long",
+                strategy="momentum",
+                strength=0.9,
+                created_at=datetime.now(UTC).isoformat(),
+            ),
+        ]
+        hub_state.read_trade_queue.return_value = q
+        with patch("web.server._hub_state_ref", hub_state):
             r = await client.get("/api/trade-queue")
         assert r.status_code == 200
         data = r.json()
@@ -376,43 +403,24 @@ class TestGetIntelTrendingStrategies:
         assert r.status_code == 200
         assert r.json() is None
 
-    async def test_intel_includes_macro_events(self, client, mock_bot):
-        from intel.macro_calendar import EventImpact, MacroEvent
+    async def test_intel_includes_macro_events(self, client):
+        from shared.models import IntelSnapshot
 
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        cond = MagicMock()
-        cond.regime = MagicMock(value="normal")
-        cond.fear_greed = 45
-        cond.fear_greed_bias = "fear"
-        cond.liquidation_24h = 0
-        cond.mass_liquidation = False
-        cond.liquidation_bias = "neutral"
-        cond.macro_event_imminent = True
-        cond.macro_exposure_mult = 0.5
-        cond.macro_spike_opportunity = False
-        cond.next_macro_event = "FOMC in 1.5h"
-        cond.whale_bias = "neutral"
-        cond.overleveraged_side = ""
-        cond.position_size_multiplier = 1.0
-        cond.should_reduce_exposure = True
-        cond.preferred_direction = "neutral"
-        mock_bot.intel = MagicMock()
-        mock_bot.intel.condition = cond
-        mock_bot.intel.macro = MagicMock()
-        mock_bot.intel.macro.upcoming_high_impact = [
-            MacroEvent(
-                title="FOMC Statement",
-                date=datetime(2026, 3, 1, 18, 0, tzinfo=UTC),
-                impact=EventImpact.CRITICAL,
-            ),
-        ]
-        r = await client.get("/api/intel")
+        hub_state = MagicMock()
+        snap = IntelSnapshot(
+            regime="normal",
+            macro_event_imminent=True,
+            next_macro_event="FOMC Statement in 1.5h",
+            sources_active=["macro"],
+        )
+        hub_state.read_intel.return_value = snap
+        with patch("web.server._hub_state_ref", hub_state):
+            r = await client.get("/api/intel")
         assert r.status_code == 200
         data = r.json()
         assert data is not None
-        assert len(data["macro_events"]) == 1
-        assert data["macro_events"][0]["title"] == "FOMC Statement"
-        assert data["macro_events"][0]["impact"] == "critical"
+        assert data["macro_event_imminent"] is True
+        assert "FOMC" in data["next_macro_event"]
 
     async def test_trending_no_bot(self, client):
         set_bot(None)  # type: ignore[arg-type]
@@ -420,22 +428,26 @@ class TestGetIntelTrendingStrategies:
         assert r.status_code == 200
         assert r.json() == []
 
-    async def test_trending_with_coins(self, client, mock_bot):
-        from scanner.trending import TrendingCoin
+    async def test_trending_with_coins(self, client):
+        from shared.models import IntelSnapshot, TrendingSnapshot
 
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.scanner.hot_movers = [
-            TrendingCoin(
-                symbol="DOGE/USDT",
-                name="Dogecoin",
-                price=0.08,
-                volume_24h=1e9,
-                market_cap=11e9,
-                change_1h=2.0,
-                change_24h=10.0,
-            ),
-        ]
-        r = await client.get("/api/trending")
+        hub_state = MagicMock()
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(
+                    symbol="DOGE/USDT",
+                    name="Dogecoin",
+                    price=0.08,
+                    volume_24h=1e9,
+                    market_cap=11e9,
+                    change_1h=2.0,
+                    change_24h=10.0,
+                ),
+            ]
+        )
+        hub_state.read_intel.return_value = snap
+        with patch("web.server._hub_state_ref", hub_state):
+            r = await client.get("/api/trending")
         assert r.status_code == 200
         data = r.json()
         assert len(data) == 1
@@ -740,11 +752,12 @@ class TestGetModulesDailyReportAnalytics:
         assert r.status_code == 200
         assert r.json() == []
 
-    async def test_modules_with_bot(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.intel = MagicMock()
-        mock_bot.intel.condition = MagicMock(regime=MagicMock(value="normal"))
-        r = await client.get("/api/modules")
+    async def test_modules_with_bot(self, client):
+        hub_state = MagicMock()
+        hub_state.read_intel.return_value = MagicMock(regime="normal", hot_movers=[], news_items=[])
+        hub_state.read_analytics.return_value = MagicMock(weights={})
+        with patch("web.server._hub_state_ref", hub_state):
+            r = await client.get("/api/modules")
         assert r.status_code == 200
         data = r.json()
         assert len(data) >= 4
@@ -752,7 +765,7 @@ class TestGetModulesDailyReportAnalytics:
         assert "intel" in names
         assert "scanner" in names
         assert "news" in names
-        assert "volatility" in names
+        assert "analytics" in names
 
     async def test_daily_report_no_bot(self, client):
         set_bot(None)  # type: ignore[arg-type]
@@ -762,13 +775,37 @@ class TestGetModulesDailyReportAnalytics:
         assert data["history"] == []
         assert "compound_report" in data
 
-    async def test_daily_report_with_bot(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        r = await client.get("/api/daily-report")
-        assert r.status_code == 200
-        data = r.json()
-        assert data["winning_days"] == 3
-        assert data["projected"] == {"1_week": 10_500.0, "1_month": 11_000.0, "3_months": 12_000.0}
+    async def test_daily_report_with_bot(self, client):
+        hub_state = MagicMock()
+        with patch("web.server._hub_state_ref", hub_state):
+            _bot_reports.clear()
+            report_bot_snapshot(
+                {
+                    "bot_id": "test",
+                    "exchange": "MEXC",
+                    "status": {},
+                    "positions": [],
+                    "wick_scalps": [],
+                    "strategies": [],
+                    "daily_report": {
+                        "winning_days": 3,
+                        "losing_days": 1,
+                        "target_hit_days": 2,
+                        "avg_daily_pnl_pct": 8.0,
+                        "history": [],
+                        "best_day": None,
+                        "worst_day": None,
+                        "projected": {"1_week": 10_500.0, "1_month": 11_000.0, "3_months": 12_000.0},
+                    },
+                }
+            )
+            try:
+                r = await client.get("/api/daily-report")
+                assert r.status_code == 200
+                data = r.json()
+                assert data["winning_days"] == 3
+            finally:
+                _bot_reports.clear()
 
     async def test_analytics_no_bot(self, client):
         set_bot(None)  # type: ignore[arg-type]
@@ -803,49 +840,67 @@ class TestRefreshAnalytics:
 
 class TestBotStartStop:
     async def test_start_no_bot(self, client):
-        set_bot(None)  # type: ignore[arg-type]
-        r = await client.post("/api/bot/start")
+        with patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast:
+            broadcast.return_value = "ok"
+            r = await client.post("/api/bot/start")
         assert r.status_code == 200
-        assert r.json()["success"] is False
+        assert r.json()["success"] is True
+        assert "broadcast" in r.json()["message"].lower() or r.json()["message"] == "ok"
 
     async def test_start_already_running(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot._running = True
-        mock_bot.settings.bot_id = "testbot"
-        r = await client.post("/api/bot/start", json={"bot_id": "testbot"})
-        assert r.status_code == 200
-        assert r.json()["success"] is False
-        assert "already running" in r.json()["message"]
+        from web.server import _bot_urls
+
+        _bot_urls["testbot"] = "http://bot-testbot:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=False, message="already running")
+                r = await client.post("/api/bot/start", json={"bot_id": "testbot"})
+                assert r.status_code == 200
+                assert r.json()["success"] is False
+                assert "already running" in r.json()["message"]
+        finally:
+            _bot_urls.clear()
 
     async def test_start_ok(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot._running = False
-        r = await client.post("/api/bot/start")
+        with patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast:
+            broadcast.return_value = "ok"
+            r = await client.post("/api/bot/start")
         assert r.status_code == 200
         assert r.json()["success"] is True
 
     async def test_stop_no_bot(self, client):
-        set_bot(None)  # type: ignore[arg-type]
-        r = await client.post("/api/bot/stop")
+        with patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast:
+            broadcast.return_value = "ok"
+            r = await client.post("/api/bot/stop")
         assert r.status_code == 200
-        assert r.json()["success"] is False
+        assert r.json()["success"] is True
 
     async def test_stop_not_running(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot._running = False
-        mock_bot.settings.bot_id = "testbot"
-        r = await client.post("/api/bot/stop", json={"bot_id": "testbot"})
-        assert r.status_code == 200
-        assert "already stopped" in r.json()["message"]
+        from web.server import _bot_urls
+
+        _bot_urls["testbot"] = "http://bot-testbot:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=False, message="already stopped")
+                r = await client.post("/api/bot/stop", json={"bot_id": "testbot"})
+                assert r.status_code == 200
+                assert "already stopped" in r.json()["message"]
+        finally:
+            _bot_urls.clear()
 
     async def test_stop_ok(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot._running = True
-        mock_bot.stop = AsyncMock()
-        r = await client.post("/api/bot/stop")
-        assert r.status_code == 200
-        assert r.json()["success"] is True
-        mock_bot.stop.assert_awaited_once()
+        with patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast:
+            broadcast.return_value = "ok"
+            r = await client.post("/api/bot/stop")
+            assert r.status_code == 200
+            assert r.json()["success"] is True
+            broadcast.assert_awaited_once()
 
 
 # ── POST /api/position/close, take-profit, tighten-stop (body: symbol, pct) ─
@@ -853,115 +908,139 @@ class TestBotStartStop:
 
 class TestPositionActions:
     async def test_close_position_no_bot(self, client):
-        set_bot(None)  # type: ignore[arg-type]
         r = await client.post("/api/position/close", json={"symbol": "BTCUSDT"})
         assert r.status_code == 200
         assert r.json()["success"] is False
+        assert "not registered" in r.json()["message"].lower()
 
     async def test_close_position_ok(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.orders.execute_signal = AsyncMock()
-        r = await client.post("/api/position/close", json={"symbol": "BTCUSDT"})
-        assert r.status_code == 200
-        data = r.json()
-        assert data["success"] is True
-        assert "Closed" in data["message"]
-        mock_bot.orders.execute_signal.assert_awaited_once()
+        from web.server import _bot_urls
+
+        _bot_urls["testbot"] = "http://bot-testbot:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=True, message="Closed")
+                r = await client.post("/api/position/close", json={"symbol": "BTCUSDT", "bot_id": "testbot"})
+                assert r.status_code == 200
+                assert r.json()["success"] is True
+                assert "Closed" in r.json()["message"]
+                fwd.assert_awaited_once_with("testbot", "/api/position/close", {"symbol": "BTCUSDT"})
+        finally:
+            _bot_urls.clear()
 
     async def test_close_position_with_slash_in_symbol(self, client, mock_bot):
-        """Symbols like BTC/USDT work when sent in request body (no path encoding issue)."""
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.orders.execute_signal = AsyncMock()
-        r = await client.post("/api/position/close", json={"symbol": "BTC/USDT"})
-        assert r.status_code == 200
-        assert r.json()["success"] is True
-        mock_bot.orders.execute_signal.assert_awaited_once()
+        from web.server import _bot_urls
+
+        _bot_urls["testbot"] = "http://bot-testbot:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=True, message="Closed")
+                r = await client.post("/api/position/close", json={"symbol": "BTC/USDT", "bot_id": "testbot"})
+                assert r.status_code == 200
+                assert r.json()["success"] is True
+                fwd.assert_awaited_once_with("testbot", "/api/position/close", {"symbol": "BTC/USDT"})
+        finally:
+            _bot_urls.clear()
 
     async def test_close_position_execute_fails(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.orders.execute_signal = AsyncMock(side_effect=Exception("Exchange error"))
-        r = await client.post("/api/position/close", json={"symbol": "BTCUSDT"})
-        assert r.status_code == 200
-        assert r.json()["success"] is False
-        assert "Exchange error" in r.json()["message"]
+        from web.server import _bot_urls
+
+        _bot_urls["testbot"] = "http://bot-testbot:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=False, message="Exchange error")
+                r = await client.post("/api/position/close", json={"symbol": "BTCUSDT", "bot_id": "testbot"})
+                assert r.status_code == 200
+                assert r.json()["success"] is False
+                assert "Exchange error" in r.json()["message"]
+        finally:
+            _bot_urls.clear()
 
     async def test_take_profit_no_bot(self, client):
-        set_bot(None)  # type: ignore[arg-type]
         r = await client.post("/api/position/take-profit", json={"symbol": "BTCUSDT", "pct": 50})
         assert r.status_code == 200
         assert r.json()["success"] is False
 
     async def test_take_profit_no_position(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.exchange.fetch_positions = AsyncMock(return_value=[])
-        r = await client.post("/api/position/take-profit", json={"symbol": "BTCUSDT", "pct": 50})
-        assert r.status_code == 200
-        assert r.json()["success"] is False
-        assert "No open position" in r.json()["message"]
+        from web.server import _bot_urls
+
+        _bot_urls["testbot"] = "http://bot-testbot:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=False, message="No open position")
+                r = await client.post(
+                    "/api/position/take-profit", json={"symbol": "BTCUSDT", "pct": 50, "bot_id": "testbot"}
+                )
+                assert r.status_code == 200
+                assert r.json()["success"] is False
+                assert "No open position" in r.json()["message"]
+        finally:
+            _bot_urls.clear()
 
     async def test_take_profit_ok(self, client, mock_bot):
-        from core.models import OrderSide, Position
+        from web.server import _bot_urls
 
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        pos = Position(
-            symbol="BTCUSDT",
-            side=OrderSide.BUY,
-            amount=1.0,
-            entry_price=50_000.0,
-            current_price=52_000.0,
-            leverage=10,
-            market_type="futures",
-            opened_at=datetime.now(UTC),
-        )
-        mock_bot.exchange.fetch_positions = AsyncMock(return_value=[pos])
-        mock_bot.exchange.place_order = AsyncMock(return_value=MagicMock())
-        r = await client.post("/api/position/take-profit", json={"symbol": "BTCUSDT", "pct": 50})
-        assert r.status_code == 200
-        assert r.json()["success"] is True
+        _bot_urls["testbot"] = "http://bot-testbot:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=True, message="Took 50%")
+                r = await client.post(
+                    "/api/position/take-profit", json={"symbol": "BTCUSDT", "pct": 50, "bot_id": "testbot"}
+                )
+                assert r.status_code == 200
+                assert r.json()["success"] is True
+        finally:
+            _bot_urls.clear()
 
     async def test_tighten_stop_no_bot(self, client):
-        set_bot(None)  # type: ignore[arg-type]
         r = await client.post("/api/position/tighten-stop", json={"symbol": "BTCUSDT", "pct": 2})
         assert r.status_code == 200
         assert r.json()["success"] is False
 
     async def test_tighten_stop_no_trailing_stop(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.orders.trailing.active_stops = {}
-        r = await client.post("/api/position/tighten-stop", json={"symbol": "BTCUSDT", "pct": 2})
-        assert r.status_code == 200
-        assert r.json()["success"] is False
-        assert "No trailing stop" in r.json()["message"]
+        from web.server import _bot_urls
+
+        _bot_urls["testbot"] = "http://bot-testbot:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=False, message="No trailing stop")
+                r = await client.post(
+                    "/api/position/tighten-stop", json={"symbol": "BTCUSDT", "pct": 2, "bot_id": "testbot"}
+                )
+                assert r.status_code == 200
+                assert r.json()["success"] is False
+                assert "No trailing stop" in r.json()["message"]
+        finally:
+            _bot_urls.clear()
 
     async def test_tighten_stop_ok(self, client, mock_bot):
-        from core.models import OrderSide, Position
-        from core.orders.trailing import TrailingStop
+        from web.server import _bot_urls
 
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        ts = TrailingStop(
-            symbol="BTCUSDT",
-            side=OrderSide.BUY,
-            entry_price=50_000.0,
-            initial_stop_pct=5.0,
-            trail_pct=2.0,
-            current_stop=47_500.0,
-        )
-        mock_bot.orders.trailing.active_stops = {"BTCUSDT": ts}
-        pos = Position(
-            symbol="BTCUSDT",
-            side=OrderSide.BUY,
-            amount=0.1,
-            entry_price=50_000.0,
-            current_price=52_000.0,
-            leverage=10,
-            market_type="futures",
-            opened_at=datetime.now(UTC),
-        )
-        mock_bot.exchange.fetch_positions = AsyncMock(return_value=[pos])
-        r = await client.post("/api/position/tighten-stop", json={"symbol": "BTCUSDT", "pct": 2})
-        assert r.status_code == 200
-        assert r.json()["success"] is True
-        assert ts.current_stop != 47_500.0
+        _bot_urls["testbot"] = "http://bot-testbot:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=True, message="Tightened")
+                r = await client.post(
+                    "/api/position/tighten-stop", json={"symbol": "BTCUSDT", "pct": 2, "bot_id": "testbot"}
+                )
+                assert r.status_code == 200
+                assert r.json()["success"] is True
+        finally:
+            _bot_urls.clear()
 
 
 # ── POST /api/close-all, stop-trading, resume-trading ──────────────────
@@ -969,41 +1048,45 @@ class TestPositionActions:
 
 class TestCloseAllStopResume:
     async def test_close_all_no_bot(self, client):
-        set_bot(None)  # type: ignore[arg-type]
-        r = await client.post("/api/close-all")
+        with patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast:
+            broadcast.return_value = "ok"
+            r = await client.post("/api/close-all")
         assert r.status_code == 200
-        assert r.json()["success"] is False
+        assert r.json()["success"] is True
 
     async def test_close_all_ok(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        r = await client.post("/api/close-all")
-        assert r.status_code == 200
-        assert r.json()["success"] is True
-        mock_bot._close_all_positions.assert_awaited_once()
+        with patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast:
+            broadcast.return_value = "ok"
+            r = await client.post("/api/close-all")
+            assert r.status_code == 200
+            assert r.json()["success"] is True
+            broadcast.assert_awaited_once()
 
     async def test_stop_trading_no_bot(self, client):
-        set_bot(None)  # type: ignore[arg-type]
-        r = await client.post("/api/stop-trading")
+        with patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast:
+            broadcast.return_value = "ok"
+            r = await client.post("/api/stop-trading")
         assert r.status_code == 200
-        assert r.json()["success"] is False
+        assert r.json()["success"] is True
 
     async def test_stop_trading_ok(self, client, mock_bot, tmp_path):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.target.STOP_FILE = tmp_path / "STOP"
-        r = await client.post("/api/stop-trading")
-        assert r.status_code == 200
-        assert r.json()["success"] is True
-        assert mock_bot.target.STOP_FILE.exists()
+        with patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast:
+            broadcast.return_value = "ok"
+            r = await client.post("/api/stop-trading")
+            assert r.status_code == 200
+            assert r.json()["success"] is True
+            broadcast.assert_awaited_once()
 
     async def test_resume_trading_ok(self, client, mock_bot, tmp_path):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        stop_file = tmp_path / "STOP"
-        stop_file.touch()
-        mock_bot.target.STOP_FILE = stop_file
-        r = await client.post("/api/resume-trading")
-        assert r.status_code == 200
-        assert r.json()["success"] is True
-        assert not stop_file.exists()
+        with patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast:
+            broadcast.return_value = "ok"
+            r = await client.post("/api/resume-trading")
+            assert r.status_code == 200
+            assert r.json()["success"] is True
+            broadcast.assert_awaited_once()
 
 
 # ── POST /api/module/{name}/toggle ─────────────────────────────────────
@@ -1025,23 +1108,17 @@ class TestToggleModule:
 
     async def test_toggle_news(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        assert mock_bot.settings.news_enabled is False
         r = await client.post("/api/module/news/toggle")
         assert r.status_code == 200
-        assert r.json()["success"] is True
-        assert mock_bot.settings.news_enabled is True
+        assert r.json()["success"] is False
+        assert "hub" in r.json()["message"].lower()
 
     async def test_toggle_intel_disable(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        intel_stop_mock = AsyncMock()
-        intel_mock = MagicMock()
-        intel_mock.stop = intel_stop_mock
-        mock_bot.intel = intel_mock
         r = await client.post("/api/module/intel/toggle")
         assert r.status_code == 200
-        assert r.json()["success"] is True
-        assert "disabled" in r.json()["message"].lower()
-        intel_stop_mock.assert_awaited_once()
+        assert r.json()["success"] is False
+        assert "hub" in r.json()["message"].lower()
 
 
 # ── Reset Profit Buffer ──────────────────────────────────────────────────
@@ -1049,31 +1126,53 @@ class TestToggleModule:
 
 class TestResetProfitBuffer:
     async def test_reset_no_bot(self, client):
-        set_bot(None)  # type: ignore[arg-type]
-        r = await client.post("/api/reset-profit-buffer")
+        with patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast:
+            broadcast.return_value = "ok"
+            r = await client.post("/api/reset-profit-buffer")
         assert r.status_code == 200
-        assert r.json()["success"] is False
+        assert r.json()["success"] is True
 
     async def test_reset_clears_buffer(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.target.profit_buffer_pct = 20.0
-        mock_bot.target._profit_buffer_pct = 20.0
-        mock_bot.risk._base_max_daily_loss_pct = 3.0
-        mock_bot.risk.max_daily_loss_pct = 13.0
-        r = await client.post("/api/reset-profit-buffer")
-        assert r.status_code == 200
-        assert r.json()["success"] is True
-        assert "20.0" in r.json()["message"]
-        assert mock_bot.target._profit_buffer_pct == 0.0
-        assert mock_bot.risk.max_daily_loss_pct == 3.0
+        with patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast:
+            broadcast.return_value = "ok"
+            r = await client.post("/api/reset-profit-buffer")
+            assert r.status_code == 200
+            assert r.json()["success"] is True
+            broadcast.assert_awaited_once()
 
-    async def test_status_includes_profit_buffer(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.target.profit_buffer_pct = 15.5
-        mock_bot.orders.scaler.active_positions = {}
-        r = await client.get("/api/status")
-        assert r.status_code == 200
-        assert r.json()["profit_buffer_pct"] == 15.5
+    async def test_status_includes_profit_buffer(self, client):
+        hub_state = MagicMock()
+        with patch("web.server._hub_state_ref", hub_state):
+            _bot_reports.clear()
+            report_bot_snapshot(
+                {
+                    "bot_id": "solo",
+                    "exchange": "MEXC",
+                    "status": {
+                        "running": True,
+                        "balance": 1000.0,
+                        "available_margin": 500.0,
+                        "daily_pnl": 0,
+                        "daily_pnl_pct": 0,
+                        "total_growth_usd": 0,
+                        "total_growth_pct": 0,
+                        "trading_mode": "paper_local",
+                        "exchange_name": "MEXC",
+                        "strategies_count": 0,
+                        "profit_buffer_pct": 15.5,
+                    },
+                    "positions": [],
+                    "wick_scalps": [],
+                    "strategies": [],
+                }
+            )
+            try:
+                r = await client.get("/api/status")
+                assert r.status_code == 200
+                assert r.json()["profit_buffer_pct"] == 15.5
+            finally:
+                _bot_reports.clear()
 
 
 # ── DB Explorer ─────────────────────────────────────────────────────────
@@ -1088,7 +1187,6 @@ class TestDbExplorer:
         tables = r.json()
         names = {t["name"] for t in tables}
         assert "trades" in names
-        assert "deposits" in names
 
     async def test_db_tables_with_bot(self, client, mock_bot):
         _ALLOWED_TABLES.clear()
@@ -1098,7 +1196,6 @@ class TestDbExplorer:
         data = r.json()
         names = {t["name"] for t in data}
         assert "trades" in names
-        assert "deposits" in names
 
     async def test_db_table_rows_empty(self, client, mock_bot):
         _ALLOWED_TABLES.clear()
@@ -1249,7 +1346,8 @@ class TestBotRegistry:
         finally:
             web.server._BOT_REGISTRY = original_path
 
-    def test_set_bot_registers_local_bot(self, mock_bot, tmp_path):
+    def test_set_bot_is_noop_does_not_register(self, mock_bot, tmp_path):
+        """set_bot() is a no-op in hub mode; it does not register URLs."""
         import web.server
         from web.server import _bot_urls
 
@@ -1259,8 +1357,7 @@ class TestBotRegistry:
             _bot_urls.clear()
             mock_bot.settings.bot_id = "momentum"
             set_bot(mock_bot)  # type: ignore[arg-type]
-            assert "momentum" in _bot_urls
-            assert _bot_urls["momentum"] == "http://bot-momentum:9035"
+            assert "momentum" not in _bot_urls
         finally:
             web.server._BOT_REGISTRY = original_path
             _bot_urls.clear()
@@ -1329,24 +1426,33 @@ class TestActionForwarding:
         finally:
             _bot_urls.clear()
 
-    async def test_local_bot_action_not_forwarded(self, client, mock_bot):
-        """Actions for the local bot execute locally, not forwarded."""
+    async def test_action_with_bot_id_forwards_to_that_bot(self, client, mock_bot):
+        """Actions with bot_id are forwarded to that bot (no local execution)."""
         mock_bot.settings.bot_id = "momentum"
         set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.orders.execute_signal = AsyncMock()
-        r = await client.post("/api/position/close", json={"symbol": "BTC/USDT", "bot_id": "momentum"})
-        assert r.status_code == 200
-        assert r.json()["success"] is True
-        mock_bot.orders.execute_signal.assert_awaited_once()
+        from web.server import _bot_urls
 
-    async def test_empty_bot_id_defaults_to_local(self, client, mock_bot):
+        _bot_urls["momentum"] = "http://bot-momentum:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=True, message="Closed")
+                r = await client.post("/api/position/close", json={"symbol": "BTC/USDT", "bot_id": "momentum"})
+                assert r.status_code == 200
+                assert r.json()["success"] is True
+                fwd.assert_awaited_once_with("momentum", "/api/position/close", {"symbol": "BTC/USDT"})
+        finally:
+            _bot_urls.clear()
+
+    async def test_empty_bot_id_not_registered(self, client, mock_bot):
+        """Empty bot_id: no local bot, forward fails with 'not registered'."""
         mock_bot.settings.bot_id = "momentum"
         set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot.orders.execute_signal = AsyncMock()
         r = await client.post("/api/position/close", json={"symbol": "BTC/USDT", "bot_id": ""})
         assert r.status_code == 200
-        assert r.json()["success"] is True
-        mock_bot.orders.execute_signal.assert_awaited_once()
+        assert r.json()["success"] is False
+        assert "not registered" in r.json()["message"].lower()
 
 
 # ── Broadcast Actions ───────────────────────────────────────────────────
@@ -1368,8 +1474,10 @@ class TestBroadcastActions:
                 r = await client.post("/api/close-all")
                 assert r.status_code == 200
                 assert r.json()["success"] is True
-                mock_bot._close_all_positions.assert_awaited_once()
-                fwd.assert_awaited_once_with("meanrev", "/api/close-all", {})
+                assert fwd.await_count == 2
+                calls = [c[0] for c in fwd.call_args_list]
+                assert ("meanrev", "/api/close-all", {}) in calls
+                assert ("momentum", "/api/close-all", {}) in calls
         finally:
             _bot_urls.clear()
 
@@ -1387,10 +1495,13 @@ class TestBroadcastActions:
                 fwd.return_value = ActionResponse(success=True, message="ok")
                 r = await client.post("/api/stop-trading")
                 assert r.status_code == 200
-                fwd.assert_awaited_once_with("swing", "/api/stop-trading", {})
+                assert r.json()["success"] is True
+                assert fwd.await_count == 2
+                calls = [c[0] for c in fwd.call_args_list]
+                assert ("swing", "/api/stop-trading", {}) in calls
+                assert ("momentum", "/api/stop-trading", {}) in calls
         finally:
             _bot_urls.clear()
-            mock_bot.target.STOP_FILE.unlink(missing_ok=True)
 
 
 # ── Trade Queue Lifecycle Statuses ──────────────────────────────────────
@@ -1400,48 +1511,43 @@ class TestTradeQueueLifecycle:
     async def test_trade_queue_shows_only_pending(self, client):
         from shared.models import SignalPriority, TradeProposal, TradeQueue
 
-        with patch("web.server.SharedState") as MockSharedState:
-            mock_state = MagicMock()
-            q = TradeQueue()
-            now = datetime.now(UTC).isoformat()
-            q.daily = [
-                TradeProposal(
-                    priority=SignalPriority.DAILY,
-                    symbol="BTC/USDT",
-                    side="long",
-                    strategy="mom",
-                    strength=0.8,
-                    created_at=now,
-                    max_age_seconds=14400,
-                ),
-                TradeProposal(
-                    priority=SignalPriority.DAILY,
-                    symbol="ETH/USDT",
-                    side="short",
-                    strategy="fade",
-                    strength=0.6,
-                    created_at=now,
-                    consumed=True,
-                    consumed_at=now,
-                ),
-                TradeProposal(
-                    priority=SignalPriority.DAILY,
-                    symbol="SOL/USDT",
-                    side="long",
-                    strategy="intel",
-                    strength=0.5,
-                    created_at=now,
-                    rejected=True,
-                    reject_reason="size too big",
-                ),
-            ]
-            mock_state.read_trade_queue.return_value = q
-            mock_data_dir = MagicMock()
-            mock_data_dir.iterdir.return_value = iter([])
-            mock_state._data_dir = mock_data_dir
-            MockSharedState.return_value = mock_state
+        hub_state = MagicMock()
+        q = TradeQueue()
+        now = datetime.now(UTC).isoformat()
+        q.daily = [
+            TradeProposal(
+                priority=SignalPriority.DAILY,
+                symbol="BTC/USDT",
+                side="long",
+                strategy="mom",
+                strength=0.8,
+                created_at=now,
+                max_age_seconds=14400,
+            ),
+            TradeProposal(
+                priority=SignalPriority.DAILY,
+                symbol="ETH/USDT",
+                side="short",
+                strategy="fade",
+                strength=0.6,
+                created_at=now,
+                consumed=True,
+                consumed_at=now,
+            ),
+            TradeProposal(
+                priority=SignalPriority.DAILY,
+                symbol="SOL/USDT",
+                side="long",
+                strategy="intel",
+                strength=0.5,
+                created_at=now,
+                rejected=True,
+                reject_reason="size too big",
+            ),
+        ]
+        hub_state.read_trade_queue.return_value = q
+        with patch("web.server._hub_state_ref", hub_state):
             r = await client.get("/api/trade-queue")
-
         assert r.status_code == 200
         data = r.json()
         assert len(data) == 1
@@ -1455,38 +1561,40 @@ class TestTradeQueueLifecycle:
 
 
 class TestAnalyticsMultibot:
-    async def test_analytics_aggregates_positions_from_reports(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        _bot_reports["meanrev"] = {
-            "bot_id": "meanrev",
-            "positions": [
-                {
-                    "symbol": "ETH/USDT",
-                    "side": "buy",
-                    "entry_price": 3000.0,
-                    "current_price": 3100.0,
-                    "pnl_pct": 3.33,
-                    "pnl_usd": 33.0,
-                    "notional_value": 1000.0,
-                    "leverage": 10,
-                    "strategy": "bollinger",
-                    "age_minutes": 15,
-                    "dca_count": 0,
-                },
-            ],
-        }
-        try:
-            r = await client.get("/api/analytics")
-            assert r.status_code == 200
-            data = r.json()
-            positions = data.get("live_positions", [])
-            assert len(positions) >= 1
-            eth_pos = next((p for p in positions if p["symbol"] == "ETH/USDT"), None)
-            assert eth_pos is not None
-            assert eth_pos["side"] == "long"
-            assert eth_pos["pnl_pct"] == 3.33
-        finally:
-            _bot_reports.clear()
+    async def test_analytics_aggregates_positions_from_reports(self, client):
+        hub_state = MagicMock()
+        hub_state.read_analytics.return_value = MagicMock(weights={})
+        with patch("web.server._hub_state_ref", hub_state):
+            _bot_reports["meanrev"] = {
+                "bot_id": "meanrev",
+                "positions": [
+                    {
+                        "symbol": "ETH/USDT",
+                        "side": "buy",
+                        "entry_price": 3000.0,
+                        "current_price": 3100.0,
+                        "pnl_pct": 3.33,
+                        "pnl_usd": 33.0,
+                        "notional_value": 1000.0,
+                        "leverage": 10,
+                        "strategy": "bollinger",
+                        "age_minutes": 15,
+                        "dca_count": 0,
+                    },
+                ],
+            }
+            try:
+                r = await client.get("/api/analytics")
+                assert r.status_code == 200
+                data = r.json()
+                positions = data.get("live_positions", [])
+                assert len(positions) >= 1
+                eth_pos = next((p for p in positions if p["symbol"] == "ETH/USDT"), None)
+                assert eth_pos is not None
+                assert eth_pos["side"] == "long"
+                assert eth_pos["pnl_pct"] == 3.33
+            finally:
+                _bot_reports.clear()
 
 
 # ── Closed Trades Endpoint ──────────────────────────────────────────────
@@ -1533,20 +1641,18 @@ class TestClosedTrades:
 
 class TestModuleToggleMultibot:
     async def test_intel_toggle_rejected_in_multibot(self, client, mock_bot):
-        mock_bot._multibot = True
         set_bot(mock_bot)  # type: ignore[arg-type]
         r = await client.post("/api/module/intel/toggle")
         assert r.status_code == 200
         assert r.json()["success"] is False
-        assert "monitor" in r.json()["message"].lower()
+        assert "hub" in r.json()["message"].lower()
 
     async def test_news_toggle_rejected_in_multibot(self, client, mock_bot):
-        mock_bot._multibot = True
         set_bot(mock_bot)  # type: ignore[arg-type]
         r = await client.post("/api/module/news/toggle")
         assert r.status_code == 200
         assert r.json()["success"] is False
-        assert "monitor" in r.json()["message"].lower()
+        assert "hub" in r.json()["message"].lower()
 
     async def test_unknown_module_rejected(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
@@ -1692,23 +1798,6 @@ class TestBuildMergedSnapshot:
 
 
 class TestWickScalps:
-    def test_wick_scalps_helper_returns_data(self, mock_bot):
-        from web.server import _wick_scalps
-
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        ws = MagicMock()
-        ws.scalp_side = "buy"
-        ws.entry_price = 50000
-        ws.amount = 0.01
-        ws.age_minutes = 5
-        ws.max_hold_minutes = 30
-        mock_bot.orders.wick_scalper.active_scalps = {"BTC/USDT": ws}
-        result = _wick_scalps()
-        assert len(result) == 1
-        assert result[0].symbol == "BTC/USDT"
-        assert result[0].scalp_side == "buy"
-        assert result[0].entry_price == 50000
-
     def test_wick_scalps_no_bot(self):
         from web.server import _wick_scalps
 
@@ -1727,24 +1816,26 @@ class TestNewsEndpoint:
         assert r.status_code == 200
         assert r.json() == []
 
-    async def test_news_with_items(self, client, mock_bot):
-        from datetime import UTC, datetime
+    async def test_news_with_items(self, client):
+        from shared.models import IntelSnapshot
 
-        from news.monitor import NewsItem
-
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        mock_bot._recent_news = [
-            NewsItem(
-                headline="BTC surges",
-                source="coindesk",
-                url="https://example.com/1",
-                published=datetime.now(UTC),
-                matched_symbols=["BTC/USDT"],
-                sentiment="bullish",
-                sentiment_score=0.8,
-            ),
-        ]
-        r = await client.get("/api/news")
+        hub_state = MagicMock()
+        snap = IntelSnapshot(
+            news_items=[
+                {
+                    "headline": "BTC surges",
+                    "source": "coindesk",
+                    "url": "https://example.com/1",
+                    "published": datetime.now(UTC).isoformat(),
+                    "matched_symbols": ["BTC/USDT"],
+                    "sentiment": "bullish",
+                    "sentiment_score": 0.8,
+                },
+            ]
+        )
+        hub_state.read_intel.return_value = snap
+        with patch("web.server._hub_state_ref", hub_state):
+            r = await client.get("/api/news")
         assert r.status_code == 200
         data = r.json()
         assert len(data) == 1
@@ -1785,50 +1876,6 @@ class TestSystemMetricsAndPrometheus:
         assert "bot_uptime" in r.text
 
 
-# ── Analytics Fallback (local positions) ────────────────────────────────
-
-
-class TestAnalyticsFallbackPositions:
-    async def test_analytics_local_fallback_when_no_reports(self, client, mock_bot):
-        from core.models import OrderSide, Position
-        from core.orders.scaler import ScaledPosition
-
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        _bot_reports.clear()
-        sp = MagicMock(spec=ScaledPosition)
-        sp.side = "long"
-        sp.strategy = "rsi"
-        sp.avg_entry_price = 50000.0
-        sp.last_add_price = 50000.0
-        sp.current_size = 0.01
-        sp.current_leverage = 10
-        sp.adds = 0
-        sp.opened_at = 0
-        mock_bot.orders.scaler.active_positions = {"BTC/USDT": sp}
-        mock_bot.exchange.fetch_positions = AsyncMock(
-            return_value=[
-                Position(
-                    symbol="BTC/USDT",
-                    side=OrderSide.BUY,
-                    amount=0.01,
-                    entry_price=50000.0,
-                    current_price=51000.0,
-                    leverage=10,
-                    market_type="futures",
-                    opened_at=datetime.now(UTC),
-                ),
-            ]
-        )
-        r = await client.get("/api/analytics")
-        assert r.status_code == 200
-        data = r.json()
-        positions = data.get("live_positions", [])
-        assert len(positions) >= 1
-        btc = next((p for p in positions if p["symbol"] == "BTC/USDT"), None)
-        assert btc is not None
-        assert btc["side"] == "long"
-
-
 # ── Resume Trading ──────────────────────────────────────────────────────
 
 
@@ -1850,7 +1897,7 @@ class TestResumeTrading:
 
 
 class TestHubPushEndpoints:
-    """Test /internal/trade and /internal/deposit endpoints."""
+    """Test /internal/trade endpoint."""
 
     async def test_push_trade_open(self, client):
         r = await client.post(
@@ -1917,41 +1964,6 @@ class TestHubPushEndpoints:
         assert r.status_code == 200
         assert r.json()["action"] == "close"
 
-    async def test_push_deposit(self, client):
-        r = await client.post(
-            "/internal/deposit",
-            json={
-                "bot_id": "momentum",
-                "amount": 500.0,
-                "exchange": "mexc",
-                "detected_at": "2026-02-20T14:00:00",
-                "balance_before": 1000.0,
-                "balance_after": 1500.0,
-            },
-        )
-        assert r.status_code == 200
-        assert r.json()["status"] == "ok"
-        assert r.json()["deposit_id"] > 0
-
-    async def test_get_deposits(self, client, mock_bot):
-        set_bot(mock_bot)  # type: ignore[arg-type]
-        await client.post(
-            "/internal/deposit",
-            json={
-                "bot_id": "test",
-                "amount": 250.0,
-                "exchange": "binance",
-                "detected_at": "2026-02-20T15:00:00",
-                "balance_before": 500.0,
-                "balance_after": 750.0,
-            },
-        )
-        r = await client.get("/api/deposits")
-        assert r.status_code == 200
-        data = r.json()
-        assert len(data) >= 1
-        assert any(d["amount"] == 250.0 for d in data)
-
     async def test_push_trade_missing_bot_id(self, client):
         r = await client.post(
             "/internal/trade",
@@ -1970,8 +1982,9 @@ class TestBotProfiles:
         r = await client.get("/api/bot-profiles")
         assert r.status_code == 200
         data = r.json()
-        assert len(data) >= 10
+        assert len(data) >= 9
         ids = [p["id"] for p in data]
+        assert "hub" not in ids
         assert "momentum" in ids
         assert "extreme" in ids
         assert "scalper" in ids
@@ -1991,14 +2004,12 @@ class TestBotProfiles:
             assert "enabled" in p
             assert "container_status" in p
 
-    async def test_hub_profile_marked(self, client, mock_bot):
+    async def test_hub_excluded_from_profiles(self, client, mock_bot):
         set_bot(mock_bot)
         r = await client.get("/api/bot-profiles")
         data = r.json()
-        hub = next(p for p in data if p["id"] == "hub")
-        assert hub["is_hub"] is True
-        non_hub = [p for p in data if not p["is_hub"]]
-        assert len(non_hub) >= 9
+        assert all(p["id"] != "hub" for p in data)
+        assert all(not p["is_hub"] for p in data)
 
     async def test_toggle_hub_rejected(self, client, mock_bot):
         set_bot(mock_bot)

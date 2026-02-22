@@ -16,7 +16,7 @@ interface Props {
 export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilter = "all", onExchangeFilterChange, exchanges = [] }: Props) {
   const [actionMsg, setActionMsg] = useState("");
   const [logsExpanded, setLogsExpanded] = useState(true);
-  const [actionTarget, setActionTarget] = useState("-");
+  const [actionTarget, setActionTarget] = useState("all");
   const [bulkAction, setBulkAction] = useState("");
 
   if (!data) return <div className="empty-state">Connecting...</div>;

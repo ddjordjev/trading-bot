@@ -54,8 +54,8 @@ class LiquidationMonitor:
     Source: https://www.coinglass.com/liquidations
     """
 
-    API_URL = "https://open-api.coinglass.com/public/v2/liquidation_info"
-    FALLBACK_URL = "https://fapi.coinglass.com/api/futures/liquidation/info"
+    API_URL_V4 = "https://open-api-v4.coinglass.com/api/futures/liquidation/exchange-list"
+    API_URL_V3 = "https://open-api-v3.coinglass.com/api/futures/liquidation/exchange-list"
 
     def __init__(self, poll_interval: int = 300, api_key: str = ""):
         self.poll_interval = poll_interval
@@ -64,6 +64,7 @@ class LiquidationMonitor:
         self._running = False
         self._history: list[LiquidationSnapshot] = []
         self._background_tasks: list[asyncio.Task[None]] = []
+        self._warned_no_key = False
 
     async def start(self) -> None:
         self._running = True
@@ -112,20 +113,38 @@ class LiquidationMonitor:
             await asyncio.sleep(self.poll_interval)
 
     async def _fetch(self) -> None:
-        headers = {}
-        if self.api_key:
-            headers["coinglassSecret"] = self.api_key
+        if not self.api_key:
+            if not self._warned_no_key:
+                logger.warning(
+                    "No CoinGlass API key set (COINGLASS_API_KEY). "
+                    "Liquidation data unavailable. Get a free key at https://www.coinglass.com/pricing"
+                )
+                self._warned_no_key = True
+            return
 
         snap = LiquidationSnapshot(timestamp=datetime.now(UTC))
+        headers = {"CG-API-KEY": self.api_key}
 
         try:
             async with aiohttp.ClientSession() as session:
-                url = self.API_URL if self.api_key else self.FALLBACK_URL
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status != 200:
-                        logger.warning("CoinGlass returned {}", resp.status)
-                        return
-                    data = await resp.json()
+                for url in (self.API_URL_V4, self.API_URL_V3):
+                    try:
+                        async with session.get(
+                            url,
+                            headers=headers,
+                            params={"symbol": "", "range": "24h"},
+                            timeout=aiohttp.ClientTimeout(total=15),
+                        ) as resp:
+                            if resp.status != 200:
+                                continue
+                            data = await resp.json()
+                            if isinstance(data, dict) and data.get("data"):
+                                break
+                    except Exception:
+                        continue
+                else:
+                    logger.warning("CoinGlass: all endpoints returned empty or errored")
+                    return
         except Exception as e:
             logger.warning("CoinGlass fetch failed: {}", e)
             return
@@ -133,17 +152,25 @@ class LiquidationMonitor:
         try:
             if not isinstance(data, dict):
                 return
-            info = data.get("data", {})
+            info = data.get("data", [])
 
             if isinstance(info, list):
                 for item in info:
-                    snap.total_24h += float(item.get("volUsd", 0) or 0)
-                    snap.long_24h += float(item.get("longVolUsd", 0) or 0)
-                    snap.short_24h += float(item.get("shortVolUsd", 0) or 0)
+                    ex = item.get("exchange", "")
+                    if ex == "All":
+                        snap.total_24h = float(item.get("liquidation_usd", 0) or 0)
+                        snap.long_24h = float(item.get("long_liquidation_usd", 0) or 0)
+                        snap.short_24h = float(item.get("short_liquidation_usd", 0) or 0)
+                        break
+                else:
+                    for item in info:
+                        snap.total_24h += float(item.get("liquidation_usd", 0) or 0)
+                        snap.long_24h += float(item.get("long_liquidation_usd", 0) or 0)
+                        snap.short_24h += float(item.get("short_liquidation_usd", 0) or 0)
             elif isinstance(info, dict):
-                snap.total_24h = float(info.get("totalVolUsd", 0) or info.get("vol24hUsd", 0) or 0)
-                snap.long_24h = float(info.get("longVolUsd", 0) or info.get("longVol24hUsd", 0) or 0)
-                snap.short_24h = float(info.get("shortVolUsd", 0) or info.get("shortVol24hUsd", 0) or 0)
+                snap.total_24h = float(info.get("liquidation_usd", 0) or 0)
+                snap.long_24h = float(info.get("long_liquidation_usd", 0) or 0)
+                snap.short_24h = float(info.get("short_liquidation_usd", 0) or 0)
         except (ValueError, TypeError, KeyError) as e:
             logger.warning("CoinGlass parse error: {}", e)
             return

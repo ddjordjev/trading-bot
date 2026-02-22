@@ -54,8 +54,6 @@ omit = [
     "htmlcov/*",
     "docs/*",
     "chat-history/*",
-    "run_analytics.py",
-    "run_monitor.py",
     "custom_strategies/*",
 ]
 

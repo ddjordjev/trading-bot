@@ -2196,16 +2196,38 @@ class TestLiquidationMonitorFetch:
 
     @pytest.fixture
     def monitor(self):
+        return LiquidationMonitor(poll_interval=300, api_key="test-key")
+
+    @pytest.fixture
+    def monitor_no_key(self):
         return LiquidationMonitor(poll_interval=300, api_key="")
+
+    @pytest.mark.asyncio
+    async def test_fetch_no_api_key_skips(self, monitor_no_key):
+        await monitor_no_key._fetch()
+        assert monitor_no_key._latest is None
+        assert monitor_no_key._warned_no_key is True
 
     @pytest.mark.asyncio
     @patch("intel.liquidations.aiohttp.ClientSession")
     async def test_fetch_success_list_format(self, mock_session_class, monitor):
         data = {
+            "code": "0",
+            "msg": "success",
             "data": [
-                {"volUsd": 100_000_000, "longVolUsd": 60_000_000, "shortVolUsd": 40_000_000},
-                {"volUsd": 50_000_000, "longVolUsd": 30_000_000, "shortVolUsd": 20_000_000},
-            ]
+                {
+                    "exchange": "All",
+                    "liquidation_usd": 85_000_000,
+                    "long_liquidation_usd": 50_000_000,
+                    "short_liquidation_usd": 35_000_000,
+                },
+                {
+                    "exchange": "Bybit",
+                    "liquidation_usd": 30_000_000,
+                    "long_liquidation_usd": 18_000_000,
+                    "short_liquidation_usd": 12_000_000,
+                },
+            ],
         }
         mock_sess = MagicMock()
         mock_sess.get.return_value = _make_liq_get_mock(200, data)
@@ -2215,19 +2237,20 @@ class TestLiquidationMonitorFetch:
         await monitor._fetch()
 
         assert monitor._latest is not None
-        assert monitor._latest.total_24h == 150_000_000
-        assert monitor._latest.long_24h == 90_000_000
-        assert monitor._latest.short_24h == 60_000_000
+        assert monitor._latest.total_24h == 85_000_000
+        assert monitor._latest.long_24h == 50_000_000
+        assert monitor._latest.short_24h == 35_000_000
 
     @pytest.mark.asyncio
     @patch("intel.liquidations.aiohttp.ClientSession")
     async def test_fetch_success_dict_format(self, mock_session_class, monitor):
         data = {
+            "code": "0",
             "data": {
-                "totalVolUsd": 500_000_000,
-                "longVolUsd": 300_000_000,
-                "shortVolUsd": 200_000_000,
-            }
+                "liquidation_usd": 500_000_000,
+                "long_liquidation_usd": 300_000_000,
+                "short_liquidation_usd": 200_000_000,
+            },
         }
         mock_sess = MagicMock()
         mock_sess.get.return_value = _make_liq_get_mock(200, data)
@@ -2240,6 +2263,38 @@ class TestLiquidationMonitorFetch:
         assert monitor._latest.total_24h == 500_000_000
         assert monitor._latest.long_24h == 300_000_000
         assert monitor._latest.short_24h == 200_000_000
+
+    @pytest.mark.asyncio
+    @patch("intel.liquidations.aiohttp.ClientSession")
+    async def test_fetch_list_no_all_entry_sums_exchanges(self, mock_session_class, monitor):
+        data = {
+            "code": "0",
+            "data": [
+                {
+                    "exchange": "Binance",
+                    "liquidation_usd": 40_000_000,
+                    "long_liquidation_usd": 25_000_000,
+                    "short_liquidation_usd": 15_000_000,
+                },
+                {
+                    "exchange": "Bybit",
+                    "liquidation_usd": 30_000_000,
+                    "long_liquidation_usd": 18_000_000,
+                    "short_liquidation_usd": 12_000_000,
+                },
+            ],
+        }
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_liq_get_mock(200, data)
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await monitor._fetch()
+
+        assert monitor._latest is not None
+        assert monitor._latest.total_24h == 70_000_000
+        assert monitor._latest.long_24h == 43_000_000
+        assert monitor._latest.short_24h == 27_000_000
 
     @pytest.mark.asyncio
     @patch("intel.liquidations.aiohttp.ClientSession")

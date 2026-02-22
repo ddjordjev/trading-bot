@@ -73,11 +73,11 @@ class WhaleSentiment:
     - https://www.coinglass.com/ (funding rates, OI, L/S ratios)
     """
 
-    COINGLASS_LS_URL = "https://fapi.coinglass.com/api/futures/longShortRate"
-    COINGLASS_FUNDING_URL = "https://fapi.coinglass.com/api/futures/funding/v2"
-    COINGLASS_OI_URL = "https://fapi.coinglass.com/api/futures/openInterest/chart"
-    COINGLASS_OI_HISTORY_URL = "https://fapi.coinglass.com/api/futures/openInterest/ohlc-history"
-    COINGLASS_TOP_TRADERS_URL = "https://fapi.coinglass.com/api/futures/topLongShortAccountRatio"
+    COINGLASS_LS_URL = "https://open-api-v4.coinglass.com/api/futures/globalLongShortAccountRatio/history"
+    COINGLASS_FUNDING_URL = "https://open-api-v4.coinglass.com/api/futures/funding/history"
+    COINGLASS_OI_URL = "https://open-api-v4.coinglass.com/api/futures/openInterest/ohlc-history"
+    COINGLASS_OI_HISTORY_URL = "https://open-api-v4.coinglass.com/api/futures/openInterest/ohlc-history"
+    COINGLASS_TOP_TRADERS_URL = "https://open-api-v4.coinglass.com/api/futures/topLongShortAccountRatio/history"
 
     def __init__(self, symbols: list[str] | None = None, poll_interval: int = 300, coinglass_key: str = ""):
         self.symbols = symbols or ["BTC", "ETH"]
@@ -144,7 +144,7 @@ class WhaleSentiment:
     async def _fetch_symbol(self, symbol: str) -> None:
         headers = {}
         if self.coinglass_key:
-            headers["coinglassSecret"] = self.coinglass_key
+            headers["CG-API-KEY"] = self.coinglass_key
 
         data = WhaleSentimentData(timestamp=datetime.now(UTC))
 

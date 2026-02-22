@@ -166,6 +166,8 @@ class Notifier:
             f"  Open positions:  {open_positions}\n"
             f"  Status:          {status}\n"
         )
+        if compound_report:
+            body += f"\nCOMPOUND GROWTH REPORT\n{'-' * 40}\n{compound_report}\n"
 
         await self.send(NotificationType.DAILY_SUMMARY, subject, body)
 

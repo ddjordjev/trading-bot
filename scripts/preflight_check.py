@@ -20,6 +20,7 @@ from loguru import logger
 
 from config.settings import get_settings
 from core.exchange.factory import create_exchange
+from core.models import MarketType
 
 
 async def run_checks() -> bool:
@@ -100,7 +101,7 @@ async def run_checks() -> bool:
     # 6. Futures availability (skip if not allowed in config)
     if settings.futures_allowed:
         try:
-            symbols = await exchange.get_available_symbols(market_type="futures")
+            symbols = await exchange.get_available_symbols(market_type=MarketType.FUTURES)
             has_futures = len(symbols) > 0
             check(
                 "Futures markets",

@@ -33,7 +33,7 @@ class MeanReversionStrategy(BaseStrategy):
 
         if math.isnan(ma) or math.isnan(price):
             return None
-        if ma == 0:
+        if price <= 0 or ma == 0:
             return None
 
         deviation = (price - ma) / ma * 100

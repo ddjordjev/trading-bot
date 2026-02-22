@@ -319,17 +319,11 @@ class HedgeManager:
         amount = notional / current_price
         side = OrderSide.SELL if pair.main_side == "long" else OrderSide.BUY
 
-        if side == OrderSide.SELL:
-            stop_price = current_price * (1 + self.hedge_stop_pct / 100)
-        else:
-            stop_price = current_price * (1 - self.hedge_stop_pct / 100)
-
         return {
             "symbol": symbol,
             "side": side,
             "amount": amount,
             "leverage": leverage,
-            "stop_price": stop_price,
             "reasons": pair.reversal_reasons,
             "reversal_score": pair.reversal_score,
         }

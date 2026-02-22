@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hub.state import HubState
 from shared.models import (
     AnalyticsSnapshot,
     BotDeploymentStatus,
@@ -186,8 +187,12 @@ class TestMonitorService:
         monitor.state.write_bot_trade_queue.assert_not_called()
 
     def test_route_to_bots_allows_supported_exchange(self, monitor):
-        """Proposals for supported symbols get routed normally."""
+        """Proposals for supported symbols get routed to the shared hub queue."""
         from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        hub_state = HubState()
+        hub_state.write_trade_queue = MagicMock()
+        monitor.state = hub_state
 
         staging = TradeQueue()
         prop = TradeProposal(
@@ -208,7 +213,7 @@ class TestMonitorService:
             max_positions=3,
         )
         monitor._route_to_bots(staging, [bot_status])
-        monitor.state.write_bot_trade_queue.assert_called_once()
+        hub_state.write_trade_queue.assert_called_once()
 
 
 # ── AnalyticsService ────────────────────────────────────────────────

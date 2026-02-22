@@ -35,7 +35,7 @@
 <body>
 
 <h1>Trade Borg — Requirements &amp; Implementation Summary</h1>
-<p class="meta">Last updated: 2026-02-20 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: MEXC, Binance, Bybit &nbsp;|&nbsp; Tests: 1200+ (80%+ coverage) &nbsp;|&nbsp; CI: GitHub Actions (green)</p>
+<p class="meta">Last updated: 2026-02-22 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: Binance (primary), Bybit, MEXC &nbsp;|&nbsp; Tests: 1630+ (85%+ coverage) &nbsp;|&nbsp; CI: GitHub Actions (green)</p>
 
 <!-- ============================================================ -->
 <h2>Table of Contents</h2>
@@ -60,7 +60,7 @@
       <li><a href="#s7-7">Position Scaling</a></li>
       <li><a href="#s7-8">Pyramid / DCA</a></li>
       <li><a href="#s7-9">Wick Scalping</a></li>
-      <li><a href="#s7-10">MEXC Liquidity Awareness</a></li>
+      <li><a href="#s7-10">Liquidity Awareness</a></li>
       <li><a href="#s7-11">Hedging</a></li>
       <li><a href="#s7-12">Volatility Exploitation</a></li>
       <li><a href="#s7-13">News Monitoring</a></li>
@@ -74,7 +74,7 @@
       <li><a href="#s7-21">Web Dashboard</a></li>
       <li><a href="#s7-22">Service Architecture &amp; Adaptive Monitoring</a></li>
       <li><a href="#s7-23">Market Hours &amp; Holiday System</a></li>
-      <li><a href="#s7-24">MEXC Futures Restriction</a></li>
+      <li><a href="#s7-24">Exchange Market-Type Restriction</a></li>
       <li><a href="#s7-25">CI/CD Pipeline</a></li>
       <li><a href="#s7-26">10-Day Execution Plan</a></li>
       <li><a href="#s7-27">Configurable Paper Risk Relaxation</a></li>
@@ -129,34 +129,43 @@
 <h2 id="s2">2. How It All Fits Together</h2>
 <!-- ============================================================ -->
 
+<div class="section-card" style="text-align:center;">
+<img src="architecture.png" alt="Trade Borg Architecture" style="max-width:100%; border-radius:8px; margin:1rem 0;">
+</div>
+
 <div class="section-card">
-<h3>Every 60 seconds (one "tick"), the bot does:</h3>
+<h3>Architecture: Hub + Bots</h3>
+<p>The hub (<code>hub_main.py</code>) is the central brain — it runs Monitor, Analytics, and SignalGenerator
+in-process, stores all shared state in <code>HubState</code> (in-memory), and serves the dashboard.
+Trading bots are lightweight executors that consume proposals from the hub via HTTP.</p>
+
+<h3>Fast Monitor Loop (~1-2 seconds)</h3>
+<p>Runs concurrently with the main tick. Handles all time-critical actions:</p>
 <ol>
-  <li><strong>Manual override check</strong> — if CLOSE_ALL file exists, close everything and stop</li>
-  <li><strong>Check stops</strong> — close positions that hit trailing/breakeven stops</li>
+  <li><strong>CLOSE_ALL override</strong> — if file exists, close everything <strong>immediately</strong> (1-2s reaction)</li>
+  <li><strong>Legendary + reversal close</strong> — at 100%+ daily with reversal risk, close all immediately</li>
+  <li><strong>Trailing stops</strong> — close positions that hit trailing/breakeven/initial stops</li>
+  <li><strong>Liquidation risk</strong> — emergency close if margin danger detected</li>
+  <li><strong>Expired quick trades</strong> — close timed-out losers (winners keep riding)</li>
+  <li><strong>Extreme mover entries</strong> — fast entry on large price moves</li>
+</ol>
+
+<h3>Main Tick Loop (30-300 seconds, adaptive)</h3>
+<p>Tick interval adapts: scalp=1s, active=60s, swing=300s, idle=60s. Handles:</p>
+<ol>
   <li><strong>Scale in</strong> — add to winning positions (WINNERS) or DCA down (PYRAMID)</li>
   <li><strong>Lever up</strong> — PYRAMID positions that recovered: raise leverage</li>
   <li><strong>Partial take</strong> — PYRAMID: pull capital off the table after lever-up</li>
-  <li><strong>Wick scalps</strong> — if a PYRAMID position is getting wicked, open a quick counter-scalp to ride the wick</li>
-  <li><strong>Expire losers</strong> — close quick trades that timed out <em>and are losing</em> (winners keep riding)</li>
-  <li><strong>Process trade queue</strong> — read proposals from monitor (CRITICAL → DAILY → SWING). Only act if idle with spare capacity and budget. Queue is advisory, never forced.</li>
-  <li><strong>Assess intel</strong> — Fear &amp; Greed, liquidations, macro, whales, DeFiLlama, Santiment → MarketCondition</li>
-  <li><strong>Legendary check</strong> — at 100%+ daily: close all if reversal risk, or email + ride</li>
-  <li><strong>Apply gates</strong> — should we trade at all? (tier, drawdown, intel regime, STOP file)</li>
-  <li><strong>Run strategies</strong> — for each symbol, analyze and generate signals:
-    <ul>
-      <li>Filter by liquidity (low-liq → gambling only or skip)</li>
-      <li>Filter by intel (don't go long when everyone is overleveraged long)</li>
-      <li>Filter by market quality (spread, volume)</li>
-      <li>Boost during macro spike opportunities</li>
-      <li>Apply aggression multiplier (never &gt; 1.0)</li>
-      <li>Execute: $50 initial, trail, add if it works</li>
-    </ul>
-  </li>
+  <li><strong>Wick scalps</strong> — counter-scalp wicks while PYRAMID DCA-s</li>
+  <li><strong>Process trade queue</strong> — proposals from hub (CRITICAL → DAILY → SWING). Advisory, never forced.</li>
+  <li><strong>Assess intel</strong> — reads MarketCondition from hub (Fear &amp; Greed, liquidations, whales, etc.)</li>
+  <li><strong>Legendary email</strong> — at 100%+ daily without reversal: email owner, let it ride</li>
+  <li><strong>Apply gates</strong> — should we trade? (tier, drawdown, intel regime, STOP file)</li>
+  <li><strong>Validate proposals</strong> — per-bot-type validator spot-checks proposals before execution</li>
   <li><strong>Hedge check</strong> — profitable positions showing reversal? Open counter-position</li>
   <li><strong>Log status</strong> — PnL, positions, stops, intel summary</li>
-  <li><strong>Record metrics</strong> — tick duration, event loop lag, strategy/method timings → Prometheus</li>
-  <li><strong>Daily reset</strong> — at midnight UTC: email report, reset counters, compound</li>
+  <li><strong>Record metrics</strong> — tick duration, event loop lag, method timings → Prometheus</li>
+  <li><strong>Daily reset</strong> — at midnight UTC: reset counters, compound. Hub sends one consolidated email.</li>
 </ol>
 </div>
 
@@ -166,7 +175,7 @@
 
 <table>
   <tr><th>File</th><th>Purpose</th></tr>
-  <tr><td><code>bot.py</code></td><td>Main orchestrator — the tick loop, strategy dispatch, all gates</td></tr>
+  <tr><td><code>bot.py</code></td><td>Trading bot — tick loop, queue consumer, fast monitor loop, order execution (no strategy analysis)</td></tr>
   <tr><td><code>config/settings.py</code></td><td>All configuration via .env (Pydantic settings)</td></tr>
   <tr><td><code>core/exchange/base.py</code></td><td>Abstract exchange interface (extend for new exchanges)</td></tr>
   <tr><td><code>core/exchange/mexc.py</code></td><td>MEXC implementation via ccxt</td></tr>
@@ -212,17 +221,22 @@
   <tr><td><code>news/monitor.py</code></td><td>RSS feed monitoring, sentiment analysis, spike correlation</td></tr>
   <tr><td><code>scanner/trending.py</code></td><td>Multi-source scanner: CryptoBubbles + CMC + CoinGecko</td></tr>
   <tr><td><code>notifications/notifier.py</code></td><td>Email alerts with bounded queue (liquidation, stops, daily summary, legendary ride)</td></tr>
-  <tr><td><code>db/store.py</code></td><td>SQLite trade database — logs every trade with full context</td></tr>
+  <tr><td><code>db/store.py</code></td><td>Per-bot SQLite trade database (legacy — bots now push trades to hub)</td></tr>
+  <tr><td><code>db/hub_store.py</code></td><td>Hub SQLite database — merged trade history for all bots (the sole persistent DB)</td></tr>
   <tr><td><code>db/models.py</code></td><td>TradeRecord, StrategyScore, PatternInsight, ModificationSuggestion</td></tr>
   <tr><td><code>analytics/engine.py</code></td><td>Pattern detection, strategy scoring, weight factors, modification suggestions</td></tr>
-  <tr><td><code>shared/state.py</code></td><td>Atomic JSON read/write with fcntl file locking for inter-process communication</td></tr>
-  <tr><td><code>shared/models.py</code></td><td>BotDeploymentStatus, BotDashboardSnapshot, IntelSnapshot, AnalyticsSnapshot, TradeQueue, TradeProposal, ExtremeCandidate, ExtremeWatchlist</td></tr>
-  <tr><td><code>services/monitor.py</code></td><td>Standalone monitoring service with adaptive intensity + signal generation</td></tr>
-  <tr><td><code>services/signal_generator.py</code></td><td>Converts intel snapshots into CRITICAL/DAILY/SWING trade proposals</td></tr>
-  <tr><td><code>services/analytics_service.py</code></td><td>Standalone analytics service (reads trades.db, writes scores)</td></tr>
-  <tr><td><code>run_monitor.py</code></td><td>Entry point for standalone monitor</td></tr>
-  <tr><td><code>run_analytics.py</code></td><td>Entry point for standalone analytics</td></tr>
-  <tr><td><code>web/server.py</code></td><td>FastAPI dashboard — REST API + WebSocket + /metrics + /health</td></tr>
+  <tr><td><code>hub_main.py</code></td><td>Hub entry point — FastAPI + Monitor + Analytics + daily report (NOT a TradingBot)</td></tr>
+  <tr><td><code>hub/state.py</code></td><td>HubState — in-memory state (trade queue, intel, analytics, bot reports). Replaces file-based SharedState.</td></tr>
+  <tr><td><code>hub/candle_fetcher.py</code></td><td>Centralized candle fetching (one fetch per symbol, shared across bots)</td></tr>
+  <tr><td><code>shared/state.py</code></td><td>Legacy file-based SharedState (kept for backward compat, unused in hub architecture)</td></tr>
+  <tr><td><code>shared/models.py</code></td><td>BotDeploymentStatus, IntelSnapshot, AnalyticsSnapshot, TradeQueue, TradeProposal, ExtremeWatchlist</td></tr>
+  <tr><td><code>services/monitor.py</code></td><td>Monitoring service — runs in-process inside hub (intel feeds + signal generation)</td></tr>
+  <tr><td><code>services/signal_generator.py</code></td><td>Converts intel snapshots into CRITICAL/DAILY/SWING trade proposals, stored in HubState</td></tr>
+  <tr><td><code>services/analytics_service.py</code></td><td>Analytics service — runs in-process inside hub (reads hub.db, computes scores)</td></tr>
+  <tr><td><code>validators/</code></td><td>Per-bot-type lightweight validators (momentum, indicators, meanrev, swing, extreme)</td></tr>
+  <tr><td><code>config/bot_profiles.py</code></td><td>Bot profile definitions — strategies, env overrides, enable/disable defaults</td></tr>
+  <tr><td><code>web/server.py</code></td><td>FastAPI dashboard — REST API + WebSocket + /metrics + /health (runs in hub)</td></tr>
+  <tr><td><code>web/command_server.py</code></td><td>Lightweight FastAPI server on each bot — /health + /metrics + /command</td></tr>
   <tr><td><code>web/auth.py</code></td><td>Token-based authentication for dashboard</td></tr>
   <tr><td><code>web/schemas.py</code></td><td>Pydantic response models for API endpoints</td></tr>
   <tr><td><code>web/metrics.py</code></td><td>Prometheus metrics: system (psutil), process, application (@timed decorator)</td></tr>
@@ -230,51 +244,62 @@
   <tr><td><code>core/market_schedule.py</code></td><td>DST-aware market hours, weekends, holidays (FMP API), global singleton</td></tr>
   <tr><td><code>docs/summary.html</code></td><td>This document — requirements &amp; implementation summary</td></tr>
   <tr><td><code>docs/EXECUTION_PLAN.md</code></td><td>10-day testnet execution plan with crash recovery and reporting</td></tr>
-  <tr><td><code>scripts/run-local.sh</code></td><td>Local setup + run script</td></tr>
   <tr><td><code>scripts/deploy-digitalocean.sh</code></td><td>DigitalOcean Docker deployment</td></tr>
+  <tr><td><code>scripts/backup_dbs.sh</code></td><td>Host-side DB backup (copies hub.db to timestamped backup dir)</td></tr>
   <tr><td><code>scripts/build-dashboard.sh</code></td><td>Build the React frontend for production</td></tr>
   <tr><td><code>scripts/preflight_check.py</code></td><td>Pre-live sanity check: API keys, balance, futures, leverage, risk</td></tr>
   <tr><td><code>scripts/run_session.sh</code></td><td>10-day session helper: start/stop/status/snapshot/logs</td></tr>
+  <tr><td><code>Dockerfile.hub</code></td><td>Hub image — full Python + Node.js (frontend build), entry: hub_main.py</td></tr>
+  <tr><td><code>Dockerfile.bot</code></td><td>Bot image — trimmed Python only (no frontend/Node.js), entry: bot.py</td></tr>
+  <tr><td><code>docker-compose.yml</code></td><td>11 services: 1 hub + 10 bots (5 active, 5 idle) + Prometheus + Grafana + Loki</td></tr>
   <tr><td><code>.github/workflows/ci.yml</code></td><td>CI pipeline: lint, type-check, test (80%+), frontend build, Docker build</td></tr>
   <tr><td><code>pyproject.toml</code></td><td>Ruff, mypy, pytest-cov configuration</td></tr>
   <tr><td><code>prometheus/prometheus.yml</code></td><td>Prometheus scrape config — targets bot /metrics every 15s</td></tr>
   <tr><td><code>grafana/provisioning/</code></td><td>Grafana auto-provisioning: datasource (Prometheus) + dashboard provider</td></tr>
   <tr><td><code>grafana/dashboards/trading-bot.json</code></td><td>Pre-built Grafana dashboard: 25+ panels (system, process, methods, trading)</td></tr>
-  <tr><td><code>docs/execution_logs/</code></td><td>Container logs from each bot run, timestamped YYYYMMDDHHmmss.log</td></tr>
-  <tr><td><code>tests/</code></td><td>1100+ tests across 15+ files covering all modules (80%+ coverage)</td></tr>
+  <tr><td><code>docs/refactoring_plan.md</code></td><td>Architecture refactoring decisions and changelog</td></tr>
+  <tr><td><code>docs/new_ideas.md</code></td><td>Backlog of ideas not yet in summary.html section 6</td></tr>
+  <tr><td><code>docs/current_issues.md</code></td><td>Known issues and recent session changes</td></tr>
+  <tr><td><code>loki/</code></td><td>Loki + Promtail config and Dockerfiles for log aggregation</td></tr>
+  <tr><td><code>tests/</code></td><td>1669+ tests across 38 files covering all modules (85%+ coverage)</td></tr>
 </table>
 
 <h3>3.1 Runtime Data Directory (<code>data/</code>)</h3>
 
-<p>All runtime state lives under <code>data/</code>. In Docker this is the <code>bot-data</code> volume mounted at <code>/app/data</code>.
-Each bot writes to <code>data/{bot_id}/</code>; shared (hub-level) files live in <code>data/</code> root.</p>
+<p>Most runtime state now lives in <strong>HubState (in-memory)</strong>. Only persistent data
+uses <code>data/</code>. In Docker this is bind-mounted from <code>$HOST_DATA_DIR</code> (host filesystem, not a Docker volume).</p>
 
 <table>
+  <tr><th colspan="3" style="text-align:left; padding-top:1rem;">Persistent (on disk)</th></tr>
   <tr><th>Path</th><th>Created By</th><th>Purpose</th></tr>
-  <tr><td><code>data/hub.db</code></td><td>Hub dashboard (<code>db/hub_store.py</code>)</td><td>SQLite — merged trade history for all bots (analytics dashboard)</td></tr>
-  <tr><td><code>data/bot_registry.json</code></td><td>Hub dashboard (<code>web/server.py</code>)</td><td>Known bot IDs and their command-server URLs</td></tr>
-  <tr><td><code>data/trade_queue.json</code></td><td>Monitor (<code>shared/state.py</code>)</td><td>Shared trade proposals from signal generator to bots</td></tr>
-  <tr><td><code>data/trade_queue.lock</code></td><td>Monitor / bots (<code>shared/state.py</code>)</td><td>fcntl lock file for trade queue atomic access</td></tr>
-  <tr><td><code>data/intel_state.json</code></td><td>Monitor (<code>shared/state.py</code>)</td><td>Latest intel snapshot (fear/greed, liquidations, whale, etc.)</td></tr>
-  <tr><td><code>data/extreme_watchlist.json</code></td><td>Monitor (<code>shared/state.py</code>)</td><td>Current extreme mover candidates for bot evaluation</td></tr>
-  <tr><td><code>data/analytics_state.json</code></td><td>Analytics service (<code>shared/state.py</code>)</td><td>Strategy scores, hourly performance, regime stats</td></tr>
-  <tr><td><code>data/{bot_id}/trades.db</code></td><td>Each bot (<code>db/store.py</code>)</td><td>Per-bot SQLite trade history</td></tr>
-  <tr><td><code>data/{bot_id}/bot_status.json</code></td><td>Each bot (<code>shared/state.py</code>)</td><td>Bot status: level, open positions, should_trade flag</td></tr>
-  <tr><td><code>data/{bot_id}/trade_queue.json</code></td><td>Hub → bot (<code>shared/state.py</code>)</td><td>Per-bot trade queue (hub copies relevant proposals here)</td></tr>
-  <tr><td><code>data/{bot_id}/trade_queue.lock</code></td><td>Bot (<code>shared/state.py</code>)</td><td>fcntl lock for per-bot queue</td></tr>
+  <tr><td><code>data/hub.db</code></td><td>Hub (<code>db/hub_store.py</code>)</td><td>SQLite — merged trade history for all bots (critical)</td></tr>
+  <tr><td><code>data/analytics_state.json</code></td><td>Hub (<code>hub/state.py</code>)</td><td>Strategy scores, patterns, suggestions (survives restarts)</td></tr>
+  <tr><td><code>data/bot_registry.json</code></td><td>Hub (<code>web/server.py</code>)</td><td>Known bot IDs and their command-server URLs</td></tr>
   <tr><td><code>logs/bot_*.log</code></td><td>Each bot (<code>bot.py</code>)</td><td>Rotated daily, 30-day retention (Docker: <code>bot-logs</code> volume)</td></tr>
+  <tr><td><code>logs/hub_*.log</code></td><td>Hub (<code>hub_main.py</code>)</td><td>Rotated daily, 14-day retention</td></tr>
+
+  <tr><th colspan="3" style="text-align:left; padding-top:1rem;">In-memory (HubState — lost on restart)</th></tr>
+  <tr><th>Data</th><th>Component</th><th>Purpose</th></tr>
+  <tr><td>Trade queue</td><td>Monitor → HubState → bots via HTTP</td><td>Trade proposals (CRITICAL/DAILY/SWING)</td></tr>
+  <tr><td>Intel snapshot</td><td>Monitor → HubState → bots via HTTP</td><td>Fear/greed, liquidations, whales, macro</td></tr>
+  <tr><td>Extreme watchlist</td><td>Monitor → HubState → bots via HTTP</td><td>Extreme mover candidates</td></tr>
+  <tr><td>Bot status/reports</td><td>Bots → Hub via HTTP</td><td>Balance, PnL, positions, strategies per bot</td></tr>
 </table>
 
 <h4>Reset to clean state</h4>
 <pre>
-# Stop everything
-docker compose down -v          # -v removes named volumes (bot-data, bot-logs, prometheus-data, grafana-data, loki-data)
+# Stop containers (data is on host, safe)
+docker compose down
 
-# Remove local state (if running outside Docker)
-rm -rf data/                    # all DBs, JSON state, per-bot dirs
-rm -rf logs/                    # all log files
+# Wipe ephemeral state only (keeps DBs intact)
+find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" | xargs rm -f
+
+# Full wipe (destructive — loses trade history)
+rm -rf "$HOST_DATA_DIR"         # all DBs, JSON state
+rm -rf "$HOST_LOGS_DIR"         # all log files
 </pre>
-<p>On next <code>docker compose up</code> (or local run), all directories and files are recreated automatically.</p>
+<p>On next <code>docker compose up</code>, all directories and files are recreated automatically.
+Data lives on the host via bind mounts — <code>docker compose down -v</code> does NOT delete it.</p>
 
 <!-- ============================================================ -->
 <h2 id="s4">4. Key Configuration</h2>
@@ -334,7 +359,7 @@ rm -rf logs/                    # all log files
   <tr>
     <td><strong>Close everything</strong></td>
     <td><code>touch CLOSE_ALL</code> in the bot directory</td>
-    <td>All open positions are market-closed immediately. The file is auto-deleted after execution.</td>
+    <td>All open positions are market-closed within 1-2 seconds (fast monitor loop). The file is auto-deleted after execution.</td>
   </tr>
   <tr>
     <td><strong>Resume trading</strong></td>
@@ -360,8 +385,8 @@ rm -rf logs/                    # all log files
 <h3>6.2 Super Scalp (High Volume, $1-per-Trade Target)</h3>
 <div class="section-card">
   <p>Target 500 trades/day at $1 profit each. Volume over size. Partially exists via <code>CompoundMomentumStrategy</code> but not optimized for throughput.</p>
-  <p><strong>Key risk:</strong> Current 60s tick loop limits volume. 500 round-trips = ~$100 in fees. Exchange rate limits cap throughput.</p>
-  <p><strong>Status:</strong> Under review. Would need faster tick loop (15-30s), limit orders, and per-trade fee tracking.</p>
+  <p><strong>Key risk:</strong> 500 round-trips = ~$100 in fees. Exchange rate limits cap throughput.</p>
+  <p><strong>Status:</strong> Under review. Tick loop is now adaptive (1-300s) and fast loop runs every 1-2s, so the infra exists. Needs limit orders and per-trade fee tracking.</p>
 </div>
 
 <h3>6.3 Don't Fight the Trend (3rd Holy Rule)</h3>
@@ -382,30 +407,16 @@ rm -rf logs/                    # all log files
 <div class="section-card">
   <p>An AI agent running as a separate service that analyzes trade logs, bot logs, and market data to find non-obvious correlations and generate natural-language insights.</p>
   <p><strong>Capabilities:</strong> Trade pattern analysis, log anomaly detection, strategy parameter recommendations, market regime classification, correlation discovery.</p>
-  <p><strong>Status:</strong> Under review. Would run as a 6th Docker service with read-only access to <code>trades.db</code> and state files. Scheduled hourly to keep LLM costs low.</p>
+  <p><strong>Status:</strong> Under review. Would run as an additional Docker service with read-only access to <code>hub.db</code> and the hub API. Scheduled hourly to keep LLM costs low.</p>
 </div>
 
-<h3>6.5 High-Intensity Ultra-Fast Strategy ✅ IMPLEMENTED</h3>
-<div class="section-card">
-  <p>In/out within 1 second to 1 minute max. Picks extreme movers and rides the momentum. Ultra-fast scalping with aggressive ticker (100ms-1s).</p>
-  <p><strong>Status:</strong> Implemented. Full pipeline: monitor identifies 5–10 extreme movers (5%+ hourly, $10M+ volume), bot evaluates candidates every 30s (including correlated exposure check), subscribes to WebSocket ticker feeds for approved symbols, detects entry patterns (momentum continuation, pullback entry) in real-time, and executes via the fast monitor loop.</p>
-  <p><strong>Key behaviors:</strong></p>
-  <ul>
-    <li>Existing positions promoted to WS are exit-watch only (no new entry, just real-time stop management)</li>
-    <li>No hard time kill on profitable trades — aggressive 0.5% trailing stop is the exit, 1-min timeout only kills flat/losers</li>
-    <li>Correlated asset detection: if holding ETH and BTC spikes, immediately subscribes + tightens/adjusts stops</li>
-    <li>Settings: 1.5% initial stop, 0.5% trail, 3% position size, max 3 extreme positions</li>
-  </ul>
-  <p><strong>Files:</strong> <code>core/extreme/watcher.py</code>, <code>bot.py</code> (evaluate + wire), <code>services/monitor.py</code> (extreme watchlist builder), <code>shared/models.py</code>, <code>shared/state.py</code>, <code>config/settings.py</code></p>
-</div>
-
-<h3>6.6 Manual Trade Ideas &amp; Price Alerts</h3>
+<h3>6.5 Manual Trade Ideas &amp; Price Alerts</h3>
 <div class="section-card">
   <p>Submit manual trade ideas with pair, entry, SL, and TP via the dashboard. Bot either executes immediately (small amount) or sets a price alarm and auto-executes when the entry price is reached.</p>
   <p><strong>Status:</strong> Under review. Would need a new dashboard form, alarm/watchlist system, and limit-order-like execution logic.</p>
 </div>
 
-<h3>6.7 AMD — Accumulation Manipulation Distribution</h3>
+<h3>6.6 AMD — Accumulation Manipulation Distribution</h3>
 <div class="section-card">
   <p>Detects the classic AMD pattern that occurs frequently in crypto. Price accumulates in a tight range (consolidation), then spikes up briefly (manipulation / fake-out), then dumps below the accumulation zone (distribution / true move).</p>
   <p><strong>How it works:</strong></p>
@@ -419,7 +430,7 @@ rm -rf logs/                    # all log files
   <p><strong>Status:</strong> Not started. Would work as a new pattern in <code>core/patterns/</code> or a dedicated strategy. Needs range detection + spike classification + breakdown confirmation. High frequency pattern in crypto — very valuable.</p>
 </div>
 
-<h3>6.8 Multi-Timeframe Reversal Signals (Fefe Demeny Method)</h3>
+<h3>6.7 Multi-Timeframe Reversal Signals (Fefe Demeny Method)</h3>
 <div class="section-card">
   <p>Watches 5m, 15m, 1h, 4h, and daily timeframes for reversal confirmations using consecutive candle structure. Each timeframe confirmation strengthens the signal. Inspired by Fefe Demeny's reversal detection method.</p>
   <p><strong>How it works (LONG example, SHORT is mirrored):</strong></p>
@@ -440,13 +451,12 @@ rm -rf logs/                    # all log files
 <table>
   <tr><th>#</th><th>Idea</th><th>Priority</th><th>Rationale</th></tr>
   <tr><td>1</td><td>Don't Fight the Trend (6.3)</td><td style="color:var(--red);">Highest</td><td>Reinforces core philosophy, clean integration into existing gate system</td></tr>
-  <tr><td>2</td><td>Multi-TF Reversal Signals (6.8)</td><td style="color:var(--red);">Highest</td><td>Multi-TF alignment is one of the strongest confirmation methods; TradingView infra already exists</td></tr>
-  <tr><td>3</td><td>AMD Pattern (6.7)</td><td style="color:var(--yellow);">High</td><td>Very frequent in crypto, high win rate when correctly identified; works as pattern or strategy</td></tr>
+  <tr><td>2</td><td>Multi-TF Reversal Signals (6.7)</td><td style="color:var(--red);">Highest</td><td>Multi-TF alignment is one of the strongest confirmation methods; TradingView infra already exists</td></tr>
+  <tr><td>3</td><td>AMD Pattern (6.6)</td><td style="color:var(--yellow);">High</td><td>Very frequent in crypto, high win rate when correctly identified; works as pattern or strategy</td></tr>
   <tr><td>4</td><td>AI Background Agent (6.4)</td><td style="color:var(--yellow);">High</td><td>Read-only, low risk, useful during 10-day paper run</td></tr>
-  <tr><td>5</td><td>Manual Trade Ideas &amp; Alerts (6.6)</td><td style="color:var(--yellow);">High</td><td>User control, complements automated strategies</td></tr>
+  <tr><td>5</td><td>Manual Trade Ideas &amp; Alerts (6.5)</td><td style="color:var(--yellow);">High</td><td>User control, complements automated strategies</td></tr>
   <tr><td>6</td><td>Volatility Straddle (6.1)</td><td style="color:var(--accent);">Medium</td><td>Needs fee/whipsaw logic, pairs with market-open windows</td></tr>
   <tr><td>7</td><td>Super Scalp (6.2)</td><td style="color:#8b949e;">Lower</td><td>Most architectural work (tick loop speed, fee tracking, order throughput)</td></tr>
-  <tr><td>—</td><td>Ultra-Fast Strategy (6.5)</td><td style="color:var(--green);">✅ Done</td><td>Implemented: WS subscription, extreme mover detection, fast execution path</td></tr>
 </table>
 
 <!-- ============================================================ -->
@@ -456,7 +466,7 @@ rm -rf logs/                    # all log files
 <h3 id="s7-1">7.1 Infrastructure &amp; Deployment</h3>
 <table>
   <tr><th style="width:60%">Requirement</th><th>Status</th><th>Where</th></tr>
-  <tr><td>Run locally from my machine</td><td><span class="badge done">Done</span></td><td class="file">scripts/run-local.sh</td></tr>
+  <tr><td>Run locally from my machine</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml, .env</td></tr>
   <tr><td>Run on DigitalOcean with Docker</td><td><span class="badge done">Done</span></td><td class="file">Dockerfile, docker-compose.yml, scripts/deploy-digitalocean.sh</td></tr>
   <tr><td>Python as the language</td><td><span class="badge done">Done</span></td><td class="file">requirements.txt, pyproject.toml</td></tr>
   <tr><td>Name the app "trading-bot"</td><td><span class="badge done">Done</span></td><td class="file">pyproject.toml</td></tr>
@@ -466,14 +476,15 @@ rm -rf logs/                    # all log files
 <h3 id="s7-2">7.2 Exchange &amp; Market Support</h3>
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
-  <tr><td>Start with MEXC, but extensible to other exchanges later</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/base.py (abstract), core/exchange/mexc.py, core/exchange/factory.py</td></tr>
-  <tr><td>Binance exchange support</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/binance.py — spot + USDT-M futures via ccxt</td></tr>
-  <tr><td>Bybit exchange support</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/bybit.py — spot + USDT perpetual via ccxt</td></tr>
+  <tr><td>Multi-exchange support via abstract adapter pattern (Binance as primary, MEXC and Bybit also available)</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/base.py (abstract), core/exchange/factory.py</td></tr>
+  <tr><td>Binance exchange adapter (primary — used for paper and live trading)</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/binance.py — spot + USDT-M futures via ccxt</td></tr>
+  <tr><td>Bybit exchange adapter</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/bybit.py — spot + USDT perpetual via ccxt</td></tr>
+  <tr><td>MEXC exchange adapter</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/mexc.py — spot + futures via ccxt</td></tr>
   <tr><td>Spot &amp; Futures trading</td><td><span class="badge done">Done</span></td><td class="file">core/models/market.py (MarketType enum)</td></tr>
-  <tr><td>Crypto, tokenized stocks, and commodities</td><td><span class="badge done">Done</span></td><td class="file">Any symbol pair supported by MEXC</td></tr>
+  <tr><td>Crypto, tokenized stocks, and commodities</td><td><span class="badge done">Done</span></td><td class="file">Any symbol pair supported by the configured exchange</td></tr>
   <tr><td>Configurable leverage (10x default)</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → default_leverage</td></tr>
   <tr><td>Paper trading vs. real trading config (paper_local / paper_live / live)</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/paper.py, config → TRADING_MODE</td></tr>
-  <tr><td>Honor exchange limits</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/mexc.py (via ccxt)</td></tr>
+  <tr><td>Honor exchange limits</td><td><span class="badge done">Done</span></td><td class="file">All adapters (via ccxt market rules)</td></tr>
 </table>
 
 <h3 id="s7-3">7.3 Core Trading Features</h3>
@@ -599,7 +610,7 @@ rm -rf logs/                    # all log files
   <tr><td>Max 2 concurrent wick scalps</td><td><span class="badge done">Done</span></td><td class="file">core/orders/wick_scalp.py → max_concurrent_scalps=2</td></tr>
 </table>
 
-<h3 id="s7-10">7.10 MEXC Liquidity Awareness</h3>
+<h3 id="s7-10">7.10 Liquidity Awareness</h3>
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
   <tr><td>Avoid low-liquidity shitcoins for serious positions (stop losses unreliable)</td><td><span class="badge done">Done</span></td><td class="file">core/risk/market_filter.py → LiquidityTier, assess_liquidity()</td></tr>
@@ -636,7 +647,7 @@ rm -rf logs/                    # all log files
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
   <tr><td>Monitor cryptobubbles.com, coinmarketcap.com, and coingecko.com for trending/tradable coins</td><td><span class="badge done">Done</span></td><td class="file">scanner/trending.py → TrendingScanner (multi-source)</td></tr>
-  <tr><td>Auto-add strategies for trending coins, remove when no longer trending</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _on_trending(), _dynamic_strategies</td></tr>
+  <tr><td>Trending coins fed into trade queue as proposals (hub-side)</td><td><span class="badge done">Done</span></td><td class="file">services/signal_generator.py, services/monitor.py</td></tr>
   <tr><td>Flag low-liquidity trending coins for gambling-only</td><td><span class="badge done">Done</span></td><td class="file">scanner/trending.py → TrendingCoin.is_low_liquidity</td></tr>
   <tr><td>Fuzzy symbol matching: auto-resolve multiplier-prefix tokens (e.g. LUNC → 1000LUNC, MOG → 1000000MOG) with price sanity validation</td><td><span class="badge done">Done</span></td><td class="file">scanner/trending.py → _symbol_alias_map, _resolve_exchange_symbol()</td></tr>
 </table>
@@ -682,7 +693,7 @@ rm -rf logs/                    # all log files
   <tr><td><strong>DAILY</strong> tier: valid for hours (momentum entries, trending setups, TV alignment)</td><td><span class="badge done">Done</span></td><td class="file">shared/models.py → SignalPriority.DAILY</td></tr>
   <tr><td><strong>SWING</strong> tier: limit-order plans with full entry blueprint, valid for days</td><td><span class="badge done">Done</span></td><td class="file">shared/models.py → SignalPriority.SWING, EntryPlan</td></tr>
   <tr><td>Signal generator converts intel snapshots into proposals</td><td><span class="badge done">Done</span></td><td class="file">services/signal_generator.py</td></tr>
-  <tr><td>Monitor writes proposals to data/trade_queue.json each tick</td><td><span class="badge done">Done</span></td><td class="file">services/monitor.py, shared/state.py</td></tr>
+  <tr><td>Monitor writes proposals to HubState (in-memory), bots receive via HTTP</td><td><span class="badge done">Done</span></td><td class="file">services/monitor.py, hub/state.py</td></tr>
   <tr><td>Bot consumes queue only when idle with spare capacity and budget</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _process_trade_queue()</td></tr>
   <tr><td>Proposals auto-expire, get rejected with reasons, purge when stale</td><td><span class="badge done">Done</span></td><td class="file">shared/models.py → TradeQueue.purge_stale()</td></tr>
   <tr><td>SWING proposals include full entry plans (entry zone, DCA levels, leverage ramp)</td><td><span class="badge done">Done</span></td><td class="file">shared/models.py → EntryPlan</td></tr>
@@ -701,7 +712,7 @@ rm -rf logs/                    # all log files
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
   <tr><td>Create <code>STOP</code> file → halt all new trades (existing ride)</td><td><span class="badge done">Done</span></td><td class="file">core/risk/daily_target.py → manual_stop</td></tr>
   <tr><td>Create <code>CLOSE_ALL</code> file → close all positions immediately</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _close_all_positions()</td></tr>
-  <tr><td>Delete the file to resume normal operation</td><td><span class="badge done">Done</span></td><td class="file">File check happens every tick</td></tr>
+  <tr><td>Delete the file to resume normal operation</td><td><span class="badge done">Done</span></td><td class="file">CLOSE_ALL checked every 1-2s (fast loop), STOP checked every tick</td></tr>
 </table>
 
 <h3 id="s7-20">7.20 Trade Analytics &amp; Pattern Detection</h3>
@@ -712,7 +723,7 @@ rm -rf logs/                    # all log files
 
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
-  <tr><td>Local SQLite database for trade history</td><td><span class="badge done">Done</span></td><td class="file">db/store.py → data/trades.db</td></tr>
+  <tr><td>Central SQLite database for trade history (hub-only)</td><td><span class="badge done">Done</span></td><td class="file">db/hub_store.py → data/hub.db</td></tr>
   <tr><td>Log every trade with full market context</td><td><span class="badge done">Done</span></td><td class="file">db/models.py → TradeRecord (27 fields)</td></tr>
   <tr><td>Strategy scoring: win rate, profit factor, expectancy</td><td><span class="badge done">Done</span></td><td class="file">analytics/engine.py → StrategyScore</td></tr>
   <tr><td>Automatic weight factors (0.05-2.0x) based on performance</td><td><span class="badge done">Done</span></td><td class="file">analytics/engine.py → _compute_weight()</td></tr>
@@ -758,16 +769,16 @@ rm -rf logs/                    # all log files
 <h3 id="s7-22">7.22 Service Architecture &amp; Adaptive Monitoring</h3>
 
 <div class="principle">
-  <strong>Don't waste cycles when fully deployed.</strong> Monitoring and analytics run as separate programs that communicate via JSON state files. When the bot is fully deployed and positions are running well, monitoring drops to background mode. When hunting for new trades, it runs at full speed. When positions are stressed (losing), monitoring escalates to find exit/hedge opportunities.
+  <strong>Hub-centric architecture.</strong> Monitor and Analytics run as async tasks inside the hub process. All shared state (intel, trade queue, analytics, bot reports) lives in HubState (in-memory). Trading bots are lightweight executors that receive data from the hub via HTTP <code>/internal/report</code>. Monitoring intensity adapts to bot deployment status.
 </div>
 
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
-  <tr><td>Separate monitor process (TV, CMC, CoinGecko, F&amp;G, Liq, Macro, Whales, Scanner)</td><td><span class="badge done">Done</span></td><td class="file">services/monitor.py → run_monitor.py</td></tr>
-  <tr><td>Separate analytics process (trade DB → scores, patterns, suggestions)</td><td><span class="badge done">Done</span></td><td class="file">services/analytics_service.py → run_analytics.py</td></tr>
-  <tr><td>Shared state via atomic JSON files in <code>data/</code> with fcntl file locking</td><td><span class="badge done">Done</span></td><td class="file">shared/state.py (write-to-temp → fsync → rename + fcntl.flock)</td></tr>
-  <tr><td>Bot writes deployment status (level, positions, health, capacity)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _write_deployment_status()</td></tr>
-  <tr><td>Bot reads intel from shared state; falls back to in-process if stale</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _read_shared_intel()</td></tr>
+  <tr><td>Monitor runs in-process inside hub (intel feeds + signal generation)</td><td><span class="badge done">Done</span></td><td class="file">services/monitor.py, hub_main.py</td></tr>
+  <tr><td>Analytics runs in-process inside hub (hub.db → scores, patterns)</td><td><span class="badge done">Done</span></td><td class="file">services/analytics_service.py, hub_main.py</td></tr>
+  <tr><td>In-memory state via HubState (replaces file-based SharedState)</td><td><span class="badge done">Done</span></td><td class="file">hub/state.py → HubState</td></tr>
+  <tr><td>Bots POST snapshots to hub, receive intel/queue/analytics in response</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _report_to_hub(), web/server.py → /internal/report</td></tr>
+  <tr><td>Bot reads intel from hub HTTP response (no file access)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → hub response parsing</td></tr>
   <tr>
     <td>Adaptive monitoring intensity:<br>
       <strong>HUNTING</strong> (idle) → full speed (1.0x)<br>
@@ -778,8 +789,8 @@ rm -rf logs/                    # all log files
     <td><span class="badge done">Done</span></td>
     <td class="file">services/monitor.py → INTENSITY_TABLE</td>
   </tr>
-  <tr><td>Docker Compose: 10 services (3 bots, monitor, analytics, db-sync, prometheus, grafana, loki, promtail) with shared volume</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml</td></tr>
-  <tr><td>Backwards compatible: bot still works in single-process mode</td><td><span class="badge done">Done</span></td><td class="file">bot.py falls back to in-process intel/analytics if shared state stale</td></tr>
+  <tr><td>Docker Compose: 1 hub + 10 bots (all active by default) + Prometheus + Grafana + Loki with host bind mounts</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml, Dockerfile.hub, Dockerfile.bot</td></tr>
+  <tr><td>Per-bot-type validators for queue proposal spot-checking</td><td><span class="badge done">Done</span></td><td class="file">validators/ (momentum, indicators, meanrev, swing, extreme)</td></tr>
 </table>
 
 <h3 id="s7-23">7.23 Market Hours &amp; Holiday System</h3>
@@ -798,11 +809,11 @@ rm -rf logs/                    # all log files
   <tr><td>Test coverage for DST transitions, open/close, holidays, weekends</td><td><span class="badge done">Done</span></td><td class="file">tests/test_market_schedule.py</td></tr>
 </table>
 
-<h3 id="s7-24">7.24 MEXC Futures Restriction</h3>
+<h3 id="s7-24">7.24 Exchange Market-Type Restriction</h3>
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
   <tr><td><code>ALLOWED_MARKET_TYPES</code> setting: spot, futures, or both</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → allowed_market_types</td></tr>
-  <tr><td>MEXC defaults to spot-only (futures unreliable on low-liq coins)</td><td><span class="badge done">Done</span></td><td class="file">.env.example → ALLOWED_MARKET_TYPES=spot</td></tr>
+  <tr><td>Per-exchange defaults (e.g. MEXC spot-only due to low-liq futures, Binance both)</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/factory.py, .env.example</td></tr>
   <tr><td>Bot falls back strategies to spot when futures disallowed</td><td><span class="badge done">Done</span></td><td class="file">bot.py → market type filter</td></tr>
   <tr><td>Rejects disallowed trade queue proposals</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _process_trade_queue()</td></tr>
   <tr><td>Preflight check skips futures tests when not enabled</td><td><span class="badge done">Done</span></td><td class="file">scripts/preflight_check.py</td></tr>
@@ -819,7 +830,7 @@ rm -rf logs/                    # all log files
   <tr><td>Ruff linting (pycodestyle, pyflakes, bugbear, isort, pyupgrade, simplify)</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml, pyproject.toml</td></tr>
   <tr><td>Mypy type checking (strict mode on critical modules)</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml → mypy --ignore-missing-imports</td></tr>
   <tr><td>Pytest with coverage enforcement (80%+ required)</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml, pyproject.toml → fail_under=80</td></tr>
-  <tr><td>1044 tests across 15+ test files, covering all modules</td><td><span class="badge done">Done</span></td><td class="file">tests/ directory</td></tr>
+  <tr><td>1630+ tests across 37 test files, covering all modules (85%+ coverage)</td><td><span class="badge done">Done</span></td><td class="file">tests/ directory</td></tr>
   <tr><td>Frontend build check (React/Vite)</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml</td></tr>
   <tr><td>Docker build verification</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml</td></tr>
   <tr><td>Git branching: develop → master (fast-forward merge when CI green)</td><td><span class="badge done">Done</span></td><td class="file">git workflow</td></tr>
@@ -828,13 +839,13 @@ rm -rf logs/                    # all log files
 <h3 id="s7-26">7.26 10-Day Execution Plan (Testnet Run)</h3>
 
 <div class="principle">
-  <strong>Prove it works before going live.</strong> A detailed execution plan documents how to run the bot on Binance testnet for 10 continuous days with $100 paper capital. Includes crash recovery, daily reporting, and strategy experimentation guidelines.
+  <strong>Prove it works before going live.</strong> A detailed execution plan documents how to run 5 bots on Binance testnet for 10 continuous days with $1,000 per bot ($5,000 total). Includes crash recovery, daily reporting, and strategy experimentation guidelines.
 </div>
 
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
   <tr><td>Execution plan document with architecture, startup, crash recovery</td><td><span class="badge done">Done</span></td><td class="file">docs/EXECUTION_PLAN.md</td></tr>
-  <tr><td>Session budget tracking ($100 starting, $60 halt threshold)</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → SESSION_BUDGET, PaperExchange</td></tr>
+  <tr><td>Session budget tracking ($1,000 per bot, $600 halt threshold)</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → SESSION_BUDGET, PaperExchange</td></tr>
   <tr><td>Run session helper script (start/stop/status/snapshot/logs)</td><td><span class="badge done">Done</span></td><td class="file">scripts/run_session.sh</td></tr>
   <tr><td>Daily reporting template + final report structure</td><td><span class="badge done">Done</span></td><td class="file">docs/reports/ (per-attempt and daily logs)</td></tr>
   <tr><td>Strategy change procedure documented</td><td><span class="badge done">Done</span></td><td class="file">docs/EXECUTION_PLAN.md → Strategy Change Procedure</td></tr>
@@ -973,16 +984,16 @@ rm -rf logs/                    # all log files
 <h3 id="s7-32">7.32 Multi-Bot Strategy Tournament</h3>
 
 <div class="principle">
-  <strong>Run 3 bot instances in parallel with different strategies, same capital, one central dashboard.</strong> Each bot writes state to <code>data/{bot_id}/</code>, reads shared intel from <code>data/</code>. External data (news, intel, scanner) is centralized in the monitor service — bots are thin clients that only execute trades. Only <code>bot-momentum</code> runs the web dashboard; other bots POST their snapshots to it via HTTP.
+  <strong>Run 10 bot instances in parallel with different strategies, same capital, one central hub.</strong> The hub runs the dashboard, monitor, and analytics. Bots are lightweight trade executors that POST snapshots to the hub and receive intel/queue via HTTP response. All persistent data flows through <code>hub.db</code> only.
 </div>
 
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
   <tr><td><code>BOT_ID</code> and <code>BOT_STRATEGIES</code> env vars for per-instance config</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → bot_id, bot_strategies, bot_strategy_list, data_dir</td></tr>
-  <tr><td>Each bot writes to <code>data/{bot_id}/</code>, reads shared intel from <code>data/</code></td><td><span class="badge done">Done</span></td><td class="file">bot.py → self.shared (bot-specific), self.shared_intel (shared)</td></tr>
-  <tr><td>Docker compose: 3 bot services (momentum, meanrev, swing) + shared monitor</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml → bot-momentum, bot-meanrev, bot-swing</td></tr>
-  <tr><td>Multi-bot mode: bots don't run their own NewsMonitor, MarketIntel, or TrendingScanner — read from shared state</td><td><span class="badge done">Done</span></td><td class="file">bot.py → self._multibot, conditional module init</td></tr>
-  <tr><td>Monitor service centrally runs news, intel, scanner and writes to shared <code>intel_state.json</code></td><td><span class="badge done">Done</span></td><td class="file">services/monitor.py → NewsMonitor, _build_snapshot()</td></tr>
+  <tr><td>Bots are stateless — zero file I/O, all state via hub HTTP</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _report_to_hub()</td></tr>
+  <tr><td>Docker compose: 1 hub + 10 bots (all active by default) + Prometheus + Grafana + Loki</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml, Dockerfile.hub, Dockerfile.bot</td></tr>
+  <tr><td>Bots receive intel/analytics/queue from hub in HTTP response (no local modules)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → hub response parsing</td></tr>
+  <tr><td>Monitor + analytics run in-process inside hub (HubState in-memory)</td><td><span class="badge done">Done</span></td><td class="file">hub_main.py, hub/state.py</td></tr>
   <tr><td>Prometheus scrapes all 3 bots with <code>bot_id</code> labels</td><td><span class="badge done">Done</span></td><td class="file">prometheus/prometheus.yml</td></tr>
   <tr><td>Backward compatible — no BOT_ID = single bot like before</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → data_dir defaults to "data"</td></tr>
   <tr><td>7 tests for config, data isolation, bot_id in status</td><td><span class="badge done">Done</span></td><td class="file">tests/test_coverage_boost.py, tests/test_shared.py</td></tr>
@@ -1032,16 +1043,16 @@ rm -rf logs/                    # all log files
 <h3 id="s7-36">7.36 Persistent Data &amp; DB Sync</h3>
 
 <div class="principle">
-  <strong>Data survives container rebuilds.</strong> Docker volumes replaced with host bind mounts (<code>./persistent/data</code>, <code>./persistent/logs</code>). A background <code>db-sync</code> service merges per-bot SQLite DBs into a unified <code>trades_all.db</code> every 30 seconds. Startup size check warns if any data directory exceeds 10 MB.
+  <strong>Data survives container rebuilds.</strong> Docker named volumes replaced with host bind mounts (<code>$HOST_DATA_DIR</code>, <code>$HOST_LOGS_DIR</code>). All trade persistence flows through <code>hub.db</code> (the sole persistent DB). Bots are fully stateless — no per-bot DBs, no file I/O. Analytics state persisted to <code>analytics_state.json</code> for restart survival.
 </div>
 
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
-  <tr><td>Host bind mounts: <code>./persistent/data</code> and <code>./persistent/logs</code></td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml → volumes</td></tr>
-  <tr><td>Background <code>db-sync</code> service merges per-bot DBs into <code>data/trades_all.db</code></td><td><span class="badge done">Done</span></td><td class="file">scripts/db_sync.py, docker-compose.yml → db-sync service</td></tr>
-  <tr><td>Unified DB has <code>bot_id</code> and <code>source_id</code> columns for traceability</td><td><span class="badge done">Done</span></td><td class="file">scripts/db_sync.py → _ensure_unified_db()</td></tr>
-  <tr><td>Sync re-updates rows that changed (open→close) since last sync</td><td><span class="badge done">Done</span></td><td class="file">scripts/db_sync.py → _resync_updated()</td></tr>
-  <tr><td>Startup data size check — warns if any dir &gt; 10 MB</td><td><span class="badge done">Done</span></td><td class="file">scripts/db_sync.py → _check_data_sizes(), bot.py → _check_data_dir_size()</td></tr>
+  <tr><td>Host bind mounts: <code>$HOST_DATA_DIR</code> and <code>$HOST_LOGS_DIR</code></td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml → volumes, .env</td></tr>
+  <tr><td>Single hub.db is the sole persistent trade DB — bots push trades via HTTP</td><td><span class="badge done">Done</span></td><td class="file">db/hub_store.py, web/server.py → /internal/trade</td></tr>
+  <tr><td>Analytics state persisted to disk (survives hub restarts)</td><td><span class="badge done">Done</span></td><td class="file">hub/state.py → _persist_analytics()</td></tr>
+  <tr><td>Bots recover open positions from hub on startup</td><td><span class="badge done">Done</span></td><td class="file">bot.py → recovery on connect</td></tr>
+  <tr><td>Host-side DB backup script</td><td><span class="badge done">Done</span></td><td class="file">scripts/backup_dbs.sh</td></tr>
 </table>
 
 <h3 id="s7-37">7.37 Centralized Log Analysis (Loki + Grafana)</h3>
@@ -1063,7 +1074,7 @@ rm -rf logs/                    # all log files
 <h3 id="s7-38">7.38 Centralized Dashboard &amp; API-Based Bot Reporting</h3>
 
 <div class="principle">
-  <strong>Bots report to the dashboard via HTTP, not shared files.</strong> Only <code>bot-momentum</code> runs the web server (port 9035). Other bots (<code>bot-meanrev</code>, <code>bot-swing</code>) POST their full dashboard snapshot (positions, strategies, status, wick scalps) to <code>POST /internal/report</code> on every tick. The dashboard server merges all bot data in-memory and serves a unified view via a single WebSocket. The frontend connects to one port only — no cross-port calls, no multi-WebSocket complexity.
+  <strong>Bots report to the hub via HTTP.</strong> The hub (<code>bot-hub</code>) runs the dashboard, API, and all shared services on port 9035. Trading bots POST their snapshots (positions, strategies, status) to <code>POST /internal/report</code> every tick and receive intel/queue/analytics in the response. The dashboard merges all bot data in-memory and serves a unified view via a single WebSocket.
 </div>
 
 <table>
@@ -1072,7 +1083,7 @@ rm -rf logs/                    # all log files
   <tr><td><code>DASHBOARD_HUB_URL</code> env var for non-primary bots</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → dashboard_hub_url</td></tr>
   <tr><td><code>POST /internal/report</code> endpoint stores snapshots in-memory (no auth — Docker internal network)</td><td><span class="badge done">Done</span></td><td class="file">web/server.py → receive_bot_report(), _bot_reports dict</td></tr>
   <tr><td>WebSocket serves merged view from all bot reports (server-side merge)</td><td><span class="badge done">Done</span></td><td class="file">web/server.py → _build_merged_snapshot()</td></tr>
-  <tr><td>Only bot-momentum runs the dashboard; others set <code>DASHBOARD_ENABLED=false</code></td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml → bot-meanrev, bot-swing env vars</td></tr>
+  <tr><td>Hub (bot-hub) runs the dashboard; all bot services set <code>DASHBOARD_ENABLED=false</code></td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml → all bot services</td></tr>
   <tr><td><code>/api/bots</code> and <code>/api/strategies</code> read from in-memory reports, not per-bot APIs</td><td><span class="badge done">Done</span></td><td class="file">web/server.py → get_bots(), get_strategies()</td></tr>
   <tr><td>Frontend: single WebSocket connection, no multi-port logic</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/App.tsx, hooks/useWebSocket.ts</td></tr>
   <tr><td>Frontend: Strategies/Analytics fetch from central server only</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Strategies.tsx, Analytics.tsx</td></tr>

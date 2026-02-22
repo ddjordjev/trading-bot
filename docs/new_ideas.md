@@ -127,10 +127,24 @@ flow or if tick frequency goes sub-second.
 
 ---
 
-## ~~Static Containers with Hub-Controlled Enable/Disable~~ — IMPLEMENTED
+## Hub-Managed Balance Allocation
 
-Implemented in commit on `develop`.  All bot containers now run statically via
-`docker-compose.yml`.  The hub controls enable/disable through
-`data/{bot_id}/bot_enabled.json`.  `web/docker_manager.py` removed, docker.sock
-mount removed from bot-hub.  Settings page toggles write the config flag —
-bots check every 5s and transition between trading and idle mode.
+Currently each bot has its own `SESSION_BUDGET` env var — a self-imposed cap
+with no inter-bot coordination. If two bots each claim $3000 from a $5000
+wallet, they'll over-allocate and eventually fail on insufficient margin.
+
+**The fix:** Hub queries the exchange wallet once, then divides capital across
+enabled bots based on their profiles (equal split, weighted by strategy risk,
+or explicit per-bot allocation in config). Each bot receives its ceiling from
+the hub at startup and on every report cycle. If a bot is disabled, its share
+is redistributed.
+
+**Behavior today (honor system):**
+- No `SESSION_BUDGET` → bot uses full wallet balance (dangerous with multiple bots)
+- `SESSION_BUDGET=1000` → bot caps itself at $1000 notional, others unaware
+- `SESSION_BUDGET > wallet` → bot thinks it has money it doesn't, margin errors
+
+**Safe rule for now:** `sum(all bot SESSION_BUDGET) <= exchange wallet balance`.
+Keep budgets conservative. The hub-managed version is the real solution.
+
+**Status:** Not started. Build before going live with multiple bots on real money.

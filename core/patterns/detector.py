@@ -249,6 +249,8 @@ class PatternDetector:
             return None
 
         l1, l2 = lows[-2], lows[-1]
+        if l1.price <= 0:
+            return None
         diff_pct = abs(l1.price - l2.price) / l1.price * 100
 
         if diff_pct > 2.0:
@@ -298,6 +300,8 @@ class PatternDetector:
             return None
 
         h1, h2 = highs[-2], highs[-1]
+        if h1.price <= 0:
+            return None
         diff_pct = abs(h1.price - h2.price) / h1.price * 100
 
         if diff_pct > 2.0:
@@ -350,6 +354,8 @@ class PatternDetector:
             return None
         if price < last.price:
             return None
+        if prev.price <= 0:
+            return None
 
         improvement_pct = (last.price - prev.price) / prev.price * 100
         conf = min(improvement_pct / 5.0, 1.0)
@@ -386,6 +392,8 @@ class PatternDetector:
         if last.price >= prev.price:
             return None
         if price > last.price:
+            return None
+        if prev.price <= 0:
             return None
 
         drop_pct = (prev.price - last.price) / prev.price * 100
@@ -424,6 +432,8 @@ class PatternDetector:
         if head.price >= ls.price or head.price >= rs.price:
             return None
         if not (ls.index < head.index < rs.index):
+            return None
+        if ls.price <= 0:
             return None
 
         shoulder_diff = abs(ls.price - rs.price) / ls.price * 100
@@ -472,6 +482,8 @@ class PatternDetector:
         if head.price <= ls.price or head.price <= rs.price:
             return None
         if not (ls.index < head.index < rs.index):
+            return None
+        if ls.price <= 0:
             return None
 
         shoulder_diff = abs(ls.price - rs.price) / ls.price * 100

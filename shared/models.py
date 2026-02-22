@@ -117,8 +117,8 @@ class TradeProposal(BaseModel):
 class TradeQueue(BaseModel):
     """Priority queue of trade proposals from monitor/intel to the bot.
 
-    Written by the monitor service to data/trade_queue.json.
-    Read (and consumed) by the bot each tick.
+    Stored in HubState (in-memory). Monitor writes proposals, bots
+    receive them via the /internal/report HTTP response each tick.
     """
 
     critical: list[TradeProposal] = []

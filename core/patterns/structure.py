@@ -96,7 +96,7 @@ class StructureAnalyzer:
 
         for sw in sorted_swings[1:]:
             cluster_avg = sum(s.price for s in current_cluster) / len(current_cluster)
-            if abs(sw.price - cluster_avg) / cluster_avg * 100 <= self.zone_tolerance_pct:
+            if cluster_avg <= 0 or abs(sw.price - cluster_avg) / cluster_avg * 100 <= self.zone_tolerance_pct:
                 current_cluster.append(sw)
             else:
                 clusters.append(current_cluster)
