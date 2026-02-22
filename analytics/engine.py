@@ -193,7 +193,7 @@ class AnalyticsEngine:
         if max_loss_streak >= 8:
             w *= 0.8
 
-        return round(max(0.05, min(2.0, w)), 3)
+        return round(max(0.3, min(2.0, w)), 3)
 
     # ------------------------------------------------------------------ #
     #  Pattern detection

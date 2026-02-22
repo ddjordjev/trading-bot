@@ -55,7 +55,6 @@ def monitor(mock_settings, tmp_path):
                                                 mock_state.read_trade_queue.return_value = TradeQueue()
                                                 mock_state.write_intel = MagicMock()
                                                 mock_state.write_trade_queue = MagicMock()
-                                                mock_state.write_bot_trade_queue = MagicMock()
                                                 mock_state_cls.return_value = mock_state
 
                                                 # Async start/stop for all clients

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -55,9 +54,8 @@ class HubState:
         self._extreme_watchlist: ExtremeWatchlist = ExtremeWatchlist()
 
         self._trade_queue: TradeQueue = TradeQueue()
-        self._bot_queues: dict[str, TradeQueue] = {}
         self._rejections: dict[str, RejectionRecord] = {}  # "symbol|strategy" → record
-        self._dispatched: list[TradeProposal] = []  # recently popped proposals for dashboard display
+        self._dispatched: list[TradeProposal] = []  # recently dispatched for dashboard
         self._dispatched_max = 50
 
         self._bot_statuses: dict[str, BotDeploymentStatus] = {}
@@ -189,13 +187,6 @@ class HubState:
     def read_trade_queue(self) -> TradeQueue:
         return self._trade_queue
 
-    def write_bot_trade_queue(self, bot_id: str, queue: TradeQueue) -> None:
-        queue.updated_at = datetime.now(UTC).isoformat()
-        self._bot_queues[bot_id] = queue
-
-    def read_bot_trade_queue(self, bot_id: str) -> TradeQueue:
-        return self._bot_queues.get(bot_id, TradeQueue())
-
     def apply_trade_queue_updates(
         self,
         consumed_ids: list[str],
@@ -216,28 +207,14 @@ class HubState:
         consumed_ids: list[str],
         rejected: dict[str, str],
     ) -> None:
-        """Process consumption and rejection reports from a bot.
+        """Process consumed/rejected reports from a bot.
 
-        Proposals were already popped from the shared queue on read, so
-        consumed_ids just need cleanup on the per-bot queue.  Rejections
-        are recorded so the signal generator can avoid re-proposing the
-        same symbol+strategy in a tight loop.
-
-        If a rejected proposal targeted multiple bot styles, a fresh copy
-        is re-inserted into the shared queue for the remaining styles
-        (excluding the one that just rejected it).
+        Updates the dispatched list (dashboard) and records rejections
+        so the signal generator can cool down on those symbols.
         """
         if not consumed_ids and not rejected:
             return
-        q = self._bot_queues.get(bot_id)
-        if q is not None:
-            for pid in consumed_ids:
-                q.mark_consumed(pid)
-            for pid, reason in rejected.items():
-                q.mark_rejected(pid, reason)
-            q.updated_at = datetime.now(UTC).isoformat()
 
-        # Update dispatched list so dashboard shows consumed/rejected status
         for dp in self._dispatched:
             if dp.id in consumed_ids:
                 dp.consumed = True
@@ -245,15 +222,10 @@ class HubState:
                 dp.rejected = True
                 dp.reject_reason = rejected[dp.id]
 
-        bot_status = self._bot_statuses.get(bot_id)
-        rejecting_style = bot_status.bot_style if bot_status else ""
-
         for pid, reason in rejected.items():
-            proposal = self._find_proposal_by_id(pid, q)
+            proposal = self._find_dispatched_by_id(pid)
             if not proposal:
                 continue
-
-            # Record rejection for signal generator cooldowns
             rkey = f"{proposal.symbol}|{proposal.strategy}"
             existing = self._rejections.get(rkey)
             if existing:
@@ -263,69 +235,45 @@ class HubState:
             else:
                 self._rejections[rkey] = RejectionRecord(reason, datetime.now(UTC))
 
-            # Re-insert for remaining styles if the proposal targeted multiple
-            if rejecting_style and proposal.target_bot:
-                styles = {t.strip() for t in proposal.target_bot.split(",") if t.strip()}
-                remaining = styles - {rejecting_style}
-                if remaining:
-                    requeued = proposal.model_copy(
-                        update={
-                            "id": uuid.uuid4().hex[:12],
-                            "target_bot": ",".join(sorted(remaining)),
-                            "consumed": False,
-                            "rejected": False,
-                            "reject_reason": "",
-                        }
-                    )
-                    self._trade_queue.add(requeued)
-                    logger.info(
-                        "Re-queued {} {} for remaining styles [{}] after {} rejected it",
-                        requeued.symbol,
-                        requeued.strategy,
-                        requeued.target_bot,
-                        rejecting_style,
-                    )
-
-    def _find_proposal_by_id(self, pid: str, bot_queue: TradeQueue | None = None) -> TradeProposal | None:
-        """Look up a proposal by ID across all queues (shared + per-bot)."""
-        for q in [self._trade_queue] + ([bot_queue] if bot_queue else []) + list(self._bot_queues.values()):
-            for bucket in ("critical", "daily", "swing"):
-                for p in getattr(q, bucket):
-                    if p.id == pid:
-                        return p
+    def _find_dispatched_by_id(self, pid: str) -> TradeProposal | None:
+        for p in self._dispatched:
+            if p.id == pid:
+                return p
         return None
 
     def read_queue_for_bot_style(self, bot_style: str) -> TradeQueue:
-        """Pop matching proposals from the shared queue for this bot style.
+        """Pop the top matching proposal for this bot style.
 
-        Proposals are REMOVED from the shared queue on read — once a bot
-        receives them, they're gone.  The bot will either execute or reject.
-        If rejected, the signal generator can propose again later (as a new
-        proposal) if conditions still warrant it.
+        Each bot gets exactly 1 proposal per request (the highest-priority
+        one). The rest stay in the queue for other bots.  Priority order:
+        critical → daily → swing.
         """
-        popped = TradeQueue()
+        result = TradeQueue()
+        picked = None
+        picked_bucket = None
+        picked_idx = None
+
         for bucket_name in ("critical", "daily", "swing"):
             src: list = getattr(self._trade_queue, bucket_name)
-            dest: list = getattr(popped, bucket_name)
-            keep: list = []
-            for p in src:
+            for i, p in enumerate(src):
                 if p.consumed or p.rejected or p.is_expired:
                     continue
                 targets = {t.strip() for t in (p.target_bot or "").split(",") if t.strip()}
                 if not targets or bot_style in targets:
-                    dest.append(p)
-                else:
-                    keep.append(p)
-            setattr(self._trade_queue, bucket_name, keep)
-        popped.updated_at = self._trade_queue.updated_at
-        self._trade_queue.updated_at = datetime.now(UTC).isoformat()
+                    picked = p
+                    picked_bucket = bucket_name
+                    picked_idx = i
+                    break
+            if picked:
+                break
 
-        # Track dispatched proposals so the dashboard can display them
-        dispatched = popped.critical + popped.daily + popped.swing
-        if dispatched:
-            self._dispatched = (dispatched + self._dispatched)[: self._dispatched_max]
+        if picked and picked_bucket is not None and picked_idx is not None:
+            getattr(self._trade_queue, picked_bucket).pop(picked_idx)
+            getattr(result, picked_bucket).append(picked)
+            self._dispatched = [picked, *self._dispatched][: self._dispatched_max]
 
-        return popped
+        result.updated_at = self._trade_queue.updated_at
+        return result
 
     def read_dispatched_proposals(self) -> list[TradeProposal]:
         """Recent proposals dispatched to bots — for dashboard display."""

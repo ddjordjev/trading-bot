@@ -1,0 +1,54 @@
+---
+description: Architecture constraints — always loaded to prevent bad decisions
+alwaysApply: true
+---
+
+# Architecture Constraints
+
+**Read `docs/ARCHITECTURE.md` before making any structural change.**
+That document is the source of truth for how the system works.
+
+## Hard Rules (never violate)
+
+1. **Bots are lightweight executors.** They receive 1 trade proposal per
+   tick from the hub, validate it, execute or reject. They manage open
+   positions (SL, TP, trailing, DCA, partial takes). That's ALL. Never
+   add market scanning, symbol filtering, data fetching, intelligence,
+   or any decision-making logic to bots. All brains live in the hub.
+
+2. **One in-memory trade queue.** `HubState._trade_queue` is the sole
+   queue. `read_queue_for_bot_style()` pops 1 proposal from the top per
+   bot request. No per-bot queues. No shadow queues. No copy-on-read.
+   No broadcasting. No locking. Pop 1, give to bot, done.
+
+3. **Hub does all filtering before queuing.** Symbol availability, exchange
+   support, expiry — all checked in `_route_to_bots()` before a proposal
+   enters the queue. Bots should never receive proposals they can't trade.
+
+4. **Bots are stateless.** No local DB. All trade persistence via HTTP to
+   hub.db. On restart: ask hub for open trades, reconcile with exchange.
+
+5. **Don't get creative.** If the architecture doesn't support something,
+   ask the user. Don't invent new data flows, queues, state management,
+   or communication patterns.
+
+## Container Roles
+
+- **bot-hub**: ALL intelligence (monitor, signals, analytics, dashboard).
+  No exchange connection, no trading.
+- **bot-{name}**: Exchange connection + order management ONLY. Receive
+  proposals from hub, execute trades, report back. Minimal footprint.
+
+## Data Flow
+
+```
+External APIs → Hub MonitorService → IntelSnapshot
+                                          ↓
+                    Hub SignalGenerator → TradeProposal (filtered)
+                                          ↓
+                              Hub TradeQueue (1 pop per bot)
+                                          ↓
+                        Bot validates → executes or rejects
+                                          ↓
+                        Bot reports result → Hub records in hub.db
+```

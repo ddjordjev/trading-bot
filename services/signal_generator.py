@@ -215,7 +215,7 @@ class SignalGenerator:
     def _analytics_strength_modifier(self, strategy: str, symbol: str, is_quick: bool = False) -> float:
         """Compute a strength multiplier from analytics feedback.
 
-        Returns a value in [0.05, 1.5].  Never zero — nothing is blocked,
+        Returns a value in [0.3, 1.5].  Never zero — nothing is blocked,
         just progressively de-prioritised as evidence accumulates against it.
         """
         if not self._analytics or not self._analytics.weights:
@@ -249,7 +249,7 @@ class SignalGenerator:
         if is_quick and self._quick_trade_penalty < 1.0:
             modifier *= self._quick_trade_penalty
 
-        return max(0.05, min(1.5, modifier))
+        return max(0.3, min(1.5, modifier))
 
     # ------------------------------------------------------------------
     # Exchange symbol tracking

@@ -1,5 +1,9 @@
 # Trading Bot — 10-Day Execution Plan
 
+> **Before doing anything, read [docs/ARCHITECTURE.md](ARCHITECTURE.md).**
+> It describes the system design, data flows, and constraints. Violating
+> it (adding logic to bots, creating extra queues, etc.) is a bug.
+
 ## Goal
 
 Run 10 trading bots on Binance testnet for 10+ continuous days, each starting
@@ -27,7 +31,11 @@ Everything else — which strategies to run, when to change them, leverage,
 risk params, symbols — is at the agent's discretion. Use the analytics
 engine, trade DB, and logs to make data-driven decisions.
 
-### All Bots (10 active)
+### Active Bots (5 — trade from Day 1)
+
+These bots have `is_default=True` in `config/bot_profiles.py`. They connect
+to the exchange, register strategies, and process trade queue proposals
+immediately on startup.
 
 | Bot | Profile | Strategies | Style | Notable Overrides |
 |-----|---------|-----------|-------|-------------------|
@@ -36,6 +44,16 @@ engine, trade DB, and logs to make data-driven decisions.
 | bot-indicators | Technical Indicators | rsi, macd | momentum | defaults |
 | bot-meanrev | Mean Reversion | bollinger, mean_reversion | meanrev | slower tick (120s idle / 60s active) |
 | bot-swing | Swing / Grid | swing_opportunity, grid | swing | slowest tick (600s idle / 300s active) |
+
+### Idle Bots (5 — running but not trading)
+
+These bots have `is_default=False`. They start in **lean idle mode**: no
+exchange connection, no strategies loaded, minimal CPU. They check the hub
+every 10 seconds for activation. Enable them via the dashboard toggle or
+`/api/bot-profile/{id}/toggle` when ready.
+
+| Bot | Profile | Strategies | Style | Notable Overrides |
+|-----|---------|-----------|-------|-------------------|
 | bot-scalper | Scalper | compound_momentum | momentum | fast tick (15s), tight SL (0.8%), low TP (2%) |
 | bot-fullstack | Full Stack | all 8 strategies | momentum | 10 max positions |
 | bot-conservative | Conservative | rsi, bollinger | meanrev | 3x leverage, $20 risk, 1% SL |
@@ -271,52 +289,74 @@ This validates: API keys (Binance testnet), exchange connectivity, USDT balance,
 BTC/USDT ticker, futures support, leverage, risk limits, trading mode, email.
 Fix any failures before proceeding.
 
-### 3. Docker Build & Smoke Test
+### 3. Docker Build (no run)
+
+Build all images and verify they compile without errors. **Do NOT start
+containers at this step** — the run happens in step 6 after configuration.
 
 ```bash
 docker compose build
+```
+
+Verify: all images build successfully (exit code 0, no build errors).
+
+### 4. Configure Active & Idle Bots
+
+Verify `config/bot_profiles.py` has the correct `is_default` flags:
+- `is_default=True`: extreme, momentum, indicators, meanrev, swing (5 active)
+- `is_default=False`: scalper, fullstack, conservative, aggressive, hedger (5 idle)
+
+Verify `.env` has the correct trading mode (`TRADING_MODE=paper_local` for
+pre-launch, `TRADING_MODE=paper_live` for the 10-day run).
+
+### 5. Launch & Smoke Test
+
+Clean ephemeral state, start all containers, and verify health:
+
+```bash
+# Wipe ephemeral state (keeps .db files intact):
+find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" | xargs rm -f
+
+# Start
 docker compose up -d
-docker compose ps          # hub + active bots should be "healthy"
-docker compose logs --tail 20 bot-hub
-docker compose logs --tail 20 bot-momentum
+
+# Wait for hub health check (start_period is 90s)
+sleep 15
+docker compose ps
 ```
 
 Verify:
-- No crash loops or repeating errors
-- Dashboard loads at http://localhost:9035
-- All 10 trading bots + hub show healthy in `docker compose ps`
-- Each bot connects to Binance testnet (check per-bot logs)
-- Dashboard total balance shows ~$10,000 (10 × $1,000; hub excluded)
-- Hub balance is $0
+- Hub + all 10 bot containers show "healthy" in `docker compose ps`
+- Hub health: `curl -s http://localhost:9035/health` → `{"status":"ok","bot_running":true,"mode":"hub"}`
+- 5 active bots show balance ~$1,000 and strategies registered (check logs)
+- 5 idle bots show "lean idle mode" or "IDLE" status (check logs)
+- Dashboard total balance shows ~$5,000 (5 active × $1,000; idle bots + hub excluded)
 - Monitor is populating intel data (check hub logs for intel polling)
-- Analytics is computing strategy scores (check hub logs or `data/analytics_state.json`)
 
-### 4. End-to-End Signal Flow
+### 6. End-to-End Signal Flow
 
 Watch logs for ~10–15 minutes and confirm the full pipeline:
 
 ```
-Strategy generates Signal → RiskManager.check_signal() → OrderManager.execute_signal()
-  → PaperExchange.place_order() → trade pushed to hub via HTTP (request_key for dedup)
 Monitor polls intel → writes IntelSnapshot to HubState → SignalGenerator produces TradeProposals
-  → proposals stored in HubState trade queue → bots receive via /internal/report response
-Hub writes hub.db → Analytics reads hub.db → computes strategy weights → persists to analytics_state.json
-Bot startup → asks hub for open trades → reconciles with exchange → recovery-closes dead ones
+  → proposals stored in HubState trade queue → active bots receive via /internal/report response
+  → bot validates + executes → PaperExchange.place_order() → trade pushed to hub via HTTP
+Hub writes hub.db → Analytics reads hub.db → computes strategy weights → persists analytics
+Idle bots report IDLE status to hub every 10s — no exchange connection, no trading
 ```
 
 If no trades fire naturally (market is quiet), verify the signal path is at least
-being evaluated by checking log lines like "Strategy X: no signal" or
-"Risk check: passed/rejected".
+being evaluated by checking log lines like "Queue: warmup" or "Risk check: passed/rejected".
 
-### 5. Teardown & Clean Slate
+### 7. Teardown (only if re-running pre-launch)
 
 ```bash
 docker compose down
-# Wipe ephemeral state (keeps .db files intact):
 find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" | xargs rm -f
 ```
 
-Once all 5 steps pass, proceed to Day 1 with confidence.
+Once all steps pass, the system is running and you proceed to Day 1.
+For Day 1, you switch `.env` to `paper_live`, rebuild, and restart.
 
 ---
 

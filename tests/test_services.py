@@ -161,9 +161,12 @@ class TestMonitorService:
         assert "FAKE/USDT" not in monitor._tv_symbols
         assert "BTC/USDT" in monitor._tv_symbols
 
-    def test_route_to_bots_skips_unsupported_exchange(self, monitor):
-        """Proposals tagged as unsupported on a bot's exchange are not routed."""
+    def test_route_to_bots_drops_unavailable_symbols(self, monitor):
+        """Proposals for symbols not on any exchange are filtered out before queuing."""
         from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        monitor.state = HubState()
+        monitor._exchange_symbols = {"BINANCE": {"BTC/USDT", "ETH/USDT"}}
 
         staging = TradeQueue()
         prop = TradeProposal(
@@ -171,7 +174,6 @@ class TestMonitorService:
             symbol="FAKE/USDT",
             side="long",
             strategy="test",
-            unsupported_exchanges=["BINANCE"],
         )
         staging.add(prop)
 
@@ -184,7 +186,7 @@ class TestMonitorService:
             max_positions=3,
         )
         monitor._route_to_bots(staging, [bot_status])
-        monitor.state.write_bot_trade_queue.assert_not_called()
+        assert monitor.state.read_trade_queue().pending_count == 0
 
     def test_route_to_bots_allows_supported_exchange(self, monitor):
         """Proposals for supported symbols get routed to the shared hub queue."""
@@ -927,7 +929,7 @@ class TestSignalGeneratorAnalytics:
         mod_sol = gen._analytics_strength_modifier("trending_momentum", "SOL/USDT")
         mod_btc = gen._analytics_strength_modifier("trending_momentum", "BTC/USDT")
         assert mod_sol < mod_btc
-        assert mod_sol == pytest.approx(0.25, abs=0.01)
+        assert mod_sol == pytest.approx(0.3, abs=0.01)
         assert mod_btc == pytest.approx(1.0, abs=0.01)
 
     def test_modifier_quick_trade_penalty(self, gen):
@@ -943,7 +945,7 @@ class TestSignalGeneratorAnalytics:
         assert mod_quick == pytest.approx(0.3, abs=0.01)
 
     def test_modifier_everything_stacks_to_floor(self, gen):
-        """When all penalties stack, modifier bottoms out at 0.05."""
+        """When all penalties stack, modifier bottoms out at 0.3."""
         gen.update_analytics(
             self._make_analytics(
                 weights=[StrategyWeightEntry(strategy="compound_momentum", weight=0.15, streak=-6)],
@@ -963,7 +965,7 @@ class TestSignalGeneratorAnalytics:
         gen._current_regime = "risk_off"
         gen._current_hour = 3
         mod = gen._analytics_strength_modifier("liq_reversal", "BTC/USDT", is_quick=True)
-        assert mod == 0.05
+        assert mod == 0.3
 
     def test_modifier_capped_at_1_5(self, gen):
         gen.update_analytics(
@@ -989,7 +991,7 @@ class TestSignalGeneratorAnalytics:
         liq = [p for p in crit if p.strategy == "liq_reversal"]
         assert len(liq) == 1
         assert liq[0].strength < 0.85
-        assert liq[0].strength == pytest.approx(0.85 * 0.4 * 0.7, abs=0.01)
+        assert liq[0].strength == pytest.approx(0.85 * 0.3, abs=0.01)
 
     def test_proposal_strength_boosted_by_analytics(self, gen, empty_queue):
         """A proposal for an outperforming strategy gets boosted strength."""

@@ -336,6 +336,7 @@ class MonitorService:
     ) -> None:
         """Route proposals from staging queue to the shared hub queue.
 
+        Drops proposals for symbols not available on any connected exchange.
         Filtering by bot style happens at read time in /internal/report.
         """
         from hub.state import HubState
@@ -344,11 +345,19 @@ class MonitorService:
             logger.warning("_route_to_bots called without HubState (got {}) — skipping", type(self.state).__name__)
             return
 
+        all_tradeable: set[str] = set()
+        for syms in self._exchange_symbols.values():
+            all_tradeable |= syms
+
         existing = self.state.read_trade_queue()
         new_count = 0
+        skipped = 0
         all_proposals = staging.critical + staging.daily + staging.swing
         for proposal in all_proposals:
             if proposal.consumed or proposal.rejected or proposal.is_expired:
+                continue
+            if all_tradeable and proposal.symbol not in all_tradeable:
+                skipped += 1
                 continue
             before = len(existing.critical) + len(existing.daily) + len(existing.swing)
             existing.add(proposal)
@@ -357,11 +366,12 @@ class MonitorService:
                 new_count += 1
         purged = existing.purge_stale()
         self.state.write_trade_queue(existing)
-        if new_count or purged:
+        if new_count or purged or skipped:
             logger.info(
-                "Trade queue updated: +{} new, -{} purged, {} total ({} pending)",
+                "Trade queue updated: +{} new, -{} purged, ~{} skipped (no exchange), {} total ({} pending)",
                 new_count,
                 purged,
+                skipped,
                 existing.total,
                 existing.pending_count,
             )
