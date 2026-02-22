@@ -1003,7 +1003,7 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
 
     Bots never touch the shared data volume — the hub acts as a proxy:
     - Reads intel, analytics, trade_queue, extreme_watchlist on their behalf
-    - Writes bot_status and exchange_symbols on their behalf
+    - Writes bot_status on their behalf
     - Returns enabled flag, confirmed ack keys, and all shared data
     """
     data = await request.json()
@@ -1023,12 +1023,6 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
                 _hub_state_ref.write_bot_status(BotDeploymentStatus(**bot_status_data))
             except Exception:
                 logger.warning("Ignoring malformed bot_status from {}", bot_id)
-
-        exchange_symbols = data.get("exchange_symbols")
-        if exchange_symbols:
-            _hub_state_ref.write_exchange_symbols(
-                bot_id, exchange_symbols.get("exchange", ""), exchange_symbols.get("symbols", [])
-            )
 
         queue_updates = data.get("queue_updates")
         if queue_updates:

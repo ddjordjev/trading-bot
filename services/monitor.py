@@ -131,6 +131,8 @@ class MonitorService:
             except Exception as e:
                 logger.warning("Candle fetcher init failed (TA disabled): {}", e)
 
+        await self._seed_exchange_symbols()
+
         await self.fear_greed.start()
         await self.liquidations.start()
         await self.macro.start()
@@ -173,6 +175,73 @@ class MonitorService:
                 item.sentiment,
             )
 
+    # ---- Exchange symbol management (hub fetches directly) ----
+
+    _SUPPORTED_EXCHANGES = ("binance", "mexc", "bybit")
+
+    async def _seed_exchange_symbols(self) -> None:
+        """On startup: load from DB, then refresh from exchanges."""
+        try:
+            from db.hub_store import HubDB
+
+            db = HubDB()
+            db.connect()
+            cached = db.load_all_exchange_symbols()
+            db.close()
+            if cached:
+                self._exchange_symbols = cached
+                self.signal_gen.update_exchange_symbols(cached)
+                total = sum(len(s) for s in cached.values())
+                logger.info(
+                    "Exchange symbols seeded from DB: {} exchanges, {} symbols",
+                    len(cached),
+                    total,
+                )
+        except Exception as e:
+            logger.warning("DB seed for exchange symbols failed: {}", e)
+
+        await self._fetch_exchange_symbols()
+
+    async def _fetch_exchange_symbols(self) -> None:
+        """Fetch symbol lists from all supported exchanges via CCXT."""
+        import ccxt.async_support as ccxt
+
+        fresh: dict[str, set[str]] = {}
+        for exchange_id in self._SUPPORTED_EXCHANGES:
+            cls = getattr(ccxt, exchange_id, None)
+            if cls is None:
+                continue
+            ex = cls({"enableRateLimit": True})
+            try:
+                await ex.load_markets()
+                symbols = {s.split(":")[0] for s in ex.markets}
+                fresh[exchange_id.upper()] = symbols
+                logger.info("Fetched {} symbols from {}", len(symbols), exchange_id.upper())
+            except Exception as e:
+                logger.warning("Failed to fetch symbols from {}: {}", exchange_id.upper(), e)
+            finally:
+                with contextlib.suppress(Exception):
+                    await ex.close()
+
+        if fresh:
+            self._exchange_symbols = fresh
+            self.signal_gen.update_exchange_symbols(fresh)
+            all_syms = [s for syms in fresh.values() for s in syms]
+            if all_syms:
+                self.scanner.set_exchange_symbols(all_syms)
+            self._last_symbols_refresh = time.monotonic()
+
+            try:
+                from db.hub_store import HubDB
+
+                db = HubDB()
+                db.connect()
+                for ex_name, syms in fresh.items():
+                    db.save_exchange_symbols(ex_name, syms)
+                db.close()
+            except Exception as e:
+                logger.warning("Failed to persist exchange symbols to DB: {}", e)
+
     async def _run_loop(self) -> None:
         tick_count = 0
         while self._running:
@@ -184,24 +253,10 @@ class MonitorService:
                 multipliers = INTENSITY_TABLE[self._current_level]
                 now = time.monotonic()
 
-                # Refresh exchange symbols every 5 minutes
-                if now - self._last_symbols_refresh >= 300:
-                    try:
-                        self._exchange_symbols = self.state.read_all_exchange_symbols()
-                        self.signal_gen.update_exchange_symbols(self._exchange_symbols)
-                        all_syms = [s for syms in self._exchange_symbols.values() for s in syms]
-                        if all_syms:
-                            self.scanner.set_exchange_symbols(all_syms)
-                        total = sum(len(s) for s in self._exchange_symbols.values())
-                        if self._exchange_symbols:
-                            logger.debug(
-                                "Exchange symbols refreshed: {} exchanges, {} total symbols",
-                                len(self._exchange_symbols),
-                                total,
-                            )
-                    except Exception as e:
-                        logger.warning("Exchange symbols refresh error: {}", e)
-                    self._last_symbols_refresh = now
+                # Refresh exchange symbols every 5 min (retry every tick while empty)
+                sym_interval = 300 if self._exchange_symbols else 30
+                if now - self._last_symbols_refresh >= sym_interval:
+                    await self._fetch_exchange_symbols()
 
                 # TradingView: refresh active symbols
                 tv_interval = self.settings.tv_poll_interval * multipliers["tv"]

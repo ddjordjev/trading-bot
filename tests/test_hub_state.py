@@ -113,20 +113,6 @@ class TestHubStateBotStatus:
         assert isinstance(bs, BotDeploymentStatus)
 
 
-class TestHubStateExchangeSymbols:
-    def test_write_and_read_symbols(self, state):
-        state.write_exchange_symbols("bot1", "binance", ["BTC/USDT", "ETH/USDT"])
-        result = state.read_all_exchange_symbols()
-        assert "BINANCE" in result
-        assert "BTC/USDT" in result["BINANCE"]
-
-    def test_merge_symbols_from_multiple_bots(self, state):
-        state.write_exchange_symbols("bot1", "binance", ["BTC/USDT"])
-        state.write_exchange_symbols("bot2", "binance", ["ETH/USDT"])
-        result = state.read_all_exchange_symbols()
-        assert result["BINANCE"] == {"BTC/USDT", "ETH/USDT"}
-
-
 class TestHubStateTradeQueue:
     def test_write_and_read_queue(self, state):
         q = TradeQueue()

@@ -69,7 +69,8 @@ These run inside the bot but operate ONLY on hub-curated data:
 ## Container Roles
 
 - **bot-hub**: ALL intelligence (monitor, signals, analytics, dashboard).
-  No exchange connection, no trading.
+  No exchange connection, no trading. Fetches exchange symbols directly
+  via CCXT (Binance, MEXC, Bybit) — bots do NOT report symbols to hub.
 - **bot-{name}**: Exchange connection + order management ONLY. Receive
   proposals from hub, validate conditions, execute trades, report back.
   `HUB_URL=http://bot-hub:9035` (not DASHBOARD_HUB_URL).
@@ -77,9 +78,14 @@ These run inside the bot but operate ONLY on hub-curated data:
 ## Data Flow
 
 ```
+Hub startup → CCXT load_markets (all exchanges) → exchange_symbols
+              (seeded from hub.db, then live fetch, refreshed every 5 min)
+                                          ↓
 External APIs → Hub MonitorService → IntelSnapshot
                                           ↓
-                    Hub SignalGenerator → TradeProposal (filtered)
+TrendingScanner → hot movers ──→ SignalGenerator (knows all exchange symbols)
+                                          ↓
+                    TradeProposal (tagged with unsupported_exchanges)
                                           ↓
                               Hub TradeQueue (1 pop per bot)
                                           ↓

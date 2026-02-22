@@ -72,6 +72,9 @@ Runs in-process:
 - **SignalGenerator** — converts intel + trending data into TradeProposal
   objects with priority (CRITICAL/DAILY/SWING) and strength scores.
   Proposals are filtered for symbol availability BEFORE entering the queue.
+  Exchange symbols are fetched directly by the monitor via CCXT (Binance,
+  MEXC, Bybit) on startup and refreshed every 5 minutes. Cached in hub.db
+  for instant availability on restart.
 - **AnalyticsService** — reads hub.db trade history, computes strategy
   weights/patterns/suggestions, persists to analytics_state.json (could
   migrate to a hub.db table in the future — currently JSON for simplicity
@@ -96,13 +99,13 @@ Each bot is configured via environment variables:
 - Risk/leverage/tick overrides per profile
 
 **Active bots** (`is_default=True` in `config/bot_profiles.py`):
-extreme, momentum, indicators, meanrev, swing.
+extreme, hedger, momentum, indicators, meanrev, swing.
 They connect to the exchange and trade proposals received from the hub
 queue. Bots do NOT register local strategies — all trade ideas originate
 from the hub's SignalGenerator. The bot validates and executes.
 
 **Idle bots** (`is_default=False`): scalper, fullstack, conservative,
-aggressive, hedger. They start in lean idle mode — no exchange connection,
+aggressive. They start in lean idle mode — no exchange connection,
 no hub communication. They check a local activation file
 (`data/{bot_id}/activate`) every 10s. The file is written by the hub's
 toggle endpoint when someone enables the bot via the dashboard. That's
@@ -115,11 +118,17 @@ the only thing idle bots do — watch for that file. Nothing else.
 ### Signal Pipeline (hub-internal)
 
 ```
+Monitor startup → CCXT load_markets() for all exchanges
+                  (seeded from hub.db cache, then live fetch)
+                              ↓
+                  exchange_symbols → SignalGenerator
+                              ↓
 External APIs → MonitorService → IntelSnapshot (HubState)
                                        ↓
 TrendingScanner → hot movers ──→ SignalGenerator
                                        ↓
                               TradeProposal objects
+                              (tagged with unsupported_exchanges)
                                        ↓
                         _route_to_bots() filters:
                           - symbol on exchange? (drop if not)
@@ -135,12 +144,13 @@ Two separate endpoints, clean separation:
 
 **POST /internal/report** — status + queue (every 5s)
 ```
-Bot → {bot_id, bot_style, bot_status, exchange_symbols, queue_updates}
+Bot → {bot_id, bot_style, bot_status, queue_updates}
 Hub → {enabled, confirmed_keys, trade_queue}
 ```
 The bot sends its status and queue feedback. Hub returns the enabled flag,
 trade write confirmations, and 1 queue proposal popped for this bot's style.
 Between full ticks, a lightweight version sends only bot_id + queue_updates.
+Note: bots do NOT report exchange symbols — the hub fetches them directly.
 
 **GET /internal/intel** — cached intel snapshot (once per full tick)
 ```

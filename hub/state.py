@@ -59,7 +59,6 @@ class HubState:
         self._dispatched_max = 50
 
         self._bot_statuses: dict[str, BotDeploymentStatus] = {}
-        self._exchange_symbols: dict[str, dict] = {}
 
         self._analytics_path = (data_dir / "analytics_state.json") if data_dir else _ANALYTICS_PATH
         self._analytics: AnalyticsSnapshot = self._load_analytics()
@@ -157,26 +156,6 @@ class HubState:
 
     def read_all_bot_statuses(self) -> list[BotDeploymentStatus]:
         return list(self._bot_statuses.values())
-
-    # ---- Exchange symbols (written via /internal/report, read by monitor) ---- #
-
-    def write_exchange_symbols(self, bot_id: str, exchange: str, symbols: list[str]) -> None:
-        self._exchange_symbols[bot_id] = {
-            "exchange": exchange.upper(),
-            "symbols": symbols,
-        }
-
-    def read_all_exchange_symbols(self) -> dict[str, set[str]]:
-        result: dict[str, set[str]] = {}
-        for _bot_id, data in self._exchange_symbols.items():
-            exchange = data.get("exchange", "").upper()
-            symbols = set(data.get("symbols", []))
-            if exchange and symbols:
-                if exchange in result:
-                    result[exchange] |= symbols
-                else:
-                    result[exchange] = symbols
-        return result
 
     # ---- Trade queue (written by monitor/signal_gen, read by bots) ---- #
 

@@ -1463,11 +1463,6 @@ class TradingBot:
             self._hub_queue_updates = {"consumed": [], "rejected": {}}
             if self._last_bot_status:
                 payload["bot_status"] = self._last_bot_status.model_dump()
-            if self._available_symbols:
-                payload["exchange_symbols"] = {
-                    "exchange": self.settings.exchange.upper(),
-                    "symbols": list(self._available_symbols),
-                }
 
         hub_url = self.settings.hub_url
         if hub_url:

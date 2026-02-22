@@ -10,7 +10,9 @@ Extends TradeDB with ``bot_id``, ``request_key`` (idempotency),
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,12 @@ class HubDB(TradeDB):
             CREATE TABLE IF NOT EXISTS bot_config (
                 bot_id TEXT PRIMARY KEY,
                 enabled INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS exchange_symbols (
+                exchange TEXT PRIMARY KEY,
+                symbols TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
         """)
         self._ensure_bot_id_column()
@@ -278,6 +286,30 @@ class HubDB(TradeDB):
         assert self._conn
         rows = self._conn.execute("SELECT bot_id, enabled FROM bot_config").fetchall()
         return {r["bot_id"]: bool(r["enabled"]) for r in rows}
+
+    # ---- Exchange symbols (hub fetches directly from exchanges) ----
+
+    def save_exchange_symbols(self, exchange: str, symbols: set[str]) -> None:
+        """Persist the symbol set for an exchange (upsert)."""
+        assert self._conn
+        self._conn.execute(
+            "INSERT INTO exchange_symbols (exchange, symbols, updated_at) "
+            "VALUES (?, ?, ?) ON CONFLICT(exchange) DO UPDATE SET symbols=excluded.symbols, updated_at=excluded.updated_at",
+            (exchange.upper(), json.dumps(sorted(symbols)), datetime.now(UTC).isoformat()),
+        )
+        self._conn.commit()
+
+    def load_all_exchange_symbols(self) -> dict[str, set[str]]:
+        """Load persisted exchange symbols from DB (used as startup seed)."""
+        assert self._conn
+        rows = self._conn.execute("SELECT exchange, symbols FROM exchange_symbols").fetchall()
+        result: dict[str, set[str]] = {}
+        for r in rows:
+            try:
+                result[r["exchange"]] = set(json.loads(r["symbols"]))
+            except Exception:
+                continue
+        return result
 
     @property
     def conn(self) -> sqlite3.Connection | None:

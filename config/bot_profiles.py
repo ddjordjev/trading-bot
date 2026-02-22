@@ -56,6 +56,20 @@ ALL_PROFILES: list[BotProfile] = [
         is_default=True,
     ),
     BotProfile(
+        id="hedger",
+        display_name="Hedge Heavy",
+        description="Momentum + Mean reversion with aggressive hedging ratios",
+        style="momentum",
+        strategies=["compound_momentum", "mean_reversion"],
+        env_overrides={
+            "HEDGE_ENABLED": "true",
+            "HEDGE_RATIO": "0.40",
+            "HEDGE_MIN_PROFIT_PCT": "2.0",
+            "MAX_HEDGES": "4",
+        },
+        is_default=True,
+    ),
+    BotProfile(
         id="momentum",
         display_name="Momentum",
         description="Trend-following with compounding momentum and market-open volatility",
@@ -152,19 +166,6 @@ ALL_PROFILES: list[BotProfile] = [
             "TAKE_PROFIT_PCT": "10",
             "INITIAL_RISK_AMOUNT": "100",
             "MAX_CONCURRENT_POSITIONS": "8",
-        },
-    ),
-    BotProfile(
-        id="hedger",
-        display_name="Hedge Heavy",
-        description="Momentum + Mean reversion with aggressive hedging ratios",
-        style="momentum",
-        strategies=["compound_momentum", "mean_reversion"],
-        env_overrides={
-            "HEDGE_ENABLED": "true",
-            "HEDGE_RATIO": "0.40",
-            "HEDGE_MIN_PROFIT_PCT": "2.0",
-            "MAX_HEDGES": "4",
         },
     ),
 ]
