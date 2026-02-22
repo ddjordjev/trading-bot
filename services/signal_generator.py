@@ -268,11 +268,11 @@ class SignalGenerator:
             return False  # no exchange data yet — wait for bots to report
         return symbol in self._all_tradeable
 
-    def _unsupported_exchanges(self, symbol: str) -> list[str]:
-        """Return list of exchanges that do NOT support this symbol."""
+    def _supported_exchanges(self, symbol: str) -> list[str]:
+        """Return list of exchanges that have this symbol."""
         if not self._exchange_symbols:
             return []
-        return [ex for ex, syms in self._exchange_symbols.items() if symbol not in syms]
+        return [ex for ex, syms in self._exchange_symbols.items() if symbol in syms]
 
     def generate(self, snap: IntelSnapshot, queue: TradeQueue) -> TradeQueue:
         """Evaluate the current intel snapshot and append new proposals."""
@@ -887,7 +887,7 @@ class SignalGenerator:
         if proposal.market_type == "futures" and self._preferred_market_type != "futures":
             proposal.market_type = self._preferred_market_type
 
-        proposal.unsupported_exchanges = self._unsupported_exchanges(proposal.symbol)
+        proposal.supported_exchanges = self._supported_exchanges(proposal.symbol)
 
         # Apply analytics modifier to strength
         raw_strength = proposal.strength
@@ -908,9 +908,9 @@ class SignalGenerator:
 
         queue.add(proposal)
         self._recent_ids[key] = datetime.now(UTC)
-        exchange_note = (
-            f" (not on: {', '.join(proposal.unsupported_exchanges)})" if proposal.unsupported_exchanges else ""
-        )
+        all_ex = set(self._exchange_symbols.keys()) if self._exchange_symbols else set()
+        missing = sorted(all_ex - set(proposal.supported_exchanges))
+        exchange_note = f" (not on: {', '.join(missing)})" if missing else ""
         analytics_note = f" [analytics: {modifier:.2f}x]" if modifier != 1.0 else ""
         logger.info(
             "QUEUE [{}] {} {} — {} (str={:.2f}){}{}",

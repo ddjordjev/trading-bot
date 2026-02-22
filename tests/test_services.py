@@ -202,7 +202,7 @@ class TestMonitorService:
             symbol="BTC/USDT",
             side="long",
             strategy="test",
-            unsupported_exchanges=[],
+            supported_exchanges=["BINANCE"],
         )
         staging.add(prop)
 
@@ -685,12 +685,12 @@ class TestSignalGenerator:
         assert gen._symbol_tradeable("ETH/USDT")
         assert not gen._symbol_tradeable("FAKE/USDT")
 
-    def test_unsupported_exchanges_tagging(self, gen):
-        """Symbols are tagged with which exchanges don't support them."""
+    def test_supported_exchanges_tagging(self, gen):
+        """Symbols are tagged with exchanges that have them."""
         gen.update_exchange_symbols({"BINANCE": {"BTC/USDT"}, "MEXC": {"BTC/USDT", "PEPE/USDT"}})
-        assert "BINANCE" in gen._unsupported_exchanges("PEPE/USDT")
-        assert "MEXC" not in gen._unsupported_exchanges("PEPE/USDT")
-        assert gen._unsupported_exchanges("BTC/USDT") == []
+        assert "MEXC" in gen._supported_exchanges("PEPE/USDT")
+        assert "BINANCE" not in gen._supported_exchanges("PEPE/USDT")
+        assert sorted(gen._supported_exchanges("BTC/USDT")) == ["BINANCE", "MEXC"]
 
     def test_propose_skips_untradeable_symbol(self, gen, empty_queue):
         """Proposals for symbols not on any exchange are dropped."""
@@ -705,8 +705,8 @@ class TestSignalGenerator:
         gen._propose(empty_queue, prop)
         assert empty_queue.total == 0
 
-    def test_propose_tags_unsupported_exchanges(self, gen, empty_queue):
-        """Proposals get tagged with exchanges that don't support the symbol."""
+    def test_propose_tags_supported_exchanges(self, gen, empty_queue):
+        """Proposals get tagged with exchanges that support the symbol."""
         gen.update_exchange_symbols({"BINANCE": {"BTC/USDT"}, "MEXC": {"BTC/USDT", "SOL/USDT"}})
         prop = TradeProposal(
             priority=SignalPriority.DAILY,
@@ -718,8 +718,8 @@ class TestSignalGenerator:
         gen._propose(empty_queue, prop)
         assert empty_queue.total == 1
         queued = empty_queue.daily[0]
-        assert "BINANCE" in queued.unsupported_exchanges
-        assert "MEXC" not in queued.unsupported_exchanges
+        assert "MEXC" in queued.supported_exchanges
+        assert "BINANCE" not in queued.supported_exchanges
 
     def test_propose_blocks_when_no_exchange_data(self, gen, empty_queue):
         """When no exchange data loaded, proposals are blocked (pessimistic)."""

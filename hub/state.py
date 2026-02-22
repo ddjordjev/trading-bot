@@ -220,22 +220,29 @@ class HubState:
                 return p
         return None
 
-    def read_queue_for_bot_style(self, bot_style: str) -> TradeQueue:
-        """Pop the top matching proposal for this bot style.
+    def read_queue_for_bot_style(self, bot_style: str, exchange: str = "") -> TradeQueue:
+        """Pop the top matching proposal for this bot style + exchange.
 
         Each bot gets exactly 1 proposal per request (the highest-priority
         one). The rest stay in the queue for other bots.  Priority order:
         critical → daily → swing.
+
+        If *exchange* is provided, only proposals whose supported_exchanges
+        include that exchange are considered.  Proposals meant for other
+        exchanges are silently skipped (left in the queue for the right bot).
         """
         result = TradeQueue()
         picked = None
         picked_bucket = None
         picked_idx = None
+        ex_upper = exchange.upper() if exchange else ""
 
         for bucket_name in ("critical", "daily", "swing"):
             src: list = getattr(self._trade_queue, bucket_name)
             for i, p in enumerate(src):
                 if p.consumed or p.rejected or p.is_expired:
+                    continue
+                if ex_upper and p.supported_exchanges and ex_upper not in p.supported_exchanges:
                     continue
                 targets = {t.strip() for t in (p.target_bot or "").split(",") if t.strip()}
                 if not targets or bot_style in targets:

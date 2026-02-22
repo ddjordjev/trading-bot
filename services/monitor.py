@@ -746,7 +746,7 @@ class MonitorService:
                 reasons.append(f"5m: {coin.change_5m:+.1f}%")
             reasons.append(f"vol: ${coin.volume_24h / 1e6:.0f}M")
 
-            unsupported = [ex for ex, syms in self._exchange_symbols.items() if pair not in syms]
+            supported = [ex for ex, syms in self._exchange_symbols.items() if pair in syms]
 
             extreme.append(
                 ExtremeCandidate(
@@ -757,7 +757,7 @@ class MonitorService:
                     volume_24h=coin.volume_24h,
                     momentum_score=score,
                     reason=" | ".join(reasons),
-                    unsupported_exchanges=unsupported,
+                    supported_exchanges=supported,
                 )
             )
 

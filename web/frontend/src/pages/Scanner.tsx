@@ -22,6 +22,7 @@ interface TradeQueueItem {
   age_seconds: number;
   status: string;
   reason: string;
+  supported_exchanges: string[];
 }
 
 export function Scanner() {
@@ -63,6 +64,7 @@ export function Scanner() {
                 <th>Side</th>
                 <th>Strategy</th>
                 <th>Strength</th>
+                <th>Exchanges</th>
                 <th>Age</th>
                 <th>Status</th>
               </tr>
@@ -85,6 +87,7 @@ export function Scanner() {
                     </td>
                     <td>{p.strategy || "—"}</td>
                     <td>{p.strength.toFixed(2)}</td>
+                    <td style={{ fontSize: "0.8rem" }}>{(p.supported_exchanges || []).join(", ") || "—"}</td>
                     <td>{p.age_seconds < 60 ? `${Math.round(p.age_seconds)}s` : `${(p.age_seconds / 60).toFixed(1)}m`}</td>
                     <td>
                       <span className="badge" style={{ background: st.bg, color: st.fg }}

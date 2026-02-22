@@ -77,6 +77,7 @@ class TradeQueueItem(BaseModel):
     age_seconds: float
     status: str = "pending"
     reason: str = ""
+    supported_exchanges: list[str] = []
 
 
 class MacroEventInfo(BaseModel):

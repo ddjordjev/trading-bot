@@ -486,6 +486,7 @@ class TestProcessSignalAndQueue:
             reason="t1",
             strength=0.9,
             market_type="futures",
+            supported_exchanges=["MEXC"],
         )
         p2 = TradeProposal(
             priority=SignalPriority.CRITICAL,
@@ -495,6 +496,7 @@ class TestProcessSignalAndQueue:
             reason="t2",
             strength=0.9,
             market_type="futures",
+            supported_exchanges=["MEXC"],
         )
         queue = MagicMock(pending_count=2)
         queue.get_actionable = MagicMock(return_value=[p1, p2])
@@ -526,6 +528,7 @@ class TestProcessSignalAndQueue:
             reason="test",
             strength=0.8,
             market_type="futures",
+            supported_exchanges=["MEXC"],
         )
         ok = await bot._execute_proposal(proposal, aggression=0.8)
         assert ok is True
@@ -584,6 +587,7 @@ class TestProcessSignalAndQueue:
             reason="swing setup",
             strength=0.6,
             market_type="futures",
+            supported_exchanges=["MEXC"],
             entry_plan=EntryPlan(stop_loss=2000.0, take_profit_targets=[2500.0]),
         )
         ok = await bot._execute_swing_proposal(proposal, aggression=0.7)
@@ -606,6 +610,7 @@ class TestProcessSignalAndQueue:
             reason="",
             strength=0.5,
             market_type="futures",
+            supported_exchanges=["MEXC"],
             entry_plan=None,
         )
         ok = await bot._execute_swing_proposal(proposal, aggression=1.0)
@@ -876,6 +881,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
                 reason="r",
                 strength=0.9,
                 market_type="futures",
+                supported_exchanges=["MEXC"],
             )
             queue = MagicMock(pending_count=1)
             queue.get_actionable = MagicMock(side_effect=lambda pri: [p] if pri == SignalPriority.CRITICAL else [])
@@ -911,6 +917,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
                 reason="r",
                 strength=0.9,
                 market_type="futures",
+                supported_exchanges=["MEXC"],
             )
             queue = MagicMock(pending_count=1)
             queue.get_actionable = MagicMock(side_effect=lambda pri: [p] if pri == SignalPriority.CRITICAL else [])
@@ -952,6 +959,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
             reason="r",
             strength=0.9,
             market_type="futures",
+            supported_exchanges=["MEXC"],
         )
         queue.get_actionable = MagicMock(side_effect=lambda pri: [p] if pri == SignalPriority.CRITICAL else [])
         bot._hub_trade_queue = queue
@@ -985,6 +993,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
             reason="ok",
             strength=0.9,
             market_type="futures",
+            supported_exchanges=["MEXC"],
         )
         queue = MagicMock(pending_count=1)
         queue.get_actionable = MagicMock(side_effect=lambda pri: [p_ok] if pri == SignalPriority.CRITICAL else [])
@@ -2005,6 +2014,7 @@ class TestProcessTradeQueueStrengthReject:
             reason="r",
             strength=0.2,
             market_type="futures",
+            supported_exchanges=["MEXC"],
         )
         queue = MagicMock(pending_count=1)
         queue.get_actionable = MagicMock(side_effect=lambda pri: [p] if pri == SignalPriority.CRITICAL else [])

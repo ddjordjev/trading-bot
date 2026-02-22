@@ -372,6 +372,7 @@ class TradingBot:
             payload: dict[str, Any] = {
                 "bot_id": self.settings.bot_id or "default",
                 "bot_style": self.settings.bot_style,
+                "exchange": self.settings.exchange.upper(),
             }
             if self._hub_queue_updates["consumed"] or self._hub_queue_updates["rejected"]:
                 payload["queue_updates"] = self._hub_queue_updates
@@ -852,7 +853,7 @@ class TradingBot:
         for proposal in queue.get_actionable(SignalPriority.CRITICAL):
             if executed >= tick_limit:
                 break
-            if not self._symbol_available(proposal.symbol) or my_exchange in proposal.unsupported_exchanges:
+            if not self._symbol_available(proposal.symbol) or my_exchange not in proposal.supported_exchanges:
                 queue.mark_rejected(proposal.id, f"symbol not on {my_exchange}")
                 rejected[proposal.id] = f"symbol not on {my_exchange}"
                 continue
@@ -895,7 +896,7 @@ class TradingBot:
             for proposal in queue.get_actionable(SignalPriority.DAILY):
                 if executed >= tick_limit:
                     break
-                if not self._symbol_available(proposal.symbol) or my_exchange in proposal.unsupported_exchanges:
+                if not self._symbol_available(proposal.symbol) or my_exchange not in proposal.supported_exchanges:
                     queue.mark_rejected(proposal.id, f"symbol not on {my_exchange}")
                     rejected[proposal.id] = f"symbol not on {my_exchange}"
                     continue
@@ -927,7 +928,7 @@ class TradingBot:
             for proposal in queue.get_actionable(SignalPriority.SWING):
                 if executed >= tick_limit:
                     break
-                if not self._symbol_available(proposal.symbol) or my_exchange in proposal.unsupported_exchanges:
+                if not self._symbol_available(proposal.symbol) or my_exchange not in proposal.supported_exchanges:
                     queue.mark_rejected(proposal.id, f"symbol not on {my_exchange}")
                     rejected[proposal.id] = f"symbol not on {my_exchange}"
                     continue
@@ -976,8 +977,8 @@ class TradingBot:
     async def _execute_proposal(self, proposal: TradeProposal, aggression: float) -> bool:
         """Convert a queue proposal into a trading signal and execute it."""
         my_exchange = self.settings.exchange.upper()
-        if my_exchange in proposal.unsupported_exchanges:
-            logger.debug("Queue skip {}: tagged not-for-{}", proposal.symbol, my_exchange)
+        if my_exchange not in proposal.supported_exchanges:
+            logger.debug("Queue skip {}: not on {}", proposal.symbol, my_exchange)
             return False
         if not self._symbol_available(proposal.symbol):
             logger.debug("Queue skip {}: not on {}", proposal.symbol, my_exchange)
@@ -1038,8 +1039,8 @@ class TradingBot:
         the initial entry and lets PYRAMID mode handle the rest.
         """
         my_exchange = self.settings.exchange.upper()
-        if my_exchange in proposal.unsupported_exchanges:
-            logger.debug("Swing skip {}: tagged not-for-{}", proposal.symbol, my_exchange)
+        if my_exchange not in proposal.supported_exchanges:
+            logger.debug("Swing skip {}: not on {}", proposal.symbol, my_exchange)
             return False
         if not self._symbol_available(proposal.symbol):
             logger.debug("Swing skip {}: not on {}", proposal.symbol, my_exchange)
@@ -1914,8 +1915,8 @@ class TradingBot:
             if not self._symbol_available(candidate.symbol):
                 logger.debug("Extreme skip {}: not on {}", candidate.symbol, my_exchange)
                 continue
-            if my_exchange in candidate.unsupported_exchanges:
-                logger.debug("Extreme skip {}: tagged not-for-{}", candidate.symbol, my_exchange)
+            if my_exchange not in candidate.supported_exchanges:
+                logger.debug("Extreme skip {}: not on {}", candidate.symbol, my_exchange)
                 continue
             try:
                 detected = datetime.fromisoformat(candidate.detected_at.replace("Z", "+00:00"))

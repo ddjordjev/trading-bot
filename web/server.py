@@ -355,6 +355,7 @@ async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem
             age_seconds=p.age_seconds,
             status=_status(p),
             reason=p.reason or "",
+            supported_exchanges=p.supported_exchanges,
         )
         for p in unique
     ]
@@ -1051,7 +1052,13 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
     if bot_id and _hub_state_ref is not None:
         with contextlib.suppress(Exception):
             bot_style = data.get("bot_style", bot_id)
-            response["trade_queue"] = _hub_state_ref.read_queue_for_bot_style(bot_style).model_dump()
+            bot_exchange = data.get("exchange", "")
+            if not bot_exchange:
+                existing_rpt = _bot_reports.get(bot_id, {})
+                bot_exchange = existing_rpt.get("exchange", "")
+            response["trade_queue"] = _hub_state_ref.read_queue_for_bot_style(
+                bot_style, exchange=bot_exchange
+            ).model_dump()
     return response
 
 
