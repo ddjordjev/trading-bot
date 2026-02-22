@@ -11,11 +11,12 @@ That document is the source of truth for how the system works.
 ## Hard Rules (never violate)
 
 1. **Bots are lightweight executors.** They receive 1 trade proposal per
-   hub check (every 5s), run a last-minute validation (candles + ticker
-   against their strategy conditions), and execute or reject. They manage
-   open positions (SL, TP, trailing, DCA, partial takes). That's ALL.
-   Never add market scanning, symbol filtering, data fetching, intelligence,
-   or any decision-making logic to bots. All brains live in the hub.
+   hub check (every 5s), run a last-minute validation (candles + ticker),
+   and execute or reject. They manage open positions (SL, TP, trailing,
+   DCA, partial takes). They run hub-delegated local tasks (ExtremeWatcher,
+   PatternDetector) that operate ONLY on hub-curated data — never on the
+   full market. NEVER add broad market scanning, symbol filtering, or
+   independent decision-making to bots. All intelligence lives in the hub.
 
 2. **One in-memory trade queue.** `HubState._trade_queue` is the sole
    queue. `read_queue_for_bot_style()` pops 1 proposal from the top per
@@ -29,11 +30,15 @@ That document is the source of truth for how the system works.
 4. **Bots are stateless.** No local DB. All trade persistence via HTTP to
    hub.db. On restart: ask hub for open trades, reconcile with exchange.
 
-5. **Don't get creative.** If the architecture doesn't support something,
+5. **Bots do NOT register local strategies.** All trade proposals originate
+   from the hub's SignalGenerator. The `strategies` field in BotProfile is
+   metadata only. Bots validate and execute — they don't generate signals.
+
+6. **Don't get creative.** If the architecture doesn't support something,
    ask the user. Don't invent new data flows, queues, state management,
    or communication patterns.
 
-6. **Idle bots are silent.** No hub communication, no exchange connection.
+7. **Idle bots are silent.** No hub communication, no exchange connection.
    They only watch a local activation file (`data/{bot_id}/activate`).
 
 ## Two Cadences in Bot Main Loop
@@ -41,15 +46,25 @@ That document is the source of truth for how the system works.
 - **Quick hub check (every 5s)**: lightweight POST to hub, receive queue
   proposal, process it. Fast queue pickup regardless of tick interval.
 - **Full tick (30-600s)**: position management, stops, scales, partials,
-  hedges, candle fetches, full status report to hub.
+  hedges, candle fetches, extreme mover eval, full status report to hub.
 
 ## Bot Decides WHETHER, Not WHAT
 
 The hub decides WHAT to trade (signal generation, analytics, queue).
 The bot decides WHETHER to execute a given proposal: it validates the
-proposal against its own strategy conditions (last-minute candle + ticker
+proposal against its own style conditions (last-minute candle + ticker
 check), checks capacity, risk limits, and aggression. If validation fails,
 it rejects the proposal.
+
+## Delegated Local Tasks
+
+These run inside the bot but operate ONLY on hub-curated data:
+
+- **ExtremeWatcher**: subscribes to WebSocket tickers for a small shortlist
+  of extreme mover candidates from the hub (via `/internal/intel`). MUST
+  NOT fetch the full exchange symbol list or scan broadly.
+- **PatternDetector**: enriches proposals with chart pattern SL/TP. Runs
+  only on candles for a specific proposal that already arrived from hub.
 
 ## Container Roles
 
@@ -57,6 +72,7 @@ it rejects the proposal.
   No exchange connection, no trading.
 - **bot-{name}**: Exchange connection + order management ONLY. Receive
   proposals from hub, validate conditions, execute trades, report back.
+  `HUB_URL=http://bot-hub:9035` (not DASHBOARD_HUB_URL).
 
 ## Data Flow
 
@@ -67,7 +83,7 @@ External APIs → Hub MonitorService → IntelSnapshot
                                           ↓
                               Hub TradeQueue (1 pop per bot)
                                           ↓
-                    Bot validates (candles + ticker vs strategy conditions)
+                    Bot validates (candles + ticker vs style conditions)
                                           ↓
                         Bot executes or rejects
                                           ↓

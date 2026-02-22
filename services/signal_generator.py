@@ -265,7 +265,7 @@ class SignalGenerator:
     def _symbol_tradeable(self, symbol: str) -> bool:
         """Check if at least one exchange supports this symbol."""
         if not self._all_tradeable:
-            return True  # no data yet, optimistic
+            return False  # no exchange data yet — wait for bots to report
         return symbol in self._all_tradeable
 
     def _unsupported_exchanges(self, symbol: str) -> list[str]:

@@ -364,7 +364,10 @@ class TradingBot:
         if not hub_url or not self._multibot:
             return
         if not self._hub_session:
-            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+            self._hub_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(force_close=True),
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
         try:
             payload: dict[str, Any] = {
                 "bot_id": self.settings.bot_id or "default",
@@ -1473,7 +1476,10 @@ class TradingBot:
     async def _post_to_hub(self, hub_url: str, payload: dict[str, Any]) -> None:
         """POST status to hub. Returns enabled flag, confirmed keys, and queue proposal."""
         if not self._hub_session:
-            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+            self._hub_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(force_close=True),
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
         try:
             url = f"{hub_url.rstrip('/')}/internal/report"
             async with self._hub_session.post(url, json=payload) as resp:
@@ -1497,7 +1503,10 @@ class TradingBot:
         if not hub_url or not self._multibot:
             return
         if not self._hub_session:
-            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+            self._hub_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(force_close=True),
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
         try:
             url = f"{hub_url.rstrip('/')}/internal/intel"
             async with self._hub_session.get(url) as resp:
@@ -1524,7 +1533,10 @@ class TradingBot:
         if not request_key:
             request_key = uuid.uuid4().hex
         if not self._hub_session:
-            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
+            self._hub_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(force_close=True),
+                timeout=aiohttp.ClientTimeout(total=5),
+            )
         payload = {
             "bot_id": self.settings.bot_id or "default",
             "action": record.action,
@@ -1551,7 +1563,10 @@ class TradingBot:
         target = hub_url
         bot_id = self.settings.bot_id or "default"
         if not self._hub_session:
-            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+            self._hub_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(force_close=True),
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
         try:
             async with self._hub_session.get(f"{target.rstrip('/')}/internal/trades/{bot_id}/open") as resp:
                 if resp.status == 200:

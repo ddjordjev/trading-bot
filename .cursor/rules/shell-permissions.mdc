@@ -39,6 +39,32 @@ try without it first, that just wastes time on a guaranteed failure.
 - Any command touching `.cursor/` paths
 - Any command touching paths outside the workspace
 
+## Docker Deployment Protocol
+
+**NEVER rebuild or restart Docker containers eagerly.** Follow this exact
+sequence every time, no shortcuts:
+
+1. **Commit** — `git add -A && git commit`
+2. **Push** — `git push origin develop`
+3. **Wait for green CI** — push and stop. User reports green/red.
+4. **Squash to master** — `git reset --soft master && git commit`, push,
+   fast-forward master, push master.
+5. **Only NOW deploy** — and always do a FULL cycle:
+   ```
+   docker compose down
+   docker compose build
+   docker compose up -d
+   ```
+
+**Rules:**
+- Never rebuild "just the bots" or "just the hub". Always bring everything
+  down, rebuild everything, bring everything up. No partial deploys.
+- Never deploy before CI is green. If CI hasn't run yet, wait for the user.
+- Never deploy mid-work. Finish all code changes, commit, push, green,
+  master — THEN deploy.
+- If the user isn't present (no explicit "deploy" / "rebuild" / "run"),
+  stop after pushing. Don't touch Docker.
+
 ## No polling loops — save tokens
 
 Every tool round-trip re-sends the full conversation to the model. Late in

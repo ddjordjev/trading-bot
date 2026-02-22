@@ -290,11 +290,41 @@ class TestAnalyticsService:
 
 
 class TestSignalGenerator:
+    _TEST_SYMBOLS = {
+        "BTC/USDT",
+        "ETH/USDT",
+        "SOL/USDT",
+        "XRP/USDT",
+        "DOGE/USDT",
+        "ADA/USDT",
+        "AVAX/USDT",
+        "LINK/USDT",
+        "DOT/USDT",
+        "SHIB/USDT",
+        "PEPE/USDT",
+        "MATIC/USDT",
+        "LTC/USDT",
+        "NEAR/USDT",
+        "UNI/USDT",
+        "OP/USDT",
+        "ARB/USDT",
+        "ANYTHING/USDT",
+        "LOW/USDT",
+        "ONLY/USDT",
+        "NEW/USDT",
+        "JUNK/USDT",
+        "FAKE/USDT",
+        *(f"PRE{i}/USDT" for i in range(20)),
+        *(f"COIN{i}/USDT" for i in range(20)),
+    }
+
     @pytest.fixture
     def gen(self):
         from services.signal_generator import SignalGenerator
 
-        return SignalGenerator()
+        g = SignalGenerator()
+        g.update_exchange_symbols({"BINANCE": self._TEST_SYMBOLS})
+        return g
 
     @pytest.fixture
     def empty_snap(self):
@@ -553,6 +583,7 @@ class TestSignalGenerator:
         from services.signal_generator import SignalGenerator
 
         gen = SignalGenerator(major_symbols={"DOGE/USDT", "XRP/USDT"})
+        gen.update_exchange_symbols({"BINANCE": self._TEST_SYMBOLS})
         snap = IntelSnapshot(
             hot_movers=[
                 TrendingSnapshot(symbol="DOGE", change_24h=3.0, volume_24h=10e6, is_low_liquidity=False),
@@ -622,6 +653,7 @@ class TestSignalGenerator:
                 "LINK/USDT",
             }
         )
+        gen.update_exchange_symbols({"BINANCE": self._TEST_SYMBOLS})
         snap = IntelSnapshot(
             hot_movers=[
                 TrendingSnapshot(symbol="ONLY", change_24h=3.0, volume_24h=10e6, is_low_liquidity=False),
@@ -689,8 +721,11 @@ class TestSignalGenerator:
         assert "BINANCE" in queued.unsupported_exchanges
         assert "MEXC" not in queued.unsupported_exchanges
 
-    def test_propose_allows_when_no_exchange_data(self, gen, empty_queue):
-        """When no exchange data loaded, all symbols pass (optimistic)."""
+    def test_propose_blocks_when_no_exchange_data(self, gen, empty_queue):
+        """When no exchange data loaded, proposals are blocked (pessimistic)."""
+        from services.signal_generator import SignalGenerator
+
+        bare = SignalGenerator()
         prop = TradeProposal(
             priority=SignalPriority.DAILY,
             symbol="ANYTHING/USDT",
@@ -698,9 +733,8 @@ class TestSignalGenerator:
             strategy="test",
             source="monitor",
         )
-        gen._propose(empty_queue, prop)
-        assert empty_queue.total == 1
-        assert empty_queue.daily[0].unsupported_exchanges == []
+        bare._propose(empty_queue, prop)
+        assert empty_queue.total == 0
 
     def test_generate_filters_untradeable_extreme_movers(self, gen, empty_queue):
         """Extreme mover proposals for untradeable symbols are dropped."""
@@ -737,7 +771,9 @@ class TestSignalGeneratorAnalytics:
     def gen(self):
         from services.signal_generator import SignalGenerator
 
-        return SignalGenerator()
+        g = SignalGenerator()
+        g.update_exchange_symbols({"BINANCE": TestSignalGenerator._TEST_SYMBOLS})
+        return g
 
     @pytest.fixture
     def empty_queue(self):

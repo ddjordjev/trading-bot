@@ -7,11 +7,14 @@
 
 ## Golden Rules
 
-1. **Bots are lightweight.** They receive 1 trade proposal, validate it
-   against their own strategy conditions (last-minute spot check), and
+1. **Bots are lightweight executors.** They receive 1 trade proposal from
+   the hub queue, validate it (last-minute candle + ticker check), and
    execute or reject. They manage open positions (SL, TP, trailing, DCA,
-   partial takes). That's it. NEVER add intelligence, filtering, data
-   fetching, or decision-making logic to bots. All brains live in the hub.
+   partial takes). They run a small number of hub-delegated local tasks
+   (ExtremeWatcher, PatternDetector) that operate ONLY on data the hub
+   already selected — never on the full market. NEVER add broad market
+   scanning, symbol filtering, or independent decision-making to bots.
+   All intelligence lives in the hub.
 
 2. **One queue.** There is exactly one in-memory trade queue inside HubState.
    The monitor writes to it. When a bot requests work, it gets 1 proposal
@@ -89,16 +92,18 @@ Entry point: `bot.py` → TradingBot class.
 Each bot is configured via environment variables:
 - `BOT_ID` — unique identifier (momentum, extreme, indicators, etc.)
 - `BOT_STYLE` — queue routing tag (momentum / meanrev / swing)
-- `DASHBOARD_HUB_URL` — always `http://bot-hub:9035`
+- `HUB_URL` — always `http://bot-hub:9035`
 - Risk/leverage/tick overrides per profile
 
 **Active bots** (`is_default=True` in `config/bot_profiles.py`):
 extreme, momentum, indicators, meanrev, swing.
-They connect to the exchange, register strategies, and trade.
+They connect to the exchange and trade proposals received from the hub
+queue. Bots do NOT register local strategies — all trade ideas originate
+from the hub's SignalGenerator. The bot validates and executes.
 
 **Idle bots** (`is_default=False`): scalper, fullstack, conservative,
 aggressive, hedger. They start in lean idle mode — no exchange connection,
-no strategies, no hub communication. They check a local activation file
+no hub communication. They check a local activation file
 (`data/{bot_id}/activate`) every 10s. The file is written by the hub's
 toggle endpoint when someone enables the bot via the dashboard. That's
 the only thing idle bots do — watch for that file. Nothing else.
@@ -144,6 +149,11 @@ Hub → {intel, analytics, extreme_watchlist, intel_age}
 Returns the full cached snapshot as-is. No bot-specific filtering — the bot
 decides what applies to it. Used for position management (reversal risk,
 aggression modifiers, exposure adjustments), not for finding trades.
+
+The `extreme_watchlist` is a small curated list of candidates the hub
+pre-selected as extreme movers. Bots with `EXTREME_ENABLED=true` subscribe
+to WebSocket tickers for ONLY these candidates — they never scan the full
+market themselves. See "Delegated Local Tasks" below.
 
 ### Trade Persistence
 
@@ -202,7 +212,7 @@ regardless of the full tick interval.
 11. Legendary day check (uses intel for reversal risk)
 12. Fetch candles for held positions (hedge + volatility checks)
 13. Hedge check
-14. Extreme mover evaluation
+14. Extreme mover evaluation (hub-curated shortlist only — see below)
 15. Write deployment status → full report to hub (`POST /internal/report`)
 
 ### Proposal validation
@@ -212,11 +222,30 @@ then runs its style-specific validator to confirm conditions still match.
 If they don't, the proposal is rejected. This is the bot's gate — it
 decides WHETHER to trade a given proposal, not WHAT to trade.
 
+### Delegated Local Tasks
+
+Some lightweight tasks run inside the bot but operate ONLY on data the
+hub already curated. They do not scan the market independently:
+
+- **ExtremeWatcher** — subscribes to WebSocket tickers for a small list
+  of extreme mover candidates received from the hub via `/internal/intel`.
+  The hub selects these candidates (typically 5-15 symbols). The bot
+  watches price action on this shortlist and enters if conditions are met.
+  It MUST NOT fetch the full exchange symbol list or scan broadly —
+  only the hub-provided candidates.
+
+- **PatternDetector** — runs chart pattern analysis on candles fetched
+  for a specific proposal that already arrived from the hub queue. It
+  enriches the signal with smarter SL/TP levels. It does NOT scan for
+  new trading opportunities.
+
 ### What the bot does
 - Manage positions (stops, scales, partials, hedges, wick scalps)
-- Validate proposals against its own strategy conditions before executing
+- Validate proposals against its own style conditions before executing
 - Decide WHETHER to accept or reject a proposal (capacity, risk, validation)
 - Use intel from hub for position management (reversal risk, aggression)
+- Execute ExtremeWatcher entries on hub-curated shortlist only
+- Enrich proposals with PatternDetector analysis
 - Report consumed/rejected back to hub
 
 ### What the bot does NOT do
@@ -224,6 +253,7 @@ decides WHETHER to trade a given proposal, not WHAT to trade.
 - Filter symbols for availability (hub does this before queuing)
 - Compute analytics or strategy scores (hub does this)
 - Decide WHAT to trade (hub decides, bot only decides whether to execute)
+- Fetch full exchange symbol lists for analysis (only the hub does this)
 
 ---
 
@@ -267,18 +297,23 @@ find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" | xargs rm -f
 
 ## Bot Profiles (config/bot_profiles.py)
 
-| ID | Style | Active | Strategies |
-|----|-------|--------|-----------|
-| extreme | momentum | Yes | compound_momentum, market_open_volatility |
-| momentum | momentum | Yes | compound_momentum, market_open_volatility |
-| indicators | momentum | Yes | rsi, macd |
-| meanrev | meanrev | Yes | bollinger, mean_reversion |
-| swing | swing | Yes | swing_opportunity, grid |
-| scalper | momentum | No | compound_momentum |
-| fullstack | momentum | No | all 8 |
-| conservative | meanrev | No | rsi, bollinger |
-| aggressive | momentum | No | compound_momentum, rsi |
-| hedger | momentum | No | compound_momentum, mean_reversion |
+Each bot has a `style` that determines which queue proposals it receives.
+The `strategies` field in BotProfile is metadata for display/documentation
+purposes — bots do NOT register local strategies. All trade proposals
+originate from the hub's SignalGenerator.
+
+| ID | Style | Active | Description |
+|----|-------|--------|-------------|
+| extreme | momentum | Yes | High-leverage extreme mover hunter |
+| momentum | momentum | Yes | Trend-following with compounding |
+| indicators | momentum | Yes | Classic RSI + MACD signals |
+| meanrev | meanrev | Yes | Bollinger + mean reversion |
+| swing | swing | Yes | Multi-day swings + grid trading |
+| scalper | momentum | No | Quick scalps, tight stops |
+| fullstack | momentum | No | All-strategy coverage |
+| conservative | meanrev | No | Low leverage, tight risk |
+| aggressive | momentum | No | High leverage, big upside |
+| hedger | momentum | No | Momentum with aggressive hedging |
 
 `is_default=True` → active on startup. `is_default=False` → lean idle,
 activate via dashboard or `/api/bot-profile/{id}/toggle`.
@@ -301,6 +336,7 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
 | `config/bot_profiles.py` | Bot profile definitions |
 | `core/exchange/paper.py` | PaperExchange (local simulation) |
 | `core/exchange/binance.py` | Binance adapter |
+| `core/extreme/watcher.py` | ExtremeWatcher (hub-curated shortlist) |
 | `core/orders/manager.py` | Order management (stops, scales, partials) |
 | `core/risk/manager.py` | Risk checks (daily loss, position limits) |
 | `core/risk/daily_target.py` | Daily target tier system |
@@ -312,9 +348,11 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
 
 ## What NOT To Do
 
-- **Don't add logic to bots.** No market scanning, no symbol filtering, no
-  data fetching beyond what's needed for the trade at hand (candles + ticker
-  for last-minute validation, price for execution). Bots are executors.
+- **Don't add broad scanning to bots.** No full market scanning, no
+  symbol filtering, no independent data fetching. Bots only fetch data
+  for specific symbols they're already trading or that the hub told them
+  to watch (ExtremeWatcher shortlist). All broad intelligence lives in
+  the hub.
 
 - **Don't create multiple queues.** One queue. Period. No per-bot queues,
   no shadow queues, no staging areas inside the bot.
