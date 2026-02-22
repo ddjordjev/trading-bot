@@ -52,7 +52,6 @@ class SwingOpportunityStrategy(BaseStrategy):
         self.swing_stop_pct = float(params.get("swing_stop_pct", 5.0))
         self.swing_max_hold_hours = int(params.get("swing_max_hold_hours", 48))
 
-        self._last_signal_price: float = 0
         self._cooldown_candles: int = 0
 
     def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:

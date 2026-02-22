@@ -58,13 +58,11 @@ class WickScalpDetector:
         wick_threshold_pct: float = 1.5,
         velocity_candles: int = 3,
         min_wick_velocity: float = 0.5,
-        scalp_budget_pct: float = 100.0,
         max_concurrent_scalps: int = 2,
     ):
         self.wick_threshold_pct = wick_threshold_pct
         self.velocity_candles = velocity_candles
         self.min_wick_velocity = min_wick_velocity
-        self.scalp_budget_pct = scalp_budget_pct
         self.max_concurrent_scalps = max_concurrent_scalps
 
         self._active_scalps: dict[str, WickScalp] = {}

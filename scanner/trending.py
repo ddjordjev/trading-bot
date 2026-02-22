@@ -290,11 +290,9 @@ class TrendingScanner:
                     TrendingCoin(
                         symbol=f"UNKNOWN_{rank_str}",
                         name=f"Rank {rank_str}",
-                        rank=int(rank_str),
                         change_1h=float(h1),
                         change_24h=float(h24),
                         change_7d=float(d7),
-                        source="cryptobubbles_fallback",
                     )
                 )
             except (ValueError, TypeError):

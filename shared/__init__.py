@@ -11,7 +11,7 @@ from shared.models import (
     TrendingSnapshot,
     TVSymbolSnapshot,
 )
-from shared.state import SharedState
+from shared.state import SharedState  # test-only; production uses hub.state.HubState
 
 __all__ = [
     "AnalyticsSnapshot",

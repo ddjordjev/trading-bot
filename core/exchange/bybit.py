@@ -214,6 +214,7 @@ class BybitExchange(BaseExchange):
             order_type=OrderType.LIMIT,
             amount=float(data.get("amount", 0) or 0),
             status=OrderStatus.CANCELLED,
+            market_type=market_type.value,
         )
 
     async def fetch_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
@@ -228,6 +229,7 @@ class BybitExchange(BaseExchange):
             status=parse_order_status(data.get("status", "")),
             filled=float(data.get("filled", 0) or 0),
             average_price=float(data.get("average", 0) or 0),
+            market_type=market_type.value,
         )
 
     async def fetch_open_orders(
@@ -244,6 +246,7 @@ class BybitExchange(BaseExchange):
                 amount=float(d.get("amount", 0) or 0),
                 status=parse_order_status(d.get("status", "")),
                 filled=float(d.get("filled", 0) or 0),
+                market_type=market_type.value,
             )
             for d in raw
         ]

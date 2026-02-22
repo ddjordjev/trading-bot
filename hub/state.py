@@ -1,8 +1,8 @@
 """In-memory state for the hub process.
 
-Replaces file-based SharedState for inter-service communication within
-the hub.  MonitorService, AnalyticsService, and the FastAPI endpoints
-all share a single HubState instance.
+MonitorService, AnalyticsService, and the FastAPI endpoints all share
+a single HubState instance.  This is the sole state backend — there is
+no file-based alternative.
 
 Analytics (strategy scores, patterns, suggestions) are persisted to disk
 so they survive restarts.  Everything else is ephemeral.
@@ -32,10 +32,7 @@ _ANALYTICS_PATH = Path("data/analytics_state.json")
 
 
 class HubState:
-    """Drop-in replacement for SharedState that keeps everything in RAM.
-
-    Method signatures mirror SharedState so MonitorService/AnalyticsService
-    can use either backend without code changes.
+    """In-memory state backend for the hub.
 
     Analytics snapshot is the one exception — it's persisted to disk on
     every write and loaded on init so strategy scores, patterns, and
@@ -108,14 +105,17 @@ class HubState:
         try:
             self._analytics_path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=str(self._analytics_path.parent), suffix=".tmp")
+            closed = False
             try:
                 data = analytics.model_dump_json(indent=2)
                 os.write(fd, data.encode())
                 os.fsync(fd)
                 os.close(fd)
-                os.replace(tmp, self._analytics_path)
+                closed = True
+                os.replace(tmp, str(self._analytics_path))
             except BaseException:
-                os.close(fd)
+                if not closed:
+                    os.close(fd)
                 if os.path.exists(tmp):
                     os.unlink(tmp)
                 raise

@@ -33,7 +33,7 @@ def mock_settings():
 @pytest.fixture
 def monitor(mock_settings, tmp_path):
     """MonitorService with all dependencies mocked."""
-    with patch("services.monitor.SharedState") as mock_state_cls:
+    with patch("services.monitor.HubState") as mock_state_cls:
         with patch("services.monitor.FearGreedClient") as mock_fg:
             with patch("services.monitor.LiquidationMonitor") as mock_liq:
                 with patch("services.monitor.MacroCalendar") as mock_macro:

@@ -33,7 +33,6 @@ class BollingerStrategy(BaseStrategy):
         bb = ta.volatility.BollingerBands(df["close"], window=self.period, window_dev=self.std_dev)
         upper = bb.bollinger_hband().iloc[-1]
         lower = bb.bollinger_lband().iloc[-1]
-        _middle = bb.bollinger_mavg().iloc[-1]
         price = df["close"].iloc[-1]
 
         if math.isnan(price) or math.isnan(upper) or math.isnan(lower):

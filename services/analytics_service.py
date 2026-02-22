@@ -1,8 +1,7 @@
-"""Incremental analytics service.
+"""Analytics service (runs in-process inside the hub).
 
-Reads trade history from data/hub.db, computes strategy scores, detects
-patterns, generates suggestions, and persists results via HubState
-(which writes analytics_state.json to disk).
+Reads trade history from hub.db, computes strategy scores, detects
+patterns, generates suggestions, and persists results via HubState.
 
 On startup the previously persisted snapshot is already loaded by HubState,
 so scores/patterns/suggestions are available immediately.  A full recompute
@@ -20,8 +19,8 @@ from loguru import logger
 
 from analytics.engine import AnalyticsEngine
 from db.store import TradeDB
+from hub.state import HubState
 from shared.models import AnalyticsSnapshot, StrategyWeightEntry
-from shared.state import SharedState
 
 HUB_DB = Path("data/hub.db")
 
@@ -38,9 +37,9 @@ class AnalyticsService:
     - Every 30 min: force a recompute regardless (streak cooloff, time shifts).
     """
 
-    def __init__(self, refresh_interval: int = 300, state: SharedState | None = None):
+    def __init__(self, refresh_interval: int = 300, state: HubState | None = None):
         self.refresh_interval = refresh_interval
-        self.state: SharedState = state or SharedState()
+        self.state: HubState = state or HubState()
         self.db = TradeDB(path=HUB_DB)
         self.engine: AnalyticsEngine | None = None
         self._running = False

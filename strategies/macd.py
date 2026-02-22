@@ -34,8 +34,6 @@ class MACDStrategy(BaseStrategy):
         macd_ind = ta.trend.MACD(
             df["close"], window_slow=self.slow, window_fast=self.fast, window_sign=self.signal_period
         )
-        _macd_line = macd_ind.macd()
-        _signal_line = macd_ind.macd_signal()
         histogram = macd_ind.macd_diff()
 
         curr_hist = histogram.iloc[-1]

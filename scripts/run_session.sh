@@ -49,19 +49,19 @@ cmd_status() {
     log "Service status:"
     docker compose ps
     echo ""
-    log "Recent bot log:"
-    docker compose logs --tail 10 trading-bot 2>/dev/null || warn "No logs yet"
+    log "Recent hub log:"
+    docker compose logs --tail 10 bot-hub 2>/dev/null || warn "No logs yet"
     echo ""
     log "Trade count:"
-    docker compose exec -T trading-bot python -c "
-from db import TradeDB
-db = TradeDB(); db.connect()
+    docker compose exec -T bot-hub python -c "
+from db.hub_store import HubDB
+db = HubDB(); db.connect()
 print(f'  Trades logged: {db.trade_count()}')
 " 2>/dev/null || warn "Could not read trade DB"
 }
 
 cmd_logs() {
-    local service="${1:-trading-bot}"
+    local service="${1:-bot-hub}"
     docker compose logs -f "$service"
 }
 
@@ -89,14 +89,14 @@ $(docker compose ps 2>/dev/null || echo "Docker not running")
 
 ## Recent Logs (last 30 lines)
 \`\`\`
-$(docker compose logs --tail 30 trading-bot 2>/dev/null || echo "No logs")
+$(docker compose logs --tail 30 bot-hub 2>/dev/null || echo "No logs")
 \`\`\`
 
 ## Trade Database
 \`\`\`
-$(docker compose exec -T trading-bot python -c "
-from db import TradeDB
-db = TradeDB(); db.connect()
+$(docker compose exec -T bot-hub python -c "
+from db.hub_store import HubDB
+db = HubDB(); db.connect()
 print(f'Total trades: {db.trade_count()}')
 for t in db.get_all_trades(10):
     print(f'  {t.closed_at} {t.symbol} {t.side} {t.action} PnL:{t.pnl_usd:+.2f}')
@@ -140,7 +140,7 @@ case "${1:-help}" in
         echo "  start        — Start all services (docker compose up -d)"
         echo "  stop         — Stop all services"
         echo "  status       — Show service health, recent logs, trade count"
-        echo "  logs [svc]   — Tail logs (default: trading-bot)"
+        echo "  logs [svc]   — Tail logs (default: bot-hub)"
         echo "  rebuild      — Rebuild images and restart"
         echo "  snapshot     — Save current state to docs/reports/"
         echo "  sync-secrets — Sync test keys from .env to GitHub secrets"

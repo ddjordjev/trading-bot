@@ -96,8 +96,6 @@ class TradingBot:
         self.news = None
         self.intel = None
         self.scanner = None
-        self.shared = None  # type: ignore[assignment]
-        self.shared_intel = None  # type: ignore[assignment]
         self._hub_intel: IntelSnapshot | None = None
         self._hub_analytics: AnalyticsSnapshot | None = None
         self._hub_trade_queue: TradeQueue | None = None
@@ -266,11 +264,14 @@ class TradingBot:
 
         await self.exchange.connect()
 
-        self._available_symbols = set()
+        self._available_symbols: set[str] = set()
         try:
             futures_syms = await self.exchange.get_available_symbols(MarketType.FUTURES)
             spot_syms = await self.exchange.get_available_symbols(MarketType.SPOT)
-            self._available_symbols = set(futures_syms) | set(spot_syms)
+            # ccxt returns futures as "BTC/USDT:USDT"; normalize to "BTC/USDT"
+            normalized = {s.split(":")[0] for s in futures_syms}
+            normalized |= set(spot_syms)
+            self._available_symbols = normalized
             logger.info("Published {} available symbols for {}", len(self._available_symbols), self.settings.exchange)
         except Exception as e:
             logger.warning("Could not publish exchange symbols: {}", e)
@@ -1591,10 +1592,10 @@ class TradingBot:
             task.add_done_callback(self._hub_tasks.discard)
 
     def _read_shared_intel(self) -> MarketCondition | None:
-        """Read intel from shared state file (written by monitor service).
+        """Read intel from hub report response.
 
-        If the monitor is running, we use its data instead of running our
-        own intel clients. Falls back to in-process intel if stale or missing.
+        Hub provides IntelSnapshot via the /internal/report cycle.
+        Returns None if intel is stale (>600s) or missing.
         """
         intel_age = self._hub_intel_age
         snap = self._hub_intel
@@ -1818,7 +1819,7 @@ class TradingBot:
         return symbol in self._available_symbols
 
     async def _evaluate_extreme_candidates(self) -> None:
-        """Read extreme watchlist from shared state, approve candidates for WS subscription."""
+        """Read extreme watchlist from hub (in-memory), approve candidates for WS subscription."""
         watchlist = self._hub_extreme_watchlist
         if not watchlist:
             return

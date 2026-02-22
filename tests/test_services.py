@@ -41,7 +41,7 @@ class TestMonitorService:
 
     @pytest.fixture
     def monitor(self, mock_settings, tmp_path):
-        with patch("services.monitor.SharedState") as mock_state_cls, patch("services.monitor.FearGreedClient"):
+        with patch("services.monitor.HubState") as mock_state_cls, patch("services.monitor.FearGreedClient"):
             with patch("services.monitor.LiquidationMonitor"):
                 with patch("services.monitor.MacroCalendar"):
                     with patch("services.monitor.WhaleSentiment"):
@@ -239,7 +239,7 @@ class TestAnalyticsService:
         return engine
 
     def test_init_defaults(self):
-        with patch("services.analytics_service.SharedState"), patch("services.analytics_service.TradeDB"):
+        with patch("services.analytics_service.HubState"), patch("services.analytics_service.TradeDB"):
             with patch("services.analytics_service.AnalyticsEngine"):
                 from services.analytics_service import AnalyticsService
 
@@ -250,13 +250,13 @@ class TestAnalyticsService:
                 assert svc._last_trade_count == 0
 
     def test_do_refresh_writes_state(self, mock_db, mock_engine, tmp_path):
-        with patch("services.analytics_service.SharedState") as state_cls:
+        with patch("services.analytics_service.HubState") as state_cls:
             with patch("services.analytics_service.TradeDB", return_value=mock_db):
                 with patch("services.analytics_service.AnalyticsEngine", return_value=mock_engine):
+                    from hub.state import HubState
                     from services.analytics_service import AnalyticsService
-                    from shared.state import SharedState
 
-                    state = SharedState(data_dir=tmp_path)
+                    state = HubState(data_dir=tmp_path)
                     state_cls.return_value = state
                     svc = AnalyticsService(refresh_interval=60)
                     svc.state = state

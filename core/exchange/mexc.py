@@ -194,6 +194,7 @@ class MexcExchange(BaseExchange):
             order_type=OrderType.LIMIT,
             amount=float(data.get("amount", 0) or 0),
             status=OrderStatus.CANCELLED,
+            market_type=market_type.value,
         )
 
     async def fetch_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
@@ -207,6 +208,7 @@ class MexcExchange(BaseExchange):
             status=parse_order_status(data.get("status", "")),
             filled=float(data.get("filled", 0) or 0),
             average_price=float(data.get("average", 0) or 0),
+            market_type=market_type.value,
         )
 
     async def fetch_open_orders(
@@ -224,6 +226,7 @@ class MexcExchange(BaseExchange):
                     amount=float(data.get("amount", 0) or 0),
                     status=parse_order_status(data.get("status", "")),
                     filled=float(data.get("filled", 0) or 0),
+                    market_type=market_type.value,
                 )
             )
         return orders

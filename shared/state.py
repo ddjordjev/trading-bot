@@ -26,7 +26,10 @@ DATA_DIR = Path("data")
 
 
 class SharedState:
-    """Atomic read/write of JSON state files for inter-process communication.
+    """File-based state backend — used only in tests.
+
+    Production code uses hub.state.HubState (in-memory) exclusively.
+    This class remains for test fixtures that need a file-backed state store.
 
     All writes use write-to-temp-then-rename for crash safety.
     Reads return the model or a default if the file is missing/corrupt.

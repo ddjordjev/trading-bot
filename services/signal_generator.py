@@ -830,8 +830,6 @@ class SignalGenerator:
         """Determine which bot style should handle this proposal."""
         if proposal.priority == SignalPriority.SWING:
             return "swing"
-        if proposal.quick_trade or proposal.tick_urgency == "scalp":
-            return "momentum"
         return "momentum"
 
     def _propose(self, queue: TradeQueue, proposal: TradeProposal) -> None:

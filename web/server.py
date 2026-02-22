@@ -733,7 +733,7 @@ _ALLOWED_TABLES: set[str] = set()
 
 
 def _get_db_conn() -> Any:
-    """Get the best available DB connection — hub first, local fallback."""
+    """Get hub DB connection for the database explorer."""
     hub = _get_hub_db()
     return hub.conn
 

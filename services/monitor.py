@@ -1,19 +1,14 @@
-"""Standalone monitoring service.
+"""Monitoring service (runs in-process inside the hub).
 
-Runs independently of the trading bot. Polls external data sources
-(TradingView, CoinMarketCap, CoinGecko, Fear & Greed, liquidations,
-macro calendar, whale sentiment, CryptoBubbles) and writes results
-to data/intel_state.json.
+Polls external data sources (TradingView, CoinMarketCap, CoinGecko,
+Fear & Greed, liquidations, macro calendar, whale sentiment,
+CryptoBubbles) and writes results to HubState (in-memory).
 
-Adaptive intensity:
-- Reads data/bot_status.json to know how busy the bot is
+Adaptive intensity based on bot deployment status:
 - HUNTING (idle, looking for trades): full-speed polling
 - ACTIVE (some positions, still has capacity): normal polling
 - DEPLOYED (fully deployed, running well): background polling
 - STRESSED (positions losing): elevated polling for exit/hedge intel
-
-When the bot is fully deployed and positions are profitable,
-there's no need to hammer APIs for new opportunities.
 """
 
 from __future__ import annotations
@@ -26,6 +21,7 @@ from datetime import UTC, datetime
 from loguru import logger
 
 from config.settings import Settings, get_settings
+from hub.state import HubState
 from intel.coingecko import CoinGeckoClient
 from intel.coinmarketcap import CoinMarketCapClient
 from intel.fear_greed import FearGreedClient
@@ -46,7 +42,6 @@ from shared.models import (
     TrendingSnapshot,
     TVSymbolSnapshot,
 )
-from shared.state import SharedState
 
 # Poll interval multipliers by deployment level
 INTENSITY_TABLE: dict[DeploymentLevel, dict[str, float]] = {
@@ -59,11 +54,11 @@ INTENSITY_TABLE: dict[DeploymentLevel, dict[str, float]] = {
 
 
 class MonitorService:
-    """Standalone monitoring process with adaptive poll rates."""
+    """Hub-integrated monitoring with adaptive poll rates."""
 
-    def __init__(self, settings: Settings | None = None, state: SharedState | None = None):
+    def __init__(self, settings: Settings | None = None, state: HubState | None = None):
         self.settings = settings or get_settings()
-        self.state: SharedState = state or SharedState()
+        self.state: HubState = state or HubState()
 
         # Clients
         self.fear_greed = FearGreedClient(poll_interval=3600)
@@ -124,9 +119,6 @@ class MonitorService:
         logger.info("=" * 50)
 
         self._running = True
-
-        # Initialize candle fetcher for hub-side technical analysis
-        from hub.state import HubState
 
         if isinstance(self.state, HubState):
             try:
