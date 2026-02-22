@@ -1150,7 +1150,7 @@ class TestWriteDeploymentStatusLevels:
 class TestReportDashboardSnapshot:
     @pytest.mark.asyncio
     async def test_report_dashboard_snapshot_posts_to_hub_when_hub_url_set(self, bot):
-        bot.settings.dashboard_hub_url = "http://hub.example.com"
+        bot.settings.hub_url = "http://hub.example.com"
         bot._hub_session = None
         bot._post_to_hub = AsyncMock()
         await bot._report_dashboard_snapshot([])

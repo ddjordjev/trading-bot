@@ -200,7 +200,7 @@ class MonitorService:
                                 total,
                             )
                     except Exception as e:
-                        logger.debug("Exchange symbols refresh error: {}", e)
+                        logger.warning("Exchange symbols refresh error: {}", e)
                     self._last_symbols_refresh = now
 
                 # TradingView: refresh active symbols
@@ -223,7 +223,7 @@ class MonitorService:
                 try:
                     self._build_extreme_watchlist()
                 except Exception as e:
-                    logger.debug("Extreme watchlist error: {}", e)
+                    logger.warning("Extreme watchlist error: {}", e)
 
                 # Feed analytics to signal generator (every 60s)
                 if now - self._last_analytics_refresh >= 60:
@@ -232,7 +232,7 @@ class MonitorService:
                         if analytics_snap.weights:
                             self.signal_gen.update_analytics(analytics_snap)
                     except Exception as e:
-                        logger.debug("Analytics feed error: {}", e)
+                        logger.warning("Analytics feed error: {}", e)
                     self._last_analytics_refresh = now
 
                 # Feed rejection history so signal generator avoids re-proposing rejected combos
@@ -243,7 +243,7 @@ class MonitorService:
                         self.signal_gen.update_rejections(rej_tuples)
                     self.state.purge_old_rejections()
                 except Exception as e:
-                    logger.debug("Rejection feed error: {}", e)
+                    logger.warning("Rejection feed error: {}", e)
 
                 # Generate proposals into a staging queue, then route to per-bot queues
                 try:
@@ -260,7 +260,7 @@ class MonitorService:
                                     ta_candidates, self._candle_fetcher, staging_queue
                                 )
                         except Exception as e:
-                            logger.debug("Technical analysis error: {}", e)
+                            logger.warning("Technical analysis error: {}", e)
                         self._last_ta_refresh = now
 
                     self._route_to_bots(staging_queue, all_statuses)
@@ -405,7 +405,7 @@ class MonitorService:
                 await self.tv.analyze_multi(symbols_to_analyze[:5], "4h")
             logger.debug("TV refreshed: {} symbols", len(results))
         except Exception as e:
-            logger.debug("TV refresh error: {}", e)
+            logger.warning("TV refresh error: {}", e)
 
     def _refresh_scanner_symbols(self) -> None:
         """Add symbols from CMC/CoinGecko to the TV watch list.

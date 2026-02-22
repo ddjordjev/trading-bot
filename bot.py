@@ -215,7 +215,7 @@ class TradingBot:
         if profile and profile.is_default:
             return True
 
-        hub_url = self.settings.dashboard_hub_url
+        hub_url = self.settings.hub_url
         if not hub_url:
             return True
 
@@ -237,8 +237,7 @@ class TradingBot:
         The file is created by the hub's toggle endpoint or manually.
         When found, breaks out and runs _full_start() for full initialization.
         """
-        bot_id = self.settings.bot_id or "default"
-        activate_path = Path(self.settings.data_dir) / bot_id / "activate"
+        activate_path = Path(self.settings.data_dir) / "activate"
         logger.info("Idle — watching {} for activation", activate_path)
         while self._running:
             try:
@@ -252,7 +251,7 @@ class TradingBot:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.debug("Lean idle error: {}", e)
+                logger.warning("Lean idle error: {}", e)
                 await asyncio.sleep(10)
 
     async def _full_start(self) -> None:
@@ -361,7 +360,7 @@ class TradingBot:
 
     async def _quick_hub_check(self) -> None:
         """Lightweight hub poll between full ticks — fetch queue proposal and process it."""
-        hub_url = self.settings.dashboard_hub_url
+        hub_url = self.settings.hub_url
         if not hub_url or not self._multibot:
             return
         if not self._hub_session:
@@ -386,7 +385,8 @@ class TradingBot:
                     self._hub_trade_queue = TradeQueue(**body["trade_queue"])
                 for key in body.get("confirmed_keys", []):
                     self._pending_hub_acks.pop(key, None)
-        except Exception:
+        except Exception as e:
+            logger.warning("Quick hub check error: {}", e)
             return
         self._retry_pending_hub_trades()
         await self._process_trade_queue()
@@ -525,7 +525,7 @@ class TradingBot:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.debug("Fast monitor error: {}", e)
+                logger.error("Fast monitor error: {}", e)
                 await asyncio.sleep(2)
 
     def _update_tick_interval(self) -> None:
@@ -745,7 +745,7 @@ class TradingBot:
                 if spike:
                     await self._handle_spike(spike)
             except Exception as e:
-                logger.debug("Candle fetch for {} failed: {}", sym, e)
+                logger.warning("Candle fetch for {} failed: {}", sym, e)
             await asyncio.sleep(0)
 
         # 13. Hedge check: open counter-positions on reversal signals
@@ -770,7 +770,7 @@ class TradingBot:
         try:
             await self._write_deployment_status()
         except Exception as e:
-            logger.debug("Failed to write deployment status: {}", e)
+            logger.error("Failed to write deployment status: {}", e, exc_info=True)
 
         # 15. Status + daily reset
         await self._log_status()
@@ -1135,7 +1135,7 @@ class TradingBot:
             self._hub_tasks.add(task)
             task.add_done_callback(self._hub_tasks.discard)
         except Exception as e:
-            logger.debug("Failed to log opened trade: {}", e)
+            logger.error("Failed to log opened trade: {}", e)
 
     def _calc_realized_pnl(self, order: Order) -> float:
         """Extract the realized PnL from a close order for deposit detection."""
@@ -1232,7 +1232,7 @@ class TradingBot:
             task.add_done_callback(self._hub_tasks.discard)
             self._whale_alerted.discard(order.symbol)
         except Exception as e:
-            logger.debug("Failed to log closed trade: {}", e)
+            logger.error("Failed to log closed trade: {}", e)
 
     async def _close_all_positions(self, reason: str) -> None:
         """Emergency close all open positions."""
@@ -1389,16 +1389,18 @@ class TradingBot:
 
         strat_list = []
         open_syms = set(self.orders.scaler.active_positions.keys())
-        for s in self._strategies:
-            stats = self._get_strategy_stats(s.name, s.symbol)
+        for key, stats in self._strategy_stats.items():
+            parts = key.split(":", 1)
+            sname = parts[0]
+            ssym = parts[1] if len(parts) > 1 else ""
             strat_list.append(
                 {
-                    "name": s.name,
-                    "symbol": s.symbol,
-                    "market_type": s.market_type,
-                    "leverage": s.leverage,
+                    "name": sname,
+                    "symbol": ssym,
+                    "market_type": "futures",
+                    "leverage": self.settings.default_leverage,
                     "is_dynamic": False,
-                    "open_now": 1 if s.symbol in open_syms else 0,
+                    "open_now": 1 if ssym in open_syms else 0,
                     "applied_count": stats.get("total") or 0,
                     "success_count": stats.get("winners") or 0,
                     "fail_count": stats.get("losers") or 0,
@@ -1464,7 +1466,7 @@ class TradingBot:
                     "symbols": list(self._available_symbols),
                 }
 
-        hub_url = self.settings.dashboard_hub_url
+        hub_url = self.settings.hub_url
         if hub_url:
             await self._post_to_hub(hub_url, payload)
 
@@ -1476,7 +1478,7 @@ class TradingBot:
             url = f"{hub_url.rstrip('/')}/internal/report"
             async with self._hub_session.post(url, json=payload) as resp:
                 if resp.status != 200:
-                    logger.debug("Hub report failed: {}", resp.status)
+                    logger.warning("Hub report failed: {}", resp.status)
                     return
                 body = await resp.json()
                 for key in body.get("confirmed_keys", []):
@@ -1486,12 +1488,12 @@ class TradingBot:
                 if "trade_queue" in body:
                     self._hub_trade_queue = TradeQueue(**body["trade_queue"])
         except Exception as e:
-            logger.debug("Hub report error: {}", e)
+            logger.error("Hub report error: {}", e, exc_info=True)
         self._retry_pending_hub_trades()
 
     async def _fetch_intel(self) -> None:
         """GET intel, analytics, and extreme watchlist from hub. Called once per full tick."""
-        hub_url = self.settings.dashboard_hub_url
+        hub_url = self.settings.hub_url
         if not hub_url or not self._multibot:
             return
         if not self._hub_session:
@@ -1511,11 +1513,11 @@ class TradingBot:
                 if "intel_age" in body:
                     self._hub_intel_age = body["intel_age"]
         except Exception as e:
-            logger.debug("Intel fetch error: {}", e)
+            logger.error("Intel fetch error: {}", e)
 
     async def _push_trade_to_hub(self, record: TradeRecord, request_key: str = "") -> None:
         """Push a trade open/close event to the hub's DB via HTTP with idempotency key."""
-        hub_url = self.settings.dashboard_hub_url
+        hub_url = self.settings.hub_url
         if not hub_url:
             return
         target = hub_url
@@ -1534,15 +1536,15 @@ class TradingBot:
             url = f"{target.rstrip('/')}/internal/trade"
             async with self._hub_session.post(url, json=payload) as resp:
                 if resp.status != 200:
-                    logger.debug("Hub trade push failed: {} (key={})", resp.status, request_key[:8])
+                    logger.error("Hub trade push failed: {} (key={})", resp.status, request_key[:8])
         except Exception as e:
-            logger.debug("Hub trade push error: {} (key={}, will retry)", e, request_key[:8])
+            logger.error("Hub trade push error: {} (key={}, will retry)", e, request_key[:8])
 
     # ---- Hub state recovery & in-memory stats ----
 
     async def _recover_state_from_hub(self) -> None:
         """On startup, fetch open trades and strategy stats from the hub."""
-        hub_url = self.settings.dashboard_hub_url
+        hub_url = self.settings.hub_url
         if not hub_url:
             logger.info("No hub URL — starting with empty state")
             return
@@ -1731,7 +1733,7 @@ class TradingBot:
                 fallback_stop_pct=fallback_pct,
             )
         except Exception as e:
-            logger.debug("Pattern analysis error for {}: {}", sig.symbol, e)
+            logger.warning("Pattern analysis error for {}: {}", sig.symbol, e)
             return 0.0
 
         if smart.initial_stop > 0 and not sig.suggested_stop_loss:

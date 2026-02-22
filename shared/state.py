@@ -68,7 +68,7 @@ class SharedState:
         except FileNotFoundError:
             return None
         except Exception as e:
-            logger.debug("Failed to read {}: {}", path, e)
+            logger.warning("Failed to read {}: {}", path, e)
             return None
 
     # ---- Bot status (written by bot, read by monitor) ---- #

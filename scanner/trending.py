@@ -216,7 +216,7 @@ class TrendingScanner:
                         )
                     )
         except Exception as e:
-            logger.debug("External source merge error: {}", e)
+            logger.warning("External source merge error: {}", e)
 
         return coins
 

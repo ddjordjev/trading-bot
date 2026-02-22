@@ -162,7 +162,7 @@ class TradingViewClient:
                         break
                     await self.full_analysis(symbol)
             except Exception as e:
-                logger.debug("TV poll error: {}", e)
+                logger.warning("TV poll error: {}", e)
             await asyncio.sleep(self.poll_interval)
 
     async def analyze(self, symbol: str, interval: str = "1h") -> TVAnalysis | None:
@@ -188,11 +188,11 @@ class TradingViewClient:
                 ) as resp,
             ):
                 if resp.status != 200:
-                    logger.debug("TV scanner {} returned {}", tv_symbol, resp.status)
+                    logger.warning("TV scanner {} returned {}", tv_symbol, resp.status)
                     return None
                 data = await resp.json()
         except Exception as e:
-            logger.debug("TV fetch error for {}: {}", symbol, e)
+            logger.warning("TV fetch error for {}: {}", symbol, e)
             return None
 
         if not isinstance(data, dict):

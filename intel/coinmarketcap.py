@@ -128,11 +128,11 @@ class CoinMarketCapClient:
                 ) as resp,
             ):
                 if resp.status != 200:
-                    logger.debug("CMC trending returned {}", resp.status)
+                    logger.warning("CMC trending returned {}", resp.status)
                     return
                 data = await resp.json()
         except Exception as e:
-            logger.debug("CMC trending error: {}", e)
+            logger.warning("CMC trending error: {}", e)
             return
 
         if not isinstance(data, dict):

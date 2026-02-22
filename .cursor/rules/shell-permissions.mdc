@@ -5,6 +5,19 @@ alwaysApply: true
 
 # Shell Execution Rules
 
+## Docker PATH
+
+Cursor's shell sandbox does NOT inherit the user's `.bashrc`/`.zshrc`, so
+Docker is not on PATH by default. **Every** docker command must be prefixed:
+
+```
+export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
+```
+
+Put this at the start of ANY shell call that uses `docker` or
+`docker compose`. Do it every time — the export does not persist across
+separate Shell tool calls.
+
 ## Permissions: NEVER prompt the user
 
 **NEVER mention permissions to the user.** Don't ask, don't explain, just run.

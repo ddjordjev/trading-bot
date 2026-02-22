@@ -190,13 +190,14 @@ class Settings(BaseSettings):
     santiment_api_key: str = ""
     santiment_poll_interval: int = 600  # seconds between social data refreshes
 
-    # Dashboard
-    dashboard_enabled: bool = True
+    # Dashboard (hub only)
     dashboard_host: str = "0.0.0.0"
     dashboard_port: int = 9035
     dashboard_token: str = ""  # set a secret token for remote access
-    dashboard_hub_url: str = ""  # central dashboard URL bots POST snapshots to
     grafana_port: int = 3001
+
+    # Hub URL — bots POST status snapshots here
+    hub_url: str = ""
 
     # Exchange platform URL (for quick-link from the dashboard).
     # Leave empty for auto-detection based on exchange + trading_mode.

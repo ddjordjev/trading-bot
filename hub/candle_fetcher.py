@@ -52,12 +52,12 @@ class CandleFetcher:
         try:
             await self._ensure_loaded()
         except Exception as e:
-            logger.debug("CandleFetcher: load_markets failed: {}", e)
+            logger.warning("CandleFetcher: load_markets failed: {}", e)
             return []
         try:
             raw = await self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         except Exception as e:
-            logger.debug("CandleFetcher: failed to fetch {} {}: {}", symbol, timeframe, e)
+            logger.warning("CandleFetcher: failed to fetch {} {}: {}", symbol, timeframe, e)
             return []
         candles = []
         for row in raw:
@@ -93,12 +93,12 @@ class CandleFetcher:
         try:
             await self._ensure_loaded()
         except Exception as e:
-            logger.debug("CandleFetcher: load_markets failed: {}", e)
+            logger.warning("CandleFetcher: load_markets failed: {}", e)
             return None
         try:
             raw = await self._exchange.fetch_ticker(symbol)
         except Exception as e:
-            logger.debug("CandleFetcher: failed to fetch ticker {}: {}", symbol, e)
+            logger.warning("CandleFetcher: failed to fetch ticker {}: {}", symbol, e)
             return None
         bid = _safe_float(raw.get("bid")) or 0.0
         ask = _safe_float(raw.get("ask")) or 0.0

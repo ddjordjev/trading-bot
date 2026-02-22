@@ -162,7 +162,7 @@ class CoinGeckoClient:
                     return
                 data = await resp.json()
         except Exception as e:
-            logger.debug("CoinGecko trending error: {}", e)
+            logger.warning("CoinGecko trending error: {}", e)
             return
 
         if not isinstance(data, dict):
@@ -236,7 +236,7 @@ class CoinGeckoClient:
                     return
                 data = await resp.json()
         except Exception as e:
-            logger.debug("CoinGecko markets error: {}", e)
+            logger.warning("CoinGecko markets error: {}", e)
             return
 
         if not isinstance(data, list):

@@ -64,8 +64,7 @@ services:
       - TZ=UTC
       - BOT_ID=momentum
       - BOT_STYLE=momentum
-      - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-hub:9035
+      - HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
@@ -81,8 +80,7 @@ services:
       - TZ=UTC
       - BOT_ID=indicators
       - BOT_STYLE=momentum
-      - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-hub:9035
+      - HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
@@ -100,8 +98,7 @@ services:
       - BOT_STYLE=meanrev
       - TICK_INTERVAL_IDLE=120
       - TICK_INTERVAL_ACTIVE=60
-      - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-hub:9035
+      - HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
@@ -119,8 +116,7 @@ services:
       - BOT_STYLE=swing
       - TICK_INTERVAL_IDLE=600
       - TICK_INTERVAL_ACTIVE=300
-      - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-hub:9035
+      - HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
@@ -149,8 +145,7 @@ services:
       - EXTREME_EVAL_INTERVAL=15
       - INITIAL_RISK_AMOUNT=100
       - TAKE_PROFIT_PCT=8
-      - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-hub:9035
+      - HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
@@ -170,8 +165,7 @@ services:
       - STOP_LOSS_PCT=0.8
       - TAKE_PROFIT_PCT=2.0
       - INITIAL_RISK_AMOUNT=30
-      - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-hub:9035
+      - HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
@@ -188,8 +182,7 @@ services:
       - BOT_ID=fullstack
       - BOT_STYLE=momentum
       - MAX_CONCURRENT_POSITIONS=10
-      - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-hub:9035
+      - HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
@@ -209,8 +202,7 @@ services:
       - MAX_POSITION_SIZE_PCT=3
       - STOP_LOSS_PCT=1.0
       - INITIAL_RISK_AMOUNT=20
-      - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-hub:9035
+      - HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
@@ -231,8 +223,7 @@ services:
       - TAKE_PROFIT_PCT=10
       - INITIAL_RISK_AMOUNT=100
       - MAX_CONCURRENT_POSITIONS=8
-      - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-hub:9035
+      - HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s
@@ -252,8 +243,7 @@ services:
       - HEDGE_RATIO=0.40
       - HEDGE_MIN_PROFIT_PCT=2.0
       - MAX_HEDGES=4
-      - DASHBOARD_ENABLED=false
-      - DASHBOARD_HUB_URL=http://bot-hub:9035
+      - HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
       interval: 30s

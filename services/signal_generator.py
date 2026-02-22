@@ -799,6 +799,8 @@ class SignalGenerator:
         analyzed = 0
 
         for symbol in candidates:
+            if not self._symbol_tradeable(symbol):
+                continue
             if not fetcher.has_symbol(symbol):
                 continue
 
@@ -850,7 +852,7 @@ class SignalGenerator:
                     )
                     analyzed += 1
                 except Exception as e:
-                    logger.debug("TA {} on {} failed: {}", strat_name, symbol, e)
+                    logger.warning("TA {} on {} failed: {}", strat_name, symbol, e)
 
         if analyzed:
             logger.info("Technical analysis: {} signals from {} candidates", analyzed, len(candidates))
@@ -874,7 +876,7 @@ class SignalGenerator:
         strategies get progressively weaker signals.
         """
         if not self._symbol_tradeable(proposal.symbol):
-            logger.debug("Skipping {}: not on any known exchange", proposal.symbol)
+            logger.warning("Skipping {}: not on any known exchange", proposal.symbol)
             return
 
         if self._rejection_cooldown_active(proposal.symbol, proposal.strategy):

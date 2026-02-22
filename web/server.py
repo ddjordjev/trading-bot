@@ -162,7 +162,13 @@ def _bot_status() -> BotStatus:
 
 
 async def _positions() -> list[PositionInfo]:
-    return []
+    merged = _build_merged_snapshot()
+    out: list[PositionInfo] = []
+    for p in merged.get("positions", []):
+        filtered = {k: v for k, v in p.items() if k in PositionInfo.model_fields}
+        with contextlib.suppress(Exception):
+            out.append(PositionInfo(**filtered))
+    return out
 
 
 def _intel_snapshot() -> IntelSnapshot | None:
@@ -175,7 +181,13 @@ def _intel_snapshot() -> IntelSnapshot | None:
 
 
 def _wick_scalps() -> list[WickScalpInfo]:
-    return []
+    merged = _build_merged_snapshot()
+    out: list[WickScalpInfo] = []
+    for w in merged.get("wick_scalps", []):
+        filtered = {k: v for k, v in w.items() if k in WickScalpInfo.model_fields}
+        with contextlib.suppress(Exception):
+            out.append(WickScalpInfo(**filtered))
+    return out
 
 
 def _recent_logs() -> list[LogEntry]:
@@ -818,10 +830,21 @@ async def db_table_rows(
 
 
 def report_bot_snapshot(data: dict[str, Any]) -> None:
-    """Store a bot's dashboard snapshot in memory (called via POST or locally)."""
+    """Merge a bot's dashboard snapshot into memory (called via POST or locally).
+
+    Quick hub checks only send bot_id + bot_style (no status/positions).
+    We merge into the existing report so lightweight polls don't erase
+    the last full snapshot.
+    """
     bot_id = data.get("bot_id", "")
-    if bot_id:
+    if not bot_id:
+        return
+    existing = _bot_reports.get(bot_id)
+    if existing is None:
         _bot_reports[bot_id] = data
+    else:
+        for key, value in data.items():
+            existing[key] = value
 
 
 async def _forward_to_bot(bot_id: str, path: str, body: dict[str, Any]) -> ActionResponse:
@@ -999,7 +1022,7 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
             try:
                 _hub_state_ref.write_bot_status(BotDeploymentStatus(**bot_status_data))
             except Exception:
-                logger.debug("Ignoring malformed bot_status from {}", bot_id)
+                logger.warning("Ignoring malformed bot_status from {}", bot_id)
 
         exchange_symbols = data.get("exchange_symbols")
         if exchange_symbols:
@@ -1144,9 +1167,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(nudge.wait(), timeout=2)
     except WebSocketDisconnect:
-        logger.debug("Dashboard WebSocket disconnected")
+        logger.info("Dashboard WebSocket disconnected")
     except Exception as e:
-        logger.debug("Dashboard WebSocket error: {}", e)
+        logger.warning("Dashboard WebSocket error: {}", e)
 
 
 # --------------- static files ---------------
