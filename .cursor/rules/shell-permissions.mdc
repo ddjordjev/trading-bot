@@ -50,11 +50,16 @@ sequence every time, no shortcuts:
 4. **Squash to master** — `git reset --soft master && git commit`, push,
    fast-forward master, push master.
 5. **Only NOW deploy** — and always do a FULL cycle:
-   ```
+   ```bash
    docker compose down
+   # Wipe ephemeral state so bots start fresh from defaults:
+   find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" -o -name "activate" | xargs rm -f
    docker compose build
    docker compose up -d
    ```
+   `HOST_DATA_DIR` is `/Users/damirdjordjev/workspace/trading-bot-data`.
+   This removes runtime JSON files (bot_registry, trade_queue, bot_status,
+   etc.) and activation marker files. DBs (`.db`) are untouched.
 
 **Rules:**
 - Never rebuild "just the bots" or "just the hub". Always bring everything

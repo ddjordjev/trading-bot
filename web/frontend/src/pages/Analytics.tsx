@@ -289,11 +289,41 @@ function LivePositionsTab({ positions }: { positions: LivePosition[] }) {
   );
 }
 
+type SortKey = "symbol" | "side" | "strategy" | "entry_price" | "exit_price" | "pnl_usd" | "leverage" | "scale_mode" | "dca_count" | "hold_minutes" | "closed_at";
+type SortDir = "asc" | "desc";
+
+function sortTrades(trades: ClosedTrade[], key: SortKey, dir: SortDir): ClosedTrade[] {
+  const sorted = [...trades].sort((a, b) => {
+    const av = a[key] ?? "";
+    const bv = b[key] ?? "";
+    if (typeof av === "number" && typeof bv === "number") return av - bv;
+    return String(av).localeCompare(String(bv));
+  });
+  return dir === "desc" ? sorted.reverse() : sorted;
+}
+
 function ClosedTradesTab({ trades }: { trades: ClosedTrade[] }) {
+  const [sortKey, setSortKey] = useState<SortKey>("closed_at");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+
   if (trades.length === 0) return <div className="empty-state">No closed trades yet. Trades appear here when positions are closed.</div>;
 
   const totalPnl = trades.reduce((s, t) => s + t.pnl_usd, 0);
   const winners = trades.filter((t) => t.is_winner).length;
+  const sorted = sortTrades(trades, sortKey, sortDir);
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  };
+
+  const arrow = (key: SortKey) => (sortKey === key ? (sortDir === "asc" ? " ▲" : " ▼") : "");
+
+  const thStyle: React.CSSProperties = { cursor: "pointer", userSelect: "none", whiteSpace: "nowrap" };
 
   return (
     <div>
@@ -319,21 +349,21 @@ function ClosedTradesTab({ trades }: { trades: ClosedTrade[] }) {
         <table>
           <thead>
             <tr>
-              <th>Symbol</th>
-              <th>Side</th>
-              <th>Strategy</th>
-              <th>Entry</th>
-              <th>Exit</th>
-              <th>PnL</th>
-              <th>Leverage</th>
-              <th>Mode</th>
-              <th>DCAs</th>
-              <th>Hold Time</th>
-              <th>Closed</th>
+              <th style={thStyle} onClick={() => toggleSort("symbol")}>Symbol{arrow("symbol")}</th>
+              <th style={thStyle} onClick={() => toggleSort("side")}>Side{arrow("side")}</th>
+              <th style={thStyle} onClick={() => toggleSort("strategy")}>Strategy{arrow("strategy")}</th>
+              <th style={thStyle} onClick={() => toggleSort("entry_price")}>Entry{arrow("entry_price")}</th>
+              <th style={thStyle} onClick={() => toggleSort("exit_price")}>Exit{arrow("exit_price")}</th>
+              <th style={thStyle} onClick={() => toggleSort("pnl_usd")}>PnL{arrow("pnl_usd")}</th>
+              <th style={thStyle} onClick={() => toggleSort("leverage")}>Leverage{arrow("leverage")}</th>
+              <th style={thStyle} onClick={() => toggleSort("scale_mode")}>Mode{arrow("scale_mode")}</th>
+              <th style={thStyle} onClick={() => toggleSort("dca_count")}>DCAs{arrow("dca_count")}</th>
+              <th style={thStyle} onClick={() => toggleSort("hold_minutes")}>Hold Time{arrow("hold_minutes")}</th>
+              <th style={thStyle} onClick={() => toggleSort("closed_at")}>Closed{arrow("closed_at")}</th>
             </tr>
           </thead>
           <tbody>
-            {trades.map((t) => (
+            {sorted.map((t) => (
               <tr key={t.id}>
                 <td><strong>{t.symbol}</strong></td>
                 <td style={{ color: t.side === "buy" || t.side === "long" ? "var(--green)" : "var(--red)" }}>

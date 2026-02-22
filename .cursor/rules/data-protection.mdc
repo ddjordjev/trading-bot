@@ -61,12 +61,13 @@ them when rebuilding/redeploying:
 - `analytics_state.json`, `intel_state.json` — service state
 - `extreme_watchlist.json` — watchlist cache
 - `bot_registry.json` — hub bot registry
+- `**/activate` — bot activation marker files (controls which bots are active)
 
 ## Rebuild procedure
 
 ```bash
 # Wipe ephemeral state on the host (DBs are untouched):
-find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" | xargs rm -f
+find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" -o -name "activate" | xargs rm -f
 # Rebuild and start:
 docker compose build && docker compose up -d
 ```
