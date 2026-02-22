@@ -714,8 +714,8 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
 async def toggle_bot_profile(profile_id: str, _: str = Depends(verify_token)) -> ActionResponse:
     """Enable or disable a bot via hub DB config.
 
-    The bot learns its enabled state from the /internal/report response
-    every tick. No file polling, no Docker API — pure HTTP.
+    When enabling an idle bot, writes an activation file to the shared data
+    volume so the bot can detect activation without hub communication.
     """
     from config.bot_profiles import PROFILES_BY_ID
 
@@ -731,9 +731,19 @@ async def toggle_bot_profile(profile_id: str, _: str = Depends(verify_token)) ->
     new_enabled = not currently_enabled
     hub.set_bot_enabled(profile_id, new_enabled)
 
+    if new_enabled:
+        _write_activation_file(profile_id)
+
     action = "Enabled" if new_enabled else "Disabled"
     nudge_ws()
     return ActionResponse(success=True, message=f"{action} {profile.display_name}")
+
+
+def _write_activation_file(bot_id: str) -> None:
+    """Write an activation marker file so an idle bot can detect activation locally."""
+    activate_dir = Path("data") / bot_id
+    activate_dir.mkdir(parents=True, exist_ok=True)
+    (activate_dir / "activate").write_text("1")
 
 
 # --------------- DB Explorer (read-only) ---------------
@@ -1016,32 +1026,37 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
     else:
         enabled = True
 
-    # --- Proxy reads: return shared data the bot needs ---
     response: dict[str, Any] = {
         "status": "ok",
         "confirmed_keys": confirmed,
         "enabled": enabled,
     }
-    if bot_id:
+    if bot_id and _hub_state_ref is not None:
         with contextlib.suppress(Exception):
-            if _hub_state_ref is not None:
-                response["intel"] = _hub_state_ref.read_intel().model_dump()
-        with contextlib.suppress(Exception):
-            if _hub_state_ref is not None:
-                response["analytics"] = _hub_state_ref.read_analytics().model_dump()
-        with contextlib.suppress(Exception):
-            if _hub_state_ref is not None:
-                # Filter shared queue by bot's style tag
-                bot_style = data.get("bot_style", bot_id)
-                response["trade_queue"] = _hub_state_ref.read_queue_for_bot_style(bot_style).model_dump()
-        with contextlib.suppress(Exception):
-            if _hub_state_ref is not None:
-                response["extreme_watchlist"] = _hub_state_ref.read_extreme_watchlist().model_dump()
-        if _hub_state_ref is not None:
-            response["intel_age"] = _hub_state_ref.intel_age_seconds()
-        else:
-            response["intel_age"] = 999999.0
+            bot_style = data.get("bot_style", bot_id)
+            response["trade_queue"] = _hub_state_ref.read_queue_for_bot_style(bot_style).model_dump()
     return response
+
+
+@app.get("/internal/intel")
+async def get_bot_intel() -> dict[str, Any]:
+    """Bots fetch the cached intel snapshot, analytics, and extreme watchlist.
+
+    Returns the full snapshot as-is — bots decide what applies to them.
+    Separate from /internal/report (which handles status + queue).
+    """
+    result: dict[str, Any] = {}
+    if _hub_state_ref is not None:
+        with contextlib.suppress(Exception):
+            result["intel"] = _hub_state_ref.read_intel().model_dump()
+        with contextlib.suppress(Exception):
+            result["analytics"] = _hub_state_ref.read_analytics().model_dump()
+        with contextlib.suppress(Exception):
+            result["extreme_watchlist"] = _hub_state_ref.read_extreme_watchlist().model_dump()
+        result["intel_age"] = _hub_state_ref.intel_age_seconds()
+    else:
+        result["intel_age"] = 999999.0
+    return result
 
 
 @app.post("/internal/trade")

@@ -29,7 +29,7 @@ strategies at any time based on observed results. The only hard constraints are:
 
 Everything else — which strategies to run, when to change them, leverage,
 risk params, symbols — is at the agent's discretion. Use the analytics
-engine, trade DB, and logs to make data-driven decisions.
+engine, trade DB, and logs to make data-driven decisions from the Hub.
 
 ### Active Bots (5 — trade from Day 1)
 
@@ -48,9 +48,10 @@ immediately on startup.
 ### Idle Bots (5 — running but not trading)
 
 These bots have `is_default=False`. They start in **lean idle mode**: no
-exchange connection, no strategies loaded, minimal CPU. They check the hub
-every 10 seconds for activation. Enable them via the dashboard toggle or
-`/api/bot-profile/{id}/toggle` when ready.
+exchange connection, no strategies loaded, no hub communication. They watch
+a local activation file (`data/{bot_id}/activate`) every 10 seconds. Enable
+them via the dashboard toggle or `/api/bot-profile/{id}/toggle` — the hub
+writes the file, the bot detects it and starts up.
 
 | Bot | Profile | Strategies | Style | Notable Overrides |
 |-----|---------|-----------|-------|-------------------|
@@ -90,65 +91,6 @@ the daily target tracker.
 
 To reset after a blown bot: restart that specific container. It re-reads
 SESSION_BUDGET=1000 and starts fresh with a new PaperExchange balance.
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     bot-hub ($0, no trading)                 │
-│  Dashboard :9035 ◄── browser                                │
-│  /internal/report ◄── trading bots POST snapshots + reads   │
-│  hub.db (sole persistent trade DB)                          │
-│  Reads/writes shared JSON on behalf of bots                 │
-└────────┬───────────────────────────────────────┬────────────┘
-         │  HTTP POST/response                   │
-    ┌────┴────────────────────────────┐           │
-    │  10 trading bots (in-memory)    │           │
-    │  bot-extreme      $1000         │           │
-    │  bot-momentum     $1000         │           │
-    │  bot-indicators   $1000         │           │
-    │  bot-meanrev      $1000         │           │
-    │  bot-swing        $1000         │           │
-    │  bot-scalper      $1000         │           │
-    │  bot-fullstack    $1000         │           │
-    │  bot-conservative $1000         │           │
-    │  bot-aggressive   $1000         │           │
-    │  bot-hedger       $1000         │           │
-    │                                │           │
-    │  Each bot:                     │           │
-    │  - Strategies + Orders         │           │
-    │  - Risk mgmt + Exchange        │ ┌────────┴──────────┐
-    │  - Zero file I/O               │ │  data/ (shared vol)│
-    │  - Reports to hub via HTTP     │ │  analytics_state   │
-    └────────────────────────────────┘ │  hub.db            │
-                                       └────────────────────┘
-    ┌──────────────┐  ┌──────────────┐
-    │   monitor    │  │  analytics   │  All in-process inside
-    │ - Intel feeds│  │ - Scores     │  the hub. Trade queue,
-    │ - Scanning   │  │ - Patterns   │  intel, bot status are
-    │ - Queue gen  │  │ - Feedback   │  in-memory (HubState).
-    └──────────────┘  └──────────────┘
-```
-
-**Data flow:**
-- Trading bots are **stateless** — in-memory only, zero file access
-- All shared data (intel, analytics, trade queue, extreme watchlist) lives
-  in `HubState` (in-memory) and flows to bots via `/internal/report` HTTP
-- Bots POST their snapshots to hub → hub stores in RAM
-- Hub returns intel/analytics/queue to bots in the HTTP response
-- `hub.db` is the sole persistent trade DB; bots push trades via HTTP
-- `analytics_state.json` is persisted to disk for restart survival
-
-**Persistent files in `data/`:**
-- `hub.db` — SQLite trade history (hub writes, analytics reads)
-- `analytics_state.json` — strategy scores/patterns (survives restarts)
-
-**In-memory only (HubState):**
-- Intel snapshots, trade queue, bot status, extreme watchlist
-
-**Logs:** `logs/` directory (1-day rotation, 30-day retention)
 
 ---
 

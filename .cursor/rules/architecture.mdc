@@ -11,9 +11,10 @@ That document is the source of truth for how the system works.
 ## Hard Rules (never violate)
 
 1. **Bots are lightweight executors.** They receive 1 trade proposal per
-   tick from the hub, validate it, execute or reject. They manage open
-   positions (SL, TP, trailing, DCA, partial takes). That's ALL. Never
-   add market scanning, symbol filtering, data fetching, intelligence,
+   hub check (every 5s), run a last-minute validation (candles + ticker
+   against their strategy conditions), and execute or reject. They manage
+   open positions (SL, TP, trailing, DCA, partial takes). That's ALL.
+   Never add market scanning, symbol filtering, data fetching, intelligence,
    or any decision-making logic to bots. All brains live in the hub.
 
 2. **One in-memory trade queue.** `HubState._trade_queue` is the sole
@@ -32,12 +33,30 @@ That document is the source of truth for how the system works.
    ask the user. Don't invent new data flows, queues, state management,
    or communication patterns.
 
+6. **Idle bots are silent.** No hub communication, no exchange connection.
+   They only watch a local activation file (`data/{bot_id}/activate`).
+
+## Two Cadences in Bot Main Loop
+
+- **Quick hub check (every 5s)**: lightweight POST to hub, receive queue
+  proposal, process it. Fast queue pickup regardless of tick interval.
+- **Full tick (30-600s)**: position management, stops, scales, partials,
+  hedges, candle fetches, full status report to hub.
+
+## Bot Decides WHETHER, Not WHAT
+
+The hub decides WHAT to trade (signal generation, analytics, queue).
+The bot decides WHETHER to execute a given proposal: it validates the
+proposal against its own strategy conditions (last-minute candle + ticker
+check), checks capacity, risk limits, and aggression. If validation fails,
+it rejects the proposal.
+
 ## Container Roles
 
 - **bot-hub**: ALL intelligence (monitor, signals, analytics, dashboard).
   No exchange connection, no trading.
 - **bot-{name}**: Exchange connection + order management ONLY. Receive
-  proposals from hub, execute trades, report back. Minimal footprint.
+  proposals from hub, validate conditions, execute trades, report back.
 
 ## Data Flow
 
@@ -48,7 +67,9 @@ External APIs → Hub MonitorService → IntelSnapshot
                                           ↓
                               Hub TradeQueue (1 pop per bot)
                                           ↓
-                        Bot validates → executes or rejects
+                    Bot validates (candles + ticker vs strategy conditions)
+                                          ↓
+                        Bot executes or rejects
                                           ↓
                         Bot reports result → Hub records in hub.db
 ```

@@ -1,15 +1,16 @@
 # System Architecture
 
 > **Audience**: AI agents. Read this FIRST before touching any code.
-> This document describes the current implementation. Do not deviate from it unless instructed to do so.
+> This document describes the current implementation. Do not deviate from it.
 
 ---
 
 ## Golden Rules
 
-1. **Bots are lightweight.** They receive 1 trade proposal per tick, validate
-   it, and execute or reject. They manage open positions (SL, TP, trailing,
-   DCA, partial takes). That's it. NEVER add intelligence, filtering, data
+1. **Bots are lightweight.** They receive 1 trade proposal, validate it
+   against their own strategy conditions (last-minute spot check), and
+   execute or reject. They manage open positions (SL, TP, trailing, DCA,
+   partial takes). That's it. NEVER add intelligence, filtering, data
    fetching, or decision-making logic to bots. All brains live in the hub.
 
 2. **One queue.** There is exactly one in-memory trade queue inside HubState.
@@ -69,7 +70,9 @@ Runs in-process:
   objects with priority (CRITICAL/DAILY/SWING) and strength scores.
   Proposals are filtered for symbol availability BEFORE entering the queue.
 - **AnalyticsService** — reads hub.db trade history, computes strategy
-  weights/patterns/suggestions, persists to analytics_state.json.
+  weights/patterns/suggestions, persists to analytics_state.json (could
+  migrate to a hub.db table in the future — currently JSON for simplicity
+  with the nested structure).
 - **Web dashboard** — React frontend at `/`, health at `/health`.
 - **Internal API** — `/internal/report` (bot ↔ hub), `/internal/trade`
   (trade persistence), `/internal/trades/{bot_id}/open` (recovery).
@@ -95,7 +98,10 @@ They connect to the exchange, register strategies, and trade.
 
 **Idle bots** (`is_default=False`): scalper, fullstack, conservative,
 aggressive, hedger. They start in lean idle mode — no exchange connection,
-no strategies. They poll the hub every 10s for activation.
+no strategies, no hub communication. They check a local activation file
+(`data/{bot_id}/activate`) every 10s. The file is written by the hub's
+toggle endpoint when someone enables the bot via the dashboard. That's
+the only thing idle bots do — watch for that file. Nothing else.
 
 ---
 
@@ -120,27 +126,24 @@ TrendingScanner → hot movers ──→ SignalGenerator
 
 ### Bot ↔ Hub Communication
 
-Every tick (30-600s depending on bot style):
+Two separate endpoints, clean separation:
 
+**POST /internal/report** — status + queue (every 5s)
 ```
-Bot → POST /internal/report
-      payload: {bot_id, bot_style, bot_status, exchange_symbols, queue_updates}
-
-Hub → response: {
-        enabled,               ← is this bot active?
-        confirmed_keys,        ← ack'd trade writes
-        intel,                 ← latest IntelSnapshot
-        analytics,             ← latest AnalyticsSnapshot
-        trade_queue,           ← 1 proposal popped for this bot's style
-        extreme_watchlist,     ← extreme mover candidates
-        intel_age              ← seconds since last intel update
-      }
+Bot → {bot_id, bot_style, bot_status, exchange_symbols, queue_updates}
+Hub → {enabled, confirmed_keys, trade_queue}
 ```
+The bot sends its status and queue feedback. Hub returns the enabled flag,
+trade write confirmations, and 1 queue proposal popped for this bot's style.
+Between full ticks, a lightweight version sends only bot_id + queue_updates.
 
-The bot's tick loop then:
-1. Checks trailing stops, scale-ins, partial takes, wick scalps
-2. Processes the 1 trade proposal (validate → execute or reject)
-3. Reports consumed/rejected back to hub next tick
+**GET /internal/intel** — cached intel snapshot (once per full tick)
+```
+Hub → {intel, analytics, extreme_watchlist, intel_age}
+```
+Returns the full cached snapshot as-is. No bot-specific filtering — the bot
+decides what applies to it. Used for position management (reversal risk,
+aggression modifiers, exposure adjustments), not for finding trades.
 
 ### Trade Persistence
 
@@ -176,31 +179,51 @@ Missing on exchange → POST /internal/recovery-close (excluded from stats)
 
 ---
 
-## Bot Tick Loop (bot.py `_tick()`)
+## Bot Tick Loop (bot.py)
 
-The tick runs every N seconds (configurable per bot profile). Steps:
+Two cadences run in the main loop:
 
-1. Fetch balance and positions from exchange
-2. Check trailing stops + liquidation risk
-3. Scale into positions (PYRAMID DCA / WINNERS adds)
-4. Try leverage raises on PYRAMID positions
-5. Take partial profit on levered-up positions
-6. Check whale position alerts ($100K+ notional)
-7. Try wick scalps (counter-trade wicks)
-8. Close expired quick trades
-9. **Process trade queue** — validate & execute the 1 proposal from hub
-10. Read market intelligence from hub
-11. Legendary day check
-12. Run strategies on tracked symbols (candle analysis)
+### Quick hub check (every 5s)
+Between full ticks, a lightweight hub poll fetches the next queue proposal
+and processes it immediately. This ensures proposals are picked up fast
+regardless of the full tick interval.
+
+### Full tick (30-600s, configurable per bot profile)
+1. **Fetch intel** from hub (`GET /internal/intel` — separate call)
+2. Fetch balance and positions from exchange
+3. Check trailing stops + liquidation risk
+4. Scale into positions (PYRAMID DCA / WINNERS adds)
+5. Try leverage raises on PYRAMID positions
+6. Take partial profit on levered-up positions
+7. Check whale position alerts ($100K+ notional)
+8. Try wick scalps (counter-trade wicks)
+9. Close expired quick trades
+10. **Process trade queue** — validate & execute the 1 proposal from hub
+11. Legendary day check (uses intel for reversal risk)
+12. Fetch candles for held positions (hedge + volatility checks)
 13. Hedge check
 14. Extreme mover evaluation
-15. Write deployment status → report to hub
+15. Write deployment status → full report to hub (`POST /internal/report`)
 
-**What the bot does**: manage positions (stops, scales, partials, hedges),
-execute pre-validated trade proposals, report status.
+### Proposal validation
+Before executing any proposal, the bot runs a **last-minute validation**
+(`_validate_proposal`): fetches recent candles and ticker for the symbol,
+then runs its style-specific validator to confirm conditions still match.
+If they don't, the proposal is rejected. This is the bot's gate — it
+decides WHETHER to trade a given proposal, not WHAT to trade.
 
-**What the bot does NOT do**: scan markets, generate signals, filter symbols,
-fetch intelligence, compute analytics, decide WHAT to trade. That's all hub.
+### What the bot does
+- Manage positions (stops, scales, partials, hedges, wick scalps)
+- Validate proposals against its own strategy conditions before executing
+- Decide WHETHER to accept or reject a proposal (capacity, risk, validation)
+- Use intel from hub for position management (reversal risk, aggression)
+- Report consumed/rejected back to hub
+
+### What the bot does NOT do
+- Scan markets or generate signals (hub does this)
+- Filter symbols for availability (hub does this before queuing)
+- Compute analytics or strategy scores (hub does this)
+- Decide WHAT to trade (hub decides, bot only decides whether to execute)
 
 ---
 
@@ -218,6 +241,11 @@ fetch intelligence, compute analytics, decide WHAT to trade. That's all hub.
 **hub.db** is the ONLY persistent database. Lives on host at
 `$HOST_DATA_DIR/hub.db`. Never delete. Backups in
 `/workspace/trading-bot-backups/`.
+
+**analytics_state.json** persists strategy weights, patterns, and
+suggestions so they survive hub restarts. It's a JSON file because
+the structure is deeply nested (Pydantic model). Could be moved to a
+hub.db table in the future.
 
 Ephemeral JSON files (`bot_status.json`, `trade_queue.json`, etc.) are
 created at runtime and should be wiped on rebuild:
@@ -285,8 +313,8 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
 ## What NOT To Do
 
 - **Don't add logic to bots.** No market scanning, no symbol filtering, no
-  data fetching beyond what's needed for the trade at hand (candle for
-  validation, price for execution). Bots are dumb executors.
+  data fetching beyond what's needed for the trade at hand (candles + ticker
+  for last-minute validation, price for execution). Bots are executors.
 
 - **Don't create multiple queues.** One queue. Period. No per-bot queues,
   no shadow queues, no staging areas inside the bot.
@@ -304,3 +332,6 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
 
 - **Don't touch hub.db directly.** Use TradeDB methods. Never DROP TABLE,
   DELETE FROM, or raw SQL outside the store module.
+
+- **Don't add hub communication to idle bots.** Idle bots only watch a
+  local activation file. No HTTP, no exchange, no nothing.

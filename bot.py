@@ -231,18 +231,20 @@ class TradingBot:
             return True
 
     async def _lean_idle_loop(self) -> None:
-        """Minimal loop for inactive bots — no exchange, no strategies.
+        """Minimal loop for inactive bots — no exchange, no strategies, no hub communication.
 
-        Periodically checks hub for activation. When activated, breaks out
-        and runs _full_start() for full initialization.
+        Checks a local activation file on the shared data volume every 10s.
+        The file is created by the hub's toggle endpoint or manually.
+        When found, breaks out and runs _full_start() for full initialization.
         """
+        bot_id = self.settings.bot_id or "default"
+        activate_path = Path(self.settings.data_dir) / bot_id / "activate"
+        logger.info("Idle — watching {} for activation", activate_path)
         while self._running:
             try:
-                await self._idle_tick()
-
-                self._enabled = self._check_enabled()
-                if self._enabled:
-                    logger.info("Bot ACTIVATED by hub — performing full initialization")
+                if activate_path.exists():
+                    logger.info("Activation file found — performing full initialization")
+                    activate_path.unlink(missing_ok=True)
                     await self._full_start()
                     return
 
@@ -316,6 +318,8 @@ class TradingBot:
             self._hub_session = None
         logger.info("Bot stopped")
 
+    _HUB_POLL_INTERVAL = 5  # seconds — queue check cadence between full ticks
+
     async def _run_loop(self) -> None:
         while self._running:
             try:
@@ -336,9 +340,16 @@ class TradingBot:
 
                     record_tick(time.perf_counter() - t0)
                     self._update_tick_interval()
-                    loop_start = time.perf_counter()
-                    await asyncio.sleep(self._tick_interval)
-                    record_event_loop_lag(time.perf_counter() - loop_start - self._tick_interval)
+
+                    remaining = self._tick_interval
+                    while remaining > 0 and self._running and self._enabled:
+                        sleep_time = min(self._HUB_POLL_INTERVAL, remaining)
+                        loop_start = time.perf_counter()
+                        await asyncio.sleep(sleep_time)
+                        remaining -= sleep_time
+                        record_event_loop_lag(time.perf_counter() - loop_start - sleep_time)
+                        if remaining > 0 and self._running and self._enabled:
+                            await self._quick_hub_check()
                 else:
                     await self._idle_tick()
                     await asyncio.sleep(10)
@@ -347,6 +358,38 @@ class TradingBot:
             except Exception as e:
                 logger.exception("Error in main loop: {}", e)
                 await asyncio.sleep(10)
+
+    async def _quick_hub_check(self) -> None:
+        """Lightweight hub poll between full ticks — fetch queue proposal and process it."""
+        hub_url = self.settings.dashboard_hub_url
+        if not hub_url or not self._multibot:
+            return
+        if not self._hub_session:
+            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+        try:
+            payload: dict[str, Any] = {
+                "bot_id": self.settings.bot_id or "default",
+                "bot_style": self.settings.bot_style,
+            }
+            if self._hub_queue_updates["consumed"] or self._hub_queue_updates["rejected"]:
+                payload["queue_updates"] = self._hub_queue_updates
+                self._hub_queue_updates = {"consumed": [], "rejected": {}}
+
+            url = f"{hub_url.rstrip('/')}/internal/report"
+            async with self._hub_session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    return
+                body = await resp.json()
+                if "enabled" in body:
+                    self._hub_enabled = body["enabled"]
+                if "trade_queue" in body:
+                    self._hub_trade_queue = TradeQueue(**body["trade_queue"])
+                for key in body.get("confirmed_keys", []):
+                    self._pending_hub_acks.pop(key, None)
+        except Exception:
+            return
+        self._retry_pending_hub_trades()
+        await self._process_trade_queue()
 
     def _check_enabled(self) -> bool:
         """Check hub-controlled enable flag (received via /internal/report response)."""
@@ -510,6 +553,8 @@ class TradingBot:
             self._tick_interval = new_interval
 
     async def _tick(self) -> None:
+
+        await self._fetch_intel()
 
         balance_map = await self.exchange.fetch_balance()
         raw_balance = balance_map.get("USDT", 0.0)
@@ -1424,7 +1469,7 @@ class TradingBot:
             await self._post_to_hub(hub_url, payload)
 
     async def _post_to_hub(self, hub_url: str, payload: dict[str, Any]) -> None:
-        """POST snapshot to hub. Hub returns all data bots need (zero direct file access)."""
+        """POST status to hub. Returns enabled flag, confirmed keys, and queue proposal."""
         if not self._hub_session:
             self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
         try:
@@ -1438,19 +1483,35 @@ class TradingBot:
                     self._pending_hub_acks.pop(key, None)
                 if "enabled" in body:
                     self._hub_enabled = body["enabled"]
+                if "trade_queue" in body:
+                    self._hub_trade_queue = TradeQueue(**body["trade_queue"])
+        except Exception as e:
+            logger.debug("Hub report error: {}", e)
+        self._retry_pending_hub_trades()
+
+    async def _fetch_intel(self) -> None:
+        """GET intel, analytics, and extreme watchlist from hub. Called once per full tick."""
+        hub_url = self.settings.dashboard_hub_url
+        if not hub_url or not self._multibot:
+            return
+        if not self._hub_session:
+            self._hub_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+        try:
+            url = f"{hub_url.rstrip('/')}/internal/intel"
+            async with self._hub_session.get(url) as resp:
+                if resp.status != 200:
+                    return
+                body = await resp.json()
                 if "intel" in body:
                     self._hub_intel = IntelSnapshot(**body["intel"])
                 if "analytics" in body:
                     self._hub_analytics = AnalyticsSnapshot(**body["analytics"])
-                if "trade_queue" in body:
-                    self._hub_trade_queue = TradeQueue(**body["trade_queue"])
                 if "extreme_watchlist" in body:
                     self._hub_extreme_watchlist = ExtremeWatchlist(**body["extreme_watchlist"])
                 if "intel_age" in body:
                     self._hub_intel_age = body["intel_age"]
         except Exception as e:
-            logger.debug("Hub report error: {}", e)
-        self._retry_pending_hub_trades()
+            logger.debug("Intel fetch error: {}", e)
 
     async def _push_trade_to_hub(self, record: TradeRecord, request_key: str = "") -> None:
         """Push a trade open/close event to the hub's DB via HTTP with idempotency key."""
