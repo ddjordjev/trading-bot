@@ -129,7 +129,8 @@ class BybitExchange(BaseExchange):
     async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
         try:
             raw = await self._futures.fetch_positions(symbols=[symbol] if symbol else None)
-        except Exception:
+        except Exception as e:
+            logger.warning("Bybit fetch_positions failed: {}", e)
             return []
 
         positions = []

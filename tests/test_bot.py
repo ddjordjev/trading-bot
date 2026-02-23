@@ -215,7 +215,8 @@ class TestLogClosedTrade:
         bot._log_closed_trade(order, "stop")
         assert "BTC/USDT" not in bot._whale_alerted
 
-    def test_log_opened_trade_stores_in_memory(self, bot):
+    @pytest.mark.asyncio
+    async def test_log_opened_trade_stores_in_memory(self, bot):
         sig = Signal(
             symbol="SOL/USDT",
             action=SignalAction.BUY,
@@ -240,8 +241,9 @@ class TestLogClosedTrade:
         sp.current_leverage = 5
         bot.orders.scaler.get = MagicMock(return_value=sp)
         bot.intel = None
+        bot._push_trade_to_hub = AsyncMock()
 
-        bot._log_opened_trade(sig, order)
+        await bot._log_opened_trade(sig, order)
 
         assert "SOL/USDT" in bot._open_trades
         record = bot._open_trades["SOL/USDT"]
@@ -265,10 +267,11 @@ class TestCheckDailyReset:
 
     @pytest.mark.asyncio
     async def test_check_daily_reset_runs_at_midnight(self, bot, mock_exchange):
+        mock_exchange.fetch_positions = AsyncMock(return_value=[])
         with patch("bot.datetime") as m_dt:
             m_dt.now.return_value = datetime(2025, 2, 20, 0, 1, tzinfo=UTC)
             await bot._check_daily_reset()
-        mock_exchange.fetch_balance.assert_called()
+        mock_exchange.fetch_positions.assert_called()
         assert bot.target._day_number == 1
 
 
@@ -1157,6 +1160,7 @@ class TestStartStopLifecycle:
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 100.0})
         bot.notifier.start = AsyncMock()
         bot._run_loop = AsyncMock()
+        bot._fast_monitor_loop = AsyncMock()
         with patch("bot.get_market_schedule") as m_sched:
             m_sched.return_value.configure = MagicMock()
             m_sched.return_value.refresh_holidays = AsyncMock()
@@ -1171,6 +1175,7 @@ class TestStartStopLifecycle:
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 100.0})
         bot.notifier.start = AsyncMock()
         bot._run_loop = AsyncMock()
+        bot._fast_monitor_loop = AsyncMock()
         with patch("bot.get_market_schedule") as m_sched:
             m_sched.return_value.configure = MagicMock()
             m_sched.return_value.refresh_holidays = AsyncMock()
@@ -1392,16 +1397,13 @@ class TestStartMultibot:
             from bot import TradingBot
 
             bot = TradingBot(settings=settings)
-        mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 100.0})
-        bot._run_loop = AsyncMock()
-        bot._recover_state_from_hub = AsyncMock()
-        bot.notifier.start = AsyncMock()
-        with patch("bot.get_market_schedule") as m_sched:
-            m_sched.return_value.configure = MagicMock()
-            m_sched.return_value.refresh_holidays = AsyncMock()
-            m_sched.return_value.summary = MagicMock(return_value="")
-            await bot.start()
         assert bot._multibot is True
+        bot._full_start = AsyncMock()
+        bot._lean_idle_loop = AsyncMock()
+        bot._check_initial_activation = AsyncMock(return_value=True)
+        await bot.start()
+        bot._full_start.assert_awaited_once()
+        bot._lean_idle_loop.assert_not_awaited()
         if bot.scanner:
             bot.scanner.start.assert_not_called()
         if bot.news:
@@ -1482,7 +1484,7 @@ class TestTickStrategyLoop:
         from core.models import Candle
 
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 500.0})
-        pos = MagicMock(symbol="BTC/USDT", amount=0.1, side=MagicMock(value="buy"))
+        pos = MagicMock(symbol="BTC/USDT", amount=0.1, side=MagicMock(value="buy"), unrealized_pnl=0.0)
         mock_exchange.fetch_positions = AsyncMock(return_value=[pos])
         candles = [
             Candle(
@@ -1634,7 +1636,7 @@ class TestTickStrategyLoop:
         from core.models import Candle
 
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 500.0})
-        pos = MagicMock(symbol="BTC/USDT", amount=0.1, side=MagicMock(value="buy"))
+        pos = MagicMock(symbol="BTC/USDT", amount=0.1, side=MagicMock(value="buy"), unrealized_pnl=0.0)
         mock_exchange.fetch_positions = AsyncMock(return_value=[pos])
         candles = [
             Candle(
@@ -1824,6 +1826,7 @@ class TestStartNonMultibotSymbolsException:
         mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 100.0})
         mock_exchange.get_available_symbols = AsyncMock(side_effect=RuntimeError("api down"))
         bot._run_loop = AsyncMock()
+        bot._fast_monitor_loop = AsyncMock()
         bot._recover_state_from_hub = AsyncMock()
         bot.notifier.start = AsyncMock()
         with patch("bot.get_market_schedule") as m_sched:
@@ -2071,7 +2074,7 @@ class TestIdleMode:
             call_count += 1
             if call_count <= 1:
                 return True
-            bot._running = False  # stop after transition
+            bot._running = False
             return False
 
         bot._check_enabled = mock_check
@@ -2083,7 +2086,11 @@ class TestIdleMode:
         bot._update_tick_interval = MagicMock()
         bot._tick_interval = 0.01
 
-        with patch("bot.record_tick", create=True), patch("bot.record_event_loop_lag", create=True):
+        with (
+            patch("bot.record_tick", create=True),
+            patch("bot.record_event_loop_lag", create=True),
+            patch("bot.asyncio.sleep", new_callable=AsyncMock),
+        ):
             await bot._run_loop()
 
         bot._wind_down.assert_awaited_once()

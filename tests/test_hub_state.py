@@ -132,7 +132,7 @@ class TestHubStateTradeQueue:
         assert read.pending_count == 1
 
     def test_serve_proposal_and_consume(self, state):
-        """serve_proposal_to_bot picks and locks; handle_consume removes exchange."""
+        """serve_proposal_to_bot picks and locks; handle_consume clears all exchanges."""
         p = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
@@ -156,10 +156,10 @@ class TestHubStateTradeQueue:
         state.handle_consume(p.id, "BINANCE", "bot1")
         remaining = state.read_trade_queue()
         assert remaining.total == 1
-        assert "BINANCE" not in remaining.proposals[0].supported_exchanges
-        assert "MEXC" in remaining.proposals[0].supported_exchanges
+        assert remaining.proposals[0].supported_exchanges == []
 
-    def test_consume_removes_proposal_when_no_exchanges_left(self, state):
+    def test_consume_keeps_proposal_as_symbol_blocker(self, state):
+        """After consume, proposal stays with empty exchanges as a symbol blocker."""
         p = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
@@ -175,7 +175,10 @@ class TestHubStateTradeQueue:
         state.write_trade_queue(q)
 
         state.handle_consume(p.id, "BINANCE", "bot1")
-        assert state.read_trade_queue().total == 0
+        remaining = state.read_trade_queue()
+        assert remaining.total == 1
+        assert remaining.proposals[0].supported_exchanges == []
+        assert remaining.has_symbol("BTC/USDT")
 
     def test_serve_respects_bot_style_target(self, state):
         p1 = TradeProposal(

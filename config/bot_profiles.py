@@ -97,7 +97,7 @@ ALL_PROFILES: list[BotProfile] = [
             "TICK_INTERVAL_IDLE": "120",
             "TICK_INTERVAL_ACTIVE": "60",
         },
-        is_default=True,
+        is_default=False,
     ),
     BotProfile(
         id="swing",
@@ -110,7 +110,7 @@ ALL_PROFILES: list[BotProfile] = [
             "TICK_INTERVAL_IDLE": "600",
             "TICK_INTERVAL_ACTIVE": "300",
         },
-        is_default=True,
+        is_default=False,
     ),
     BotProfile(
         id="scalper",
@@ -125,7 +125,7 @@ ALL_PROFILES: list[BotProfile] = [
             "TAKE_PROFIT_PCT": "2.0",
             "INITIAL_RISK_AMOUNT": "30",
         },
-        is_default=True,
+        is_default=False,
     ),
     BotProfile(
         id="fullstack",
@@ -160,7 +160,7 @@ ALL_PROFILES: list[BotProfile] = [
             "STOP_LOSS_PCT": "1.0",
             "INITIAL_RISK_AMOUNT": "20",
         },
-        is_default=True,
+        is_default=False,
     ),
     BotProfile(
         id="aggressive",
@@ -175,7 +175,7 @@ ALL_PROFILES: list[BotProfile] = [
             "INITIAL_RISK_AMOUNT": "100",
             "MAX_CONCURRENT_POSITIONS": "8",
         },
-        is_default=True,
+        is_default=False,
     ),
 ]
 

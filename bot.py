@@ -1018,8 +1018,13 @@ class TradingBot:
         else:
             logger.info("Data dir: {:.2f} MB", size_mb)
 
-    def _log_opened_trade(self, signal: Signal, order: Order, *, low_liquidity: bool = False) -> None:
-        """Record a trade open in memory and push to hub."""
+    async def _log_opened_trade(self, signal: Signal, order: Order, *, low_liquidity: bool = False) -> None:
+        """Record a trade open in memory and push to hub.
+
+        The push is awaited so the trade exists in hub.db before the
+        caller reports consumed — closing the dedup gap where the signal
+        generator could recreate the proposal.
+        """
         try:
             now = datetime.now(UTC)
             sp = self.orders.scaler.get(signal.symbol)
@@ -1046,9 +1051,7 @@ class TradingBot:
             )
             self._open_trades[signal.symbol] = record
             logger.debug("Opened trade for {} (in-memory)", signal.symbol)
-            task = asyncio.ensure_future(self._push_trade_to_hub(record))
-            self._hub_tasks.add(task)
-            task.add_done_callback(self._hub_tasks.discard)
+            await self._push_trade_to_hub(record)
         except Exception as e:
             logger.error("Failed to log opened trade: {}", e)
 
@@ -1743,7 +1746,7 @@ class TradingBot:
                 self._log_closed_trade(order, sig.strategy)
                 realized_pnl = self._calc_realized_pnl(order)
             else:
-                self._log_opened_trade(sig, order, low_liquidity=low_liquidity)
+                await self._log_opened_trade(sig, order, low_liquidity=low_liquidity)
             self._active_signals.append(sig)
             self.target.record_trade(realized_pnl=realized_pnl)
             if len(self._active_signals) > 100:

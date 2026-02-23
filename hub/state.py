@@ -239,15 +239,20 @@ class HubState:
         return picked.model_copy()
 
     def handle_consume(self, proposal_id: str, exchange: str, bot_id: str) -> None:
-        """Bot confirmed it executed the trade — remove this exchange from the proposal."""
+        """Bot confirmed it executed the trade.
+
+        The proposal stays in the queue with cleared exchanges so that
+        ``has_symbol()`` keeps returning True — this prevents the signal
+        generator from recreating a proposal for the same symbol before
+        hub.db and active_symbols catch up.  The lock is left intact.
+        ``purge_stale()`` cleans up once ``max_age_seconds`` is reached.
+        """
         proposal = self._find_proposal(proposal_id)
         if proposal:
             self._outcomes.append(QueueOutcome(proposal_id, proposal.symbol, proposal.strategy, "consumed", bot_id))
             self._outcomes = self._outcomes[-self._outcomes_max :]
-
-        removed = self._trade_queue.remove_exchange(proposal_id, exchange)
-        if removed:
-            logger.debug("Queue: proposal {} fully consumed (no exchanges left)", proposal_id)
+            proposal.supported_exchanges = []
+            proposal.max_age_seconds = int(proposal.age_seconds) + 300
 
         self._trade_queue.updated_at = datetime.now(UTC).isoformat()
 

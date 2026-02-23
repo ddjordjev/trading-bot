@@ -76,6 +76,7 @@ class TradeProposal(BaseModel):
     source: str = ""
     target_bot: str = ""
     supported_exchanges: list[str] = []
+    consumed: bool = False
 
     @property
     def is_locked(self) -> bool:
@@ -147,7 +148,7 @@ class TradeQueue(BaseModel):
 
     @property
     def pending_count(self) -> int:
-        return sum(1 for p in self.proposals if not p.is_locked and not p.is_expired)
+        return sum(1 for p in self.proposals if not p.consumed and not p.is_locked and not p.is_expired)
 
     def add(self, proposal: TradeProposal) -> None:
         if any(p.id == proposal.id for p in self.proposals):

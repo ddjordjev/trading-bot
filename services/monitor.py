@@ -434,7 +434,7 @@ class MonitorService:
         deduped = 0
         all_proposals = staging.proposals
         for proposal in all_proposals:
-            if proposal.is_expired:
+            if proposal.consumed or proposal.is_expired:
                 continue
             if all_tradeable and proposal.symbol not in all_tradeable:
                 skipped += 1
