@@ -180,10 +180,10 @@ class SharedState:
         consumed_ids: list[str],
         rejected: dict[str, str],
     ) -> None:
-        """Apply consumed/rejected updates under exclusive lock to avoid losing monitor's new proposals.
+        """Remove consumed/rejected proposals from the local queue file.
 
-        Bot uses this instead of read-modify-write so it never overwrites
-        proposals added by the monitor after the bot's read.
+        With the hub-centric model, bots report outcomes directly to the hub.
+        This file-based version is kept for backward compat with SharedState.
         """
         if not consumed_ids and not rejected:
             return
@@ -193,10 +193,9 @@ class SharedState:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
                 q = self._read(self._data_dir / "trade_queue.json", TradeQueue) or TradeQueue()
-                for pid in consumed_ids:
-                    q.mark_consumed(pid)
-                for pid, reason in rejected.items():
-                    q.mark_rejected(pid, reason)
+                remove_ids = set(consumed_ids) | set(rejected.keys())
+                for pid in remove_ids:
+                    q.remove_proposal(pid)
                 q.updated_at = datetime.now(UTC).isoformat()
                 self._write(self._data_dir / "trade_queue.json", q)
             finally:

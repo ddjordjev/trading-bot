@@ -421,7 +421,7 @@ class TestSignalGenerator:
         )
         empty_queue.add(prop)
         gen._propose(empty_queue, prop)
-        assert len(empty_queue.daily) == 1
+        assert empty_queue.total == 1
 
     def test_purge_cooldowns_removes_old(self, gen):
         from datetime import datetime, timedelta
@@ -717,7 +717,7 @@ class TestSignalGenerator:
         )
         gen._propose(empty_queue, prop)
         assert empty_queue.total == 1
-        queued = empty_queue.daily[0]
+        queued = empty_queue.proposals[0]
         assert "MEXC" in queued.supported_exchanges
         assert "BINANCE" not in queued.supported_exchanges
 

@@ -205,23 +205,26 @@ class TestTradeQueue:
         q.add(TradeProposal(priority=SignalPriority.DAILY, symbol="ETH/USDT"))
         assert q.pending_count == 2
 
-    def test_mark_consumed(self):
+    def test_remove_exchange(self):
         from shared.models import SignalPriority, TradeProposal, TradeQueue
 
         q = TradeQueue()
-        p = TradeProposal(priority=SignalPriority.SWING, symbol="SOL/USDT")
+        p = TradeProposal(priority=SignalPriority.SWING, symbol="SOL/USDT", supported_exchanges=["BINANCE", "MEXC"])
         q.add(p)
-        q.mark_consumed(p.id)
-        assert q.pending_count == 0
+        removed = q.remove_exchange(p.id, "BINANCE")
+        assert not removed
+        assert q.total == 1
+        assert q.proposals[0].supported_exchanges == ["MEXC"]
 
-    def test_mark_rejected(self):
+    def test_remove_exchange_removes_proposal_when_empty(self):
         from shared.models import SignalPriority, TradeProposal, TradeQueue
 
         q = TradeQueue()
-        p = TradeProposal(priority=SignalPriority.DAILY, symbol="DOGE/USDT")
+        p = TradeProposal(priority=SignalPriority.DAILY, symbol="DOGE/USDT", supported_exchanges=["BINANCE"])
         q.add(p)
-        q.mark_rejected(p.id, reason="too weak")
-        assert q.pending_count == 0
+        removed = q.remove_exchange(p.id, "BINANCE")
+        assert removed
+        assert q.total == 0
 
     def test_get_actionable(self):
         from shared.models import SignalPriority, TradeProposal, TradeQueue
@@ -239,10 +242,10 @@ class TestTradeQueue:
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
             created_at=(datetime.now(UTC) - timedelta(hours=2)).isoformat(),
+            max_age_seconds=60,
         )
-        p.consumed = True
-        q.critical.append(p)
-        removed = q.purge_stale(max_consumed_age=60)
+        q.add(p)
+        removed = q.purge_stale(max_expired_age=60)
         assert removed == 1
         assert q.total == 0
 
@@ -984,11 +987,7 @@ class TestSharedStateExtended:
         state.write_trade_queue(q)
         state.apply_trade_queue_updates(consumed_ids=[p1.id], rejected={p2.id: "no slots"})
         read = state.read_trade_queue()
-        assert read.total == 2
-        consumed = next(x for x in read.critical + read.daily + read.swing if x.id == p1.id)
-        assert consumed.consumed
-        rejected = next(x for x in read.critical + read.daily + read.swing if x.id == p2.id)
-        assert rejected.rejected
+        assert read.total == 0
 
 
 # ── Santiment Client ─────────────────────────────────────────────────────────

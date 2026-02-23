@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -71,14 +71,23 @@ class TradeProposal(BaseModel):
 
     entry_plan: EntryPlan | None = None
 
-    consumed: bool = False
-    consumed_at: str = ""
-    rejected: bool = False
-    reject_reason: str = ""
+    locked_until: str = ""
 
     source: str = ""
-    target_bot: str = ""  # routing: which bot style should handle this (momentum/meanrev/swing)
-    supported_exchanges: list[str] = []  # exchanges where this symbol was found
+    target_bot: str = ""
+    supported_exchanges: list[str] = []
+
+    @property
+    def is_locked(self) -> bool:
+        if not self.locked_until:
+            return False
+        try:
+            deadline = datetime.fromisoformat(self.locked_until.replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=UTC)
+            return datetime.now(UTC) < deadline
+        except (ValueError, TypeError):
+            return False
 
     @property
     def is_expired(self) -> bool:
@@ -115,73 +124,124 @@ class TradeProposal(BaseModel):
 
 
 class TradeQueue(BaseModel):
-    """Priority queue of trade proposals from monitor/intel to the bot.
+    """Flat priority queue of trade proposals.
 
-    Stored in HubState (in-memory). Monitor writes proposals, bots
-    receive them via the /internal/report HTTP response each tick.
+    Single list sorted by priority (CRITICAL > DAILY > SWING) then age.
+    Proposals are either available or locked (``locked_until`` set).
+    On consume/reject the bot's exchange is removed; when no exchanges
+    remain the proposal is deleted.
     """
 
-    critical: list[TradeProposal] = []
-    daily: list[TradeProposal] = []
-    swing: list[TradeProposal] = []
+    proposals: list[TradeProposal] = []
     updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+    _PRIORITY_ORDER: dict[SignalPriority, int] = {
+        SignalPriority.CRITICAL: 0,
+        SignalPriority.DAILY: 1,
+        SignalPriority.SWING: 2,
+    }
 
     @property
     def total(self) -> int:
-        return len(self.critical) + len(self.daily) + len(self.swing)
+        return len(self.proposals)
 
     @property
     def pending_count(self) -> int:
-        return sum(
-            1 for p in self.critical + self.daily + self.swing if not p.consumed and not p.rejected and not p.is_expired
-        )
+        return sum(1 for p in self.proposals if not p.is_locked and not p.is_expired)
 
     def add(self, proposal: TradeProposal) -> None:
-        bucket = self._bucket(proposal.priority)
-        if any(p.id == proposal.id for p in bucket):
+        if any(p.id == proposal.id for p in self.proposals):
             return
-        bucket.append(proposal)
+        self.proposals.append(proposal)
 
-    def get_actionable(self, priority: SignalPriority) -> list[TradeProposal]:
-        return [p for p in self._bucket(priority) if not p.consumed and not p.rejected and not p.is_expired]
+    def has_symbol(self, symbol: str) -> bool:
+        """True if the symbol has any pending or locked proposal."""
+        return any(p.symbol == symbol and not p.is_expired for p in self.proposals)
 
-    def mark_consumed(self, proposal_id: str) -> None:
-        for p in self.critical + self.daily + self.swing:
+    def get_actionable(self, priority: SignalPriority | None = None) -> list[TradeProposal]:
+        """Return available (non-locked, non-expired) proposals, optionally filtered by priority."""
+        return [
+            p
+            for p in self.proposals
+            if not p.is_locked and not p.is_expired and (priority is None or p.priority == priority)
+        ]
+
+    def get_next_for_bot(
+        self,
+        exchange: str,
+        bot_style: str = "",
+        allowed_priorities: list[SignalPriority] | None = None,
+        active_symbols: set[str] | None = None,
+        open_db_symbols: set[str] | None = None,
+    ) -> TradeProposal | None:
+        """Return the highest-priority available proposal for this bot, or None."""
+        ex_upper = exchange.upper()
+        prio_order = [SignalPriority.CRITICAL, SignalPriority.DAILY, SignalPriority.SWING]
+
+        for prio in prio_order:
+            if allowed_priorities and prio not in allowed_priorities:
+                continue
+            for p in self.proposals:
+                if p.priority != prio:
+                    continue
+                if p.is_locked or p.is_expired:
+                    continue
+                if ex_upper not in p.supported_exchanges:
+                    continue
+                if active_symbols and p.symbol in active_symbols:
+                    continue
+                if open_db_symbols and p.symbol in open_db_symbols:
+                    continue
+                targets = {t.strip() for t in (p.target_bot or "").split(",") if t.strip()}
+                if targets and bot_style not in targets:
+                    continue
+                return p
+        return None
+
+    def lock_proposal(self, proposal_id: str, seconds: int = 60) -> None:
+        deadline = datetime.now(UTC) + timedelta(seconds=seconds)
+        for p in self.proposals:
             if p.id == proposal_id:
-                p.consumed = True
-                p.consumed_at = datetime.now(UTC).isoformat()
+                p.locked_until = deadline.isoformat()
                 return
 
-    def mark_rejected(self, proposal_id: str, reason: str = "") -> None:
-        for p in self.critical + self.daily + self.swing:
+    def unlock_expired(self) -> int:
+        """Clear locks whose deadline has passed."""
+        cleared = 0
+        for p in self.proposals:
+            if p.locked_until and not p.is_locked:
+                p.locked_until = ""
+                cleared += 1
+        return cleared
+
+    def remove_exchange(self, proposal_id: str, exchange: str) -> bool:
+        """Remove *exchange* from a proposal's supported list.
+
+        Clears the lock.  Returns True if the proposal was removed entirely
+        (no supported exchanges left).
+        """
+        ex_upper = exchange.upper()
+        for i, p in enumerate(self.proposals):
             if p.id == proposal_id:
-                p.rejected = True
-                p.reject_reason = reason
-                return
+                p.supported_exchanges = [e for e in p.supported_exchanges if e != ex_upper]
+                p.locked_until = ""
+                if not p.supported_exchanges:
+                    self.proposals.pop(i)
+                    return True
+                return False
+        return False
 
-    def purge_stale(self, max_consumed_age: int = 3600, max_expired_age: int = 600) -> int:
-        """Remove consumed/rejected/expired proposals older than thresholds."""
-        removed = 0
-        _now = datetime.now(UTC)
-        for attr in ("critical", "daily", "swing"):
-            bucket: list[TradeProposal] = getattr(self, attr)
-            keep = []
-            for p in bucket:
-                age = p.age_seconds
-                if (
-                    (p.consumed and age > max_consumed_age)
-                    or (p.rejected and age > max_expired_age)
-                    or (p.is_expired and age > max_expired_age)
-                ):
-                    removed += 1
-                else:
-                    keep.append(p)
-            setattr(self, attr, keep)
-        return removed
+    def remove_proposal(self, proposal_id: str) -> TradeProposal | None:
+        for i, p in enumerate(self.proposals):
+            if p.id == proposal_id:
+                return self.proposals.pop(i)
+        return None
 
-    def _bucket(self, priority: SignalPriority) -> list[TradeProposal]:
-        result: list[TradeProposal] = getattr(self, priority.value)
-        return result
+    def purge_stale(self, max_expired_age: int = 600) -> int:
+        """Remove expired proposals older than *max_expired_age* seconds."""
+        before = len(self.proposals)
+        self.proposals = [p for p in self.proposals if not (p.is_expired and p.age_seconds > max_expired_age)]
+        return before - len(self.proposals)
 
 
 class BotDeploymentStatus(BaseModel):

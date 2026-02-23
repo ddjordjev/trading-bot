@@ -116,7 +116,7 @@ class TestHubStateBotStatus:
 class TestHubStateTradeQueue:
     def test_write_and_read_queue(self, state):
         q = TradeQueue()
-        q.critical.append(
+        q.add(
             TradeProposal(
                 priority=SignalPriority.CRITICAL,
                 symbol="BTC/USDT",
@@ -131,7 +131,8 @@ class TestHubStateTradeQueue:
         read = state.read_trade_queue()
         assert read.pending_count == 1
 
-    def test_apply_trade_queue_updates_consumes(self, state):
+    def test_serve_proposal_and_consume(self, state):
+        """serve_proposal_to_bot picks and locks; handle_consume removes exchange."""
         p = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
@@ -140,17 +141,43 @@ class TestHubStateTradeQueue:
             reason="r",
             strength=0.8,
             market_type="futures",
+            target_bot="momentum",
+            supported_exchanges=["BINANCE", "MEXC"],
         )
         q = TradeQueue()
-        q.critical.append(p)
+        q.add(p)
         state.write_trade_queue(q)
 
-        state.apply_trade_queue_updates(consumed_ids=[p.id], rejected={})
-        read = state.read_trade_queue()
-        assert read.pending_count == 0
+        served = state.serve_proposal_to_bot("momentum", "bot1", "BINANCE")
+        assert served is not None
+        assert served.symbol == "BTC/USDT"
+        assert state.read_trade_queue().proposals[0].is_locked
 
-    def test_read_queue_for_bot_style_pops_one(self, state):
-        """Each read pops exactly 1 matching proposal from the top."""
+        state.handle_consume(p.id, "BINANCE", "bot1")
+        remaining = state.read_trade_queue()
+        assert remaining.total == 1
+        assert "BINANCE" not in remaining.proposals[0].supported_exchanges
+        assert "MEXC" in remaining.proposals[0].supported_exchanges
+
+    def test_consume_removes_proposal_when_no_exchanges_left(self, state):
+        p = TradeProposal(
+            priority=SignalPriority.CRITICAL,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="m",
+            reason="r",
+            strength=0.8,
+            market_type="futures",
+            supported_exchanges=["BINANCE"],
+        )
+        q = TradeQueue()
+        q.add(p)
+        state.write_trade_queue(q)
+
+        state.handle_consume(p.id, "BINANCE", "bot1")
+        assert state.read_trade_queue().total == 0
+
+    def test_serve_respects_bot_style_target(self, state):
         p1 = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
@@ -160,6 +187,7 @@ class TestHubStateTradeQueue:
             strength=0.8,
             market_type="futures",
             target_bot="momentum",
+            supported_exchanges=["BINANCE"],
         )
         p2 = TradeProposal(
             priority=SignalPriority.CRITICAL,
@@ -169,63 +197,89 @@ class TestHubStateTradeQueue:
             reason="r",
             strength=0.6,
             market_type="futures",
-            target_bot="momentum",
-        )
-        p3 = TradeProposal(
-            priority=SignalPriority.CRITICAL,
-            symbol="SOL/USDT",
-            side="long",
-            strategy="s",
-            reason="r",
-            strength=0.7,
-            market_type="futures",
             target_bot="swing",
+            supported_exchanges=["BINANCE"],
         )
         q = TradeQueue()
-        q.critical.extend([p1, p2, p3])
+        q.add(p1)
+        q.add(p2)
         state.write_trade_queue(q)
 
-        # First momentum bot gets BTC (top of queue)
-        bot1_q = state.read_queue_for_bot_style("momentum")
-        assert len(bot1_q.critical) == 1
-        assert bot1_q.critical[0].symbol == "BTC/USDT"
+        served = state.serve_proposal_to_bot("momentum", "bot1", "BINANCE")
+        assert served is not None
+        assert served.symbol == "BTC/USDT"
 
-        # Second momentum bot gets ETH (next in line)
-        bot2_q = state.read_queue_for_bot_style("momentum")
-        assert len(bot2_q.critical) == 1
-        assert bot2_q.critical[0].symbol == "ETH/USDT"
+        state.handle_consume(p1.id, "BINANCE", "bot1")
 
-        # SOL targeted at swing — momentum gets nothing
-        bot3_q = state.read_queue_for_bot_style("momentum")
-        assert bot3_q.pending_count == 0
+        nothing = state.serve_proposal_to_bot("momentum", "bot2", "BINANCE")
+        assert nothing is None
 
-        # Swing bot gets SOL
-        swing_q = state.read_queue_for_bot_style("swing")
-        assert len(swing_q.critical) == 1
-        assert swing_q.critical[0].symbol == "SOL/USDT"
+        swing = state.serve_proposal_to_bot("swing", "bot3", "BINANCE")
+        assert swing is not None
+        assert swing.symbol == "ETH/USDT"
 
-    def test_read_queue_for_bot_style_includes_untagged(self, state):
-        """Untagged proposals match any style."""
-        p = TradeProposal(
+    def test_serve_respects_allowed_priorities(self, state):
+        p_daily = TradeProposal(
             priority=SignalPriority.DAILY,
-            symbol="SOL/USDT",
+            symbol="BTC/USDT",
             side="long",
             strategy="x",
             reason="r",
             strength=0.5,
             market_type="futures",
-            target_bot="",
+            supported_exchanges=["BINANCE"],
         )
         q = TradeQueue()
-        q.daily.append(p)
+        q.add(p_daily)
         state.write_trade_queue(q)
 
-        result = state.read_queue_for_bot_style("momentum")
-        assert len(result.daily) == 1
-        assert state.read_trade_queue().pending_count == 0
+        only_critical = state.serve_proposal_to_bot(
+            "momentum", "bot1", "BINANCE", allowed_priorities=[SignalPriority.CRITICAL]
+        )
+        assert only_critical is None
+
+        daily_ok = state.serve_proposal_to_bot("momentum", "bot1", "BINANCE", allowed_priorities=[SignalPriority.DAILY])
+        assert daily_ok is not None
+
+    def test_serve_filters_active_symbols(self, state):
+        p = TradeProposal(
+            priority=SignalPriority.CRITICAL,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="m",
+            reason="r",
+            strength=0.8,
+            market_type="futures",
+            supported_exchanges=["BINANCE"],
+        )
+        q = TradeQueue()
+        q.add(p)
+        state.write_trade_queue(q)
+
+        state.update_bot_positions("other_bot", "BINANCE", {"BTC/USDT"})
+
+        served = state.serve_proposal_to_bot("momentum", "bot1", "BINANCE")
+        assert served is None
+
+    def test_serve_filters_open_db_symbols(self, state):
+        p = TradeProposal(
+            priority=SignalPriority.CRITICAL,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="m",
+            reason="r",
+            strength=0.8,
+            market_type="futures",
+            supported_exchanges=["BINANCE"],
+        )
+        q = TradeQueue()
+        q.add(p)
+        state.write_trade_queue(q)
+
+        served = state.serve_proposal_to_bot("momentum", "bot1", "BINANCE", open_db_symbols={"BTC/USDT"})
+        assert served is None
 
     def test_rejection_tracking(self, state):
-        """Rejections are recorded with escalating counts via dispatched list."""
         p = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
@@ -235,18 +289,33 @@ class TestHubStateTradeQueue:
             strength=0.8,
             market_type="futures",
             target_bot="momentum",
+            supported_exchanges=["BINANCE"],
         )
         q = TradeQueue()
-        q.critical.append(p)
+        q.add(p)
         state.write_trade_queue(q)
 
-        # Bot pops the proposal (puts it in dispatched list)
-        state.read_queue_for_bot_style("momentum")
-
-        state.apply_bot_queue_updates("bot1", consumed_ids=[], rejected={p.id: "no free slots"})
+        state.handle_reject(p.id, "BINANCE", "bot1", "no free slots")
         history = state.get_rejection_history()
         assert "BTC/USDT|m" in history
         assert history["BTC/USDT|m"].count == 1
 
-        state.apply_bot_queue_updates("bot1", consumed_ids=[], rejected={p.id: "no free slots"})
-        assert history["BTC/USDT|m"].count == 2
+    def test_untagged_proposals_match_any_style(self, state):
+        p = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="SOL/USDT",
+            side="long",
+            strategy="x",
+            reason="r",
+            strength=0.5,
+            market_type="futures",
+            target_bot="",
+            supported_exchanges=["BINANCE"],
+        )
+        q = TradeQueue()
+        q.add(p)
+        state.write_trade_queue(q)
+
+        result = state.serve_proposal_to_bot("momentum", "bot1", "BINANCE")
+        assert result is not None
+        assert result.symbol == "SOL/USDT"

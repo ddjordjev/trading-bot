@@ -451,47 +451,27 @@ class TestProcessSignalAndQueue:
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_empty_returns_early(self, bot):
-        bot._hub_trade_queue = None
+        bot._hub_proposal = None
         await bot._process_trade_queue()
         bot.exchange.fetch_positions.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_read_exception_returns_early(self, bot):
-        bot._hub_trade_queue = None
+        bot._hub_proposal = None
         await bot._process_trade_queue()
         bot.exchange.fetch_positions.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_process_trade_queue_warmup_skips(self, bot):
-        """Queue processing is skipped during warmup period."""
-        bot._started_at = datetime.now(UTC)
-        bot._warmup_minutes = 5
-        bot._hub_trade_queue = MagicMock(pending_count=0)
-        await bot._process_trade_queue()
-        bot.exchange.fetch_positions.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_process_trade_queue_after_warmup_proceeds(self, bot):
-        """Queue processing proceeds after warmup period elapses."""
-        from datetime import timedelta
-
-        bot._started_at = datetime.now(UTC) - timedelta(minutes=10)
-        bot._warmup_minutes = 3
-        bot._hub_trade_queue = MagicMock(pending_count=0)
-        await bot._process_trade_queue()
-        bot.exchange.fetch_positions.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_process_trade_queue_respects_per_tick_cap(self, bot, mock_exchange):
-        """Only MAX_QUEUE_EXECUTIONS_PER_TICK proposals execute per tick."""
+    async def test_process_trade_queue_processes_single_proposal(self, bot, mock_exchange):
+        """Hub serves one proposal at a time — bot processes it and reports."""
         from datetime import timedelta
 
         from shared.models import SignalPriority, TradeProposal
 
         bot._started_at = datetime.now(UTC) - timedelta(minutes=10)
-        bot._warmup_minutes = 3
+        bot._warmup_minutes = 1
 
-        p1 = TradeProposal(
+        p = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
             side="long",
@@ -501,29 +481,21 @@ class TestProcessSignalAndQueue:
             market_type="futures",
             supported_exchanges=["MEXC"],
         )
-        p2 = TradeProposal(
-            priority=SignalPriority.CRITICAL,
-            symbol="ETH/USDT",
-            side="long",
-            strategy="m",
-            reason="t2",
-            strength=0.9,
-            market_type="futures",
-            supported_exchanges=["MEXC"],
-        )
-        queue = MagicMock(pending_count=2)
-        queue.get_actionable = MagicMock(return_value=[p1, p2])
-        bot._hub_trade_queue = queue
+        bot._hub_proposal = p
 
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot._execute_proposal = AsyncMock(return_value=True)
+        bot._is_symbol_open_on_exchange = AsyncMock(return_value=False)
+        bot._report_queue_outcome = AsyncMock()
         bot.target.should_trade = MagicMock(return_value=True)
         bot.target.aggression_multiplier = MagicMock(return_value=1.0)
         bot.target.reset_day(100.0)
         bot.target.update_balance(105.0)
 
         await bot._process_trade_queue()
-        assert bot._execute_proposal.call_count == bot.MAX_QUEUE_EXECUTIONS_PER_TICK
+        bot._execute_proposal.assert_called_once()
+        bot._report_queue_outcome.assert_called_once()
+        assert bot._hub_proposal is None
 
     @pytest.mark.asyncio
     async def test_execute_proposal_success(self, bot, mock_exchange):
@@ -884,7 +856,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
         from shared.models import SignalPriority, TradeProposal
 
         bot._started_at = datetime.now(UTC) - timedelta(minutes=10)
-        bot._warmup_minutes = 3
+        bot._warmup_minutes = 1
         with patch.object(type(bot.settings), "is_market_type_allowed", MagicMock(return_value=False)):
             p = TradeProposal(
                 priority=SignalPriority.CRITICAL,
@@ -896,9 +868,8 @@ class TestProcessTradeQueueRejectsAndUpdates:
                 market_type="futures",
                 supported_exchanges=["MEXC"],
             )
-            queue = MagicMock(pending_count=1)
-            queue.get_actionable = MagicMock(side_effect=lambda pri: [p] if pri == SignalPriority.CRITICAL else [])
-            bot._hub_trade_queue = queue
+            bot._hub_proposal = p
+            bot._report_queue_outcome = AsyncMock()
             mock_exchange.fetch_positions = AsyncMock(return_value=[])
             bot.target.should_trade = MagicMock(return_value=True)
             bot.target.aggression_multiplier = MagicMock(return_value=1.0)
@@ -907,10 +878,10 @@ class TestProcessTradeQueueRejectsAndUpdates:
 
             await bot._process_trade_queue()
 
-        assert queue.mark_rejected.called
-        reject_reason = queue.mark_rejected.call_args[0][1]
-        assert "not allowed" in reject_reason.lower()
-        assert len(bot._hub_queue_updates["rejected"]) > 0
+        bot._report_queue_outcome.assert_called_once()
+        call_args = bot._report_queue_outcome.call_args
+        assert call_args[0][1] == "rejected"
+        assert "not allowed" in call_args[0][2].lower()
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_rejects_no_free_slots(self, bot, mock_exchange):
@@ -920,7 +891,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
         from shared.models import SignalPriority, TradeProposal
 
         bot._started_at = datetime.now(UTC) - timedelta(minutes=10)
-        bot._warmup_minutes = 3
+        bot._warmup_minutes = 1
         with patch.object(type(bot.settings), "effective_max_concurrent_positions", PropertyMock(return_value=1)):
             p = TradeProposal(
                 priority=SignalPriority.CRITICAL,
@@ -932,9 +903,8 @@ class TestProcessTradeQueueRejectsAndUpdates:
                 market_type="futures",
                 supported_exchanges=["MEXC"],
             )
-            queue = MagicMock(pending_count=1)
-            queue.get_actionable = MagicMock(side_effect=lambda pri: [p] if pri == SignalPriority.CRITICAL else [])
-            bot._hub_trade_queue = queue
+            bot._hub_proposal = p
+            bot._report_queue_outcome = AsyncMock()
             pos = Position(
                 symbol="ETH/USDT",
                 side=OrderSide.BUY,
@@ -951,9 +921,8 @@ class TestProcessTradeQueueRejectsAndUpdates:
 
             await bot._process_trade_queue()
 
-        assert queue.mark_rejected.called
-        assert queue.mark_rejected.call_args[0][1] == "no free slots"
-        assert p.id in bot._hub_queue_updates["rejected"] or len(bot._hub_queue_updates["rejected"]) > 0
+        bot._report_queue_outcome.assert_called_once()
+        assert bot._report_queue_outcome.call_args[0][2] == "no free slots"
 
     @pytest.mark.asyncio
     async def test_process_trade_queue_rejects_when_not_allow_new(self, bot, mock_exchange):
@@ -962,8 +931,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
         from shared.models import SignalPriority, TradeProposal
 
         bot._started_at = datetime.now(UTC) - timedelta(minutes=10)
-        bot._warmup_minutes = 3
-        queue = MagicMock(pending_count=1)
+        bot._warmup_minutes = 1
         p = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
@@ -974,8 +942,8 @@ class TestProcessTradeQueueRejectsAndUpdates:
             market_type="futures",
             supported_exchanges=["MEXC"],
         )
-        queue.get_actionable = MagicMock(side_effect=lambda pri: [p] if pri == SignalPriority.CRITICAL else [])
-        bot._hub_trade_queue = queue
+        bot._hub_proposal = p
+        bot._report_queue_outcome = AsyncMock()
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot.target.should_trade = MagicMock(return_value=False)
         tier_mock = MagicMock(value="strong")
@@ -985,18 +953,18 @@ class TestProcessTradeQueueRejectsAndUpdates:
 
             await bot._process_trade_queue()
 
-        assert queue.mark_rejected.called
-        assert "not trading" in queue.mark_rejected.call_args[0][1].lower()
+        bot._report_queue_outcome.assert_called_once()
+        assert "tier=" in bot._report_queue_outcome.call_args[0][2]
 
     @pytest.mark.asyncio
-    async def test_process_trade_queue_applies_updates_with_consumed_and_rejected(self, bot, mock_exchange):
+    async def test_process_trade_queue_consumed_reports_immediately(self, bot, mock_exchange):
         from datetime import timedelta
 
         from shared.models import SignalPriority, TradeProposal
         from validators import ValidationResult
 
         bot._started_at = datetime.now(UTC) - timedelta(minutes=10)
-        bot._warmup_minutes = 3
+        bot._warmup_minutes = 1
         bot._validate_proposal = AsyncMock(return_value=ValidationResult(valid=True, reason="ok"))
         p_ok = TradeProposal(
             priority=SignalPriority.CRITICAL,
@@ -1008,11 +976,9 @@ class TestProcessTradeQueueRejectsAndUpdates:
             market_type="futures",
             supported_exchanges=["MEXC"],
         )
-        queue = MagicMock(pending_count=1)
-        queue.get_actionable = MagicMock(side_effect=lambda pri: [p_ok] if pri == SignalPriority.CRITICAL else [])
-        queue.mark_consumed = MagicMock()
-        queue.mark_rejected = MagicMock()
-        bot._hub_trade_queue = queue
+        bot._hub_proposal = p_ok
+        bot._report_queue_outcome = AsyncMock()
+        bot._is_symbol_open_on_exchange = AsyncMock(return_value=False)
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         mock_exchange.fetch_ticker = AsyncMock(return_value=MagicMock(last=50_000.0))
         bot._process_signal = AsyncMock()
@@ -1023,9 +989,8 @@ class TestProcessTradeQueueRejectsAndUpdates:
 
         await bot._process_trade_queue()
 
-        queue.mark_consumed.assert_called_once_with(p_ok.id)
-        assert p_ok.id in bot._hub_queue_updates["consumed"]
-        assert bot._hub_queue_updates["consumed"]
+        bot._report_queue_outcome.assert_called_once()
+        assert bot._report_queue_outcome.call_args[0][1] == "consumed"
 
 
 # ── _read_shared_intel (regime, news hydration) ──────────────────────────────
@@ -2018,7 +1983,7 @@ class TestProcessTradeQueueStrengthReject:
         from shared.models import SignalPriority, TradeProposal
 
         bot._started_at = datetime.now(UTC) - timedelta(minutes=10)
-        bot._warmup_minutes = 3
+        bot._warmup_minutes = 1
         p = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
@@ -2029,9 +1994,8 @@ class TestProcessTradeQueueStrengthReject:
             market_type="futures",
             supported_exchanges=["MEXC"],
         )
-        queue = MagicMock(pending_count=1)
-        queue.get_actionable = MagicMock(side_effect=lambda pri: [p] if pri == SignalPriority.CRITICAL else [])
-        bot._hub_trade_queue = queue
+        bot._hub_proposal = p
+        bot._report_queue_outcome = AsyncMock()
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
         bot.target.should_trade = MagicMock(return_value=True)
         bot.target.aggression_multiplier = MagicMock(return_value=0.5)
@@ -2040,8 +2004,8 @@ class TestProcessTradeQueueStrengthReject:
 
         await bot._process_trade_queue()
 
-        assert queue.mark_rejected.called
-        assert "strength" in queue.mark_rejected.call_args[0][1].lower()
+        bot._report_queue_outcome.assert_called_once()
+        assert "strength" in bot._report_queue_outcome.call_args[0][2].lower()
 
 
 class TestIdleMode:

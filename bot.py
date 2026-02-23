@@ -24,7 +24,7 @@ from core.orders import OrderManager
 from core.orders.scaler import ScaleMode
 from core.patterns import PatternDetector, StructureAnalyzer
 from core.risk import RiskManager
-from core.risk.daily_target import DailyTargetTracker, DailyTier
+from core.risk.daily_target import DailyTargetTracker
 from core.risk.market_filter import MarketQualityFilter
 from db.models import TradeRecord
 from intel import MarketCondition
@@ -39,7 +39,6 @@ from shared.models import (
     IntelSnapshot,
     SignalPriority,
     TradeProposal,
-    TradeQueue,
 )
 from strategies import BUILTIN_STRATEGIES
 from strategies.base import BaseStrategy
@@ -98,10 +97,9 @@ class TradingBot:
         self.scanner = None
         self._hub_intel: IntelSnapshot | None = None
         self._hub_analytics: AnalyticsSnapshot | None = None
-        self._hub_trade_queue: TradeQueue | None = None
+        self._hub_proposal: TradeProposal | None = None
         self._hub_extreme_watchlist: ExtremeWatchlist | None = None
         self._hub_intel_age: float = 999999
-        self._hub_queue_updates: dict[str, Any] = {"consumed": [], "rejected": {}}
         self._last_bot_status: BotDeploymentStatus | None = None
         self.pattern_detector = PatternDetector(
             structure=StructureAnalyzer(swing_lookback=5, zone_tolerance_pct=0.3),
@@ -120,7 +118,7 @@ class TradingBot:
         self._status_interval = 300
         self._last_status_log: datetime | None = None
         self._started_at: datetime | None = None
-        self._warmup_minutes = 3  # no queue processing for first N minutes
+        self._warmup_minutes = 1
         self._hub_session: aiohttp.ClientSession | None = None
         self._hub_tasks: set[asyncio.Task[None]] = set()
         self._stop_check_lock = asyncio.Lock()
@@ -377,15 +375,20 @@ class TradingBot:
                 connector=aiohttp.TCPConnector(force_close=True),
                 timeout=aiohttp.ClientTimeout(total=10),
             )
+
+        warmup_done = True
+        if self._started_at:
+            uptime_min = (datetime.now(UTC) - self._started_at).total_seconds() / 60
+            warmup_done = uptime_min >= self._warmup_minutes
+
         try:
             payload: dict[str, Any] = {
                 "bot_id": self.settings.bot_id or "default",
                 "bot_style": self.settings.bot_style,
                 "exchange": self.settings.exchange.upper(),
+                "open_symbols": list(self._open_trades.keys()),
+                "ready": warmup_done,
             }
-            if self._hub_queue_updates["consumed"] or self._hub_queue_updates["rejected"]:
-                payload["queue_updates"] = self._hub_queue_updates
-                self._hub_queue_updates = {"consumed": [], "rejected": {}}
 
             url = f"{hub_url.rstrip('/')}/internal/report"
             async with self._hub_session.post(url, json=payload) as resp:
@@ -394,15 +397,17 @@ class TradingBot:
                 body = await resp.json()
                 if "enabled" in body:
                     self._hub_enabled = body["enabled"]
-                if "trade_queue" in body:
-                    self._hub_trade_queue = TradeQueue(**body["trade_queue"])
+                self._hub_proposal = None
+                if "proposal" in body and warmup_done:
+                    self._hub_proposal = TradeProposal(**body["proposal"])
                 for key in body.get("confirmed_keys", []):
                     self._pending_hub_acks.pop(key, None)
         except Exception as e:
             logger.warning("Quick hub check error: {}", e)
             return
         self._retry_pending_hub_trades()
-        await self._process_trade_queue()
+        if warmup_done:
+            await self._process_trade_queue()
 
     def _check_enabled(self) -> bool:
         """Check hub-controlled enable flag (received via /internal/report response)."""
@@ -522,17 +527,7 @@ class TradingBot:
                         realized_pnl = self._calc_realized_pnl(order)
                         self.target.record_trade(realized_pnl=realized_pnl)
 
-                extreme_signals = self.extreme_watcher.drain_signals()
-                for sig in extreme_signals:
-                    if not self.target.should_trade():
-                        break
-                    if len(self.orders.scaler.active_positions) >= self.settings.effective_max_concurrent_positions:
-                        break
-                    try:
-                        await self._process_signal(sig, pyramid=False)
-                        logger.info("Extreme entry: {} {} via {}", sig.action.value, sig.symbol, sig.strategy)
-                    except Exception as e:
-                        logger.error("Extreme signal error for {}: {}", sig.symbol, e)
+                self.extreme_watcher.drain_signals()
 
                 await asyncio.sleep(self.settings.tick_interval_scalp)
             except asyncio.CancelledError:
@@ -797,183 +792,86 @@ class TradingBot:
     _PENDING_HUB_ACKS_MAX = 200
 
     async def _process_trade_queue(self) -> None:
-        """Consume proposals from the monitor's trade queue.
+        """Evaluate the single proposal served by the hub.
 
-        The queue is strictly advisory — the bot only acts when it has
-        genuine spare capacity, budget, and secured positions.  A
-        successful day means existing trades are protected; new queue
-        items are not forced just because they exist.
-
-        Safeguards against rapid balance drain on boot:
-        - Warmup: no queue processing for the first N minutes
-        - Per-tick cap: at most MAX_QUEUE_EXECUTIONS_PER_TICK per tick
+        The hub already filtered by bot style, exchange, and priority.
+        The bot decides whether to execute based on local conditions
+        (capacity, budget, exchange position check).
         """
-        if self._started_at:
-            uptime_min = (datetime.now(UTC) - self._started_at).total_seconds() / 60
-            if uptime_min < self._warmup_minutes:
-                logger.debug(
-                    "Queue: warmup ({:.0f}s / {}m) — skipping",
-                    uptime_min * 60,
-                    self._warmup_minutes,
-                )
-                return
-
-        queue = self._hub_trade_queue
-        if not queue:
+        proposal = self._hub_proposal
+        if not proposal:
             return
 
-        if queue.pending_count == 0:
+        self._hub_proposal = None
+
+        if not self.settings.is_market_type_allowed(proposal.market_type):
+            await self._report_queue_outcome(
+                proposal.id, "rejected", f"market type '{proposal.market_type}' not allowed"
+            )
             return
 
         positions = await self.exchange.fetch_positions()
         active_count = sum(1 for p in positions if p.amount > 0)
         max_pos = self.settings.effective_max_concurrent_positions
-        free_slots = max(0, max_pos - active_count)
+        if active_count >= max_pos:
+            await self._report_queue_outcome(proposal.id, "rejected", "no free slots")
+            return
 
-        tier = self.target.tier
-        allow_new = self.target.should_trade()
+        if not self.target.should_trade() and not self.target.manual_stop:
+            all_in_profit = active_count > 0 and all(p.pnl_pct >= 0 for p in positions if p.amount > 0)
+            if not all_in_profit:
+                await self._report_queue_outcome(proposal.id, "rejected", f"tier={self.target.tier.value}")
+                return
+
         aggression = self.target.aggression_multiplier()
-        pnl_pct = self.target.todays_pnl_pct
+        min_str = 0.2 if proposal.priority == SignalPriority.CRITICAL else 0.3
+        if proposal.strength * aggression < min_str:
+            await self._report_queue_outcome(proposal.id, "rejected", "strength too low")
+            return
 
-        avg_health = 0.0
-        all_in_profit = False
-        if active_count > 0:
-            pnls = [p.pnl_pct for p in positions if p.amount > 0]
-            avg_health = sum(pnls) / len(pnls)
-            all_in_profit = all(pnl >= 0 for pnl in pnls)
-        positions_secured = active_count == 0 or avg_health >= 0
+        if await self._is_symbol_open_on_exchange(proposal.symbol):
+            await self._report_queue_outcome(proposal.id, "rejected", "already open on exchange")
+            return
 
-        if all_in_profit and active_count > 0 and not self.target.manual_stop:
-            allow_new = True
-            aggression = max(aggression, 1.0)
-            logger.info(
-                "All {} positions in profit — all-in mode: aggression={:.2f}, free_slots={}, available for new entries",
-                active_count,
-                aggression,
-                free_slots,
-            )
-
-        executed = 0
-        tick_limit = self.MAX_QUEUE_EXECUTIONS_PER_TICK
-        consumed_ids: list[str] = []
-        rejected: dict[str, str] = {}
-
-        my_exchange = self.settings.exchange.upper()
-
-        # --- CRITICAL: time-sensitive, but still respect capacity + tick cap ---
-        for proposal in queue.get_actionable(SignalPriority.CRITICAL):
-            if executed >= tick_limit:
-                break
-            if not self._symbol_available(proposal.symbol) or my_exchange not in proposal.supported_exchanges:
-                queue.mark_rejected(proposal.id, f"symbol not on {my_exchange}")
-                rejected[proposal.id] = f"symbol not on {my_exchange}"
-                continue
-            if not self.settings.is_market_type_allowed(proposal.market_type):
-                queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
-                rejected[proposal.id] = f"market type '{proposal.market_type}' not allowed"
-                continue
-            if free_slots <= 0:
-                queue.mark_rejected(proposal.id, "no free slots")
-                rejected[proposal.id] = "no free slots"
-                continue
-            if not allow_new:
-                queue.mark_rejected(proposal.id, f"tier={tier.value} — not trading")
-                rejected[proposal.id] = f"tier={tier.value} — not trading"
-                continue
-            if proposal.strength * aggression < 0.2:
-                queue.mark_rejected(proposal.id, "strength too low after aggression")
-                rejected[proposal.id] = "strength too low after aggression"
-                continue
-
+        if proposal.priority == SignalPriority.SWING:
+            ok = await self._execute_swing_proposal(proposal, aggression)
+        else:
             ok = await self._execute_proposal(proposal, aggression)
-            if ok:
-                queue.mark_consumed(proposal.id)
-                consumed_ids.append(proposal.id)
-                free_slots -= 1
-                executed += 1
-            else:
-                queue.mark_rejected(proposal.id, "execution failed")
-                rejected[proposal.id] = "execution failed"
 
-        # --- DAILY: need at least 1 free slot and tier allows trading ---
-        # All positions green = capital is safe, always allow new entries
-        budget_ok = (
-            all_in_profit
-            or tier in (DailyTier.BUILDING, DailyTier.LOSING)
-            or (tier == DailyTier.STRONG and positions_secured)
-        )
+        if ok:
+            await self._report_queue_outcome(proposal.id, "consumed")
+            logger.info("Queue: executed {} [{}] via {}", proposal.symbol, proposal.priority.value, proposal.strategy)
+        else:
+            await self._report_queue_outcome(proposal.id, "rejected", "execution failed")
 
-        if allow_new and free_slots >= 1 and budget_ok:
-            for proposal in queue.get_actionable(SignalPriority.DAILY):
-                if executed >= tick_limit:
-                    break
-                if not self._symbol_available(proposal.symbol) or my_exchange not in proposal.supported_exchanges:
-                    queue.mark_rejected(proposal.id, f"symbol not on {my_exchange}")
-                    rejected[proposal.id] = f"symbol not on {my_exchange}"
-                    continue
-                if not self.settings.is_market_type_allowed(proposal.market_type):
-                    queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
-                    rejected[proposal.id] = f"market type '{proposal.market_type}' not allowed"
-                    continue
-                if free_slots <= 0:
-                    break
-                if proposal.strength * aggression < 0.3:
-                    queue.mark_rejected(proposal.id, "daily: strength too low")
-                    rejected[proposal.id] = "daily: strength too low"
-                    continue
+    async def _report_queue_outcome(self, proposal_id: str, action: str, reason: str = "") -> None:
+        """Immediately POST consume/reject to hub so the queue is updated right away."""
+        hub_url = self.settings.hub_url
+        if not hub_url or not self._hub_session:
+            return
+        try:
+            url = f"{hub_url.rstrip('/')}/internal/queue-update"
+            payload = {
+                "bot_id": self.settings.bot_id or "default",
+                "exchange": self.settings.exchange.upper(),
+                "proposal_id": proposal_id,
+                "action": action,
+                "reason": reason,
+            }
+            async with self._hub_session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    logger.warning("Queue outcome report failed: {}", resp.status)
+        except Exception as e:
+            logger.warning("Queue outcome report error: {}", e)
 
-                ok = await self._execute_proposal(proposal, aggression)
-                if ok:
-                    queue.mark_consumed(proposal.id)
-                    consumed_ids.append(proposal.id)
-                    free_slots -= 1
-                    executed += 1
-                else:
-                    queue.mark_rejected(proposal.id, "execution failed")
-                    rejected[proposal.id] = "execution failed"
-
-        # --- SWING: need at least 1 free slot and not deeply in the red ---
-        swing_ok = free_slots >= 1 and (all_in_profit or pnl_pct >= -3.0)
-
-        if allow_new and swing_ok:
-            for proposal in queue.get_actionable(SignalPriority.SWING):
-                if executed >= tick_limit:
-                    break
-                if not self._symbol_available(proposal.symbol) or my_exchange not in proposal.supported_exchanges:
-                    queue.mark_rejected(proposal.id, f"symbol not on {my_exchange}")
-                    rejected[proposal.id] = f"symbol not on {my_exchange}"
-                    continue
-                if not self.settings.is_market_type_allowed(proposal.market_type):
-                    queue.mark_rejected(proposal.id, f"market type '{proposal.market_type}' not allowed")
-                    rejected[proposal.id] = f"market type '{proposal.market_type}' not allowed"
-                    continue
-                if free_slots <= 0:
-                    break
-                if proposal.strength * aggression < 0.3:
-                    continue
-
-                ok = await self._execute_swing_proposal(proposal, aggression)
-                if ok:
-                    queue.mark_consumed(proposal.id)
-                    consumed_ids.append(proposal.id)
-                    free_slots -= 1
-                    executed += 1
-                else:
-                    queue.mark_rejected(proposal.id, "swing execution failed")
-                    rejected[proposal.id] = "swing execution failed"
-
-        if consumed_ids or rejected:
-            self._hub_queue_updates["consumed"].extend(consumed_ids)
-            self._hub_queue_updates["rejected"].update(rejected)
-
-        if executed > 0:
-            logger.info(
-                "Queue: executed {} proposal(s) this tick (remaining: C={} D={} S={})",
-                executed,
-                len(queue.get_actionable(SignalPriority.CRITICAL)),
-                len(queue.get_actionable(SignalPriority.DAILY)),
-                len(queue.get_actionable(SignalPriority.SWING)),
-            )
+    async def _is_symbol_open_on_exchange(self, symbol: str) -> bool:
+        """Explicitly check the exchange for an existing position on this symbol."""
+        try:
+            positions = await self.exchange.fetch_positions()
+            return any(p.symbol == symbol and p.amount > 0 for p in positions)
+        except Exception as e:
+            logger.warning("Exchange position check failed for {}: {}", symbol, e)
+            return True
 
     async def _validate_proposal(self, proposal: TradeProposal) -> ValidationResult:
         """Run the bot-type-specific validator on a single proposal."""
@@ -987,15 +885,11 @@ class TradingBot:
 
     async def _execute_proposal(self, proposal: TradeProposal, aggression: float) -> bool:
         """Convert a queue proposal into a trading signal and execute it."""
-        my_exchange = self.settings.exchange.upper()
-        if my_exchange not in proposal.supported_exchanges:
-            logger.debug("Queue skip {}: not on {}", proposal.symbol, my_exchange)
-            return False
         if not self._symbol_available(proposal.symbol):
-            logger.debug("Queue skip {}: not on {}", proposal.symbol, my_exchange)
+            logger.debug("Queue skip {}: symbol not available locally", proposal.symbol)
             return False
         if proposal.symbol in self._open_trades:
-            logger.info("Queue skip {}: already have an open position", proposal.symbol)
+            logger.info("Queue skip {}: already in local _open_trades", proposal.symbol)
             return False
 
         result = await self._validate_proposal(proposal)
@@ -1480,11 +1374,8 @@ class TradingBot:
             "daily_report": daily_report,
         }
 
-        if self._multibot:
-            payload["queue_updates"] = self._hub_queue_updates
-            self._hub_queue_updates = {"consumed": [], "rejected": {}}
-            if self._last_bot_status:
-                payload["bot_status"] = self._last_bot_status.model_dump()
+        if self._multibot and self._last_bot_status:
+            payload["bot_status"] = self._last_bot_status.model_dump()
 
         hub_url = self.settings.hub_url
         if hub_url:
@@ -1497,6 +1388,14 @@ class TradingBot:
                 connector=aiohttp.TCPConnector(force_close=True),
                 timeout=aiohttp.ClientTimeout(total=10),
             )
+
+        payload["open_symbols"] = list(self._open_trades.keys())
+        warmup_done = True
+        if self._started_at:
+            uptime_min = (datetime.now(UTC) - self._started_at).total_seconds() / 60
+            warmup_done = uptime_min >= self._warmup_minutes
+        payload["ready"] = warmup_done
+
         try:
             url = f"{hub_url.rstrip('/')}/internal/report"
             async with self._hub_session.post(url, json=payload) as resp:
@@ -1508,8 +1407,9 @@ class TradingBot:
                     self._pending_hub_acks.pop(key, None)
                 if "enabled" in body:
                     self._hub_enabled = body["enabled"]
-                if "trade_queue" in body:
-                    self._hub_trade_queue = TradeQueue(**body["trade_queue"])
+                self._hub_proposal = None
+                if "proposal" in body and warmup_done:
+                    self._hub_proposal = TradeProposal(**body["proposal"])
         except Exception as e:
             logger.error("Hub report error: {}", e, exc_info=True)
         self._retry_pending_hub_trades()

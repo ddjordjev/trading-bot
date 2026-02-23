@@ -196,6 +196,12 @@ class HubDB(TradeDB):
 
     # ---- Bot-centric queries ----
 
+    def get_open_trade_symbols(self) -> set[str]:
+        """Return the set of symbols with at least one unclosed trade (any bot)."""
+        assert self._conn
+        rows = self._conn.execute("SELECT DISTINCT symbol FROM trades WHERE closed_at=''").fetchall()
+        return {r["symbol"] for r in rows}
+
     def get_open_trades_for_bot(self, bot_id: str) -> list[TradeRecord]:
         """Return all unclosed trades for a specific bot."""
         assert self._conn

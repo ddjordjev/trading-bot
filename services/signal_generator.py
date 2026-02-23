@@ -682,12 +682,7 @@ class SignalGenerator:
         candidates = self._merge_trending(snap)
         candidates.sort(key=lambda m: abs(m.change_24h), reverse=True)
 
-        existing_syms = {
-            p.symbol
-            for bucket in (q.critical, q.daily, q.swing)
-            for p in bucket
-            if not p.consumed and not p.rejected and not p.is_expired
-        }
+        existing_syms = {p.symbol for p in q.proposals if not p.is_expired}
 
         added = 0
         for mover in candidates:

@@ -179,10 +179,10 @@ class TestSharedStateTradeQueue:
         q.add(TradeProposal(priority=SignalPriority.CRITICAL, symbol="ETH/USDT", side="short", strength=0.9))
         state.write_trade_queue(q)
         read_back = state.read_trade_queue()
-        assert len(read_back.daily) == 1
-        assert len(read_back.critical) == 1
-        assert read_back.daily[0].symbol == "BTC/USDT"
-        assert read_back.critical[0].symbol == "ETH/USDT"
+        assert read_back.total == 2
+        syms = {p.symbol for p in read_back.proposals}
+        assert "BTC/USDT" in syms
+        assert "ETH/USDT" in syms
 
     def test_write_bot_trade_queue_creates_subdir(self, state):
         from shared.models import SignalPriority, TradeProposal, TradeQueue
@@ -193,10 +193,10 @@ class TestSharedStateTradeQueue:
         bot_file = state._data_dir / "momentum" / "trade_queue.json"
         assert bot_file.exists()
         data = json.loads(bot_file.read_text())
-        assert len(data["daily"]) == 1
-        assert data["daily"][0]["symbol"] == "SOL/USDT"
+        assert len(data["proposals"]) == 1
+        assert data["proposals"][0]["symbol"] == "SOL/USDT"
 
-    def test_apply_trade_queue_updates_marks_consumed(self, state):
+    def test_apply_trade_queue_updates_removes_consumed(self, state):
         from shared.models import SignalPriority, TradeProposal, TradeQueue
 
         q = TradeQueue()
@@ -206,9 +206,9 @@ class TestSharedStateTradeQueue:
 
         state.apply_trade_queue_updates(consumed_ids=[p.id], rejected={})
         updated = state.read_trade_queue()
-        assert updated.daily[0].consumed is True
+        assert updated.total == 0
 
-    def test_apply_trade_queue_updates_marks_rejected(self, state):
+    def test_apply_trade_queue_updates_removes_rejected(self, state):
         from shared.models import SignalPriority, TradeProposal, TradeQueue
 
         q = TradeQueue()
@@ -218,8 +218,7 @@ class TestSharedStateTradeQueue:
 
         state.apply_trade_queue_updates(consumed_ids=[], rejected={p.id: "risk limit"})
         updated = state.read_trade_queue()
-        assert updated.daily[0].rejected is True
-        assert updated.daily[0].reject_reason == "risk limit"
+        assert updated.total == 0
 
     def test_apply_empty_updates_is_noop(self, state):
         from shared.models import SignalPriority, TradeProposal, TradeQueue
@@ -229,8 +228,7 @@ class TestSharedStateTradeQueue:
         state.write_trade_queue(q)
         state.apply_trade_queue_updates(consumed_ids=[], rejected={})
         updated = state.read_trade_queue()
-        assert not updated.daily[0].consumed
-        assert not updated.daily[0].rejected
+        assert updated.total == 1
 
 
 class TestSharedStateBotDiscovery:

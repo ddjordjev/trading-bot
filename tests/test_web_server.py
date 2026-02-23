@@ -363,7 +363,7 @@ class TestGetTradeQueue:
 
         hub_state = MagicMock()
         q = TradeQueue()
-        q.critical = [
+        q.add(
             TradeProposal(
                 priority=SignalPriority.CRITICAL,
                 symbol="BTC/USDT",
@@ -372,8 +372,9 @@ class TestGetTradeQueue:
                 strength=0.9,
                 created_at=datetime.now(UTC).isoformat(),
             ),
-        ]
+        )
         hub_state.read_trade_queue.return_value = q
+        hub_state.read_recent_outcomes.return_value = []
         with patch("web.server._hub_state_ref", hub_state):
             r = await client.get("/api/trade-queue")
         assert r.status_code == 200
@@ -1508,13 +1509,13 @@ class TestBroadcastActions:
 
 
 class TestTradeQueueLifecycle:
-    async def test_trade_queue_shows_all_statuses(self, client):
+    async def test_trade_queue_shows_pending_proposals(self, client):
         from shared.models import SignalPriority, TradeProposal, TradeQueue
 
         hub_state = MagicMock()
         q = TradeQueue()
         now = datetime.now(UTC).isoformat()
-        q.daily = [
+        q.add(
             TradeProposal(
                 priority=SignalPriority.DAILY,
                 symbol="BTC/USDT",
@@ -1523,17 +1524,9 @@ class TestTradeQueueLifecycle:
                 strength=0.8,
                 created_at=now,
                 max_age_seconds=14400,
-            ),
-            TradeProposal(
-                priority=SignalPriority.DAILY,
-                symbol="ETH/USDT",
-                side="short",
-                strategy="fade",
-                strength=0.6,
-                created_at=now,
-                consumed=True,
-                consumed_at=now,
-            ),
+            )
+        )
+        q.add(
             TradeProposal(
                 priority=SignalPriority.DAILY,
                 symbol="SOL/USDT",
@@ -1541,21 +1534,18 @@ class TestTradeQueueLifecycle:
                 strategy="intel",
                 strength=0.5,
                 created_at=now,
-                rejected=True,
-                reject_reason="size too big",
-            ),
-        ]
+            )
+        )
         hub_state.read_trade_queue.return_value = q
-        hub_state.read_dispatched_proposals.return_value = []
+        hub_state.read_recent_outcomes.return_value = []
         with patch("web.server._hub_state_ref", hub_state):
             r = await client.get("/api/trade-queue")
         assert r.status_code == 200
         data = r.json()
-        assert len(data) == 3
+        assert len(data) == 2
         by_sym = {d["symbol"]: d for d in data}
         assert by_sym["BTC/USDT"]["status"] == "pending"
-        assert by_sym["ETH/USDT"]["status"] == "consumed"
-        assert by_sym["SOL/USDT"]["status"] == "rejected"
+        assert by_sym["SOL/USDT"]["status"] == "pending"
 
 
 # ── Analytics with Multibot Positions ───────────────────────────────────

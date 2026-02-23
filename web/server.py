@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import time
 from collections import deque
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -316,49 +317,45 @@ async def get_news(_: str = Depends(verify_token)) -> list[NewsItemInfo]:
 
 @app.get("/api/trade-queue", response_model=list[TradeQueueItem])
 async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem]:
-    """Return all recent trade proposals across all bot queues with lifecycle status."""
-    all_proposals: list[Any] = []
-
+    """Return all current trade proposals plus recent outcomes."""
     if _hub_state_ref is None:
         return []
 
-    # Shared queue (not yet dispatched) + recently dispatched to bots
+    items: list[TradeQueueItem] = []
+
     q = _hub_state_ref.read_trade_queue()
-    for bucket in (q.critical, q.daily, q.swing):
-        all_proposals.extend(bucket)
-    all_proposals.extend(_hub_state_ref.read_dispatched_proposals())
-
-    active = [p for p in all_proposals if not p.is_expired]
-
-    seen: set[str] = set()
-    unique = []
-    for p in active:
-        if p.id not in seen:
-            seen.add(p.id)
-            unique.append(p)
-
-    unique.sort(key=lambda p: p.created_at, reverse=True)
-
-    def _status(p: Any) -> str:
-        if p.consumed:
-            return "consumed"
-        if p.rejected:
-            return "rejected"
-        return "pending"
-
-    return [
-        TradeQueueItem(
-            symbol=p.symbol,
-            side=p.side,
-            strategy=p.strategy or "",
-            strength=p.strength,
-            age_seconds=p.age_seconds,
-            status=_status(p),
-            reason=p.reason or "",
-            supported_exchanges=p.supported_exchanges,
+    for p in q.proposals:
+        if p.is_expired:
+            continue
+        items.append(
+            TradeQueueItem(
+                symbol=p.symbol,
+                side=p.side,
+                strategy=p.strategy or "",
+                strength=p.strength,
+                age_seconds=p.age_seconds,
+                status="locked" if p.is_locked else "pending",
+                reason=p.reason or "",
+                supported_exchanges=p.supported_exchanges,
+            )
         )
-        for p in unique
-    ]
+
+    for o in _hub_state_ref.read_recent_outcomes():
+        items.append(
+            TradeQueueItem(
+                symbol=o.symbol,
+                side="",
+                strategy=o.strategy,
+                strength=0,
+                age_seconds=(datetime.now(UTC) - o.timestamp).total_seconds(),
+                status=o.action,
+                reason=o.reason,
+                supported_exchanges=[],
+            )
+        )
+
+    items.sort(key=lambda x: x.age_seconds)
+    return items
 
 
 @app.get("/api/trending", response_model=list[TrendingCoinInfo])
@@ -1024,7 +1021,7 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
     Bots never touch the shared data volume — the hub acts as a proxy:
     - Reads intel, analytics, trade_queue, extreme_watchlist on their behalf
     - Writes bot_status on their behalf
-    - Returns enabled flag, confirmed ack keys, and all shared data
+    - Returns enabled flag, confirmed ack keys, and trade proposal
     """
     data = await request.json()
     bot_id = data.get("bot_id", "")
@@ -1044,14 +1041,12 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
             except Exception:
                 logger.warning("Ignoring malformed bot_status from {}", bot_id)
 
-        queue_updates = data.get("queue_updates")
-        if queue_updates:
-            consumed = queue_updates.get("consumed", [])
-            rejected = queue_updates.get("rejected", {})
-            if consumed or rejected:
-                _hub_state_ref.apply_bot_queue_updates(bot_id, consumed, rejected)
-
         exchange = data.get("exchange", "")
+
+        open_symbols = data.get("open_symbols")
+        if exchange and open_symbols is not None:
+            _hub_state_ref.update_bot_positions(bot_id, exchange, set(open_symbols))
+
         if exchange and "positions" in data:
             positions = data["positions"] or []
             held_symbols = {p["symbol"] for p in positions if p.get("symbol")}
@@ -1074,17 +1069,60 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
         "confirmed_keys": confirmed,
         "enabled": enabled,
     }
-    if bot_id and _hub_state_ref is not None:
+
+    bot_ready = data.get("ready", False)
+    if bot_id and _hub_state_ref is not None and bot_ready:
         with contextlib.suppress(Exception):
+            from config.bot_profiles import PROFILES_BY_ID
+            from shared.models import SignalPriority
+
             bot_style = data.get("bot_style", bot_id)
             bot_exchange = data.get("exchange", "")
             if not bot_exchange:
                 existing_rpt = _bot_reports.get(bot_id, {})
                 bot_exchange = existing_rpt.get("exchange", "")
-            response["trade_queue"] = _hub_state_ref.read_queue_for_bot_style(
-                bot_style, exchange=bot_exchange
-            ).model_dump()
+
+            profile = PROFILES_BY_ID.get(bot_id)
+            allowed = None
+            if profile and profile.allowed_priorities:
+                allowed = [SignalPriority(p) for p in profile.allowed_priorities]
+
+            open_db_syms = hub.get_open_trade_symbols()
+            proposal = _hub_state_ref.serve_proposal_to_bot(
+                bot_style=bot_style,
+                bot_id=bot_id,
+                exchange=bot_exchange,
+                allowed_priorities=allowed,
+                open_db_symbols=open_db_syms,
+            )
+            if proposal:
+                response["proposal"] = proposal.model_dump()
+
     return response
+
+
+@app.post("/internal/queue-update")
+async def queue_update(request: Request) -> dict[str, Any]:
+    """Immediate consume/reject report from a bot — updates the queue right away."""
+    data = await request.json()
+    bot_id = data.get("bot_id", "")
+    exchange = data.get("exchange", "")
+    action = data.get("action", "")
+    proposal_id = data.get("proposal_id", "")
+    reason = data.get("reason", "")
+
+    if not bot_id or not proposal_id or action not in ("consumed", "rejected"):
+        return {"status": "error", "detail": "missing bot_id, proposal_id, or invalid action"}
+
+    if _hub_state_ref is None:
+        return {"status": "error", "detail": "hub not ready"}
+
+    if action == "consumed":
+        _hub_state_ref.handle_consume(proposal_id, exchange, bot_id)
+    else:
+        _hub_state_ref.handle_reject(proposal_id, exchange, bot_id, reason)
+
+    return {"status": "ok"}
 
 
 @app.get("/internal/intel")

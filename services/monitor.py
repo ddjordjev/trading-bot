@@ -38,6 +38,8 @@ from shared.models import (
     ExtremeCandidate,
     ExtremeWatchlist,
     IntelSnapshot,
+    SignalPriority,
+    TradeProposal,
     TradeQueue,
     TrendingSnapshot,
     TVSymbolSnapshot,
@@ -280,6 +282,12 @@ class MonitorService:
                 except Exception as e:
                     logger.warning("Extreme watchlist error: {}", e)
 
+                # Inject extreme movers into the trade queue as CRITICAL proposals
+                try:
+                    self._queue_extreme_proposals()
+                except Exception as e:
+                    logger.warning("Extreme proposal injection error: {}", e)
+
                 # Feed analytics to signal generator (every 60s)
                 if now - self._last_analytics_refresh >= 60:
                     try:
@@ -407,16 +415,35 @@ class MonitorService:
         for syms in self._exchange_symbols.values():
             all_tradeable |= syms
 
+        open_db_symbols: set[str] = set()
+        try:
+            from pathlib import Path
+
+            from db.hub_store import HubDB
+
+            hub = HubDB(path=Path("data/hub.db"))
+            hub.connect()
+            open_db_symbols = hub.get_open_trade_symbols()
+            hub.close()
+        except Exception:
+            pass
+
         existing = self.state.read_trade_queue()
         new_count = 0
         skipped = 0
         deduped = 0
-        all_proposals = staging.critical + staging.daily + staging.swing
+        all_proposals = staging.proposals
         for proposal in all_proposals:
-            if proposal.consumed or proposal.rejected or proposal.is_expired:
+            if proposal.is_expired:
                 continue
             if all_tradeable and proposal.symbol not in all_tradeable:
                 skipped += 1
+                continue
+            if existing.has_symbol(proposal.symbol):
+                deduped += 1
+                continue
+            if proposal.symbol in open_db_symbols:
+                deduped += 1
                 continue
             available = [
                 ex for ex in proposal.supported_exchanges if proposal.symbol not in self.state.get_active_symbols(ex)
@@ -426,10 +453,9 @@ class MonitorService:
                 continue
             if available != proposal.supported_exchanges:
                 proposal.supported_exchanges = available
-            before = len(existing.critical) + len(existing.daily) + len(existing.swing)
+            before = existing.total
             existing.add(proposal)
-            after = len(existing.critical) + len(existing.daily) + len(existing.swing)
-            if after > before:
+            if existing.total > before:
                 new_count += 1
         purged = existing.purge_stale()
         self.state.write_trade_queue(existing)
@@ -722,6 +748,46 @@ class MonitorService:
                 seen.add(sym)
 
         return candidates[:20]
+
+    def _queue_extreme_proposals(self) -> None:
+        """Convert top extreme candidates into CRITICAL proposals and add to the hub queue."""
+        from hub.state import HubState
+
+        if not isinstance(self.state, HubState):
+            return
+        watchlist = self.state.read_extreme_watchlist()
+        if not watchlist.candidates:
+            return
+
+        existing = self.state.read_trade_queue()
+        added = 0
+        for cand in watchlist.candidates[:5]:
+            if existing.has_symbol(cand.symbol):
+                continue
+            side = "long" if cand.direction == "bull" else "short"
+            proposal = TradeProposal(
+                priority=SignalPriority.CRITICAL,
+                symbol=cand.symbol,
+                side=side,
+                strategy="extreme_mover",
+                reason=cand.reason,
+                strength=min(1.0, cand.momentum_score / 50.0),
+                market_type="futures",
+                leverage=20,
+                quick_trade=True,
+                max_hold_minutes=30,
+                tick_urgency="scalp",
+                max_age_seconds=300,
+                source="extreme_watchlist",
+                target_bot="extreme",
+                supported_exchanges=cand.supported_exchanges,
+            )
+            existing.add(proposal)
+            added += 1
+
+        if added:
+            self.state.write_trade_queue(existing)
+            logger.debug("Queued {} extreme proposals", added)
 
     def _build_extreme_watchlist(self) -> None:
         """Filter scanner data for extreme movers and write to shared state."""

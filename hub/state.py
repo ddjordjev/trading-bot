@@ -25,11 +25,35 @@ from shared.models import (
     BotDeploymentStatus,
     ExtremeWatchlist,
     IntelSnapshot,
+    SignalPriority,
     TradeProposal,
     TradeQueue,
 )
 
 _ANALYTICS_PATH = Path("data/analytics_state.json")
+
+
+class QueueOutcome:
+    """Lightweight record kept for dashboard display and signal-generator cooldown."""
+
+    __slots__ = ("action", "bot_id", "proposal_id", "reason", "strategy", "symbol", "timestamp")
+
+    def __init__(
+        self,
+        proposal_id: str,
+        symbol: str,
+        strategy: str,
+        action: str,
+        bot_id: str,
+        reason: str = "",
+    ):
+        self.proposal_id = proposal_id
+        self.symbol = symbol
+        self.strategy = strategy
+        self.action = action
+        self.bot_id = bot_id
+        self.reason = reason
+        self.timestamp = datetime.now(UTC)
 
 
 class RejectionRecord:
@@ -54,9 +78,9 @@ class HubState:
         self._extreme_watchlist: ExtremeWatchlist = ExtremeWatchlist()
 
         self._trade_queue: TradeQueue = TradeQueue()
-        self._rejections: dict[str, RejectionRecord] = {}  # "symbol|strategy" → record
-        self._dispatched: list[TradeProposal] = []  # recently dispatched for dashboard
-        self._dispatched_max = 50
+        self._rejections: dict[str, RejectionRecord] = {}
+        self._outcomes: list[QueueOutcome] = []
+        self._outcomes_max = 100
 
         self._bot_statuses: dict[str, BotDeploymentStatus] = {}
         self._bot_positions: dict[str, tuple[str, set[str]]] = {}
@@ -87,7 +111,6 @@ class HubState:
             return 999999
 
     # ---- Analytics (written by analytics svc, read by endpoints / bots) ---- #
-    # Persisted to disk so scores/patterns/suggestions survive restarts.
 
     def write_analytics(self, analytics: AnalyticsSnapshot) -> None:
         analytics.updated_at = datetime.now(UTC).isoformat()
@@ -173,26 +196,10 @@ class HubState:
         self._active_symbols_by_exchange[ex] = all_syms
 
     def get_active_symbols(self, exchange: str) -> set[str]:
-        """Symbols currently held OR recently dispatched to any bot on this exchange."""
-        held = self._active_symbols_by_exchange.get(exchange.upper(), set())
-        dispatched = self._get_dispatched_symbols(exchange)
-        return held | dispatched
+        """Symbols currently held by any bot on this exchange."""
+        return self._active_symbols_by_exchange.get(exchange.upper(), set())
 
-    def _get_dispatched_symbols(self, exchange: str) -> set[str]:
-        """Symbols from recently dispatched proposals (guards the report-back gap)."""
-        ex = exchange.upper()
-        cutoff = datetime.now(UTC) - timedelta(minutes=5)
-        result: set[str] = set()
-        for p in self._dispatched:
-            if (
-                p.created_at
-                and datetime.fromisoformat(p.created_at) > cutoff
-                and (not p.supported_exchanges or ex in p.supported_exchanges)
-            ):
-                result.add(p.symbol)
-        return result
-
-    # ---- Trade queue (written by monitor/signal_gen, read by bots) ---- #
+    # ---- Trade queue ---- #
 
     def write_trade_queue(self, queue: TradeQueue) -> None:
         queue.updated_at = datetime.now(UTC).isoformat()
@@ -201,45 +208,57 @@ class HubState:
     def read_trade_queue(self) -> TradeQueue:
         return self._trade_queue
 
-    def apply_trade_queue_updates(
+    def serve_proposal_to_bot(
         self,
-        consumed_ids: list[str],
-        rejected: dict[str, str],
-    ) -> None:
-        if not consumed_ids and not rejected:
-            return
-        q = self._trade_queue
-        for pid in consumed_ids:
-            q.mark_consumed(pid)
-        for pid, reason in rejected.items():
-            q.mark_rejected(pid, reason)
-        q.updated_at = datetime.now(UTC).isoformat()
-
-    def apply_bot_queue_updates(
-        self,
+        bot_style: str,
         bot_id: str,
-        consumed_ids: list[str],
-        rejected: dict[str, str],
-    ) -> None:
-        """Process consumed/rejected reports from a bot.
+        exchange: str,
+        allowed_priorities: list[SignalPriority] | None = None,
+        open_db_symbols: set[str] | None = None,
+    ) -> TradeProposal | None:
+        """Pick and lock the next matching proposal for a bot.
 
-        Updates the dispatched list (dashboard) and records rejections
-        so the signal generator can cool down on those symbols.
+        Returns a copy of the proposal (for the bot) or None.
+        The original stays in the queue with ``locked_until`` set to 60 s.
         """
-        if not consumed_ids and not rejected:
-            return
+        self._trade_queue.unlock_expired()
 
-        for dp in self._dispatched:
-            if dp.id in consumed_ids:
-                dp.consumed = True
-            elif dp.id in rejected:
-                dp.rejected = True
-                dp.reject_reason = rejected[dp.id]
+        active = self.get_active_symbols(exchange) if exchange else set()
 
-        for pid, reason in rejected.items():
-            proposal = self._find_dispatched_by_id(pid)
-            if not proposal:
-                continue
+        picked = self._trade_queue.get_next_for_bot(
+            exchange=exchange,
+            bot_style=bot_style,
+            allowed_priorities=allowed_priorities,
+            active_symbols=active,
+            open_db_symbols=open_db_symbols,
+        )
+        if not picked:
+            return None
+
+        self._trade_queue.lock_proposal(picked.id, seconds=60)
+        return picked.model_copy()
+
+    def handle_consume(self, proposal_id: str, exchange: str, bot_id: str) -> None:
+        """Bot confirmed it executed the trade — remove this exchange from the proposal."""
+        proposal = self._find_proposal(proposal_id)
+        if proposal:
+            self._outcomes.append(QueueOutcome(proposal_id, proposal.symbol, proposal.strategy, "consumed", bot_id))
+            self._outcomes = self._outcomes[-self._outcomes_max :]
+
+        removed = self._trade_queue.remove_exchange(proposal_id, exchange)
+        if removed:
+            logger.debug("Queue: proposal {} fully consumed (no exchanges left)", proposal_id)
+
+        self._trade_queue.updated_at = datetime.now(UTC).isoformat()
+
+    def handle_reject(self, proposal_id: str, exchange: str, bot_id: str, reason: str = "") -> None:
+        """Bot rejected the proposal — remove this exchange, record for cooldown."""
+        proposal = self._find_proposal(proposal_id)
+        if proposal:
+            self._outcomes.append(
+                QueueOutcome(proposal_id, proposal.symbol, proposal.strategy, "rejected", bot_id, reason)
+            )
+            self._outcomes = self._outcomes[-self._outcomes_max :]
             rkey = f"{proposal.symbol}|{proposal.strategy}"
             existing = self._rejections.get(rkey)
             if existing:
@@ -249,68 +268,22 @@ class HubState:
             else:
                 self._rejections[rkey] = RejectionRecord(reason, datetime.now(UTC))
 
-    def _find_dispatched_by_id(self, pid: str) -> TradeProposal | None:
-        for p in self._dispatched:
-            if p.id == pid:
+        self._trade_queue.remove_exchange(proposal_id, exchange)
+        self._trade_queue.updated_at = datetime.now(UTC).isoformat()
+
+    def _find_proposal(self, proposal_id: str) -> TradeProposal | None:
+        for p in self._trade_queue.proposals:
+            if p.id == proposal_id:
                 return p
         return None
 
-    def read_queue_for_bot_style(self, bot_style: str, exchange: str = "") -> TradeQueue:
-        """Pop the top matching proposal for this bot style + exchange.
-
-        Each bot gets exactly 1 proposal per request (the highest-priority
-        one). The rest stay in the queue for other bots.  Priority order:
-        critical → daily → swing.
-
-        If *exchange* is provided, only proposals whose supported_exchanges
-        include that exchange are considered.  Proposals meant for other
-        exchanges are silently skipped (left in the queue for the right bot).
-        Symbols already held or recently dispatched on this exchange are also
-        skipped to prevent duplicate positions.
-        """
-        result = TradeQueue()
-        picked = None
-        picked_bucket = None
-        picked_idx = None
-        ex_upper = exchange.upper() if exchange else ""
-        active = self.get_active_symbols(exchange) if ex_upper else set()
-
-        for bucket_name in ("critical", "daily", "swing"):
-            src: list = getattr(self._trade_queue, bucket_name)
-            for i, p in enumerate(src):
-                if p.consumed or p.rejected or p.is_expired:
-                    continue
-                if ex_upper and p.supported_exchanges and ex_upper not in p.supported_exchanges:
-                    continue
-                if ex_upper and p.symbol in active:
-                    continue
-                targets = {t.strip() for t in (p.target_bot or "").split(",") if t.strip()}
-                if not targets or bot_style in targets:
-                    picked = p
-                    picked_bucket = bucket_name
-                    picked_idx = i
-                    break
-            if picked:
-                break
-
-        if picked and picked_bucket is not None and picked_idx is not None:
-            getattr(self._trade_queue, picked_bucket).pop(picked_idx)
-            getattr(result, picked_bucket).append(picked)
-            self._dispatched = [picked, *self._dispatched][: self._dispatched_max]
-
-        result.updated_at = self._trade_queue.updated_at
-        return result
-
-    def read_dispatched_proposals(self) -> list[TradeProposal]:
-        """Recent proposals dispatched to bots — for dashboard display."""
+    def read_recent_outcomes(self) -> list[QueueOutcome]:
+        """For dashboard display — recent consumed/rejected outcomes."""
         cutoff = datetime.now(UTC) - timedelta(minutes=30)
-        self._dispatched = [
-            p for p in self._dispatched if p.created_at and datetime.fromisoformat(p.created_at) > cutoff
-        ]
-        return self._dispatched
+        self._outcomes = [o for o in self._outcomes if o.timestamp > cutoff]
+        return self._outcomes
 
     def get_rejection_history(self) -> dict[str, RejectionRecord]:
-        """Return rejection records for signal generator to consult."""
         return self._rejections
 
     def purge_old_rejections(self, max_age_hours: int = 24) -> None:

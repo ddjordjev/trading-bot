@@ -17,6 +17,7 @@ class BotProfile:
     description: str
     style: str  # momentum / meanrev / swing
     strategies: list[str] = field(default_factory=list)
+    allowed_priorities: list[str] = field(default_factory=lambda: ["critical", "daily"])
     env_overrides: dict[str, str] = field(default_factory=dict)
     is_default: bool = False
     is_hub: bool = False
@@ -38,6 +39,7 @@ ALL_PROFILES: list[BotProfile] = [
         description="Hunts extreme price movers with high leverage and aggressive entries",
         style="momentum",
         strategies=["compound_momentum", "market_open_volatility"],
+        allowed_priorities=["critical"],
         env_overrides={
             "DEFAULT_LEVERAGE": "20",
             "MAX_CONCURRENT_POSITIONS": "10",
@@ -103,6 +105,7 @@ ALL_PROFILES: list[BotProfile] = [
         description="Multi-day swing trades and grid trading with fixed intervals",
         style="swing",
         strategies=["swing_opportunity", "grid"],
+        allowed_priorities=["daily", "swing"],
         env_overrides={
             "TICK_INTERVAL_IDLE": "600",
             "TICK_INTERVAL_ACTIVE": "300",
@@ -115,6 +118,7 @@ ALL_PROFILES: list[BotProfile] = [
         description="Quick in-and-out scalps with tight stops and fast tick intervals",
         style="momentum",
         strategies=["compound_momentum"],
+        allowed_priorities=["critical"],
         env_overrides={
             "TICK_INTERVAL_ACTIVE": "15",
             "STOP_LOSS_PCT": "0.8",
@@ -138,6 +142,7 @@ ALL_PROFILES: list[BotProfile] = [
             "mean_reversion",
             "grid",
         ],
+        allowed_priorities=["critical", "daily", "swing"],
         env_overrides={
             "MAX_CONCURRENT_POSITIONS": "10",
         },

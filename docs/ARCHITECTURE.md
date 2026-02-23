@@ -128,29 +128,47 @@ External APIs → MonitorService → IntelSnapshot (HubState)
 TrendingScanner → hot movers ──→ SignalGenerator
                                        ↓
                               TradeProposal objects
-                              (tagged with unsupported_exchanges)
+                              (tagged with supported_exchanges)
                                        ↓
                         _route_to_bots() filters:
                           - symbol on exchange? (drop if not)
-                          - consumed/rejected/expired? (skip)
+                          - symbol already in queue? (dedup)
+                          - symbol in hub.db open trades? (dedup)
+                          - symbol held by a bot on that exchange? (remove exchange)
                                        ↓
-                              TradeQueue (HubState)
-                           single in-memory list
+Extreme watchlist → top 5 injected as CRITICAL proposals
+                              ↓
+                        TradeQueue (HubState)
+                     single flat in-memory list
 ```
 
 ### Bot ↔ Hub Communication
 
-Two separate endpoints, clean separation:
+Three endpoints, clean separation:
 
-**POST /internal/report** — status + queue (every 5s)
+**POST /internal/report** — status + queue proposal (every 5s)
 ```
-Bot → {bot_id, bot_style, bot_status, queue_updates}
-Hub → {enabled, confirmed_keys, trade_queue}
+Bot → {bot_id, bot_style, exchange, open_symbols, ready, bot_status?, positions?}
+Hub → {enabled, confirmed_keys, proposal?}
 ```
-The bot sends its status and queue feedback. Hub returns the enabled flag,
-trade write confirmations, and 1 queue proposal popped for this bot's style.
-Between full ticks, a lightweight version sends only bot_id + queue_updates.
-Note: bots do NOT report exchange symbols — the hub fetches them directly.
+The bot sends its current open symbols (from local `_open_trades`) every 5
+seconds so the hub always knows what each bot holds (max 5s lag). The `ready`
+flag is false during warmup (1 min) — hub returns no proposal until the bot
+is ready. When ready, hub picks the best matching proposal (filtered by bot
+style, exchange, priority, dedup against hub.db and active symbols), locks
+it for 60s, and returns it. Full ticks also include `bot_status` and
+`positions` for dashboard reporting.
+
+**POST /internal/queue-update** — immediate consume/reject
+```
+Bot → {bot_id, exchange, proposal_id, action, reason?}
+Hub → {status: "ok"}
+```
+Bot reports consumed/rejected immediately after evaluating a proposal.
+Hub removes the bot's exchange from the proposal's `supported_exchanges`.
+If no exchanges remain, the proposal is deleted from the queue. If other
+exchanges remain, the proposal stays available for bots on those exchanges.
+Rejections are recorded for signal generator cooldowns.
 
 **GET /internal/intel** — cached intel snapshot (once per full tick)
 ```
@@ -185,17 +203,51 @@ Missing on exchange → POST /internal/recovery-close (excluded from stats)
 
 ## Trade Queue Rules
 
-- **One queue** in `HubState._trade_queue` (type: `TradeQueue`).
-- **Three priority buckets**: critical, daily, swing. Checked in that order.
+- **One flat queue** in `HubState._trade_queue` (type: `TradeQueue`).
+  Single `proposals` list — each proposal has a `priority` field
+  (CRITICAL / DAILY / SWING). Served in priority order, then by age.
+- **Lifecycle**: proposals only have `locked_until`. No consumed/rejected
+  fields. A proposal is either available, locked (being evaluated), or
+  removed from the queue.
 - **Monitor writes**: `_route_to_bots()` adds proposals after filtering
-  for symbol availability on connected exchanges.
-- **Bot reads**: `read_queue_for_bot_style(style)` pops exactly 1 matching
-  proposal from the top. Matching = `target_bot` tag matches the bot's style,
-  or `target_bot` is empty (any style).
-- **Pop is destructive** — once a bot gets a proposal, it's gone from the queue.
-  Other bots get the next one.
-- Bot reports consumed/rejected via `queue_updates` in next report payload.
-  Hub records rejections for signal generator cooldowns.
+  for symbol availability, queue dedup, hub.db open trade dedup, and
+  active symbols on each exchange.
+- **Hub serves**: `serve_proposal_to_bot()` picks 1 matching proposal,
+  locks it for 60s, returns a copy. Matching criteria:
+  - Bot's exchange in `supported_exchanges`
+  - Priority in bot's `allowed_priorities` (from BotProfile)
+  - `target_bot` matches bot style (or empty = any)
+  - Symbol not in `active_symbols` (held by any bot on same exchange)
+  - Symbol not in hub.db open trades
+- **On consume/reject**: bot's exchange is removed from the proposal.
+  Proposal stays for other exchanges. Removed entirely when no exchanges
+  left. Bot reports immediately via POST `/internal/queue-update`.
+- **Lock expiry**: if bot doesn't report within 60s, lock expires and
+  proposal becomes available again.
+
+### Deduplication Layers (4 levels)
+
+| Layer | Where | What |
+|-------|-------|------|
+| Queue dedup | Hub, `_route_to_bots` | Symbol already in queue? |
+| Hub DB dedup | Hub, routing + serving | Open trade in hub.db (`closed_at=''`)? |
+| Active symbols | Hub, serving | Any bot on this exchange holding it? |
+| Exchange check | Bot, before execution | `fetch_positions()` — asks exchange directly |
+
+### Bot Style Filtering
+
+Each `BotProfile` has `allowed_priorities`:
+
+| Bot | Priorities |
+|-----|-----------|
+| extreme, scalper | `["critical"]` |
+| momentum, hedger, indicators, aggressive | `["critical", "daily"]` |
+| meanrev, conservative | `["daily"]` |
+| swing | `["daily", "swing"]` |
+| fullstack | `["critical", "daily", "swing"]` |
+
+Hub only serves proposals whose priority matches. A swing bot never sees
+CRITICAL. An extreme bot never sees DAILY/SWING.
 
 ---
 
@@ -204,9 +256,10 @@ Missing on exchange → POST /internal/recovery-close (excluded from stats)
 Two cadences run in the main loop:
 
 ### Quick hub check (every 5s)
-Between full ticks, a lightweight hub poll fetches the next queue proposal
-and processes it immediately. This ensures proposals are picked up fast
-regardless of the full tick interval.
+Between full ticks, a lightweight hub poll sends `open_symbols` + `ready`
+flag and receives the next proposal. During warmup (first 1 min), `ready`
+is false and no proposal is requested or processed. After warmup, the bot
+evaluates the proposal and reports consumed/rejected immediately.
 
 ### Full tick (30-600s, configurable per bot profile)
 1. **Fetch intel** from hub (`GET /internal/intel` — separate call)
@@ -239,10 +292,12 @@ hub already curated. They do not scan the market independently:
 
 - **ExtremeWatcher** — subscribes to WebSocket tickers for a small list
   of extreme mover candidates received from the hub via `/internal/intel`.
-  The hub selects these candidates (typically 5-15 symbols). The bot
-  watches price action on this shortlist and enters if conditions are met.
-  It MUST NOT fetch the full exchange symbol list or scan broadly —
-  only the hub-provided candidates.
+  The hub selects these candidates (typically 5-15 symbols). The top 5
+  are also injected into the trade queue as CRITICAL proposals with
+  `target_bot="extreme"`. New entries come through the queue (validated
+  and deduped like any other proposal). ExtremeWatcher's local role is
+  **position monitoring** — tight stops, fast exits on open positions.
+  It MUST NOT fetch the full exchange symbol list or scan broadly.
 
 - **PatternDetector** — runs chart pattern analysis on candles fetched
   for a specific proposal that already arrived from the hub queue. It
@@ -254,7 +309,7 @@ hub already curated. They do not scan the market independently:
 - Validate proposals against its own style conditions before executing
 - Decide WHETHER to accept or reject a proposal (capacity, risk, validation)
 - Use intel from hub for position management (reversal risk, aggression)
-- Execute ExtremeWatcher entries on hub-curated shortlist only
+- Monitor open positions from ExtremeWatcher shortlist (fast exits/stops)
 - Enrich proposals with PatternDetector analysis
 - Report consumed/rejected back to hub
 
@@ -373,8 +428,9 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
 - **Don't persist state in bots.** No local DB, no state files. Everything
   goes to hub.db via HTTP.
 
-- **Don't add complexity to the queue.** Pop 1 from top, give to bot, done.
-  No locking, no broadcasting, no copy-on-read, no round-robin assignment.
+- **Don't add complexity to the queue.** Serve 1 proposal, lock 60s, bot
+  reports immediately. No broadcasting, no copy-on-read, no round-robin.
+  Don't buffer queue outcomes — always report consumed/rejected right away.
 
 - **Don't lower test coverage thresholds.** Write tests instead.
 
