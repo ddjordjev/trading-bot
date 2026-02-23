@@ -53,13 +53,14 @@ sequence every time, no shortcuts:
    ```bash
    docker compose down
    # Wipe ephemeral state so bots start fresh from defaults:
-   find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" -o -name "activate" | xargs rm -f
+   find "$HOST_DATA_DIR" \( -name "*.json" -o -name "*.lock" -o -name "activate" -o -name "STOP" -o -name "CLOSE_ALL" \) | xargs rm -f
    docker compose build
    docker compose up -d
    ```
    `HOST_DATA_DIR` is `/Users/damirdjordjev/workspace/trading-bot-data`.
    This removes runtime JSON files (bot_registry, trade_queue, bot_status,
-   etc.) and activation marker files. DBs (`.db`) are untouched.
+   etc.), activation markers, and manual override files. DBs (`.db`) are
+   untouched.
 
 **Rules:**
 - Never rebuild "just the bots" or "just the hub". Always bring everything

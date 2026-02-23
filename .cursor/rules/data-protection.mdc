@@ -62,12 +62,13 @@ them when rebuilding/redeploying:
 - `extreme_watchlist.json` — watchlist cache
 - `bot_registry.json` — hub bot registry
 - `**/activate` — bot activation marker files (controls which bots are active)
+- `**/STOP`, `**/CLOSE_ALL` — manual trading override files
 
 ## Rebuild procedure
 
 ```bash
 # Wipe ephemeral state on the host (DBs are untouched):
-find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" -o -name "activate" | xargs rm -f
+find "$HOST_DATA_DIR" \( -name "*.json" -o -name "*.lock" -o -name "activate" -o -name "STOP" -o -name "CLOSE_ALL" \) | xargs rm -f
 # Rebuild and start:
 docker compose build && docker compose up -d
 ```

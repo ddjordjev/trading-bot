@@ -134,7 +134,7 @@ class TradingBot:
         self._realized_pnl: float = 0.0
         self._enabled: bool = True  # hub-controlled enable flag
         self._hub_enabled: bool = True  # latest value from hub report response
-        self._validator = get_validator(self.settings.bot_style)
+        self._validator = get_validator(self.settings.bot_style, paper_mode=self.settings.is_paper)
 
     # -- Strategy Management --
 

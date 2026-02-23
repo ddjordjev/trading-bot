@@ -22,10 +22,10 @@ VALIDATORS_BY_STYLE: dict[str, type[Validator]] = {
 }
 
 
-def get_validator(bot_style: str) -> Validator:
+def get_validator(bot_style: str, *, paper_mode: bool = False) -> Validator:
     """Return the appropriate validator for a bot style, defaulting to momentum."""
     cls = VALIDATORS_BY_STYLE.get(bot_style, MomentumValidator)
-    return cls()
+    return cls(paper_mode=paper_mode)
 
 
 __all__ = [

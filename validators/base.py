@@ -20,6 +20,9 @@ class Validator(ABC):
     decide whether a hub-generated trade proposal is still actionable.
     """
 
+    def __init__(self, *, paper_mode: bool = False) -> None:
+        self.paper_mode = paper_mode
+
     @abstractmethod
     def validate(
         self,

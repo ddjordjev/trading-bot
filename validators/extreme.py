@@ -33,13 +33,14 @@ class ExtremeValidator(Validator):
         closes = pd.Series([c.close for c in candles])
         volumes = pd.Series([c.volume for c in candles])
 
-        recent_vol = volumes.iloc[-5:].mean()
-        older_vol = volumes.iloc[-20:-5].mean() if len(volumes) >= 20 else volumes.mean()
-        if older_vol > 0 and recent_vol / older_vol < self.VOLUME_SURGE_MULT:
-            return ValidationResult(
-                valid=False,
-                reason=f"volume surge fading ({recent_vol / older_vol:.1f}x, need {self.VOLUME_SURGE_MULT}x)",
-            )
+        if not self.paper_mode:
+            recent_vol = volumes.iloc[-5:].mean()
+            older_vol = volumes.iloc[-20:-5].mean() if len(volumes) >= 20 else volumes.mean()
+            if older_vol > 0 and recent_vol / older_vol < self.VOLUME_SURGE_MULT:
+                return ValidationResult(
+                    valid=False,
+                    reason=f"volume surge fading ({recent_vol / older_vol:.1f}x, need {self.VOLUME_SURGE_MULT}x)",
+                )
 
         price_now = closes.iloc[-1]
         price_recent = closes.iloc[-5]

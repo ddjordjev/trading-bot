@@ -38,14 +38,15 @@ class MomentumValidator(Validator):
         if side == "short" and rsi < self.RSI_OVERSOLD:
             return ValidationResult(valid=False, reason=f"RSI already oversold ({rsi:.0f})")
 
-        recent_vol = volumes.iloc[-3:].mean()
-        avg_vol = volumes.mean()
-        vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 1.0
-        if vol_ratio < 0.8:
-            return ValidationResult(
-                valid=False,
-                reason=f"volume declining ({vol_ratio:.1f}x avg)",
-            )
+        if not self.paper_mode:
+            recent_vol = volumes.iloc[-3:].mean()
+            avg_vol = volumes.mean()
+            vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 1.0
+            if vol_ratio < 0.8:
+                return ValidationResult(
+                    valid=False,
+                    reason=f"volume declining ({vol_ratio:.1f}x avg)",
+                )
 
         ema_fast = closes.ewm(span=8).mean().iloc[-1]
         ema_slow = closes.ewm(span=21).mean().iloc[-1]
