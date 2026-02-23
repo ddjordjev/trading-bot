@@ -53,6 +53,21 @@ class HubDB(TradeDB):
                 symbols TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS cex_binance_snapshots (
+                timestamp TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                price REAL NOT NULL,
+                quote_volume REAL NOT NULL,
+                change_24h REAL NOT NULL,
+                funding_rate REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (timestamp, symbol)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_cex_binance_ts
+                ON cex_binance_snapshots(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_cex_binance_symbol_ts
+                ON cex_binance_snapshots(symbol, timestamp);
         """)
         self._ensure_bot_id_column()
         self._ensure_request_key_column()
@@ -332,6 +347,58 @@ class HubDB(TradeDB):
             except Exception:
                 continue
         return result
+
+    # ---- Binance futures scanner snapshots ----
+
+    def save_binance_snapshots(self, rows: list[dict[str, Any]]) -> None:
+        """Upsert minute snapshots produced by BinanceFuturesScanner."""
+        if not rows:
+            return
+        assert self._conn
+        self._conn.executemany(
+            """
+            INSERT INTO cex_binance_snapshots
+            (timestamp, symbol, price, quote_volume, change_24h, funding_rate)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(timestamp, symbol) DO UPDATE SET
+                price=excluded.price,
+                quote_volume=excluded.quote_volume,
+                change_24h=excluded.change_24h,
+                funding_rate=excluded.funding_rate
+            """,
+            [
+                (
+                    r.get("timestamp", ""),
+                    r.get("symbol", ""),
+                    float(r.get("price", 0.0)),
+                    float(r.get("quote_volume", 0.0)),
+                    float(r.get("change_24h", 0.0)),
+                    float(r.get("funding_rate", 0.0)),
+                )
+                for r in rows
+            ],
+        )
+        self._conn.commit()
+
+    def load_binance_snapshots_since(self, since_iso: str) -> list[sqlite3.Row]:
+        """Load scanner snapshots since a given ISO timestamp."""
+        assert self._conn
+        return self._conn.execute(
+            """
+            SELECT timestamp, symbol, price, quote_volume, change_24h, funding_rate
+            FROM cex_binance_snapshots
+            WHERE timestamp >= ?
+            ORDER BY timestamp ASC
+            """,
+            (since_iso,),
+        ).fetchall()
+
+    def cleanup_binance_snapshots_before(self, cutoff_iso: str) -> int:
+        """Delete old scanner snapshots; returns deleted row count."""
+        assert self._conn
+        cur = self._conn.execute("DELETE FROM cex_binance_snapshots WHERE timestamp < ?", (cutoff_iso,))
+        self._conn.commit()
+        return cur.rowcount if cur.rowcount is not None else 0
 
     @property
     def conn(self) -> sqlite3.Connection | None:

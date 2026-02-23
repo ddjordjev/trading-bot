@@ -102,6 +102,20 @@ interface DailyReport {
   projected: { "1_week": number; "1_month": number; "3_months": number };
 }
 
+interface DbTable {
+  name: string;
+  row_count: number;
+}
+
+interface DbTableData {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
 const SEVERITY_COLORS: Record<string, string> = {
   info: "var(--accent)",
   warning: "var(--yellow)",
@@ -123,12 +137,154 @@ function weightColor(w: number): string {
   return "var(--red)";
 }
 
+function DbExplorer() {
+  const [tables, setTables] = useState<DbTable[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [tableData, setTableData] = useState<DbTableData | null>(null);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    get<DbTable[]>("/api/db/tables").then(setTables).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!selected) { setTableData(null); return; }
+    setLoading(true);
+    get<DbTableData>(`/api/db/table/${selected}?page=${page}&page_size=100`)
+      .then(setTableData)
+      .catch(() => setTableData(null))
+      .finally(() => setLoading(false));
+  }, [selected, page]);
+
+  const selectTable = (name: string) => {
+    setSelected(name);
+    setPage(1);
+  };
+
+  return (
+    <div style={{ marginTop: "0.5rem" }}>
+      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+        {tables.map(t => (
+          <button
+            key={t.name}
+            onClick={() => selectTable(t.name)}
+            style={{
+              padding: "0.35rem 0.75rem", fontSize: "0.8rem", cursor: "pointer",
+              borderRadius: "var(--radius, 6px)",
+              border: `1px solid ${selected === t.name ? "var(--accent, #58a6ff)" : "var(--border, #30363d)"}`,
+              background: selected === t.name ? "var(--accent, #58a6ff)" : "var(--bg-card, #161b22)",
+              color: selected === t.name ? "#fff" : "var(--text, #c9d1d9)",
+            }}
+          >
+            {t.name} <span style={{ opacity: 0.6 }}>({t.row_count})</span>
+          </button>
+        ))}
+        {tables.length === 0 && (
+          <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>No tables found</span>
+        )}
+      </div>
+
+      {loading && <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Loading...</div>}
+
+      {tableData && !loading && (
+        <div style={{
+          background: "var(--bg-card, #161b22)", border: "1px solid var(--border, #30363d)",
+          borderRadius: "var(--radius, 8px)", overflow: "hidden",
+        }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.75rem" }}>
+              <thead>
+                <tr>
+                  {tableData.columns.map(col => (
+                    <th key={col} style={{
+                      padding: "0.5rem 0.6rem", textAlign: "left", whiteSpace: "nowrap",
+                      borderBottom: "1px solid var(--border, #30363d)",
+                      color: "var(--text-muted, #8b949e)", fontWeight: 600, fontSize: "0.7rem",
+                      textTransform: "uppercase", letterSpacing: "0.03em",
+                      position: "sticky", top: 0, background: "var(--bg-card, #161b22)",
+                    }}>
+                      {col}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {tableData.rows.map((row, i) => (
+                  <tr key={i} style={{
+                    borderBottom: "1px solid var(--border, #30363d)",
+                    background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.02)",
+                  }}>
+                    {tableData.columns.map(col => (
+                      <td key={col} style={{
+                        padding: "0.4rem 0.6rem", whiteSpace: "nowrap",
+                        maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis",
+                      }}>
+                        {row[col] == null ? <span style={{ opacity: 0.3 }}>NULL</span> : String(row[col])}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+                {tableData.rows.length === 0 && (
+                  <tr>
+                    <td colSpan={tableData.columns.length} style={{
+                      padding: "1rem", textAlign: "center", color: "var(--text-muted)",
+                    }}>
+                      Empty table
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {tableData.total_pages > 1 && (
+            <div style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              padding: "0.5rem 0.75rem", borderTop: "1px solid var(--border, #30363d)",
+              fontSize: "0.75rem", color: "var(--text-muted)",
+            }}>
+              <span>{tableData.total} rows total</span>
+              <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
+                <button
+                  disabled={page <= 1}
+                  onClick={() => setPage(p => p - 1)}
+                  style={{
+                    padding: "0.2rem 0.5rem", fontSize: "0.75rem", cursor: page > 1 ? "pointer" : "default",
+                    background: "none", border: "1px solid var(--border)", borderRadius: 4,
+                    color: "var(--text-muted)", opacity: page <= 1 ? 0.3 : 1,
+                  }}
+                >
+                  Prev
+                </button>
+                <span>Page {tableData.page} / {tableData.total_pages}</span>
+                <button
+                  disabled={page >= tableData.total_pages}
+                  onClick={() => setPage(p => p + 1)}
+                  style={{
+                    padding: "0.2rem 0.5rem", fontSize: "0.75rem",
+                    cursor: page < tableData.total_pages ? "pointer" : "default",
+                    background: "none", border: "1px solid var(--border)", borderRadius: 4,
+                    color: "var(--text-muted)", opacity: page >= tableData.total_pages ? 0.3 : 1,
+                  }}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Analytics({ bots = [] }: { bots?: { bot_id: string }[] }) {
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [report, setReport] = useState<DailyReport | null>(null);
   const [closedTrades, setClosedTrades] = useState<ClosedTrade[]>([]);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"live" | "closed" | "scores" | "patterns" | "suggestions" | "hourly" | "report">("live");
+  const [tab, setTab] = useState<"live" | "closed" | "scores" | "patterns" | "suggestions" | "hourly" | "db" | "report">("live");
 
   const refresh = async () => {
     setLoading(true);
@@ -197,7 +353,7 @@ export function Analytics({ bots = [] }: { bots?: { bot_id: string }[] }) {
       </div>
 
       <div className="tabs" style={{ marginBottom: "1rem" }}>
-        {(["live", "closed", "scores", "patterns", "suggestions", "hourly", "report"] as const).map((t) => (
+        {(["live", "closed", "scores", "patterns", "suggestions", "hourly", "db", "report"] as const).map((t) => (
           <button key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
             {t === "live" ? `Live (${analytics?.live_positions.length ?? 0})`
               : t === "closed" ? `Closed Trades (${closedTrades.length})`
@@ -205,6 +361,7 @@ export function Analytics({ bots = [] }: { bots?: { bot_id: string }[] }) {
               : t === "patterns" ? `Patterns (${analytics?.patterns.length ?? 0})`
               : t === "suggestions" ? `Suggestions (${analytics?.suggestions.length ?? 0})`
               : t === "hourly" ? "Time & Regime"
+              : t === "db" ? "Database Explorer"
               : "Daily Report"}
           </button>
         ))}
@@ -216,6 +373,7 @@ export function Analytics({ bots = [] }: { bots?: { bot_id: string }[] }) {
       {tab === "patterns" && <PatternsTab patterns={analytics?.patterns ?? []} />}
       {tab === "suggestions" && <SuggestionsTab suggestions={analytics?.suggestions ?? []} />}
       {tab === "hourly" && <HourlyTab hourly={analytics?.hourly_performance ?? []} regime={analytics?.regime_performance ?? []} />}
+      {tab === "db" && <DbExplorer />}
       {tab === "report" && <ReportTab report={report} />}
     </div>
   );

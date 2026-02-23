@@ -2,7 +2,7 @@ import type { FullSnapshot } from "../hooks/useWebSocket";
 import { postBody } from "../api/client";
 import { PositionRow } from "../components/PositionRow";
 import { LogViewer } from "../components/LogViewer";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 interface Props {
   data: FullSnapshot | null;
@@ -18,10 +18,12 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
   const [logsExpanded, setLogsExpanded] = useState(true);
   const [actionTarget, setActionTarget] = useState("all");
   const [bulkAction, setBulkAction] = useState("");
+  const [manualStopOverride, setManualStopOverride] = useState<boolean | null>(null);
 
   if (!data) return <div className="empty-state">Connecting...</div>;
 
   const s = data.status;
+  const manualStopActive = manualStopOverride ?? s.manual_stop_active;
   const pnlClass = s.daily_pnl_pct >= 0 ? "pnl-positive" : "pnl-negative";
 
   const eb = data.exchange_balances ?? {};
@@ -52,18 +54,52 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
     if (targets === null || targets.length === 0) return;
     if (progressMsg) setBulkAction(progressMsg);
     const results: string[] = [];
-    for (const t of targets) {
-      try {
-        await fn(t);
-        results.push(`${t}: OK`);
-      } catch (e: any) {
-        results.push(`${t}: ${e.message}`);
+    let successCount = 0;
+
+    const parseAction = (resp: unknown): { success: boolean; message?: string } => {
+      if (!resp || typeof resp !== "object") return { success: true };
+      const maybe = resp as { success?: unknown; message?: unknown };
+      if (typeof maybe.success === "boolean") {
+        return { success: maybe.success, message: typeof maybe.message === "string" ? maybe.message : undefined };
       }
+      return { success: true };
+    };
+
+    const settled = await Promise.allSettled(targets.map((t) => fn(t)));
+    settled.forEach((item, idx) => {
+      const t = targets[idx];
+      if (item.status === "fulfilled") {
+        const parsed = parseAction(item.value);
+        if (parsed.success) {
+          successCount += 1;
+          results.push(`${t}: ${parsed.message || "OK"}`);
+        } else {
+          results.push(`${t}: ${parsed.message || "failed"}`);
+        }
+      } else {
+        const reason = item.reason instanceof Error ? item.reason.message : String(item.reason);
+        results.push(`${t}: ${reason}`);
+      }
+    });
+    const allSucceeded = successCount === targets.length;
+    if (allSucceeded) {
+      if (label === "Resume") setManualStopOverride(false);
+      if (label === "Halt") setManualStopOverride(true);
     }
     setBulkAction("");
     setActionMsg(`${label} — ${results.join(", ")}`);
     setTimeout(() => setActionMsg(""), 4000);
   };
+
+  useEffect(() => {
+    if (manualStopOverride === null) return;
+    if (s.manual_stop_active === manualStopOverride) {
+      setManualStopOverride(null);
+      return;
+    }
+    const timer = setTimeout(() => setManualStopOverride(null), 10000);
+    return () => clearTimeout(timer);
+  }, [manualStopOverride, s.manual_stop_active]);
 
   const fmtUptime = (sec: number) => {
     const h = Math.floor(sec / 3600);
@@ -122,7 +158,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
           <div className="label">Bot Status</div>
           <div className="value" style={{ color: s.running ? "var(--green)" : "var(--red)" }}>
             {s.running ? "Running" : "Stopped"}
-            {s.manual_stop_active && <span style={{ color: "var(--yellow)", fontSize: "0.7rem" }}> (HALTED)</span>}
+            {manualStopActive && <span style={{ color: "var(--yellow)", fontSize: "0.7rem" }}> (HALTED)</span>}
           </div>
         </div>
         {s.exchange_url && (

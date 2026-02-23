@@ -69,6 +69,11 @@ Runs in-process:
 - **MonitorService** — polls external APIs (TradingView, CoinMarketCap,
   CoinGecko, Fear&Greed, liquidations, macro, whales), writes IntelSnapshot
   to HubState. Also runs TrendingScanner for hot movers.
+- **BinanceFuturesScanner** — exchange-native scanner that polls Binance
+  public futures endpoints (`/fapi/v1/ticker/24hr`, `/fapi/v1/premiumIndex`),
+  persists minute snapshots to hub.db, restores rolling history on restart,
+  and computes confidence-weighted hot movers from local rolling data.
+  This scanner is currently data-only (no direct proposal routing yet).
 - **SignalGenerator** — converts intel + trending data into TradeProposal
   objects with priority (CRITICAL/DAILY/SWING) and strength scores.
   Proposals are filtered for symbol availability BEFORE entering the queue.
@@ -330,6 +335,7 @@ hub already curated. They do not scan the market independently:
 | What | Where | Survives restart |
 |------|-------|-----------------|
 | Trade history | hub.db (host bind mount) | Yes |
+| Binance scanner snapshots | hub.db (`cex_binance_snapshots`) | Yes |
 | Analytics scores | analytics_state.json (host) | Yes |
 | Bot status | HubState (memory) | No |
 | Intel snapshots | HubState (memory) | No |
@@ -397,6 +403,7 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
 | `hub/state.py` | Single in-memory state (HubState) |
 | `web/server.py` | Dashboard + /internal endpoints |
 | `services/monitor.py` | Intel polling + signal routing |
+| `scanner/binance_futures.py` | Binance futures native scanner (DB-backed rolling history) |
 | `services/signal_generator.py` | Proposal creation |
 | `services/analytics_service.py` | Strategy scoring from trade history |
 | `analytics/engine.py` | Analytics computation logic |

@@ -1069,6 +1069,13 @@ class TestWriteDeploymentStatusLevels:
             market_type="futures",
         )
         mock_exchange.fetch_positions = AsyncMock(return_value=[pos])
+        bot._open_trades["BTC/USDT"] = TradeRecord(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            action="open",
+            opened_at="2026-02-20T10:00:00+00:00",
+        )
         bot.shared = MagicMock()
         await bot._write_deployment_status()
         assert bot._last_bot_status.level == DeploymentLevel.STRESSED
@@ -1103,6 +1110,20 @@ class TestWriteDeploymentStatusLevels:
                 ),
             ]
             mock_exchange.fetch_positions = AsyncMock(return_value=positions)
+            bot._open_trades["BTC/USDT"] = TradeRecord(
+                symbol="BTC/USDT",
+                side="long",
+                strategy="test",
+                action="open",
+                opened_at="2026-02-20T10:00:00+00:00",
+            )
+            bot._open_trades["ETH/USDT"] = TradeRecord(
+                symbol="ETH/USDT",
+                side="long",
+                strategy="test",
+                action="open",
+                opened_at="2026-02-20T10:00:00+00:00",
+            )
             bot.shared = MagicMock()
             await bot._write_deployment_status()
         assert bot._last_bot_status.level == DeploymentLevel.DEPLOYED
@@ -1127,6 +1148,13 @@ class TestWriteDeploymentStatusLevels:
                 market_type="futures",
             )
             mock_exchange.fetch_positions = AsyncMock(return_value=[pos])
+            bot._open_trades["BTC/USDT"] = TradeRecord(
+                symbol="BTC/USDT",
+                side="long",
+                strategy="test",
+                action="open",
+                opened_at="2026-02-20T10:00:00+00:00",
+            )
             bot.shared = MagicMock()
             await bot._write_deployment_status()
         assert bot._last_bot_status.level == DeploymentLevel.ACTIVE

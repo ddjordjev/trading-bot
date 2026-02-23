@@ -1231,7 +1231,11 @@ class TradingBot:
     async def _write_deployment_status(self) -> None:
         """Tell the monitor service how busy we are so it adjusts intensity."""
         positions = await self.exchange.fetch_positions()
-        active = [p for p in positions if p.amount > 0]
+        # Shared exchange account: fetch_positions() includes positions opened by
+        # other bots. For dashboard/status ownership, only count positions this
+        # bot actively tracks in its own in-memory state.
+        owned_symbols = set(self._open_trades.keys())
+        active = [p for p in positions if p.amount > 0 and p.symbol in owned_symbols]
 
         avg_health = 0.0
         worst = 0.0

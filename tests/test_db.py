@@ -577,3 +577,54 @@ class TestHubDB:
         hub.mark_recovery_close("b1", "2026-01-01T10:00:00")
         stats = hub.get_strategy_stats_for_bot("b1", "rsi")
         assert stats.get("total", 0) == 0
+
+    def test_binance_snapshots_roundtrip(self, hub: HubDB):
+        rows = [
+            {
+                "timestamp": "2026-02-23T10:00:00+00:00",
+                "symbol": "BTC/USDT",
+                "price": 50000.0,
+                "quote_volume": 1000000000.0,
+                "change_24h": 2.5,
+                "funding_rate": 0.0001,
+            },
+            {
+                "timestamp": "2026-02-23T10:01:00+00:00",
+                "symbol": "BTC/USDT",
+                "price": 50050.0,
+                "quote_volume": 1001000000.0,
+                "change_24h": 2.6,
+                "funding_rate": 0.00011,
+            },
+        ]
+        hub.save_binance_snapshots(rows)
+        loaded = hub.load_binance_snapshots_since("2026-02-23T09:59:00+00:00")
+        assert len(loaded) == 2
+        assert loaded[0]["symbol"] == "BTC/USDT"
+
+    def test_binance_snapshots_cleanup(self, hub: HubDB):
+        hub.save_binance_snapshots(
+            [
+                {
+                    "timestamp": "2026-02-20T10:00:00+00:00",
+                    "symbol": "ETH/USDT",
+                    "price": 3000.0,
+                    "quote_volume": 500000000.0,
+                    "change_24h": 1.2,
+                    "funding_rate": 0.0002,
+                },
+                {
+                    "timestamp": "2026-02-23T10:00:00+00:00",
+                    "symbol": "ETH/USDT",
+                    "price": 3050.0,
+                    "quote_volume": 510000000.0,
+                    "change_24h": 1.6,
+                    "funding_rate": 0.00025,
+                },
+            ]
+        )
+        removed = hub.cleanup_binance_snapshots_before("2026-02-22T00:00:00+00:00")
+        assert removed == 1
+        loaded = hub.load_binance_snapshots_since("2026-02-20T00:00:00+00:00")
+        assert len(loaded) == 1
+        assert loaded[0]["timestamp"] == "2026-02-23T10:00:00+00:00"

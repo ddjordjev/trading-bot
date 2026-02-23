@@ -190,6 +190,15 @@ class Settings(BaseSettings):
     santiment_api_key: str = ""
     santiment_poll_interval: int = 600  # seconds between social data refreshes
 
+    # CEX scanners (exchange-native trend feeds)
+    cex_scanner_enabled: bool = True
+    binance_scanner_enabled: bool = True
+    binance_scanner_poll_interval: int = 60
+    binance_scanner_min_quote_volume: float = 5_000_000.0
+    binance_scanner_top_movers_count: int = 15
+    binance_scanner_history_hours: int = 24
+    binance_scanner_retention_days: int = 7
+
     # Dashboard (hub only)
     dashboard_host: str = "0.0.0.0"
     dashboard_port: int = 9035

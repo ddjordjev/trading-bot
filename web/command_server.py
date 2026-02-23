@@ -27,7 +27,7 @@ def set_bot(bot: TradingBot) -> None:
     _bot = bot
 
 
-async def _nudge_hub() -> None:
+async def _nudge_hub(*, full_snapshot: bool = False) -> None:
     """Fire-and-forget: send an immediate status report to the hub.
 
     This ensures the dashboard reflects action results (close-all, halt,
@@ -38,7 +38,12 @@ async def _nudge_hub() -> None:
     import contextlib
 
     with contextlib.suppress(Exception):
-        await _bot._quick_hub_check()
+        if full_snapshot:
+            # Full snapshot includes "positions", which clears stale open-position
+            # cards immediately after close-all/stop/resume actions.
+            await _bot._write_deployment_status()
+        else:
+            await _bot._quick_hub_check()
 
 
 def _json(success: bool, message: str) -> web.Response:
@@ -134,7 +139,7 @@ async def close_all(_request: web.Request) -> web.Response:
     await _bot._close_all_positions("Hub: close all")
     import asyncio
 
-    task = asyncio.create_task(_nudge_hub())
+    task = asyncio.create_task(_nudge_hub(full_snapshot=True))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return _json(True, "All positions closed")
@@ -146,7 +151,7 @@ async def stop_trading(_request: web.Request) -> web.Response:
     _bot.target.STOP_FILE.touch()
     import asyncio
 
-    task = asyncio.create_task(_nudge_hub())
+    task = asyncio.create_task(_nudge_hub(full_snapshot=True))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return _json(True, "Trading halted")
@@ -158,7 +163,7 @@ async def resume_trading(_request: web.Request) -> web.Response:
     _bot.target.STOP_FILE.unlink(missing_ok=True)
     import asyncio
 
-    task = asyncio.create_task(_nudge_hub())
+    task = asyncio.create_task(_nudge_hub(full_snapshot=True))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return _json(True, "Trading resumed")

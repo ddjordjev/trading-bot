@@ -37,6 +37,13 @@ class TestMonitorService:
         s.cmc_poll_interval = 300
         s.coingecko_api_key = ""
         s.coingecko_poll_interval = 300
+        s.cex_scanner_enabled = True
+        s.binance_scanner_enabled = True
+        s.binance_scanner_poll_interval = 60
+        s.binance_scanner_min_quote_volume = 5_000_000.0
+        s.binance_scanner_top_movers_count = 15
+        s.binance_scanner_history_hours = 24
+        s.binance_scanner_retention_days = 7
         return s
 
     @pytest.fixture

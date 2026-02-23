@@ -27,6 +27,20 @@ const REGIME_COLORS: Record<string, string> = {
   capitulation: "var(--purple)",
 };
 
+const LIQUIDATION_BIAS_COLORS: Record<string, string> = {
+  long: "var(--green)",
+  short: "var(--red)",
+  neutral: "var(--text-muted)",
+};
+
+function formatUsdCompact(value: number): string {
+  if (!Number.isFinite(value)) return "—";
+  if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`;
+  if (value >= 1e6) return `$${(value / 1e6).toFixed(2)}M`;
+  if (value >= 1e3) return `$${(value / 1e3).toFixed(1)}K`;
+  return `$${Math.round(value).toLocaleString()}`;
+}
+
 export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
   const [intel, setIntel] = useState<IntelSnapshot | null>(wsIntel);
   const [news, setNews] = useState<NewsItem[]>([]);
@@ -85,7 +99,7 @@ export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
         <div className="card">
           <h3 style={{ color: "var(--heading)", marginBottom: "0.8rem" }}>Liquidations (24h)</h3>
           <div style={{ fontSize: "1.5rem", fontWeight: 700, color: "var(--heading)" }}>
-            ${(intel.liquidation_24h / 1e6).toFixed(0)}M
+            {formatUsdCompact(intel.liquidation_24h)}
           </div>
           {intel.mass_liquidation && (
             <div style={{
@@ -97,7 +111,9 @@ export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
             </div>
           )}
           <div style={{ marginTop: "0.5rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
-            Bias: <strong style={{ color: "var(--text)" }}>{intel.liquidation_bias}</strong>
+            Bias: <strong style={{ color: LIQUIDATION_BIAS_COLORS[intel.liquidation_bias] || "var(--text)" }}>
+              {intel.liquidation_bias.toUpperCase()}
+            </strong>
           </div>
         </div>
       </div>

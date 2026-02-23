@@ -30,6 +30,7 @@ from intel.macro_calendar import MacroCalendar
 from intel.tradingview import TradingViewClient
 from intel.whale_sentiment import WhaleSentiment
 from news import NewsItem, NewsMonitor
+from scanner.binance_futures import BinanceFuturesScanner
 from scanner.trending import TrendingScanner
 from services.signal_generator import SignalGenerator
 from shared.models import (
@@ -92,6 +93,25 @@ class MonitorService:
             min_volume_24h=5_000_000,
             min_market_cap=50_000_000,
         )
+        cex_enabled = self._as_bool(getattr(self.settings, "cex_scanner_enabled", True), True)
+        binance_enabled = self._as_bool(getattr(self.settings, "binance_scanner_enabled", True), True)
+        binance_poll = self._as_int(getattr(self.settings, "binance_scanner_poll_interval", 60), 60, min_value=30)
+        binance_min_vol = self._as_float(
+            getattr(self.settings, "binance_scanner_min_quote_volume", 5_000_000.0),
+            5_000_000.0,
+            min_value=0.0,
+        )
+        binance_top = self._as_int(getattr(self.settings, "binance_scanner_top_movers_count", 15), 15, min_value=1)
+        binance_hist = self._as_int(getattr(self.settings, "binance_scanner_history_hours", 24), 24, min_value=1)
+        binance_retention = self._as_int(getattr(self.settings, "binance_scanner_retention_days", 7), 7, min_value=1)
+        self.binance_scanner = BinanceFuturesScanner(
+            enabled=cex_enabled and binance_enabled,
+            poll_interval=binance_poll,
+            min_quote_volume=binance_min_vol,
+            top_movers_count=binance_top,
+            history_hours=binance_hist,
+            retention_days=binance_retention,
+        )
         self.news = NewsMonitor(self.settings)
         self._recent_news: list[NewsItem] = []
 
@@ -113,11 +133,39 @@ class MonitorService:
         self._exchange_symbols: dict[str, set[str]] = {}
         self._candle_fetcher: object | None = None
 
+    @staticmethod
+    def _as_bool(value: object, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            low = value.strip().lower()
+            if low in {"1", "true", "yes", "on"}:
+                return True
+            if low in {"0", "false", "no", "off"}:
+                return False
+        return default
+
+    @staticmethod
+    def _as_int(value: object, default: int, *, min_value: int) -> int:
+        try:
+            parsed = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            parsed = default
+        return max(min_value, parsed)
+
+    @staticmethod
+    def _as_float(value: object, default: float, *, min_value: float) -> float:
+        try:
+            parsed = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            parsed = default
+        return max(min_value, parsed)
+
     async def start(self) -> None:
         logger.info("=" * 50)
         logger.info("MONITOR SERVICE v1.0")
         logger.info("Adaptive intensity: ON")
-        logger.info("Sources: F&G, Liquidations, Macro, Whales, TV, CMC, CoinGecko, Scanner")
+        logger.info("Sources: F&G, Liquidations, Macro, Whales, TV, CMC, CoinGecko, Scanner, BinanceScanner")
         logger.info("=" * 50)
 
         self._running = True
@@ -143,6 +191,7 @@ class MonitorService:
         await self.cmc.start()
         await self.gecko.start()
         await self.scanner.start()
+        await self.binance_scanner.start()
         await self.news.start()
         self.news.on_news(self._on_news)
 
@@ -161,6 +210,7 @@ class MonitorService:
         await self.cmc.stop()
         await self.gecko.stop()
         await self.scanner.stop()
+        await self.binance_scanner.stop()
         await self.news.stop()
         logger.info("Monitor service stopped")
 
@@ -231,6 +281,7 @@ class MonitorService:
             all_syms = [s for syms in fresh.values() for s in syms]
             if all_syms:
                 self.scanner.set_exchange_symbols(all_syms)
+            self.binance_scanner.set_exchange_symbols(fresh.get("BINANCE", set()))
             self._last_symbols_refresh = time.monotonic()
 
             try:
@@ -345,6 +396,12 @@ class MonitorService:
                         len(snapshot.tv_analyses),
                         bot_summary,
                     )
+                    if self.binance_scanner.enabled:
+                        logger.info(
+                            "BinanceScanner | latest={} hot={}",
+                            len(self.binance_scanner.latest_scan),
+                            len(self.binance_scanner.hot_movers),
+                        )
 
                 tick_count += 1
                 sleep_time = self._base_tick * multipliers["base"]
