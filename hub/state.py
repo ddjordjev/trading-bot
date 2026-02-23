@@ -219,7 +219,8 @@ class HubState:
         """Pick and lock the next matching proposal for a bot.
 
         Returns a copy of the proposal (for the bot) or None.
-        The original stays in the queue with ``locked_until`` set to 60 s.
+        The original stays in the queue with ``locked_until`` set to 300 s
+        so no other bot can grab the same symbol while this one is executing.
         """
         self._trade_queue.unlock_expired()
 
@@ -235,24 +236,23 @@ class HubState:
         if not picked:
             return None
 
-        self._trade_queue.lock_proposal(picked.id, seconds=60)
+        self._trade_queue.lock_proposal(picked.id, seconds=300)
         return picked.model_copy()
 
     def handle_consume(self, proposal_id: str, exchange: str, bot_id: str) -> None:
-        """Bot confirmed it executed the trade.
+        """Bot confirmed it executed the trade — remove from queue.
 
-        The proposal stays in the queue with cleared exchanges so that
-        ``has_symbol()`` keeps returning True — this prevents the signal
-        generator from recreating a proposal for the same symbol before
-        hub.db and active_symbols catch up.  The lock is left intact.
-        ``purge_stale()`` cleans up once ``max_age_seconds`` is reached.
+        The trade is now open: the bot already pushed it to hub.db and
+        reports the symbol via ``open_symbols`` every 5 s.  Those two
+        layers (``open_db_symbols`` + ``active_symbols``) prevent the
+        signal generator from recreating proposals for this symbol.
+        Keeping a ghost proposal around is unnecessary and error-prone.
         """
         proposal = self._find_proposal(proposal_id)
         if proposal:
             self._outcomes.append(QueueOutcome(proposal_id, proposal.symbol, proposal.strategy, "consumed", bot_id))
             self._outcomes = self._outcomes[-self._outcomes_max :]
-            proposal.supported_exchanges = []
-            proposal.max_age_seconds = int(proposal.age_seconds) + 300
+            self._trade_queue.remove_proposal(proposal_id)
 
         self._trade_queue.updated_at = datetime.now(UTC).isoformat()
 

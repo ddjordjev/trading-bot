@@ -213,16 +213,19 @@ Missing on exchange → POST /internal/recovery-close (excluded from stats)
   for symbol availability, queue dedup, hub.db open trade dedup, and
   active symbols on each exchange.
 - **Hub serves**: `serve_proposal_to_bot()` picks 1 matching proposal,
-  locks it for 60s, returns a copy. Matching criteria:
+  locks it for 300s, returns a copy. Matching criteria:
   - Bot's exchange in `supported_exchanges`
   - Priority in bot's `allowed_priorities` (from BotProfile)
   - `target_bot` matches bot style (or empty = any)
   - Symbol not in `active_symbols` (held by any bot on same exchange)
   - Symbol not in hub.db open trades
-- **On consume/reject**: bot's exchange is removed from the proposal.
-  Proposal stays for other exchanges. Removed entirely when no exchanges
-  left. Bot reports immediately via POST `/internal/queue-update`.
-- **Lock expiry**: if bot doesn't report within 60s, lock expires and
+- **On consume**: proposal is deleted from the queue. The trade is now
+  open — symbol protection shifts to `open_db_symbols` (hub.db) and
+  `active_symbols` (bot reports `open_symbols` every 5s).
+- **On reject**: bot's exchange is removed from the proposal. Proposal
+  stays for other exchanges. Removed entirely when no exchanges left.
+  Bot reports immediately via POST `/internal/queue-update`.
+- **Lock expiry**: if bot doesn't report within 300s, lock expires and
   proposal becomes available again.
 
 ### Deduplication Layers (4 levels)

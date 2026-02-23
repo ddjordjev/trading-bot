@@ -381,13 +381,16 @@ class TradingBot:
             uptime_min = (datetime.now(UTC) - self._started_at).total_seconds() / 60
             warmup_done = uptime_min >= self._warmup_minutes
 
+        if warmup_done and self._hub_proposal:
+            await self._process_trade_queue()
+
         try:
             payload: dict[str, Any] = {
                 "bot_id": self.settings.bot_id or "default",
                 "bot_style": self.settings.bot_style,
                 "exchange": self.settings.exchange.upper(),
                 "open_symbols": list(self._open_trades.keys()),
-                "ready": warmup_done,
+                "ready": warmup_done and not self.target.manual_stop,
             }
 
             url = f"{hub_url.rstrip('/')}/internal/report"
@@ -817,7 +820,11 @@ class TradingBot:
             await self._report_queue_outcome(proposal.id, "rejected", "no free slots")
             return
 
-        if not self.target.should_trade() and not self.target.manual_stop:
+        if self.target.manual_stop:
+            await self._report_queue_outcome(proposal.id, "rejected", "manual_stop")
+            return
+
+        if not self.target.should_trade():
             all_in_profit = active_count > 0 and all(p.pnl_pct >= 0 for p in positions if p.amount > 0)
             if not all_in_profit:
                 await self._report_queue_outcome(proposal.id, "rejected", f"tier={self.target.tier.value}")
@@ -1397,7 +1404,7 @@ class TradingBot:
         if self._started_at:
             uptime_min = (datetime.now(UTC) - self._started_at).total_seconds() / 60
             warmup_done = uptime_min >= self._warmup_minutes
-        payload["ready"] = warmup_done
+        payload["ready"] = warmup_done and not self.target.manual_stop
 
         try:
             url = f"{hub_url.rstrip('/')}/internal/report"
@@ -1411,7 +1418,7 @@ class TradingBot:
                 if "enabled" in body:
                     self._hub_enabled = body["enabled"]
                 self._hub_proposal = None
-                if "proposal" in body and warmup_done:
+                if "proposal" in body and warmup_done and not self.target.manual_stop:
                     self._hub_proposal = TradeProposal(**body["proposal"])
         except Exception as e:
             logger.error("Hub report error: {}", e, exc_info=True)

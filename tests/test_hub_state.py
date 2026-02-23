@@ -155,11 +155,10 @@ class TestHubStateTradeQueue:
 
         state.handle_consume(p.id, "BINANCE", "bot1")
         remaining = state.read_trade_queue()
-        assert remaining.total == 1
-        assert remaining.proposals[0].supported_exchanges == []
+        assert remaining.total == 0
 
-    def test_consume_keeps_proposal_as_symbol_blocker(self, state):
-        """After consume, proposal stays with empty exchanges as a symbol blocker."""
+    def test_consume_removes_proposal_from_queue(self, state):
+        """After consume, proposal is deleted — symbol protection shifts to open_db_symbols + active_symbols."""
         p = TradeProposal(
             priority=SignalPriority.CRITICAL,
             symbol="BTC/USDT",
@@ -176,9 +175,8 @@ class TestHubStateTradeQueue:
 
         state.handle_consume(p.id, "BINANCE", "bot1")
         remaining = state.read_trade_queue()
-        assert remaining.total == 1
-        assert remaining.proposals[0].supported_exchanges == []
-        assert remaining.has_symbol("BTC/USDT")
+        assert remaining.total == 0
+        assert not remaining.has_symbol("BTC/USDT")
 
     def test_serve_respects_bot_style_target(self, state):
         p1 = TradeProposal(
