@@ -759,10 +759,28 @@ class MonitorService:
         if not watchlist.candidates:
             return
 
+        open_db_symbols: set[str] = set()
+        try:
+            from pathlib import Path
+
+            from db.hub_store import HubDB
+
+            hub = HubDB(path=Path("data/hub.db"))
+            hub.connect()
+            open_db_symbols = hub.get_open_trade_symbols()
+            hub.close()
+        except Exception:
+            pass
+
         existing = self.state.read_trade_queue()
         added = 0
         for cand in watchlist.candidates[:5]:
             if existing.has_symbol(cand.symbol):
+                continue
+            if cand.symbol in open_db_symbols:
+                continue
+            available = [ex for ex in cand.supported_exchanges if cand.symbol not in self.state.get_active_symbols(ex)]
+            if cand.supported_exchanges and not available:
                 continue
             side = "long" if cand.direction == "bull" else "short"
             proposal = TradeProposal(
@@ -780,7 +798,7 @@ class MonitorService:
                 max_age_seconds=300,
                 source="extreme_watchlist",
                 target_bot="extreme",
-                supported_exchanges=cand.supported_exchanges,
+                supported_exchanges=available or cand.supported_exchanges,
             )
             existing.add(proposal)
             added += 1

@@ -1537,15 +1537,14 @@ class TestTradeQueueLifecycle:
             )
         )
         hub_state.read_trade_queue.return_value = q
-        hub_state.read_recent_outcomes.return_value = []
         with patch("web.server._hub_state_ref", hub_state):
             r = await client.get("/api/trade-queue")
         assert r.status_code == 200
         data = r.json()
         assert len(data) == 2
         by_sym = {d["symbol"]: d for d in data}
-        assert by_sym["BTC/USDT"]["status"] == "pending"
-        assert by_sym["SOL/USDT"]["status"] == "pending"
+        assert by_sym["BTC/USDT"]["strategy"] == "mom"
+        assert by_sym["SOL/USDT"]["strategy"] == "intel"
 
 
 # ── Analytics with Multibot Positions ───────────────────────────────────

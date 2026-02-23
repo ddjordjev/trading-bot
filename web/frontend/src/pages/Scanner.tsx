@@ -20,7 +20,6 @@ interface TradeQueueItem {
   strategy: string;
   strength: number;
   age_seconds: number;
-  status: string;
   reason: string;
   supported_exchanges: string[];
 }
@@ -66,21 +65,11 @@ export function Scanner() {
                 <th>Strength</th>
                 <th>Exchanges</th>
                 <th>Age</th>
-                <th>Status</th>
               </tr>
             </thead>
             <tbody>
-              {tradeQueue.map((p, i) => {
-                const statusStyle: Record<string, { bg: string; fg: string }> = {
-                  pending:  { bg: "rgba(88,166,255,0.15)", fg: "var(--accent)" },
-                  consumed: { bg: "rgba(63,185,80,0.15)",  fg: "var(--green)" },
-                  rejected: { bg: "rgba(248,81,73,0.15)",  fg: "var(--red)" },
-                  expired:  { bg: "rgba(139,148,158,0.15)", fg: "var(--text-muted)" },
-                };
-                const st = statusStyle[p.status] || statusStyle.expired;
-                const rowOpacity = p.status === "expired" || p.status === "rejected" ? 0.55 : 1;
-                return (
-                  <tr key={`${p.symbol}-${p.side}-${i}`} style={{ opacity: rowOpacity }}>
+              {tradeQueue.map((p, i) => (
+                  <tr key={`${p.symbol}-${p.side}-${i}`}>
                     <td style={{ fontWeight: 600 }}>{p.symbol}</td>
                     <td style={{ color: p.side === "long" || p.side === "buy" ? "var(--green)" : "var(--red)" }}>
                       {p.side === "buy" ? "LONG" : p.side === "sell" ? "SHORT" : p.side.toUpperCase()}
@@ -89,13 +78,8 @@ export function Scanner() {
                     <td>{p.strength.toFixed(2)}</td>
                     <td style={{ fontSize: "0.8rem" }}>{(p.supported_exchanges || []).join(", ") || "—"}</td>
                     <td>{p.age_seconds < 60 ? `${Math.round(p.age_seconds)}s` : `${(p.age_seconds / 60).toFixed(1)}m`}</td>
-                    <td>
-                      <span className="badge" style={{ background: st.bg, color: st.fg }}
-                        title={p.reason || ""}>{p.status.toUpperCase()}</span>
-                    </td>
                   </tr>
-                );
-              })}
+              ))}
             </tbody>
           </table>
         </div>

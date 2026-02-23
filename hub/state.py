@@ -237,21 +237,36 @@ class HubState:
             return None
 
         self._trade_queue.lock_proposal(picked.id, seconds=300)
+        logger.info(
+            "Served {} {} to {} (locked 300s) | queue={} active={} db={}",
+            picked.symbol,
+            picked.strategy,
+            bot_id,
+            self._trade_queue.total,
+            active,
+            open_db_symbols or set(),
+        )
         return picked.model_copy()
 
     def handle_consume(self, proposal_id: str, exchange: str, bot_id: str) -> None:
         """Bot confirmed it executed the trade — remove from queue.
 
-        The trade is now open: the bot already pushed it to hub.db and
-        reports the symbol via ``open_symbols`` every 5 s.  Those two
-        layers (``open_db_symbols`` + ``active_symbols``) prevent the
-        signal generator from recreating proposals for this symbol.
-        Keeping a ghost proposal around is unnecessary and error-prone.
+        Immediately registers the symbol in ``active_symbols`` so that
+        ``_route_to_bots`` and ``_queue_extreme_proposals`` won't re-add
+        a proposal for this symbol before the bot's next report cycle
+        propagates ``open_symbols``.
         """
         proposal = self._find_proposal(proposal_id)
         if proposal:
             self._outcomes.append(QueueOutcome(proposal_id, proposal.symbol, proposal.strategy, "consumed", bot_id))
             self._outcomes = self._outcomes[-self._outcomes_max :]
+
+            if bot_id and exchange:
+                ex = exchange.upper()
+                _, existing_syms = self._bot_positions.get(bot_id, (ex, set()))
+                self.update_bot_positions(bot_id, ex, existing_syms | {proposal.symbol})
+                logger.info("Consumed {} by {} — symbol added to active_symbols[{}]", proposal.symbol, bot_id, ex)
+
             self._trade_queue.remove_proposal(proposal_id)
 
         self._trade_queue.updated_at = datetime.now(UTC).isoformat()

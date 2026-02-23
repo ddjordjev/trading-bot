@@ -68,14 +68,13 @@ class TradeRecord(BaseModel):
 
 
 class TradeQueueItem(BaseModel):
-    """Trade proposal in the queue with lifecycle status."""
+    """Active trade proposal in the queue."""
 
     symbol: str
     side: str
     strategy: str
     strength: float
     age_seconds: float
-    status: str = "pending"
     reason: str = ""
     supported_exchanges: list[str] = []
 

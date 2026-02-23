@@ -27,6 +27,20 @@ def set_bot(bot: TradingBot) -> None:
     _bot = bot
 
 
+async def _nudge_hub() -> None:
+    """Fire-and-forget: send an immediate status report to the hub.
+
+    This ensures the dashboard reflects action results (close-all, halt,
+    resume) without waiting for the next regular report cycle.
+    """
+    if not _bot:
+        return
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        await _bot._quick_hub_check()
+
+
 def _json(success: bool, message: str) -> web.Response:
     return web.json_response({"success": success, "message": message})
 
@@ -118,6 +132,11 @@ async def close_all(_request: web.Request) -> web.Response:
     if not _bot:
         return _json(False, "Bot not initialized")
     await _bot._close_all_positions("Hub: close all")
+    import asyncio
+
+    task = asyncio.create_task(_nudge_hub())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return _json(True, "All positions closed")
 
 
@@ -125,6 +144,11 @@ async def stop_trading(_request: web.Request) -> web.Response:
     if not _bot:
         return _json(False, "Bot not initialized")
     _bot.target.STOP_FILE.touch()
+    import asyncio
+
+    task = asyncio.create_task(_nudge_hub())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return _json(True, "Trading halted")
 
 
@@ -132,6 +156,11 @@ async def resume_trading(_request: web.Request) -> web.Response:
     if not _bot:
         return _json(False, "Bot not initialized")
     _bot.target.STOP_FILE.unlink(missing_ok=True)
+    import asyncio
+
+    task = asyncio.create_task(_nudge_hub())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return _json(True, "Trading resumed")
 
 

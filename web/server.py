@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import time
 from collections import deque
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -325,7 +324,7 @@ async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem
 
     q = _hub_state_ref.read_trade_queue()
     for p in q.proposals:
-        if p.is_expired:
+        if p.is_expired or p.is_locked:
             continue
         items.append(
             TradeQueueItem(
@@ -334,23 +333,8 @@ async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem
                 strategy=p.strategy or "",
                 strength=p.strength,
                 age_seconds=p.age_seconds,
-                status="locked" if p.is_locked else "pending",
                 reason=p.reason or "",
                 supported_exchanges=p.supported_exchanges,
-            )
-        )
-
-    for o in _hub_state_ref.read_recent_outcomes():
-        items.append(
-            TradeQueueItem(
-                symbol=o.symbol,
-                side="",
-                strategy=o.strategy,
-                strength=0,
-                age_seconds=(datetime.now(UTC) - o.timestamp).total_seconds(),
-                status=o.action,
-                reason=o.reason,
-                supported_exchanges=[],
             )
         )
 

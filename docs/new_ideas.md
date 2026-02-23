@@ -148,3 +148,13 @@ is redistributed.
 Keep budgets conservative. The hub-managed version is the real solution.
 
 **Status:** Not started. Build before going live with multiple bots on real money.
+
+---
+
+## Trading Philosophy — Volatility as Opportunity
+
+1. **Volatility is not RISK — it's an OPPORTUNITY.**
+   - Never throttle or avoid trades solely because volatility is high.
+   - High volatility = bigger moves = more profit potential.
+   - Risk management limits *losses*, not *exposure to movement*.
+   - Strategies should lean INTO volatility spikes, not shy away.
