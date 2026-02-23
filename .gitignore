@@ -24,6 +24,7 @@ CLOSE_ALL
 htmlcov/
 .coverage
 docs/execution_logs/
+docker-compose.override.yml
 /Users/damirdjordjev/workspace/trading-bot-backups/
 /Users/damirdjordjev/workspace/trading-bot-data/
 /Users/damirdjordjev/workspace/trading-bot-logs/

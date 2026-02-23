@@ -59,6 +59,8 @@ class HubState:
         self._dispatched_max = 50
 
         self._bot_statuses: dict[str, BotDeploymentStatus] = {}
+        self._bot_positions: dict[str, tuple[str, set[str]]] = {}
+        self._active_symbols_by_exchange: dict[str, set[str]] = {}
 
         self._analytics_path = (data_dir / "analytics_state.json") if data_dir else _ANALYTICS_PATH
         self._analytics: AnalyticsSnapshot = self._load_analytics()
@@ -156,6 +158,23 @@ class HubState:
 
     def read_all_bot_statuses(self) -> list[BotDeploymentStatus]:
         return list(self._bot_statuses.values())
+
+    def update_bot_positions(self, bot_id: str, exchange: str, symbols: set[str]) -> None:
+        """Track which symbols a bot currently holds on a given exchange."""
+        ex = exchange.upper()
+        all_syms: set[str] = set()
+        for bid, (bex, bsyms) in list(self._bot_positions.items()):
+            if bid == bot_id:
+                continue
+            if bex == ex:
+                all_syms |= bsyms
+        self._bot_positions[bot_id] = (ex, symbols)
+        all_syms |= symbols
+        self._active_symbols_by_exchange[ex] = all_syms
+
+    def get_active_symbols(self, exchange: str) -> set[str]:
+        """Symbols currently held by any bot on this exchange."""
+        return self._active_symbols_by_exchange.get(exchange.upper(), set())
 
     # ---- Trade queue (written by monitor/signal_gen, read by bots) ---- #
 

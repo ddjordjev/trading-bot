@@ -79,15 +79,28 @@ class TestTradingBotInit:
 
 
 class TestTradingBotStrategyManagement:
-    def test_add_strategy_registers_builtin(self, bot):
-        bot.add_strategy("compound_momentum", "BTC/USDT", market_type="spot")
-        assert len(bot._strategies) == 1
-        assert bot._strategies[0].symbol == "BTC/USDT"
-        assert bot._strategies[0].name == "compound_momentum"
+    @pytest.mark.parametrize("market_type", ["spot", "futures"])
+    def test_add_strategy_registers_builtin(self, settings, mock_exchange, market_type):
+        settings.allowed_market_types = "spot,futures"
+        with patch("bot.create_exchange", return_value=mock_exchange):
+            from bot import TradingBot
 
-    def test_add_strategy_unknown_raises(self, bot):
-        with pytest.raises(ValueError, match="Unknown strategy"):
-            bot.add_strategy("unknown_strat", "BTC/USDT")
+            b = TradingBot(settings=settings)
+            b.add_strategy("compound_momentum", "BTC/USDT", market_type=market_type)
+            assert len(b._strategies) == 1
+            assert b._strategies[0].symbol == "BTC/USDT"
+            assert b._strategies[0].name == "compound_momentum"
+            assert b._strategies[0].market_type == market_type
+
+    @pytest.mark.parametrize("market_type", ["spot", "futures"])
+    def test_add_strategy_unknown_raises(self, settings, mock_exchange, market_type):
+        settings.allowed_market_types = "spot,futures"
+        with patch("bot.create_exchange", return_value=mock_exchange):
+            from bot import TradingBot
+
+            b = TradingBot(settings=settings)
+            with pytest.raises(ValueError, match="Unknown strategy"):
+                b.add_strategy("unknown_strat", "BTC/USDT", market_type=market_type)
 
     def test_add_strategy_market_type_not_allowed_fallback_to_spot(self, settings, mock_exchange):
         settings.allowed_market_types = "spot"

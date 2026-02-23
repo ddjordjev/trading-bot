@@ -392,6 +392,9 @@ class MonitorService:
         """Route proposals from staging queue to the shared hub queue.
 
         Drops proposals for symbols not available on any connected exchange.
+        Removes exchanges where the symbol is already held by a bot — prevents
+        multiple bots on the same account from piling into the same position.
+        If no exchanges remain after filtering, the proposal is dropped.
         Filtering by bot style happens at read time in /internal/report.
         """
         from hub.state import HubState
@@ -407,6 +410,7 @@ class MonitorService:
         existing = self.state.read_trade_queue()
         new_count = 0
         skipped = 0
+        deduped = 0
         all_proposals = staging.critical + staging.daily + staging.swing
         for proposal in all_proposals:
             if proposal.consumed or proposal.rejected or proposal.is_expired:
@@ -414,6 +418,14 @@ class MonitorService:
             if all_tradeable and proposal.symbol not in all_tradeable:
                 skipped += 1
                 continue
+            available = [
+                ex for ex in proposal.supported_exchanges if proposal.symbol not in self.state.get_active_symbols(ex)
+            ]
+            if proposal.supported_exchanges and not available:
+                deduped += 1
+                continue
+            if available != proposal.supported_exchanges:
+                proposal.supported_exchanges = available
             before = len(existing.critical) + len(existing.daily) + len(existing.swing)
             existing.add(proposal)
             after = len(existing.critical) + len(existing.daily) + len(existing.swing)
@@ -421,12 +433,13 @@ class MonitorService:
                 new_count += 1
         purged = existing.purge_stale()
         self.state.write_trade_queue(existing)
-        if new_count or purged or skipped:
+        if new_count or purged or skipped or deduped:
             logger.info(
-                "Trade queue updated: +{} new, -{} purged, ~{} skipped (no exchange), {} total ({} pending)",
+                "Trade queue updated: +{} new, -{} purged, ~{} skipped (no exchange), ~{} deduped (already traded), {} total ({} pending)",
                 new_count,
                 purged,
                 skipped,
+                deduped,
                 existing.total,
                 existing.pending_count,
             )

@@ -219,16 +219,18 @@ class TradingBot:
         if not hub_url:
             return True
 
+        default = profile.is_default if profile else False
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as sess:
                 payload = {"bot_id": bot_id, "bot_style": self.settings.bot_style}
                 async with sess.post(f"{hub_url}/internal/report", json=payload) as resp:
                     data = await resp.json()
-                    enabled = data.get("enabled", True)
+                    enabled = data.get("enabled", default)
                     self._hub_enabled = enabled
                     return enabled
         except Exception:
-            return True
+            logger.warning("Hub unreachable during activation check — defaulting to idle")
+            return False
 
     async def _lean_idle_loop(self) -> None:
         """Minimal loop for inactive bots — no exchange, no strategies, no hub communication.
@@ -565,7 +567,7 @@ class TradingBot:
         balance = self.settings.cap_balance(raw_balance)
 
         positions = await self.exchange.fetch_positions()
-        self.target.update_balance(raw_balance)
+        self.target.update_balance(balance)
 
         pyramid_pnl = sum(
             p.unrealized_pnl

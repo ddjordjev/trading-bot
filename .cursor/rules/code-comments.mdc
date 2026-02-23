@@ -1,0 +1,32 @@
+# Code Comments
+
+## Rules
+
+1. **No historical context in comments.** Comments must describe the
+   current state — what the code does NOW and why. Never reference what
+   it used to do, what was changed, what was replaced, or what the "old"
+   behavior was. Git history exists for that.
+
+2. **No narration.** Don't restate what the code already says. Only
+   comment non-obvious intent, trade-offs, or constraints.
+
+3. **No changelog-style comments.** No "Fixed bug where...",
+   "Previously this did...", "Changed from X to Y because...".
+
+4. Before committing, scan changed files for comments that violate these
+   rules and remove them.
+
+## Examples
+
+Bad:
+```python
+# Old testnet used testnet.binancefuture.com; now using demo endpoint
+# Previously this returned True, changed to False for safety
+# Fixed: was using raw_balance, now uses capped balance
+```
+
+Good:
+```python
+# Override futures URLs to Binance Demo Trading endpoint
+# Fail-closed: idle bots stay idle if hub is unreachable
+```

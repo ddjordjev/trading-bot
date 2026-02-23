@@ -49,6 +49,12 @@ class BinanceExchange(BaseExchange):
         if sandbox:
             self._spot.set_sandbox_mode(True)
             self._futures.set_sandbox_mode(True)
+            # Override futures URLs to Binance Demo Trading endpoint
+            api_urls = self._futures.urls.get("api", {})
+            if isinstance(api_urls, dict):
+                for key, url in list(api_urls.items()):
+                    if isinstance(url, str) and "testnet.binancefuture.com" in url:
+                        api_urls[key] = url.replace("testnet.binancefuture.com", "demo-fapi.binance.com")
 
         self._watchers: list[asyncio.Task[None]] = []
 
@@ -116,18 +122,27 @@ class BinanceExchange(BaseExchange):
 
     @timed("exchange.fetch_balance")
     async def fetch_balance(self) -> dict[str, float]:
-        data = await self._spot.fetch_balance()
         result: dict[str, float] = {}
-        for asset, info in data.items():
-            if isinstance(info, dict) and info.get("free", 0) > 0:
-                result[asset] = float(info["free"])
+        try:
+            data = await self._spot.fetch_balance()
+            for asset, info in data.items():
+                if isinstance(info, dict) and info.get("free", 0) > 0:
+                    result[asset] = float(info["free"])
+        except Exception:
+            if self.sandbox:
+                logger.debug("Spot balance fetch failed in sandbox mode — skipping")
+            else:
+                raise
         try:
             futures_data = await self._futures.fetch_balance()
             for asset, info in futures_data.items():
                 if isinstance(info, dict) and info.get("free", 0) > 0:
                     result[asset] = result.get(asset, 0) + float(info["free"])
         except Exception:
-            pass
+            if self.sandbox:
+                logger.debug("Futures balance fetch failed in sandbox mode — skipping")
+            else:
+                raise
         return {k: v for k, v in result.items() if v > 0}
 
     @timed("exchange.fetch_positions")

@@ -1032,6 +1032,12 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
             if consumed or rejected:
                 _hub_state_ref.apply_bot_queue_updates(bot_id, consumed, rejected)
 
+        exchange = data.get("exchange", "")
+        if exchange and "positions" in data:
+            positions = data["positions"] or []
+            held_symbols = {p["symbol"] for p in positions if p.get("symbol")}
+            _hub_state_ref.update_bot_positions(bot_id, exchange, held_symbols)
+
     report_bot_snapshot(data)
     hub = _get_hub_db()
     confirmed = hub.drain_confirmed_keys(bot_id) if bot_id else []
