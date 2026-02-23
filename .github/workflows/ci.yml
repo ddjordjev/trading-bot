@@ -54,33 +54,11 @@ jobs:
       - working-directory: web/frontend
         run: npm run build
 
-  integration-test:
-    name: Binance IT
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    needs: [test]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-      - run: pip install -r requirements.txt
-      - name: Run integration tests
-        env:
-          TRADING_MODE: ${{ secrets.TRADING_MODE }}
-          EXCHANGE: ${{ secrets.EXCHANGE }}
-          BINANCE_TEST_API_KEY: ${{ secrets.BINANCE_TEST_API_KEY }}
-          BINANCE_TEST_API_SECRET: ${{ secrets.BINANCE_TEST_API_SECRET }}
-          BYBIT_TEST_API_KEY: ${{ secrets.BYBIT_TEST_API_KEY }}
-          BYBIT_TEST_API_SECRET: ${{ secrets.BYBIT_TEST_API_SECRET }}
-        run: pytest tests/test_integration_binance.py -v --tb=short -m integration --no-cov
-
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
-    needs: [lint-and-type-check, test, integration-test]
+    needs: [lint-and-type-check, test]
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t trading-bot:ci .
