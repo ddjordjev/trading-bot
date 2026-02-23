@@ -292,3 +292,8 @@ class BotProfileInfo(BaseModel):
     is_hub: bool = False
     enabled: bool = False
     container_status: str = "idle"  # "running" | "idle" | "winding_down"
+    balance: float | None = None
+    daily_pnl: float | None = None
+    wins: int = 0
+    losses: int = 0
+    open_positions: int = 0

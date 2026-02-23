@@ -707,6 +707,10 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
         rpt = _bot_reports.get(p.id, {})
         container_status = ("running" if enabled else "idle") if rpt else "idle"
 
+        s = rpt.get("status", {})
+        positions = rpt.get("positions", [])
+        summary = hub.get_bot_summary(p.id)
+
         result.append(
             BotProfileInfo(
                 id=p.id,
@@ -718,6 +722,11 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
                 is_hub=p.is_hub,
                 enabled=enabled,
                 container_status=container_status,
+                balance=s.get("balance") if s else None,
+                daily_pnl=s.get("daily_pnl") if s else None,
+                wins=summary.get("wins", 0),
+                losses=summary.get("losses", 0),
+                open_positions=len(positions),
             )
         )
     return result

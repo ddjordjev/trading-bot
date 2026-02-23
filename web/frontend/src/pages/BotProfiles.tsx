@@ -11,6 +11,11 @@ interface BotProfile {
   is_hub: boolean;
   enabled: boolean;
   container_status: string;
+  balance: number | null;
+  daily_pnl: number | null;
+  wins: number;
+  losses: number;
+  open_positions: number;
 }
 
 const STYLE_COLORS: Record<string, string> = {
@@ -165,6 +170,41 @@ export function BotProfiles() {
                     <span style={{ color: "var(--text-muted)" }}>overrides</span>
                     <span style={{ color: "var(--heading)" }}>{overrideKeys.length} params</span>
                   </div>
+                )}
+                {p.balance != null && (
+                  <>
+                    <div style={{ borderTop: "1px solid var(--border)", margin: "0.4rem 0" }} />
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "0.15rem 0" }}>
+                      <span style={{ color: "var(--text-muted)" }}>balance</span>
+                      <span style={{ color: "var(--heading)" }}>
+                        ${p.balance.toFixed(2)}
+                        {p.daily_pnl != null && (
+                          <span style={{ color: p.daily_pnl >= 0 ? "var(--green)" : "var(--red)", marginLeft: 6, fontSize: "0.75rem" }}>
+                            {p.daily_pnl >= 0 ? "+" : ""}{p.daily_pnl.toFixed(2)}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "0.15rem 0" }}>
+                      <span style={{ color: "var(--text-muted)" }}>trades</span>
+                      <span>
+                        <span style={{ color: "var(--green)" }}>{p.wins}W</span>
+                        {" / "}
+                        <span style={{ color: "var(--red)" }}>{p.losses}L</span>
+                        {(p.wins + p.losses) > 0 && (
+                          <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: "0.75rem" }}>
+                            ({Math.round(p.wins / (p.wins + p.losses) * 100)}%)
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    {p.open_positions > 0 && (
+                      <div style={{ display: "flex", justifyContent: "space-between", padding: "0.15rem 0" }}>
+                        <span style={{ color: "var(--text-muted)" }}>positions</span>
+                        <span style={{ color: "var(--accent)" }}>{p.open_positions} open</span>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>

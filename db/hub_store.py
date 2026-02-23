@@ -253,6 +253,22 @@ class HubDB(TradeDB):
             result[key] = d
         return result
 
+    def get_bot_summary(self, bot_id: str) -> dict[str, Any]:
+        """Aggregate wins, losses, total PnL for a bot (excludes recovery closes)."""
+        assert self._conn
+        row = self._conn.execute(
+            """SELECT
+                SUM(CASE WHEN is_winner=1 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN is_winner=0 AND pnl_usd!=0 THEN 1 ELSE 0 END) as losses,
+                COALESCE(SUM(pnl_usd), 0) as total_pnl
+            FROM trades
+            WHERE bot_id=? AND action='close' AND recovery_close=0""",
+            (bot_id,),
+        ).fetchone()
+        if not row:
+            return {"wins": 0, "losses": 0, "total_pnl": 0.0}
+        return {"wins": row["wins"] or 0, "losses": row["losses"] or 0, "total_pnl": row["total_pnl"] or 0.0}
+
     # ---- Acknowledgment buffer ----
 
     def _mark_confirmed(self, bot_id: str, request_key: str) -> None:
