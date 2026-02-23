@@ -994,6 +994,9 @@ class TradingBot:
         if not self._symbol_available(proposal.symbol):
             logger.debug("Queue skip {}: not on {}", proposal.symbol, my_exchange)
             return False
+        if proposal.symbol in self._open_trades:
+            logger.info("Queue skip {}: already have an open position", proposal.symbol)
+            return False
 
         result = await self._validate_proposal(proposal)
         if not result.valid:
@@ -1055,6 +1058,9 @@ class TradingBot:
             return False
         if not self._symbol_available(proposal.symbol):
             logger.debug("Swing skip {}: not on {}", proposal.symbol, my_exchange)
+            return False
+        if proposal.symbol in self._open_trades:
+            logger.info("Swing skip {}: already have an open position", proposal.symbol)
             return False
 
         result = await self._validate_proposal(proposal)

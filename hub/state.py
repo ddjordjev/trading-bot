@@ -173,8 +173,24 @@ class HubState:
         self._active_symbols_by_exchange[ex] = all_syms
 
     def get_active_symbols(self, exchange: str) -> set[str]:
-        """Symbols currently held by any bot on this exchange."""
-        return self._active_symbols_by_exchange.get(exchange.upper(), set())
+        """Symbols currently held OR recently dispatched to any bot on this exchange."""
+        held = self._active_symbols_by_exchange.get(exchange.upper(), set())
+        dispatched = self._get_dispatched_symbols(exchange)
+        return held | dispatched
+
+    def _get_dispatched_symbols(self, exchange: str) -> set[str]:
+        """Symbols from recently dispatched proposals (guards the report-back gap)."""
+        ex = exchange.upper()
+        cutoff = datetime.now(UTC) - timedelta(minutes=5)
+        result: set[str] = set()
+        for p in self._dispatched:
+            if (
+                p.created_at
+                and datetime.fromisoformat(p.created_at) > cutoff
+                and (not p.supported_exchanges or ex in p.supported_exchanges)
+            ):
+                result.add(p.symbol)
+        return result
 
     # ---- Trade queue (written by monitor/signal_gen, read by bots) ---- #
 
@@ -249,12 +265,15 @@ class HubState:
         If *exchange* is provided, only proposals whose supported_exchanges
         include that exchange are considered.  Proposals meant for other
         exchanges are silently skipped (left in the queue for the right bot).
+        Symbols already held or recently dispatched on this exchange are also
+        skipped to prevent duplicate positions.
         """
         result = TradeQueue()
         picked = None
         picked_bucket = None
         picked_idx = None
         ex_upper = exchange.upper() if exchange else ""
+        active = self.get_active_symbols(exchange) if ex_upper else set()
 
         for bucket_name in ("critical", "daily", "swing"):
             src: list = getattr(self._trade_queue, bucket_name)
@@ -262,6 +281,8 @@ class HubState:
                 if p.consumed or p.rejected or p.is_expired:
                     continue
                 if ex_upper and p.supported_exchanges and ex_upper not in p.supported_exchanges:
+                    continue
+                if ex_upper and p.symbol in active:
                     continue
                 targets = {t.strip() for t in (p.target_bot or "").split(",") if t.strip()}
                 if not targets or bot_style in targets:

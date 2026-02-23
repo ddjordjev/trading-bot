@@ -48,11 +48,12 @@ class MomentumValidator(Validator):
                     reason=f"volume declining ({vol_ratio:.1f}x avg)",
                 )
 
-        ema_fast = closes.ewm(span=8).mean().iloc[-1]
-        ema_slow = closes.ewm(span=21).mean().iloc[-1]
-        if side == "long" and ema_fast < ema_slow:
-            return ValidationResult(valid=False, reason="fast EMA below slow — trend weakening")
-        if side == "short" and ema_fast > ema_slow:
-            return ValidationResult(valid=False, reason="fast EMA above slow — trend weakening")
+        if not self.paper_mode:
+            ema_fast = closes.ewm(span=8).mean().iloc[-1]
+            ema_slow = closes.ewm(span=21).mean().iloc[-1]
+            if side == "long" and ema_fast < ema_slow:
+                return ValidationResult(valid=False, reason="fast EMA below slow — trend weakening")
+            if side == "short" and ema_fast > ema_slow:
+                return ValidationResult(valid=False, reason="fast EMA above slow — trend weakening")
 
         return ValidationResult(valid=True, reason="momentum confirmed", confidence=0.85)
