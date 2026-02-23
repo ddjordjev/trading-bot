@@ -121,6 +121,7 @@ ALL_PROFILES: list[BotProfile] = [
             "TAKE_PROFIT_PCT": "2.0",
             "INITIAL_RISK_AMOUNT": "30",
         },
+        is_default=True,
     ),
     BotProfile(
         id="fullstack",
@@ -140,6 +141,7 @@ ALL_PROFILES: list[BotProfile] = [
         env_overrides={
             "MAX_CONCURRENT_POSITIONS": "10",
         },
+        is_default=True,
     ),
     BotProfile(
         id="conservative",
@@ -153,6 +155,7 @@ ALL_PROFILES: list[BotProfile] = [
             "STOP_LOSS_PCT": "1.0",
             "INITIAL_RISK_AMOUNT": "20",
         },
+        is_default=True,
     ),
     BotProfile(
         id="aggressive",
@@ -167,6 +170,7 @@ ALL_PROFILES: list[BotProfile] = [
             "INITIAL_RISK_AMOUNT": "100",
             "MAX_CONCURRENT_POSITIONS": "8",
         },
+        is_default=True,
     ),
 ]
 
