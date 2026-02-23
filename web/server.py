@@ -909,6 +909,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
     dynamic_count = 0
     bot_count = 0
     first_status: dict[str, Any] = {}
+    exchange_balances: dict[str, float] = {}
 
     for rpt in reports:
         s = rpt.get("status", {})
@@ -923,6 +924,10 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
         if not first_status:
             first_status = s
+
+        ex_bal = rpt.get("exchange_balance", 0)
+        if ex_name and ex_bal:
+            exchange_balances[ex_name] = max(exchange_balances.get(ex_name, 0), ex_bal)
 
         total_balance += s.get("balance", 0)
         total_available += s.get("available_margin", 0)
@@ -966,14 +971,18 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
     intel = _intel_snapshot()
 
+    real_balance = sum(exchange_balances.values()) if exchange_balances else total_balance
+    real_margin_used = sum(p.get("notional_value", 0) / max(p.get("leverage", 1), 1) for p in all_positions)
+    real_available = max(0.0, real_balance - real_margin_used)
+
     merged_status = {
         "bot_id": "all",
         "running": any_running,
         "trading_mode": first_status.get("trading_mode", "paper_local"),
         "exchange_name": first_status.get("exchange_name", ""),
         "exchange_url": first_status.get("exchange_url", ""),
-        "balance": total_balance,
-        "available_margin": total_available,
+        "balance": real_balance,
+        "available_margin": real_available,
         "daily_pnl": total_daily_pnl,
         "daily_pnl_pct": total_daily_pnl_pct / bot_count if bot_count else 0,
         "tier": first_status.get("tier", "building"),
@@ -995,6 +1004,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
         "intel": intel.model_dump() if intel else None,
         "logs": list(_log_buffer),
         "bots": bot_snapshots,
+        "exchange_balances": exchange_balances,
     }
 
 

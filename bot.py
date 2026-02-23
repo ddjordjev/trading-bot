@@ -129,6 +129,9 @@ class TradingBot:
         self.extreme_watcher = ExtremeWatcher(self.exchange, self.settings)
         self._last_extreme_eval: float = 0.0
         self._available_symbols: set[str] = set()
+        self._raw_balance: float = 0.0
+        self._session_start_balance: float = 0.0
+        self._realized_pnl: float = 0.0
         self._enabled: bool = True  # hub-controlled enable flag
         self._hub_enabled: bool = True  # latest value from hub report response
         self._validator = get_validator(self.settings.bot_style)
@@ -282,13 +285,17 @@ class TradingBot:
         await self.notifier.start()
 
         balance_map = await self.exchange.fetch_balance()
-        balance = self.settings.cap_balance(balance_map.get("USDT", 0.0))
+        raw = balance_map.get("USDT", 0.0)
+        self._raw_balance = raw
+        balance = self.settings.cap_balance(raw)
+        self._session_start_balance = balance
+        self._realized_pnl = 0.0
         self.risk.reset_daily(balance)
         self.target.reset_day(balance)
 
         projected = self.target.projected_balance
         if self.settings.session_budget > 0:
-            logger.info("Session budget: ${:.2f} (exchange has ${:.2f})", balance, balance_map.get("USDT", 0.0))
+            logger.info("Session budget: ${:.2f} (exchange has ${:.2f})", balance, raw)
         logger.info("Starting balance: {:.2f} USDT", balance)
         logger.info(
             "Projections if target hit daily -> 1w: {:.0f} | 1mo: {:.0f} | 3mo: {:.0f}",
@@ -564,9 +571,11 @@ class TradingBot:
 
         balance_map = await self.exchange.fetch_balance()
         raw_balance = balance_map.get("USDT", 0.0)
-        balance = self.settings.cap_balance(raw_balance)
+        self._raw_balance = raw_balance
 
         positions = await self.exchange.fetch_positions()
+        unrealized = sum(p.unrealized_pnl for p in positions if p.amount > 0)
+        balance = self._session_start_balance + self._realized_pnl + unrealized
         self.target.update_balance(balance)
 
         pyramid_pnl = sum(
@@ -1230,8 +1239,11 @@ class TradingBot:
                 closed_at=now.isoformat(),
             )
 
+            self._realized_pnl += pnl_usd
             self._update_strategy_stats(record)
-            logger.debug("Closed trade for {} PnL={:.2f} (in-memory)", order.symbol, pnl_usd)
+            logger.debug(
+                "Closed trade for {} PnL={:.2f} (realized total={:.2f})", order.symbol, pnl_usd, self._realized_pnl
+            )
 
             task = asyncio.ensure_future(self._push_trade_to_hub(record))
             self._hub_tasks.add(task)
@@ -1435,6 +1447,7 @@ class TradingBot:
             "bot_id": self.settings.bot_id or "default",
             "bot_style": self.settings.bot_style,
             "exchange": self.settings.exchange.upper(),
+            "exchange_balance": self._raw_balance,
             "status": {
                 "running": self._running,
                 "trading_mode": self.settings.trading_mode,
@@ -2012,16 +2025,18 @@ class TradingBot:
         if now.hour == 0 and now.minute < 2:
             if self.target._last_reset and self.target._last_reset.date() == now.date():
                 return
-            balance_map = await self.exchange.fetch_balance()
-            raw_balance = balance_map.get("USDT", 0.0)
-            self.target.update_balance(raw_balance)
+            positions = await self.exchange.fetch_positions()
+            unrealized = sum(p.unrealized_pnl for p in positions if p.amount > 0)
+            eod_balance = self._session_start_balance + self._realized_pnl + unrealized
 
             logger.info("=== DAILY RESET ===")
             logger.info(self.target.status_report())
             logger.info("Total growth since start: {:.1f}%", self.target.total_growth_pct)
 
-            self.risk.reset_daily(raw_balance, profit_buffer_pct=self.target.profit_buffer_pct)
-            self.target.reset_day(raw_balance)
+            self._session_start_balance = eod_balance
+            self._realized_pnl = 0.0
+            self.risk.reset_daily(eod_balance, profit_buffer_pct=self.target.profit_buffer_pct)
+            self.target.reset_day(eod_balance)
 
 
 def main() -> None:

@@ -24,6 +24,12 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
   const s = data.status;
   const pnlClass = s.daily_pnl_pct >= 0 ? "pnl-positive" : "pnl-negative";
 
+  const eb = data.exchange_balances ?? {};
+  const exchangeBalance = exchangeFilter === "all"
+    ? Object.values(eb).reduce((a, b) => a + b, 0)
+    : eb[exchangeFilter] ?? 0;
+  const displayBalance = exchangeBalance > 0 ? exchangeBalance : s.balance;
+
   const visibleBots = exchangeFilter === "all"
     ? bots
     : bots.filter((b) => b.exchange.toUpperCase() === exchangeFilter);
@@ -70,7 +76,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
       <div className="stat-grid">
         <div className="stat-card">
           <div className="label">Balance / Available</div>
-          <div className="value">${Math.round(s.balance).toLocaleString()}</div>
+          <div className="value">${Math.round(displayBalance).toLocaleString()}</div>
           <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: 2 }}>
             ${Math.round(s.available_margin).toLocaleString()} available
           </div>

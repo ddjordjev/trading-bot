@@ -21,6 +21,7 @@ export interface FullSnapshot {
   wick_scalps: (WickScalpInfo & { bot_id?: string; exchange_name?: string })[];
   logs: LogEntry[];
   bots?: BotSnapshot[];
+  exchange_balances?: Record<string, number>;
 }
 
 export interface BotStatus {

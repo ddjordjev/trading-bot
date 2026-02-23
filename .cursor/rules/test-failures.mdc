@@ -1,0 +1,39 @@
+---
+description: How to handle test failures — investigate root cause before touching code or tests
+globs: tests/**/*.py
+alwaysApply: false
+---
+
+# Test Failure Protocol
+
+When a test fails, **stop and investigate before changing anything.**
+
+## Rules
+
+1. **Never dismiss a failure as "pre-existing" or "unrelated".** If you
+   saw it fail, you own it. Investigate.
+
+2. **Never tweak a test just to make it pass.** Understand WHY it fails
+   first. The test might be correct and the code might be wrong.
+
+3. **Root-cause checklist** (do all of these before editing):
+   - Read the test — what behavior is it asserting?
+   - Read the code under test — does the code match the test's intent?
+   - Read the error — is the failure in the test, the code, or the
+     environment (e.g. fixture depending on `.env` state)?
+   - If unclear, **ask the user** instead of guessing.
+
+4. **Environment-dependent tests are bugs.** Tests must not depend on
+   `.env` values. If a fixture uses `get_settings()`, it must explicitly
+   set every field it relies on so results are the same regardless of
+   what's in `.env`.
+
+5. **When fixing, fix the actual problem:**
+   - Test wrong → fix the test, explain why the assertion was incorrect
+   - Code wrong → fix the code, test stays as-is
+   - Fixture wrong → fix the fixture, explain the environment dependency
+   - If both need changes, explain both clearly
+
+6. **Parametrize when the function handles multiple cases.** If a function
+   works with both `spot` and `futures`, test both — don't pick one and
+   hope the other works.
