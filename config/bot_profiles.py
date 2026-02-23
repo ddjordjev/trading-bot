@@ -69,7 +69,7 @@ ALL_PROFILES: list[BotProfile] = [
             "HEDGE_MIN_PROFIT_PCT": "2.0",
             "MAX_HEDGES": "4",
         },
-        is_default=True,
+        is_default=False,
     ),
     BotProfile(
         id="momentum",
@@ -97,7 +97,7 @@ ALL_PROFILES: list[BotProfile] = [
             "TICK_INTERVAL_IDLE": "120",
             "TICK_INTERVAL_ACTIVE": "60",
         },
-        is_default=False,
+        is_default=True,
     ),
     BotProfile(
         id="swing",
@@ -110,7 +110,7 @@ ALL_PROFILES: list[BotProfile] = [
             "TICK_INTERVAL_IDLE": "600",
             "TICK_INTERVAL_ACTIVE": "300",
         },
-        is_default=False,
+        is_default=True,
     ),
     BotProfile(
         id="scalper",
@@ -146,7 +146,7 @@ ALL_PROFILES: list[BotProfile] = [
         env_overrides={
             "MAX_CONCURRENT_POSITIONS": "10",
         },
-        is_default=True,
+        is_default=False,
     ),
     BotProfile(
         id="conservative",

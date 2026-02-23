@@ -301,6 +301,52 @@ class TestHubStateTradeQueue:
         assert "BTC/USDT|m" in history
         assert history["BTC/USDT|m"].count == 1
 
+    def test_serve_blocks_locked_symbol(self, state):
+        """When Bot A locks a ZRO/USDT proposal, Bot B cannot get any ZRO/USDT proposal."""
+        p1 = TradeProposal(
+            priority=SignalPriority.CRITICAL,
+            symbol="ZRO/USDT",
+            side="short",
+            strategy="trending_momentum",
+            reason="r",
+            strength=0.8,
+            market_type="futures",
+            supported_exchanges=["BINANCE"],
+        )
+        p2 = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="ZRO/USDT",
+            side="short",
+            strategy="rsi",
+            reason="r",
+            strength=0.6,
+            market_type="futures",
+            supported_exchanges=["BINANCE"],
+        )
+        p3 = TradeProposal(
+            priority=SignalPriority.CRITICAL,
+            symbol="ETH/USDT",
+            side="long",
+            strategy="m",
+            reason="r",
+            strength=0.7,
+            market_type="futures",
+            supported_exchanges=["BINANCE"],
+        )
+        q = TradeQueue()
+        q.add(p1)
+        q.add(p2)
+        q.add(p3)
+        state.write_trade_queue(q)
+
+        served_a = state.serve_proposal_to_bot("momentum", "bot-a", "BINANCE")
+        assert served_a is not None
+        assert served_a.symbol == "ZRO/USDT"
+
+        served_b = state.serve_proposal_to_bot("momentum", "bot-b", "BINANCE")
+        assert served_b is not None
+        assert served_b.symbol == "ETH/USDT", "Bot B must NOT get ZRO/USDT while it's locked"
+
     def test_untagged_proposals_match_any_style(self, state):
         p = TradeProposal(
             priority=SignalPriority.DAILY,

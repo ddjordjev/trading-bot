@@ -179,6 +179,8 @@ class TradeQueue(BaseModel):
         ex_upper = exchange.upper()
         prio_order = [SignalPriority.CRITICAL, SignalPriority.DAILY, SignalPriority.SWING]
 
+        locked_symbols = {p.symbol for p in self.proposals if p.is_locked}
+
         for prio in prio_order:
             if allowed_priorities and prio not in allowed_priorities:
                 continue
@@ -188,6 +190,8 @@ class TradeQueue(BaseModel):
                 if p.is_locked or p.is_expired:
                     continue
                 if ex_upper not in p.supported_exchanges:
+                    continue
+                if p.symbol in locked_symbols:
                     continue
                 if active_symbols and p.symbol in active_symbols:
                     continue

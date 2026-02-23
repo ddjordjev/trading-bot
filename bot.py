@@ -401,7 +401,7 @@ class TradingBot:
                 if "enabled" in body:
                     self._hub_enabled = body["enabled"]
                 self._hub_proposal = None
-                if "proposal" in body and warmup_done:
+                if "proposal" in body and warmup_done and not self.target.manual_stop:
                     self._hub_proposal = TradeProposal(**body["proposal"])
                 for key in body.get("confirmed_keys", []):
                     self._pending_hub_acks.pop(key, None)

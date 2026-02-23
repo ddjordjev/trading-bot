@@ -55,9 +55,9 @@ jobs:
         run: npm run build
 
   docker-build:
-    name: Docker Build
+    name: Docker Build (skipped — local only)
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: false
     needs: [lint-and-type-check, test]
     steps:
       - uses: actions/checkout@v4

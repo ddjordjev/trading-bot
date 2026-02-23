@@ -645,6 +645,9 @@ async def tighten_stop(body: PositionTightenStopBody, _: str = Depends(verify_to
 @app.post("/api/close-all", response_model=ActionResponse)
 async def close_all(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
     bid = (body.bot_id if body else "") or ""
+    if _hub_state_ref is not None:
+        _hub_state_ref.read_trade_queue().proposals.clear()
+        logger.info("Trade queue purged (close-all)")
     if bid and bid != "all":
         return await _forward_to_bot(bid, "/api/close-all", {})
     result = await _broadcast_to_remote_bots("/api/close-all", {})
@@ -652,9 +655,15 @@ async def close_all(body: BotActionBody | None = None, _: str = Depends(verify_t
     return ActionResponse(success=True, message=result or "broadcast sent")
 
 
+_GLOBAL_STOP_FILE = Path("data/STOP")
+
+
 @app.post("/api/stop-trading", response_model=ActionResponse)
 async def stop_trading(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
     bid = (body.bot_id if body else "") or ""
+    _GLOBAL_STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _GLOBAL_STOP_FILE.touch()
+    logger.info("Global STOP file created — hub will not serve proposals")
     if bid and bid != "all":
         return await _forward_to_bot(bid, "/api/stop-trading", {})
     result = await _broadcast_to_remote_bots("/api/stop-trading", {})
@@ -665,6 +674,8 @@ async def stop_trading(body: BotActionBody | None = None, _: str = Depends(verif
 @app.post("/api/resume-trading", response_model=ActionResponse)
 async def resume_trading(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
     bid = (body.bot_id if body else "") or ""
+    _GLOBAL_STOP_FILE.unlink(missing_ok=True)
+    logger.info("Global STOP file removed — hub will resume serving proposals")
     if bid and bid != "all":
         return await _forward_to_bot(bid, "/api/resume-trading", {})
     result = await _broadcast_to_remote_bots("/api/resume-trading", {})
@@ -1074,6 +1085,8 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
     }
 
     bot_ready = data.get("ready", False)
+    if _GLOBAL_STOP_FILE.exists():
+        bot_ready = False
     if bot_id and _hub_state_ref is not None and bot_ready:
         with contextlib.suppress(Exception):
             from config.bot_profiles import PROFILES_BY_ID
