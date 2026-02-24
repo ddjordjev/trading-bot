@@ -2253,6 +2253,30 @@ class TestLiquidationMonitorFetch:
 
     @pytest.mark.asyncio
     @patch("intel.liquidations.aiohttp.ClientSession")
+    async def test_fetch_no_api_key_ignores_24h_label_number(self, mock_session_class, monitor_no_key):
+        html = """
+        <div class="font3 fw5 MuiBox-root cg-style-0">24h Rekt</div>
+        <div class="Number undefined">
+          <span>24</span>
+        </div>
+        """
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.text = AsyncMock(return_value=html)
+        mock_get = MagicMock()
+        mock_get.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_get.__aexit__ = AsyncMock(return_value=None)
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = mock_get
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await monitor_no_key._fetch()
+
+        assert monitor_no_key._latest is None
+
+    @pytest.mark.asyncio
+    @patch("intel.liquidations.aiohttp.ClientSession")
     async def test_fetch_success_list_format(self, mock_session_class, monitor):
         data = {
             "code": "0",

@@ -1,30 +1,5 @@
 import { useEffect, useState } from "react";
 
-function normalizeSummaryHtml(raw: string): string {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(raw, "text/html");
-
-  // Force link navigation out of the iframe context.
-  let head = doc.head;
-  if (!head) {
-    head = doc.createElement("head");
-    doc.documentElement.insertBefore(head, doc.body ?? null);
-  }
-  const base = doc.createElement("base");
-  base.setAttribute("target", "_blank");
-  head.appendChild(base);
-
-  // Keep all summary links from hijacking the iframe context.
-  for (const anchor of Array.from(doc.querySelectorAll("a[href]"))) {
-    const href = (anchor.getAttribute("href") ?? "").trim();
-    if (!href || href.startsWith("#")) continue;
-    anchor.setAttribute("target", "_blank");
-    anchor.setAttribute("rel", "noopener noreferrer");
-  }
-
-  return `<!doctype html>\n${doc.documentElement.outerHTML}`;
-}
-
 export function Summary() {
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +11,7 @@ export function Summary() {
         return r.text();
       })
       .then((raw) => {
-        setHtml(normalizeSummaryHtml(raw));
+        setHtml(raw);
       })
       .catch((e) => setError(e.message));
   }, []);
@@ -62,7 +37,6 @@ export function Summary() {
       className="summary-embed"
       title="Trade Borg Summary"
       srcDoc={html}
-      sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
       style={{
         width: "100%",
         height: "calc(100vh - 120px)",

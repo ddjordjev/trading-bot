@@ -60,6 +60,8 @@ class LiquidationMonitor:
     API_URL_V4 = "https://open-api-v4.coinglass.com/api/futures/liquidation/exchange-list"
     API_URL_V3 = "https://open-api-v3.coinglass.com/api/futures/liquidation/exchange-list"
     WEB_URL = "https://www.coinglass.com/LiquidationData"
+    # Guard against parsing label fragments like "24h" as dollar values.
+    MIN_PLAUSIBLE_TOTAL_24H_USD = 1_000_000.0
     BINANCE_LIQ_STREAM = "wss://fstream.binance.com/ws/!forceOrder@arr"
     BYBIT_LIQ_STREAM = "wss://stream.bybit.com/v5/public/linear"
     BYBIT_TOP_SYMBOLS: tuple[str, ...] = (
@@ -217,7 +219,7 @@ class LiquidationMonitor:
             )
             if dom_match:
                 total = _parse_compact_usd(dom_match.group(1))
-                if total > 0:
+                if total >= self.MIN_PLAUSIBLE_TOTAL_24H_USD:
                     long_match = re.search(
                         r"Long[^0-9$]*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?\s*(?:[kmb]|million|billion|thousand)?)",
                         window,
@@ -249,6 +251,8 @@ class LiquidationMonitor:
             if not parsed:
                 return None
             total = parsed[0]
+            if total < self.MIN_PLAUSIBLE_TOTAL_24H_USD:
+                return None
             long_24h = parsed[1] if len(parsed) > 1 else 0.0
             short_24h = parsed[2] if len(parsed) > 2 else 0.0
             if long_24h <= 0 and short_24h <= 0:
