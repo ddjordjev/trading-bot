@@ -103,7 +103,7 @@ export function Monitoring() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(2, minmax(420px, 1fr))",
+            gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
             gap: "0.75rem",
           }}
         >
@@ -114,7 +114,7 @@ export function Monitoring() {
               src={soloPanelSrc(panelId)}
               style={{
                 width: "100%",
-                height: "520px",
+                height: "300px",
                 border: "1px solid var(--border, #30363d)",
                 borderRadius: "var(--radius, 8px)",
                 background: "var(--bg-secondary, #161b22)",
