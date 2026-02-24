@@ -803,11 +803,16 @@ class TradingBot:
             logger.info("Stale short-term losers detected — halving aggression to {:.3f}", aggression)
 
         held_symbols = [p.symbol for p in positions if p.amount > 0]
+        pos_by_symbol = {p.symbol: p for p in positions if p.amount > 0}
         for sym in held_symbols:
             try:
                 candles = await self.exchange.fetch_candles(sym, "1m", limit=200)
                 ticker = await self.exchange.fetch_ticker(sym)
                 candles_map[sym] = candles
+                pos = pos_by_symbol.get(sym)
+                if pos:
+                    guard_level = self._structure_guard_level(candles, ticker.last or pos.current_price, pos.side.value)
+                    self.orders.set_structure_guard(sym, guard_level)
 
                 spike = self.volatility.update(ticker)
                 if spike:
@@ -1761,6 +1766,38 @@ class TradingBot:
             )
 
         return boost
+
+    def _structure_guard_level(self, candles: list[Candle], current_price: float, side: str) -> float:
+        """Return a structure guard level (HL/LH) to avoid over-tight trailing.
+
+        Long: latest confirmed higher low below current price.
+        Short: latest confirmed lower high above current price.
+        """
+        if len(candles) < 20 or current_price <= 0:
+            return 0.0
+
+        try:
+            swings = self.pattern_detector.structure.find_swing_points(candles)
+        except Exception:
+            return 0.0
+
+        side_l = side.lower()
+        if side_l in ("buy", "long"):
+            lows = [s for s in swings if s.is_low]
+            if len(lows) < 2:
+                return 0.0
+            prev_low, last_low = lows[-2], lows[-1]
+            if last_low.price > prev_low.price and last_low.price < current_price:
+                return float(last_low.price)
+            return 0.0
+
+        highs = [s for s in swings if s.is_high]
+        if len(highs) < 2:
+            return 0.0
+        prev_high, last_high = highs[-2], highs[-1]
+        if last_high.price < prev_high.price and last_high.price > current_price:
+            return float(last_high.price)
+        return 0.0
 
     def _adjust_for_target(self, sig: Signal, aggression: float) -> Signal:
         adjusted = sig.model_copy()

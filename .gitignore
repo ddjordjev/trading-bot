@@ -1,4 +1,5 @@
 .env
+.env.openclaw.local
 __pycache__/
 *.pyc
 *.pyo

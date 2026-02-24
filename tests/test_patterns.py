@@ -396,10 +396,12 @@ class TestWickBounceTighten:
             initial_stop_pct=5.0,
             trail_pct=1.0,
             tightened_stop=1.20,
+            wick_tighten_enabled=True,
         )
         assert ts.current_stop == pytest.approx(1.25 * 0.95)  # deep stop
 
-        ts.update(1.21)  # price drops close to 1.20 tightened level
+        ts.update(1.20)  # touch tightened zone
+        ts.update(1.21)  # reclaim above tightened zone
         assert ts.wick_bounced
         assert ts.current_stop > 1.19  # tightened to ~1.20 + offset
 
@@ -429,8 +431,10 @@ class TestWickBounceTighten:
             initial_stop_pct=5.0,
             trail_pct=1.0,
             tightened_stop=104.0,
+            wick_tighten_enabled=True,
         )
-        ts.update(103.5)  # price spikes close to 104 then comes back
+        ts.update(104.0)  # touch tightened zone
+        ts.update(103.5)  # reclaim below tightened zone
         assert ts.wick_bounced
         assert ts.current_stop < 105.0  # tightened
 

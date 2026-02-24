@@ -528,6 +528,8 @@ class MonitorService:
         all_tradeable: set[str] = set()
         for syms in self._exchange_symbols.values():
             all_tradeable |= syms
+        paper_live_mode = str(getattr(self.settings, "trading_mode", "") or "").lower() == "paper_live"
+        binance_demo_symbols = self._exchange_symbols.get("BINANCE", set()) if paper_live_mode else set()
 
         open_db_symbols: set[str] = set()
         hub = None
@@ -559,6 +561,10 @@ class MonitorService:
             if all_tradeable and proposal.symbol not in all_tradeable:
                 skipped += 1
                 continue
+            if paper_live_mode and binance_demo_symbols and proposal.symbol not in binance_demo_symbols:
+                # In paper_live we only queue symbols tradable on Binance demo/testnet.
+                skipped += 1
+                continue
             if existing.has_symbol(proposal.symbol):
                 deduped += 1
                 continue
@@ -568,6 +574,11 @@ class MonitorService:
             available = [
                 ex for ex in proposal.supported_exchanges if proposal.symbol not in self.state.get_active_symbols(ex)
             ]
+            if paper_live_mode and binance_demo_symbols:
+                if proposal.symbol in self.state.get_active_symbols("BINANCE"):
+                    deduped += 1
+                    continue
+                available = ["BINANCE"]
             if proposal.supported_exchanges and not available:
                 deduped += 1
                 continue

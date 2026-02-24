@@ -274,3 +274,60 @@ class TestTrailingStopManagerKeys:
         )
         stopped = mgr.update_all([hit_pos])
         assert "BTC/USDT:wick" in stopped
+
+
+class TestTrailingBehaviorGuards:
+    def test_wick_tighten_requires_touch_then_reclaim(self):
+        ts = TrailingStop(
+            symbol="ALT/USDT",
+            side=OrderSide.BUY,
+            entry_price=100.0,
+            initial_stop_pct=2.0,
+            trail_pct=1.0,
+            activation_pct=10.0,
+            tightened_stop=99.0,
+            wick_tighten_enabled=True,
+        )
+        original = ts.current_stop
+
+        # No touch -> no tighten.
+        ts.update(101.0)
+        assert ts.current_stop == pytest.approx(original)
+        assert ts.wick_touched is False
+
+        # Touch below tightened stop, then reclaim above tightened stop.
+        ts.update(98.9)
+        assert ts.wick_touched is True
+        ts.update(99.2)
+        assert ts.wick_bounced is True
+        assert ts.current_stop > 99.0
+
+    def test_structure_guard_caps_long_stop(self):
+        ts = TrailingStop(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            entry_price=100.0,
+            initial_stop_pct=2.0,
+            trail_pct=1.0,
+            activation_pct=1.0,
+            structure_guard=103.0,
+        )
+        ts.update(104.0)
+        ts.update(106.0)
+        assert ts.current_stop <= 103.0
+        assert ts.current_stop == pytest.approx(103.0)
+
+    def test_structure_guard_caps_short_stop(self):
+        ts = TrailingStop(
+            symbol="BTC/USDT",
+            side=OrderSide.SELL,
+            entry_price=100.0,
+            initial_stop_pct=2.0,
+            trail_pct=1.0,
+            activation_pct=1.0,
+            structure_guard=97.0,
+        )
+        ts.update(98.0)
+        ts.update(94.0)
+        assert ts.current_stop >= 97.0
+        assert ts.current_stop == pytest.approx(97.0)

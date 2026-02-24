@@ -191,6 +191,9 @@ class OrderManager:
             market_type=market_type.value,
         )
         tightened = signal.tightened_stop or 0.0
+        wick_tighten_enabled = bool(
+            signal.quick_trade or signal.strategy.startswith("extreme_") or signal.strategy == "wick_scalp"
+        )
         if pyramid:
             is_major = signal.symbol in self.settings.major_symbol_list
             pyramid_stop = max(sp.dca_interval_pct * 3, 5.0) if is_major else max(sp.dca_interval_pct * 8, 15.0)
@@ -199,6 +202,7 @@ class OrderManager:
                 initial_stop_pct=pyramid_stop,
                 low_liquidity=low_liquidity,
                 tightened_stop=tightened,
+                wick_tighten_enabled=wick_tighten_enabled,
             )
             logger.info(
                 "PYRAMID stop for {}: {:.1f}% ({})",
@@ -211,6 +215,7 @@ class OrderManager:
                 pos,
                 low_liquidity=low_liquidity,
                 tightened_stop=tightened,
+                wick_tighten_enabled=wick_tighten_enabled,
             )
 
         self._active_orders.append(order)
@@ -1078,3 +1083,7 @@ class OrderManager:
     @property
     def trade_history(self) -> list[dict[str, Any]]:
         return list(self._trade_log)
+
+    def set_structure_guard(self, symbol: str, level: float) -> None:
+        """Update structure-based stop guard for an active main position."""
+        self.trailing.set_structure_guard(symbol, level)

@@ -36,6 +36,9 @@ class TrailingStop(BaseModel):
     low_liquidity: bool = False  # if True, we manage stop ourselves (no exchange SL)
     tightened_stop: float = 0.0  # textbook level to tighten to after wick bounce
     wick_bounced: bool = False  # True once price wicked near tightened_stop and recovered
+    wick_tighten_enabled: bool = False  # fast wick tighten only for quick/extreme trades
+    wick_touched: bool = False  # True once price actually tags the tighten zone
+    structure_guard: float = 0.0  # long: max stop, short: min stop (market-structure guard)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     def model_post_init(self, __context: object) -> None:
@@ -88,30 +91,38 @@ class TrailingStop(BaseModel):
             self.breakeven_locked = True
             if self.entry_price > self.current_stop:
                 be_stop = self._be_with_fee_offset(self.entry_price, long=True)
-                if be_stop > self.current_stop:
-                    self.current_stop = be_stop
+                if self._move_long_stop(be_stop):
                     logger.info(
                         "BREAK-EVEN locked for {} at {:.2f}% profit (stop -> {:.6f}, entry was {:.6f})",
                         self.symbol,
                         profit_pct,
-                        be_stop,
+                        self.current_stop,
                         self.entry_price,
                     )
 
-        # Wick-bounce tighten: price dropped near tightened_stop level then recovered
-        if self.tightened_stop > 0 and not self.wick_bounced and self.tightened_stop > self.current_stop:
-            proximity_pct = (price - self.tightened_stop) / self.entry_price * 100
-            if proximity_pct < 1.5 and price > self.tightened_stop:
+        # Wick-bounce tighten: requires explicit touch, then reclaim.
+        if (
+            self.wick_tighten_enabled
+            and self.tightened_stop > 0
+            and not self.wick_bounced
+            and self.tightened_stop > self.current_stop
+        ):
+            touch_px = self.tightened_stop * (1 + 0.10 / 100)
+            reclaim_px = self.tightened_stop * (1 + 0.05 / 100)
+            if not self.wick_touched and price <= touch_px:
+                self.wick_touched = True
+            if self.wick_touched and price >= reclaim_px:
                 self.wick_bounced = True
                 old = self.current_stop
-                self.current_stop = self._be_with_fee_offset(self.tightened_stop, long=True)
-                logger.info(
-                    "WICK BOUNCE tighten {}: {:.6f} -> {:.6f} (price wicked near {:.6f} and recovered)",
-                    self.symbol,
-                    old,
-                    self.current_stop,
-                    self.tightened_stop,
-                )
+                tightened = self._be_with_fee_offset(self.tightened_stop, long=True)
+                if self._move_long_stop(tightened):
+                    logger.info(
+                        "WICK BOUNCE tighten {}: {:.6f} -> {:.6f} (price touched {:.6f} then reclaimed)",
+                        self.symbol,
+                        old,
+                        self.current_stop,
+                        self.tightened_stop,
+                    )
 
         # Trailing activation
         if not self.activated and profit_pct >= self.activation_pct:
@@ -122,10 +133,11 @@ class TrailingStop(BaseModel):
             self.peak_price = price
             if self.activated:
                 new_stop = price * (1 - self.trail_pct / 100)
-                if new_stop > self.current_stop:
-                    old = self.current_stop
-                    self.current_stop = new_stop
-                    logger.debug("Trail raised {}: {:.6f} -> {:.6f} (peak: {:.6f})", self.symbol, old, new_stop, price)
+                old = self.current_stop
+                if self._move_long_stop(new_stop):
+                    logger.debug(
+                        "Trail raised {}: {:.6f} -> {:.6f} (peak: {:.6f})", self.symbol, old, self.current_stop, price
+                    )
 
         return False
 
@@ -162,30 +174,38 @@ class TrailingStop(BaseModel):
             self.breakeven_locked = True
             if self.entry_price < self.current_stop:
                 be_stop = self._be_with_fee_offset(self.entry_price, long=False)
-                if be_stop < self.current_stop:
-                    self.current_stop = be_stop
+                if self._move_short_stop(be_stop):
                     logger.info(
                         "BREAK-EVEN locked for {} at {:.2f}% profit (stop -> {:.6f}, entry was {:.6f})",
                         self.symbol,
                         profit_pct,
-                        be_stop,
+                        self.current_stop,
                         self.entry_price,
                     )
 
-        # Wick-bounce tighten (short): price spiked near tightened_stop then fell back
-        if self.tightened_stop > 0 and not self.wick_bounced and self.tightened_stop < self.current_stop:
-            proximity_pct = (self.tightened_stop - price) / self.entry_price * 100
-            if proximity_pct < 1.5 and price < self.tightened_stop:
+        # Wick-bounce tighten (short): requires explicit touch, then reclaim lower.
+        if (
+            self.wick_tighten_enabled
+            and self.tightened_stop > 0
+            and not self.wick_bounced
+            and self.tightened_stop < self.current_stop
+        ):
+            touch_px = self.tightened_stop * (1 - 0.10 / 100)
+            reclaim_px = self.tightened_stop * (1 - 0.05 / 100)
+            if not self.wick_touched and price >= touch_px:
+                self.wick_touched = True
+            if self.wick_touched and price <= reclaim_px:
                 self.wick_bounced = True
                 old = self.current_stop
-                self.current_stop = self._be_with_fee_offset(self.tightened_stop, long=False)
-                logger.info(
-                    "WICK BOUNCE tighten {}: {:.6f} -> {:.6f} (price wicked near {:.6f} and recovered)",
-                    self.symbol,
-                    old,
-                    self.current_stop,
-                    self.tightened_stop,
-                )
+                tightened = self._be_with_fee_offset(self.tightened_stop, long=False)
+                if self._move_short_stop(tightened):
+                    logger.info(
+                        "WICK BOUNCE tighten {}: {:.6f} -> {:.6f} (price touched {:.6f} then reclaimed)",
+                        self.symbol,
+                        old,
+                        self.current_stop,
+                        self.tightened_stop,
+                    )
 
         if not self.activated and profit_pct >= self.activation_pct:
             self.activated = True
@@ -195,12 +215,34 @@ class TrailingStop(BaseModel):
             self.peak_price = price
             if self.activated:
                 new_stop = price * (1 + self.trail_pct / 100)
-                if new_stop < self.current_stop:
-                    old = self.current_stop
-                    self.current_stop = new_stop
-                    logger.debug("Trail lowered {}: {:.6f} -> {:.6f} (peak: {:.6f})", self.symbol, old, new_stop, price)
+                old = self.current_stop
+                if self._move_short_stop(new_stop):
+                    logger.debug(
+                        "Trail lowered {}: {:.6f} -> {:.6f} (peak: {:.6f})", self.symbol, old, self.current_stop, price
+                    )
 
         return False
+
+    def _apply_structure_guard(self, candidate: float) -> float:
+        if self.structure_guard <= 0:
+            return candidate
+        if self.side == OrderSide.BUY:
+            return min(candidate, self.structure_guard)
+        return max(candidate, self.structure_guard)
+
+    def _move_long_stop(self, candidate: float) -> bool:
+        guarded = self._apply_structure_guard(candidate)
+        if guarded <= self.current_stop:
+            return False
+        self.current_stop = guarded
+        return True
+
+    def _move_short_stop(self, candidate: float) -> bool:
+        guarded = self._apply_structure_guard(candidate)
+        if guarded >= self.current_stop:
+            return False
+        self.current_stop = guarded
+        return True
 
     @staticmethod
     def _be_with_fee_offset(entry: float, long: bool) -> float:
@@ -296,6 +338,7 @@ class TrailingStopManager:
         low_liquidity: bool = False,
         key: str | None = None,
         tightened_stop: float = 0.0,
+        wick_tighten_enabled: bool = False,
     ) -> TrailingStop:
         ts = TrailingStop(
             symbol=position.symbol,
@@ -305,6 +348,7 @@ class TrailingStopManager:
             trail_pct=trail_pct or self.default_trail_pct,
             activation_pct=self.activation_pct,
             tightened_stop=tightened_stop,
+            wick_tighten_enabled=wick_tighten_enabled,
             breakeven_trigger_pct=self.breakeven_pct,
             low_liquidity=low_liquidity,
         )
@@ -350,6 +394,11 @@ class TrailingStopManager:
 
     def get(self, symbol: str) -> TrailingStop | None:
         return self._stops.get(symbol)
+
+    def set_structure_guard(self, symbol: str, level: float) -> None:
+        ts = self._stops.get(symbol)
+        if ts:
+            ts.structure_guard = level if level > 0 else 0.0
 
     @property
     def active_stops(self) -> dict[str, TrailingStop]:

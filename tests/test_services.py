@@ -236,6 +236,68 @@ class TestMonitorService:
         monitor._route_to_bots(staging, [bot_status])
         hub_state.write_trade_queue.assert_called_once()
 
+    def test_route_to_bots_paper_live_excludes_non_binance_demo_symbols(self, monitor):
+        """paper_live mode drops symbols unavailable on Binance demo/testnet."""
+        from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        with patch("db.hub_store.HubDB") as mock_db:
+            mock_db.return_value.connect = MagicMock()
+            mock_db.return_value.close = MagicMock()
+            mock_db.return_value.get_open_trade_symbols = MagicMock(return_value=set())
+
+            monitor.settings.trading_mode = "paper_live"
+            monitor.state = HubState()
+            monitor._exchange_symbols = {
+                "BINANCE": {"BTC/USDT"},
+                "MEXC": {"BTC/USDT", "PEPE/USDT"},
+            }
+
+            staging = TradeQueue()
+            staging.add(
+                TradeProposal(
+                    priority=SignalPriority.DAILY,
+                    symbol="PEPE/USDT",
+                    side="long",
+                    strategy="test",
+                    supported_exchanges=["MEXC"],
+                )
+            )
+
+            monitor._route_to_bots(staging, [])
+            assert monitor.state.read_trade_queue().pending_count == 0
+
+    def test_route_to_bots_paper_live_forces_binance_supported_exchange(self, monitor):
+        """paper_live mode keeps queue proposals executable on Binance demo."""
+        from shared.models import SignalPriority, TradeProposal, TradeQueue
+
+        with patch("db.hub_store.HubDB") as mock_db:
+            mock_db.return_value.connect = MagicMock()
+            mock_db.return_value.close = MagicMock()
+            mock_db.return_value.get_open_trade_symbols = MagicMock(return_value=set())
+
+            monitor.settings.trading_mode = "paper_live"
+            monitor.state = HubState()
+            monitor._exchange_symbols = {
+                "BINANCE": {"BTC/USDT"},
+                "MEXC": {"BTC/USDT"},
+            }
+
+            staging = TradeQueue()
+            staging.add(
+                TradeProposal(
+                    priority=SignalPriority.DAILY,
+                    symbol="BTC/USDT",
+                    side="long",
+                    strategy="test",
+                    supported_exchanges=["MEXC"],
+                )
+            )
+
+            monitor._route_to_bots(staging, [])
+            queued = monitor.state.read_trade_queue().proposals
+            assert len(queued) == 1
+            assert queued[0].supported_exchanges == ["BINANCE"]
+
 
 # ── AnalyticsService ────────────────────────────────────────────────
 

@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,7 @@ ESCALATE_ON_HIGH_TRIAGE = os.getenv("OPENCLAW_BRIDGE_ESCALATE_ON_HIGH_TRIAGE", "
 
 DAILY_BUDGET_USD = float(os.getenv("OPENCLAW_BRIDGE_DAILY_BUDGET_USD", "1.67"))  # ≈$50/mo
 DAILY_SONNET_CALL_CAP = max(0, int(os.getenv("OPENCLAW_BRIDGE_DAILY_SONNET_CALL_CAP", "0")))  # disabled by default
+PAID_MIN_INTERVAL_SECONDS = max(0, int(os.getenv("OPENCLAW_BRIDGE_PAID_MIN_INTERVAL_SECONDS", "600")))
 BUDGET_STATE_PATH = Path(os.getenv("OPENCLAW_BRIDGE_BUDGET_STATE_PATH", "data/openclaw_budget_state.json"))
 DISTILL_PATH = Path(os.getenv("OPENCLAW_BRIDGE_DISTILL_PATH", "data/openclaw_distill.jsonl"))
 
@@ -309,13 +311,14 @@ class BudgetController:
     SONNET_IN = 3.0 / 1_000_000
     SONNET_OUT = 15.0 / 1_000_000
 
-    def __init__(self, path: Path, daily_cap_usd: float, sonnet_cap: int) -> None:
+    def __init__(self, path: Path, daily_cap_usd: float, sonnet_cap: int, min_paid_interval_seconds: int) -> None:
         self.path = path
         self.daily_cap_usd = max(0.01, daily_cap_usd)
         self.sonnet_cap = max(0, sonnet_cap)
+        self.min_paid_interval_seconds = max(0, min_paid_interval_seconds)
 
     def _base_state(self) -> dict[str, Any]:
-        return {"date": _today_key(), "usd_spent": 0.0, "sonnet_calls": 0, "requests": 0}
+        return {"date": _today_key(), "usd_spent": 0.0, "sonnet_calls": 0, "requests": 0, "last_paid_ts": 0.0}
 
     def load(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -339,8 +342,19 @@ class BudgetController:
             return (input_tokens * self.SONNET_IN) + (output_tokens * self.SONNET_OUT)
         return (input_tokens * self.HAIKU_IN) + (output_tokens * self.HAIKU_OUT)
 
-    def can_afford(self, model_tier: str, estimated_input: int, estimated_output: int) -> tuple[bool, str]:
+    def can_afford(
+        self,
+        model_tier: str,
+        estimated_input: int,
+        estimated_output: int,
+        *,
+        bypass_cooldown: bool = False,
+    ) -> tuple[bool, str]:
         state = self.load()
+        if self.min_paid_interval_seconds > 0 and not bypass_cooldown:
+            last_paid_ts = _to_float(state.get("last_paid_ts", 0.0), 0.0)
+            if last_paid_ts > 0 and (time.time() - last_paid_ts) < self.min_paid_interval_seconds:
+                return False, "paid_cooldown_active"
         if model_tier == "sonnet" and self.sonnet_cap > 0 and int(state.get("sonnet_calls", 0)) >= self.sonnet_cap:
             return False, "sonnet_daily_cap_reached"
         projected = float(state.get("usd_spent", 0.0)) + self.estimate_cost(
@@ -356,6 +370,7 @@ class BudgetController:
             model_tier, input_tokens, output_tokens
         )
         state["requests"] = int(state.get("requests", 0)) + 1
+        state["last_paid_ts"] = time.time()
         if model_tier == "sonnet":
             state["sonnet_calls"] = int(state.get("sonnet_calls", 0)) + 1
         self.save(state)
@@ -508,7 +523,21 @@ def _should_escalate(local_payload: dict[str, Any] | None, fallback: dict[str, A
     return bool(ESCALATE_ON_HIGH_TRIAGE and has_high_triage)
 
 
-_budget = BudgetController(BUDGET_STATE_PATH, DAILY_BUDGET_USD, DAILY_SONNET_CALL_CAP)
+def _should_call_paid(local_payload: dict[str, Any] | None, fallback: dict[str, Any]) -> tuple[bool, str]:
+    if local_payload is None:
+        return True, "local_unavailable"
+    src = local_payload or fallback
+    regime_conf = _to_float(((src.get("regime_commentary") or {}).get("confidence", 0.0)), 0.0)
+    triage = list(src.get("failure_triage", []) or [])
+    has_high_triage = any(str((t or {}).get("severity", "")).lower() == "high" for t in triage if isinstance(t, dict))
+    if regime_conf < ESCALATE_CONFIDENCE_LT:
+        return True, "local_low_confidence"
+    if ESCALATE_ON_HIGH_TRIAGE and has_high_triage:
+        return True, "local_high_triage"
+    return False, "local_ok_skip_paid"
+
+
+_budget = BudgetController(BUDGET_STATE_PATH, DAILY_BUDGET_USD, DAILY_SONNET_CALL_CAP, PAID_MIN_INTERVAL_SECONDS)
 _local_client = LocalAdvisoryClient(LOCAL_ENABLED, LOCAL_OLLAMA_URL, LOCAL_MODEL, LOCAL_TIMEOUT)
 _anthropic_client = AnthropicAdvisoryClient(
     enabled=PAID_ENABLED,
@@ -568,35 +597,44 @@ async def intel() -> dict[str, Any]:
     local_norm = _normalize_advisory(local_payload or {}, fallback)
 
     use_sonnet = _should_escalate(local_payload=local_norm, fallback=fallback)
+    should_call_paid, paid_decision_reason = _should_call_paid(local_payload=local_payload, fallback=fallback)
     paid_norm: dict[str, Any] | None = None
     paid_model_used = ""
     budget_reason = "paid_disabled"
 
     if _anthropic_client.enabled:
-        prompt_for_estimate = _advisory_prompt(context, recent_examples=examples)
-        estimate_in = _estimate_tokens(prompt_for_estimate)
-        estimate_out = PAID_MAX_TOKENS
-        tier = "sonnet" if use_sonnet else "haiku"
-        allowed, budget_reason = _budget.can_afford(tier, estimate_in, estimate_out)
-        if allowed:
-            paid_payload, in_toks, out_toks, paid_model_used = await _anthropic_client.run(
-                context=context,
-                local_draft=local_norm,
-                use_sonnet=use_sonnet,
+        budget_reason = paid_decision_reason
+        if should_call_paid:
+            prompt_for_estimate = _advisory_prompt(context, recent_examples=examples)
+            estimate_in = _estimate_tokens(prompt_for_estimate)
+            estimate_out = PAID_MAX_TOKENS
+            tier = "sonnet" if use_sonnet else "haiku"
+            bypass_cooldown = paid_decision_reason in {"local_unavailable", "local_high_triage"}
+            allowed, budget_reason = _budget.can_afford(
+                tier,
+                estimate_in,
+                estimate_out,
+                bypass_cooldown=bypass_cooldown,
             )
-            if paid_payload:
-                paid_norm = _normalize_advisory(paid_payload, local_norm)
-                _budget.record("sonnet" if use_sonnet else "haiku", in_toks, out_toks)
-                _append_distill(
-                    DISTILL_PATH,
-                    {
-                        "as_of": _now_iso(),
-                        "context": context,
-                        "local_output": local_norm,
-                        "paid_output": paid_norm,
-                        "paid_model": paid_model_used,
-                    },
+            if allowed:
+                paid_payload, in_toks, out_toks, paid_model_used = await _anthropic_client.run(
+                    context=context,
+                    local_draft=local_norm,
+                    use_sonnet=use_sonnet,
                 )
+                if paid_payload:
+                    paid_norm = _normalize_advisory(paid_payload, local_norm)
+                    _budget.record("sonnet" if use_sonnet else "haiku", in_toks, out_toks)
+                    _append_distill(
+                        DISTILL_PATH,
+                        {
+                            "as_of": _now_iso(),
+                            "context": context,
+                            "local_output": local_norm,
+                            "paid_output": paid_norm,
+                            "paid_model": paid_model_used,
+                        },
+                    )
 
     final_payload = paid_norm or local_norm
     budget_state = _budget.load()
@@ -611,13 +649,15 @@ async def intel() -> dict[str, Any]:
             "intel_age": intel_age,
             "lane_used": "paid" if paid_norm else ("local" if local_payload else "fallback"),
             "paid_model_used": paid_model_used,
-            "sonnet_escalation_attempted": use_sonnet,
+            "sonnet_escalation_attempted": bool(should_call_paid and use_sonnet),
             "sonnet_escalation_enabled": ENABLE_SONNET_ESCALATION,
             "budget_reason": budget_reason,
+            "paid_decision_reason": paid_decision_reason,
             "budget_usd_spent_today": round(_to_float(budget_state.get("usd_spent", 0.0), 0.0), 6),
             "budget_daily_cap_usd": DAILY_BUDGET_USD,
             "sonnet_calls_today": _to_int(budget_state.get("sonnet_calls", 0), 0),
             "sonnet_daily_cap": DAILY_SONNET_CALL_CAP,
+            "paid_min_interval_seconds": PAID_MIN_INTERVAL_SECONDS,
             "distill_records_path": str(DISTILL_PATH),
             "local_model": LOCAL_MODEL,
             "paid_model_haiku": PAID_MODEL_HAIKU,

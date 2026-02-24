@@ -561,6 +561,34 @@ class TestOrderManagerExecuteSignal:
         assert out.status == OrderStatus.FILLED
         assert len(order_manager._active_orders) == 1
 
+    async def test_execute_signal_quick_trade_enables_wick_tighten(self, order_manager, mock_exchange):
+        signal = Signal(
+            symbol="BTC/USDT",
+            action=SignalAction.BUY,
+            strategy="extreme_momentum",
+            suggested_price=50_000.0,
+            leverage=10,
+            quick_trade=True,
+        )
+        filled = Order(
+            id="oquick",
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.002,
+            status=OrderStatus.FILLED,
+            filled=0.002,
+            average_price=50_000.0,
+            leverage=2,
+        )
+        mock_exchange.place_order.return_value = filled
+
+        out = await order_manager.execute_signal(signal)
+        assert out is not None
+        ts = order_manager.trailing.get("BTC/USDT")
+        assert ts is not None
+        assert ts.wick_tighten_enabled is True
+
     async def test_execute_signal_no_price_skips(self, order_manager):
         signal = Signal(
             symbol="BTC/USDT",
