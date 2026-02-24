@@ -2086,3 +2086,34 @@ class TestBotProfiles:
         assert data["success"] is True
         assert "Enabled" in data["message"]
         assert hub.is_bot_enabled("scalper") is True
+
+    async def test_profile_balance_is_available_plus_margin_plus_unrealized(self, client, mock_bot):
+        set_bot(mock_bot)
+        _bot_reports.clear()
+        report_bot_snapshot(
+            {
+                "bot_id": "momentum",
+                "exchange": "MEXC",
+                "status": {
+                    "running": True,
+                    "available_margin": 450.0,
+                    "daily_pnl": 5.0,
+                },
+                "positions": [
+                    {"symbol": "BTC/USDT", "notional_value": 100.0, "leverage": 5, "pnl_usd": 10.0},
+                    {"symbol": "ETH/USDT", "notional_value": 60.0, "leverage": 3, "pnl_usd": 20.0},
+                ],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+        try:
+            r = await client.get("/api/bot-profiles")
+            assert r.status_code == 200
+            data = r.json()
+            profile = next(p for p in data if p["id"] == "momentum")
+            # balance_now = available + used_margin + unrealized
+            # 450 + (100/5 + 60/3) + (10+20) = 520
+            assert profile["balance"] == pytest.approx(520.0)
+        finally:
+            _bot_reports.clear()

@@ -701,6 +701,17 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
         s = rpt.get("status", {})
         positions = rpt.get("positions", [])
         summary = hub.get_bot_summary(p.id)
+        balance_now: float | None
+        if s:
+            available = float(s.get("available_margin", 0.0) or 0.0)
+            margin_used = sum(
+                float(pos.get("notional_value", 0.0) or 0.0) / max(float(pos.get("leverage", 1) or 1), 1.0)
+                for pos in positions
+            )
+            unrealized = sum(float(pos.get("pnl_usd", pos.get("pnl", 0.0)) or 0.0) for pos in positions)
+            balance_now = max(0.0, available + margin_used + unrealized)
+        else:
+            balance_now = None
 
         result.append(
             BotProfileInfo(
@@ -713,7 +724,7 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
                 is_hub=p.is_hub,
                 enabled=enabled,
                 container_status=container_status,
-                balance=s.get("balance") if s else None,
+                balance=balance_now,
                 daily_pnl=s.get("daily_pnl") if s else None,
                 wins=summary.get("wins", 0),
                 losses=summary.get("losses", 0),
