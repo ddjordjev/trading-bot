@@ -111,6 +111,10 @@ def _reset_hub_db() -> None:
         hub.conn.execute("DELETE FROM trades")
         with contextlib.suppress(Exception):
             hub.conn.execute("DELETE FROM bot_config")
+        with contextlib.suppress(Exception):
+            hub.conn.execute("DELETE FROM openclaw_daily_reports")
+        with contextlib.suppress(Exception):
+            hub.conn.execute("DELETE FROM openclaw_suggestions")
         hub.conn.commit()
     hub._ack_buffer.clear()
 
@@ -963,6 +967,70 @@ class TestGetModulesDailyReportAnalytics:
         data = r.json()
         assert "hourly_performance" in data
         assert "regime_performance" in data
+
+    async def test_analytics_includes_openclaw_suggestions(self, client):
+        hub = _get_hub_db()
+        report_id = hub.insert_openclaw_daily_report(
+            report_day="2026-02-24",
+            run_kind="manual",
+            requested_at="2026-02-24T00:00:00+00:00",
+            completed_at="2026-02-24T00:00:10+00:00",
+            lane_used="paid",
+            source_url="http://openclaw-bridge:18080/daily-review",
+            context_payload={},
+            response_payload={"summary": "ok"},
+            status="ok",
+            error_text="",
+        )
+        hub.upsert_openclaw_suggestion(
+            {
+                "suggestion_type": "reduce_weight",
+                "title": "Reduce trending exposure",
+                "description": "Trend entries degrade in caution",
+                "strategy": "trending_momentum",
+                "symbol": "BTC/USDT",
+                "confidence": 0.81,
+                "suggested_value": "weight=0.6",
+                "based_on_trades": 55,
+            },
+            report_id=report_id,
+        )
+        r = await client.get("/api/analytics")
+        assert r.status_code == 200
+        data = r.json()
+        assert "suggestions" in data
+
+    async def test_openclaw_suggestion_status_endpoint(self, client):
+        hub = _get_hub_db()
+        report_id = hub.insert_openclaw_daily_report(
+            report_day="2026-02-24",
+            run_kind="manual",
+            requested_at="2026-02-24T00:00:00+00:00",
+            completed_at="2026-02-24T00:00:10+00:00",
+            lane_used="local",
+            source_url="http://openclaw-bridge:18080/daily-review",
+            context_payload={},
+            response_payload={},
+            status="ok",
+            error_text="",
+        )
+        sid = hub.upsert_openclaw_suggestion(
+            {
+                "suggestion_type": "process",
+                "title": "Track slippage by hour",
+                "description": "Add hourly slippage dashboard card",
+                "strategy": "",
+                "symbol": "",
+                "confidence": 0.6,
+                "based_on_trades": 0,
+            },
+            report_id=report_id,
+        )
+        r = await client.post(f"/api/openclaw-suggestions/{sid}/status", json={"status": "implemented"})
+        assert r.status_code == 200
+        assert r.json()["success"] is True
+        rows = hub.list_openclaw_suggestions(include_removed=True)
+        assert rows[0]["status"] == "implemented"
 
 
 # ── POST /api/analytics/refresh ────────────────────────────────────────

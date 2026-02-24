@@ -222,6 +222,9 @@ class PatternInsightInfo(BaseModel):
 
 
 class ModificationSuggestionInfo(BaseModel):
+    id: int = 0
+    source: str = "analytics"
+    status: str = "new"
     strategy: str
     symbol: str = ""
     suggestion_type: str
@@ -232,6 +235,13 @@ class ModificationSuggestionInfo(BaseModel):
     suggested_value: str = ""
     expected_improvement: str = ""
     based_on_trades: int = 0
+    notes: str = ""
+    updated_at: str = ""
+
+
+class SuggestionStatusBody(BaseModel):
+    status: str
+    notes: str = ""
 
 
 class LivePositionInfo(BaseModel):

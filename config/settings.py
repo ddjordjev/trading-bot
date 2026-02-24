@@ -168,6 +168,9 @@ class Settings(BaseSettings):
     openclaw_token: str = ""  # optional bearer token for OpenClaw endpoint
     openclaw_poll_interval: int = Field(default=120, ge=15, le=3600)  # seconds between OpenClaw pulls
     openclaw_timeout_seconds: int = Field(default=8, ge=2, le=60)  # per-request timeout for OpenClaw fetches
+    openclaw_daily_review_enabled: bool = True  # enable end-of-day optimization advisory run
+    openclaw_daily_review_interval_hours: int = Field(default=24, ge=1, le=72)  # cadence for daily review
+    openclaw_daily_review_force_paid: bool = True  # allow bridge paid lane for daily review
     fear_greed_poll: int = 3600  # how often to poll Fear & Greed (seconds)
     liquidation_poll: int = 300  # CoinGlass liquidation poll interval
     macro_calendar_poll: int = 1800  # ForexFactory calendar poll interval

@@ -115,6 +115,49 @@ class HubDB(TradeDB):
                 ON cex_binance_snapshots(symbol, timestamp);
             CREATE INDEX IF NOT EXISTS idx_cex_binance_state_updated_at
                 ON cex_binance_symbol_state(updated_at);
+
+            CREATE TABLE IF NOT EXISTS openclaw_daily_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_day TEXT NOT NULL,
+                run_kind TEXT NOT NULL DEFAULT 'scheduled',
+                requested_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                lane_used TEXT NOT NULL DEFAULT 'fallback',
+                status TEXT NOT NULL DEFAULT 'ok',
+                source_url TEXT NOT NULL DEFAULT '',
+                context_json TEXT NOT NULL DEFAULT '{}',
+                response_json TEXT NOT NULL DEFAULT '{}',
+                error_text TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS openclaw_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                suggestion_key TEXT NOT NULL UNIQUE,
+                source TEXT NOT NULL DEFAULT 'openclaw',
+                status TEXT NOT NULL DEFAULT 'new',
+                suggestion_type TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                strategy TEXT NOT NULL DEFAULT '',
+                symbol TEXT NOT NULL DEFAULT '',
+                confidence REAL NOT NULL DEFAULT 0,
+                current_value TEXT NOT NULL DEFAULT '',
+                suggested_value TEXT NOT NULL DEFAULT '',
+                expected_improvement TEXT NOT NULL DEFAULT '',
+                based_on_trades INTEGER NOT NULL DEFAULT 0,
+                notes TEXT NOT NULL DEFAULT '',
+                first_seen_report_id INTEGER NOT NULL DEFAULT 0,
+                last_seen_report_id INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                implemented_at TEXT NOT NULL DEFAULT '',
+                removed_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_openclaw_reports_completed
+                ON openclaw_daily_reports(completed_at);
+            CREATE INDEX IF NOT EXISTS idx_openclaw_suggestions_status
+                ON openclaw_suggestions(status, updated_at);
         """)
         self._ensure_bot_id_column()
         self._ensure_request_key_column()
@@ -571,3 +614,297 @@ class HubDB(TradeDB):
     @property
     def conn(self) -> sqlite3.Connection | None:
         return self._conn
+
+    # ---- OpenClaw advisory persistence ----
+
+    def insert_openclaw_daily_report(
+        self,
+        *,
+        report_day: str,
+        run_kind: str,
+        requested_at: str,
+        completed_at: str,
+        lane_used: str,
+        source_url: str,
+        context_payload: dict[str, Any],
+        response_payload: dict[str, Any],
+        status: str = "ok",
+        error_text: str = "",
+    ) -> int:
+        """Persist one OpenClaw daily optimization run."""
+        assert self._conn
+        cur = self._conn.execute(
+            """
+            INSERT INTO openclaw_daily_reports
+            (report_day, run_kind, requested_at, completed_at, lane_used, status, source_url, context_json, response_json, error_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                report_day,
+                run_kind,
+                requested_at,
+                completed_at,
+                lane_used,
+                status,
+                source_url,
+                json.dumps(context_payload, ensure_ascii=True),
+                json.dumps(response_payload, ensure_ascii=True),
+                error_text,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid or 0)
+
+    def get_latest_openclaw_daily_report(self) -> dict[str, Any] | None:
+        """Return latest OpenClaw daily report metadata and payload."""
+        assert self._conn
+        row = self._conn.execute(
+            """
+            SELECT * FROM openclaw_daily_reports
+            ORDER BY completed_at DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if not row:
+            return None
+        out = dict(row)
+        with_data: dict[str, Any] = dict(out)
+        for key in ("context_json", "response_json"):
+            raw = out.get(key, "{}")
+            try:
+                with_data[key.replace("_json", "")] = json.loads(raw) if raw else {}
+            except Exception:
+                with_data[key.replace("_json", "")] = {}
+        return with_data
+
+    def get_latest_openclaw_report_completed_at(self) -> str:
+        """Return ISO timestamp for latest OpenClaw report completion, or empty."""
+        latest = self.get_latest_openclaw_daily_report()
+        return str((latest or {}).get("completed_at", "") or "")
+
+    def _build_openclaw_suggestion_key(self, suggestion: dict[str, Any]) -> str:
+        strategy = str(suggestion.get("strategy", "") or "").strip().lower()
+        symbol = str(suggestion.get("symbol", "") or "").strip().upper()
+        s_type = str(suggestion.get("suggestion_type", "") or "").strip().lower()
+        title = str(suggestion.get("title", "") or "").strip().lower()
+        suggestion_key = str(suggestion.get("suggestion_key", "") or "").strip().lower()
+        base = suggestion_key or f"{s_type}|{strategy}|{symbol}|{title}"
+        return base[:300]
+
+    def upsert_openclaw_suggestion(self, suggestion: dict[str, Any], *, report_id: int) -> int:
+        """Insert or update an OpenClaw suggestion while preserving lifecycle state."""
+        assert self._conn
+        now_iso = datetime.now(UTC).isoformat()
+        skey = self._build_openclaw_suggestion_key(suggestion)
+        existing = self._conn.execute(
+            "SELECT id, status, implemented_at, removed_at, created_at, first_seen_report_id FROM openclaw_suggestions WHERE suggestion_key=?",
+            (skey,),
+        ).fetchone()
+
+        payload = {
+            "suggestion_type": str(suggestion.get("suggestion_type", "") or ""),
+            "title": str(suggestion.get("title", "") or ""),
+            "description": str(suggestion.get("description", "") or ""),
+            "strategy": str(suggestion.get("strategy", "") or ""),
+            "symbol": str(suggestion.get("symbol", "") or ""),
+            "confidence": float(suggestion.get("confidence", 0.0) or 0.0),
+            "current_value": str(suggestion.get("current_value", "") or ""),
+            "suggested_value": str(suggestion.get("suggested_value", "") or ""),
+            "expected_improvement": str(suggestion.get("expected_improvement", "") or ""),
+            "based_on_trades": int(suggestion.get("based_on_trades", 0) or 0),
+        }
+
+        if existing:
+            self._conn.execute(
+                """
+                UPDATE openclaw_suggestions SET
+                    source='openclaw',
+                    suggestion_type=?,
+                    title=?,
+                    description=?,
+                    strategy=?,
+                    symbol=?,
+                    confidence=?,
+                    current_value=?,
+                    suggested_value=?,
+                    expected_improvement=?,
+                    based_on_trades=?,
+                    last_seen_report_id=?,
+                    updated_at=?
+                WHERE id=?
+                """,
+                (
+                    payload["suggestion_type"],
+                    payload["title"],
+                    payload["description"],
+                    payload["strategy"],
+                    payload["symbol"],
+                    payload["confidence"],
+                    payload["current_value"],
+                    payload["suggested_value"],
+                    payload["expected_improvement"],
+                    payload["based_on_trades"],
+                    report_id,
+                    now_iso,
+                    int(existing["id"]),
+                ),
+            )
+            self._conn.commit()
+            return int(existing["id"])
+
+        cur = self._conn.execute(
+            """
+            INSERT INTO openclaw_suggestions (
+                suggestion_key, source, status, suggestion_type, title, description, strategy, symbol,
+                confidence, current_value, suggested_value, expected_improvement, based_on_trades, notes,
+                first_seen_report_id, last_seen_report_id, created_at, updated_at, implemented_at, removed_at
+            ) VALUES (?, 'openclaw', 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, '', '')
+            """,
+            (
+                skey,
+                payload["suggestion_type"],
+                payload["title"],
+                payload["description"],
+                payload["strategy"],
+                payload["symbol"],
+                payload["confidence"],
+                payload["current_value"],
+                payload["suggested_value"],
+                payload["expected_improvement"],
+                payload["based_on_trades"],
+                report_id,
+                report_id,
+                now_iso,
+                now_iso,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid or 0)
+
+    def mark_openclaw_suggestion_status(self, suggestion_id: int, status: str, notes: str = "") -> bool:
+        """Transition suggestion lifecycle state (new/accepted/rejected/implemented/removed)."""
+        assert self._conn
+        if status not in {"new", "accepted", "rejected", "implemented", "removed"}:
+            return False
+        now_iso = datetime.now(UTC).isoformat()
+        implemented_at = now_iso if status == "implemented" else ""
+        removed_at = now_iso if status == "removed" else ""
+        row = self._conn.execute("SELECT id FROM openclaw_suggestions WHERE id=?", (suggestion_id,)).fetchone()
+        if not row:
+            return False
+        self._conn.execute(
+            """
+            UPDATE openclaw_suggestions
+            SET status=?,
+                notes=CASE WHEN ?='' THEN notes ELSE ? END,
+                implemented_at=CASE WHEN ?='' THEN implemented_at ELSE ? END,
+                removed_at=CASE WHEN ?='' THEN removed_at ELSE ? END,
+                updated_at=?
+            WHERE id=?
+            """,
+            (
+                status,
+                notes,
+                notes,
+                implemented_at,
+                implemented_at,
+                removed_at,
+                removed_at,
+                now_iso,
+                suggestion_id,
+            ),
+        )
+        self._conn.commit()
+        return True
+
+    def list_openclaw_suggestions(self, *, include_removed: bool = False, limit: int = 200) -> list[dict[str, Any]]:
+        """List persisted OpenClaw suggestions for dashboard/API use."""
+        assert self._conn
+        if include_removed:
+            rows = self._conn.execute(
+                "SELECT * FROM openclaw_suggestions ORDER BY updated_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM openclaw_suggestions WHERE status != 'removed' ORDER BY updated_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_openclaw_suggestion_context(self, limit: int = 40) -> list[dict[str, Any]]:
+        """Return compact historical suggestion context for next OpenClaw runs."""
+        assert self._conn
+        rows = self._conn.execute(
+            """
+            SELECT suggestion_key, status, suggestion_type, title, strategy, symbol, suggested_value, updated_at
+            FROM openclaw_suggestions
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_openclaw_daily_trade_rollup(self, days: int = 30) -> list[dict[str, Any]]:
+        """Compact day-level performance history for OpenClaw context."""
+        assert self._conn
+        rows = self._conn.execute(
+            """
+            SELECT
+                substr(closed_at, 1, 10) as day,
+                COUNT(*) as trades,
+                SUM(CASE WHEN is_winner=1 THEN 1 ELSE 0 END) as wins,
+                COALESCE(SUM(pnl_usd), 0) as total_pnl_usd,
+                COALESCE(AVG(pnl_pct), 0) as avg_pnl_pct
+            FROM trades
+            WHERE action='close' AND closed_at != '' AND recovery_close=0
+            GROUP BY substr(closed_at, 1, 10)
+            ORDER BY day DESC
+            LIMIT ?
+            """,
+            (days,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_openclaw_strategy_rollup(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Compact strategy-level performance rollup for OpenClaw context."""
+        assert self._conn
+        rows = self._conn.execute(
+            """
+            SELECT
+                strategy,
+                COUNT(*) as trades,
+                SUM(CASE WHEN is_winner=1 THEN 1 ELSE 0 END) as wins,
+                COALESCE(SUM(pnl_usd), 0) as total_pnl_usd,
+                COALESCE(AVG(pnl_pct), 0) as avg_pnl_pct
+            FROM trades
+            WHERE action='close' AND closed_at != '' AND recovery_close=0
+            GROUP BY strategy
+            ORDER BY trades DESC, total_pnl_usd ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_openclaw_symbol_rollup(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Compact symbol-level performance rollup for OpenClaw context."""
+        assert self._conn
+        rows = self._conn.execute(
+            """
+            SELECT
+                symbol,
+                COUNT(*) as trades,
+                SUM(CASE WHEN is_winner=1 THEN 1 ELSE 0 END) as wins,
+                COALESCE(SUM(pnl_usd), 0) as total_pnl_usd,
+                COALESCE(AVG(pnl_pct), 0) as avg_pnl_pct
+            FROM trades
+            WHERE action='close' AND closed_at != '' AND recovery_close=0
+            GROUP BY symbol
+            ORDER BY ABS(total_pnl_usd) DESC, trades DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]

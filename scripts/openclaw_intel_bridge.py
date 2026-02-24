@@ -13,7 +13,7 @@ from typing import Any
 
 import aiohttp
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -305,6 +305,55 @@ def _advisory_prompt(context: dict[str, Any], recent_examples: list[dict[str, An
         f"Recent paid examples (for style only): {json.dumps(examples, ensure_ascii=True)}\n"
         f"Context: {json.dumps(context, ensure_ascii=True)}"
     )
+
+
+def _daily_review_prompt(context: dict[str, Any], recent_examples: list[dict[str, Any]] | None = None) -> str:
+    examples = recent_examples or []
+    return (
+        "You are OpenClaw strategy optimizer for Trade Borg.\n"
+        "Return JSON only with exact keys: as_of, summary, suggestions.\n"
+        "suggestions is a list (max 12) of compact actionable recommendations.\n"
+        "Each suggestion object keys: suggestion_type, title, description, strategy, symbol, confidence, "
+        "current_value, suggested_value, expected_improvement, based_on_trades.\n"
+        "advisory-only, no raw dumps, no chain-of-thought.\n"
+        "Keep description under 280 chars and expected_improvement under 120 chars.\n"
+        "Use suggestion_type one of: disable, reduce_weight, change_param, time_filter, regime_filter, process.\n"
+        f"Recent examples: {json.dumps(examples, ensure_ascii=True)}\n"
+        f"Context: {json.dumps(context, ensure_ascii=True)}"
+    )
+
+
+def _normalize_daily_review(payload: dict[str, Any], fallback_summary: str = "") -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "as_of": _now_iso(),
+        "summary": fallback_summary or "No additional recommendation today.",
+        "suggestions": [],
+    }
+    if isinstance(payload, dict):
+        out["as_of"] = str(payload.get("as_of") or out["as_of"])
+        out["summary"] = str(payload.get("summary") or out["summary"])
+        suggestions = payload.get("suggestions", [])
+        normalized: list[dict[str, Any]] = []
+        if isinstance(suggestions, list):
+            for item in suggestions[:12]:
+                if not isinstance(item, dict):
+                    continue
+                normalized.append(
+                    {
+                        "suggestion_type": str(item.get("suggestion_type", "process") or "process"),
+                        "title": str(item.get("title", "") or "")[:180],
+                        "description": str(item.get("description", "") or "")[:280],
+                        "strategy": str(item.get("strategy", "") or "")[:80],
+                        "symbol": str(item.get("symbol", "") or "")[:40],
+                        "confidence": max(0.0, min(1.0, _to_float(item.get("confidence", 0.0), 0.0))),
+                        "current_value": str(item.get("current_value", "") or "")[:120],
+                        "suggested_value": str(item.get("suggested_value", "") or "")[:120],
+                        "expected_improvement": str(item.get("expected_improvement", "") or "")[:120],
+                        "based_on_trades": max(0, _to_int(item.get("based_on_trades", 0), 0)),
+                    }
+                )
+        out["suggestions"] = normalized
+    return out
 
 
 class BudgetController:
@@ -690,6 +739,107 @@ async def intel() -> dict[str, Any]:
             "paid_model_sonnet": PAID_MODEL_SONNET,
             "local_timed_out": local_timed_out,
             "max_latency_seconds": MAX_LATENCY_SECONDS,
+        },
+    }
+
+
+@app.post("/daily-review")
+async def daily_review(request: Request) -> dict[str, Any]:
+    """Run OpenClaw daily optimizer with compact historical context."""
+    body = await request.json()
+    context = body.get("context", {}) if isinstance(body, dict) else {}
+    policy = body.get("policy", {}) if isinstance(body, dict) else {}
+    if not isinstance(context, dict):
+        context = {}
+    if not isinstance(policy, dict):
+        policy = {}
+
+    force_paid = bool(policy.get("force_paid", False))
+    examples = _load_recent_distilled_examples(DISTILL_PATH, LOCAL_RECENT_EXAMPLES)
+    fallback_summary = "Daily optimization generated from compact hub aggregates."
+    local_payload: dict[str, Any] | None = None
+    paid_payload: dict[str, Any] | None = None
+    paid_model_used = ""
+    budget_reason = "paid_disabled"
+    local_timed_out = False
+
+    if _local_client.enabled:
+        prompt = _daily_review_prompt(context, recent_examples=examples)
+        local_body = {
+            "model": _local_client.model,
+            "stream": False,
+            "format": "json",
+            "messages": [{"role": "user", "content": prompt}],
+            "options": {"temperature": 0.2},
+        }
+        timeout = aiohttp.ClientTimeout(total=_local_client.timeout)
+        try:
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.post(f"{_local_client.base_url}/api/chat", json=local_body) as resp,
+            ):
+                if resp.status == 200:
+                    raw = await resp.json()
+                    text = str((((raw or {}).get("message") or {}).get("content")) or "")
+                    local_payload = _extract_json(text)
+        except TimeoutError:
+            local_timed_out = True
+        except Exception:
+            local_payload = None
+
+    local_norm = _normalize_daily_review(local_payload or {}, fallback_summary=fallback_summary)
+
+    if _anthropic_client.enabled and (force_paid or local_payload is None):
+        prompt = _daily_review_prompt(context, recent_examples=examples)
+        estimate_in = _estimate_tokens(prompt)
+        estimate_out = PAID_MAX_TOKENS
+        allowed, budget_reason = _budget.can_afford("haiku", estimate_in, estimate_out, bypass_cooldown=force_paid)
+        if allowed:
+            paid_body = {
+                "model": _anthropic_client.haiku_model,
+                "max_tokens": _anthropic_client.max_tokens,
+                "temperature": _anthropic_client.temperature,
+                "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+            }
+            headers = {
+                "x-api-key": _anthropic_client.api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+            timeout = aiohttp.ClientTimeout(total=_anthropic_client.timeout)
+            try:
+                async with (
+                    aiohttp.ClientSession(timeout=timeout) as session,
+                    session.post("https://api.anthropic.com/v1/messages", json=paid_body, headers=headers) as resp,
+                ):
+                    if resp.status == 200:
+                        raw = await resp.json()
+                        content = raw.get("content", []) if isinstance(raw, dict) else []
+                        text = ""
+                        if isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, dict) and block.get("type") == "text":
+                                    text += str(block.get("text", ""))
+                        paid_payload = _extract_json(text)
+                        usage = raw.get("usage", {}) if isinstance(raw, dict) else {}
+                        in_toks = _to_int(usage.get("input_tokens", estimate_in), estimate_in)
+                        out_toks = _to_int(usage.get("output_tokens", _estimate_tokens(text)), _estimate_tokens(text))
+                        _budget.record("haiku", in_toks, out_toks)
+                        paid_model_used = _anthropic_client.haiku_model
+            except Exception:
+                paid_payload = None
+
+    final_norm = _normalize_daily_review(paid_payload or local_norm, fallback_summary=fallback_summary)
+    return {
+        **final_norm,
+        "meta": {
+            "lane_used": "paid" if paid_payload else ("local" if local_payload else "fallback"),
+            "paid_model_used": paid_model_used,
+            "budget_reason": budget_reason,
+            "force_paid": force_paid,
+            "local_timed_out": local_timed_out,
+            "max_latency_seconds": MAX_LATENCY_SECONDS,
+            "generated_at": _now_iso(),
         },
     }
 

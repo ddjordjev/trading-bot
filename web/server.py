@@ -36,6 +36,7 @@ from web.schemas import (
     PositionTightenStopBody,
     StrategyInfo,
     StrategyScoreInfo,
+    SuggestionStatusBody,
     TradeQueueItem,
     TradeRecord,
     TrendingCoinInfo,
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
 
 _hub_state_ref: HubState | None = None
 _monitor_ref: Any | None = None
+_openclaw_advisor_ref: Any | None = None
 _start_time: float = 0.0
 _log_buffer: deque[dict[str, Any]] = deque(maxlen=200)
 _bot_reports: dict[str, dict[str, Any]] = {}
@@ -125,6 +127,12 @@ def set_monitor_service(monitor: Any) -> None:
     """Called by hub_main.py to expose monitor runtime controls to API handlers."""
     global _monitor_ref
     _monitor_ref = monitor
+
+
+def set_openclaw_advisor_service(service: Any) -> None:
+    """Called by hub_main.py to expose OpenClaw daily advisor controls."""
+    global _openclaw_advisor_ref
+    _openclaw_advisor_ref = service
 
 
 FRONTEND_DIR = Path(__file__).parent / "frontend" / "dist"
@@ -573,7 +581,10 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
             for s in sorted(hub_analytics.scores.values(), key=lambda x: x.total_pnl, reverse=True)
         ]
         patterns = [PatternInsightInfo(**p.model_dump()) for p in hub_analytics.patterns]
-        suggestions = [ModificationSuggestionInfo(**s.model_dump()) for s in hub_analytics.suggestions]
+        suggestions = [
+            ModificationSuggestionInfo(source="analytics", status="new", **s.model_dump())
+            for s in hub_analytics.suggestions
+        ]
         hourly = hub.get_hourly_performance()
         regime = hub.get_regime_performance()
     else:
@@ -582,6 +593,28 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
         suggestions = []
         hourly = []
         regime = []
+
+    oc_rows = hub.list_openclaw_suggestions(include_removed=False, limit=200)
+    for row in oc_rows:
+        suggestions.append(
+            ModificationSuggestionInfo(
+                id=int(row.get("id", 0) or 0),
+                source=str(row.get("source", "openclaw") or "openclaw"),
+                status=str(row.get("status", "new") or "new"),
+                strategy=str(row.get("strategy", "") or ""),
+                symbol=str(row.get("symbol", "") or ""),
+                suggestion_type=str(row.get("suggestion_type", "") or "change_param"),
+                title=str(row.get("title", "") or ""),
+                description=str(row.get("description", "") or ""),
+                confidence=float(row.get("confidence", 0.0) or 0.0),
+                current_value=str(row.get("current_value", "") or ""),
+                suggested_value=str(row.get("suggested_value", "") or ""),
+                expected_improvement=str(row.get("expected_improvement", "") or ""),
+                based_on_trades=int(row.get("based_on_trades", 0) or 0),
+                notes=str(row.get("notes", "") or ""),
+                updated_at=str(row.get("updated_at", "") or ""),
+            )
+        )
 
     live = []
     # Pull live positions from all bot reports (multibot)
@@ -621,6 +654,29 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
         regime_performance=regime,
         live_positions=live,
     )
+
+
+@app.post("/api/openclaw-suggestions/{suggestion_id}/status", response_model=ActionResponse)
+async def update_openclaw_suggestion_status(
+    suggestion_id: int,
+    body: SuggestionStatusBody,
+    _: str = Depends(verify_token),
+) -> ActionResponse:
+    hub = _get_hub_db()
+    ok = hub.mark_openclaw_suggestion_status(suggestion_id, body.status, notes=body.notes)
+    if not ok:
+        return ActionResponse(success=False, message="Suggestion not found or invalid status")
+    return ActionResponse(success=True, message=f"Suggestion {suggestion_id} marked as {body.status}")
+
+
+@app.post("/api/openclaw/daily-review/trigger", response_model=ActionResponse)
+async def trigger_openclaw_daily_review(_: str = Depends(verify_token)) -> ActionResponse:
+    if _openclaw_advisor_ref is None or not hasattr(_openclaw_advisor_ref, "trigger_now"):
+        return ActionResponse(success=False, message="OpenClaw daily advisor unavailable")
+    result = await _openclaw_advisor_ref.trigger_now("manual")
+    if result.get("ok"):
+        return ActionResponse(success=True, message=f"OpenClaw daily review stored (report {result.get('report_id')})")
+    return ActionResponse(success=False, message=f"OpenClaw daily review failed: {result.get('error') or 'unknown'}")
 
 
 @app.get("/api/closed-trades")

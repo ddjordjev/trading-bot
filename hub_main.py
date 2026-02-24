@@ -28,11 +28,20 @@ from hub.state import HubState
 from notifications.notifier import NotificationType, Notifier
 from services.analytics_service import AnalyticsService
 from services.monitor import MonitorService
-from web.server import _bot_reports, app, set_hub_state, set_monitor_service, setup_log_capture
+from services.openclaw_advisor_service import OpenClawAdvisorService
+from web.server import (
+    _bot_reports,
+    app,
+    set_hub_state,
+    set_monitor_service,
+    set_openclaw_advisor_service,
+    setup_log_capture,
+)
 
 _hub_state: HubState | None = None
 _monitor: MonitorService | None = None
 _analytics: AnalyticsService | None = None
+_openclaw_advisor: OpenClawAdvisorService | None = None
 _notifier: Notifier | None = None
 _background_tasks: list[asyncio.Task] = []  # type: ignore[type-arg]
 
@@ -149,22 +158,25 @@ async def _send_compound_daily_report() -> None:
 
 async def _start_services(state: HubState) -> None:
     """Launch monitor, analytics, and daily report as background asyncio tasks."""
-    global _monitor, _analytics, _notifier
+    global _monitor, _analytics, _openclaw_advisor, _notifier
 
     settings = get_settings()
 
     _monitor = MonitorService(settings=settings, state=state)
     set_monitor_service(_monitor)
     _analytics = AnalyticsService(refresh_interval=300, state=state)
+    _openclaw_advisor = OpenClawAdvisorService(settings=settings, state=state)
+    set_openclaw_advisor_service(_openclaw_advisor)
     _notifier = Notifier(settings)
     await _notifier.start()
 
     monitor_task = asyncio.create_task(_monitor.start(), name="monitor")
     analytics_task = asyncio.create_task(_analytics.start(), name="analytics")
     daily_task = asyncio.create_task(_daily_report_loop(), name="daily_report")
-    _background_tasks.extend([monitor_task, analytics_task, daily_task])
+    openclaw_advisor_task = asyncio.create_task(_openclaw_advisor.start(), name="openclaw_advisor")
+    _background_tasks.extend([monitor_task, analytics_task, daily_task, openclaw_advisor_task])
 
-    logger.info("Hub services started: monitor + analytics + daily report")
+    logger.info("Hub services started: monitor + analytics + daily report + openclaw advisor")
 
 
 async def _stop_services() -> None:
@@ -172,6 +184,8 @@ async def _stop_services() -> None:
         await _monitor.stop()
     if _analytics:
         await _analytics.stop()
+    if _openclaw_advisor:
+        await _openclaw_advisor.stop()
     if _notifier:
         await _notifier.stop()
 

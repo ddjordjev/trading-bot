@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { get, post } from "../api/client";
+import { get, post, postBody } from "../api/client";
 
 interface StrategyScore {
   strategy: string;
@@ -34,6 +34,9 @@ interface PatternInsight {
 }
 
 interface ModSuggestion {
+  id: number;
+  source: string;
+  status: string;
   strategy: string;
   symbol: string;
   suggestion_type: string;
@@ -44,6 +47,8 @@ interface ModSuggestion {
   suggested_value: string;
   expected_improvement: string;
   based_on_trades: number;
+  notes: string;
+  updated_at: string;
 }
 
 interface LivePosition {
@@ -128,6 +133,7 @@ const SUGGESTION_COLORS: Record<string, string> = {
   time_filter: "var(--accent)",
   regime_filter: "var(--purple)",
   change_param: "var(--accent)",
+  process: "var(--purple)",
 };
 
 function weightColor(w: number): string {
@@ -284,6 +290,7 @@ export function Analytics() {
   const [report, setReport] = useState<DailyReport | null>(null);
   const [closedTrades, setClosedTrades] = useState<ClosedTrade[]>([]);
   const [loading, setLoading] = useState(true);
+  const [busySuggestionId, setBusySuggestionId] = useState<number | null>(null);
   const [tab, setTab] = useState<"live" | "closed" | "scores" | "patterns" | "suggestions" | "hourly" | "db" | "report">("live");
 
   const refresh = async (silent = false) => {
@@ -302,6 +309,21 @@ export function Analytics() {
   const triggerRefresh = async () => {
     await post("/api/analytics/refresh");
     await refresh();
+  };
+
+  const triggerOpenClawDailyReview = async () => {
+    await post("/api/openclaw/daily-review/trigger");
+    await refresh();
+  };
+
+  const updateSuggestionStatus = async (id: number, status: string) => {
+    setBusySuggestionId(id);
+    try {
+      await postBody(`/api/openclaw-suggestions/${id}/status`, { status });
+      await refresh(true);
+    } finally {
+      setBusySuggestionId(null);
+    }
   };
 
   useEffect(() => {
@@ -352,9 +374,14 @@ export function Analytics() {
             </>
           )}
         </div>
-        <button className="btn-primary" style={{ marginLeft: "1rem" }} onClick={triggerRefresh}>
-          Refresh Analytics
-        </button>
+        <div style={{ display: "flex", gap: "0.5rem", marginLeft: "1rem" }}>
+          <button className="btn-primary" onClick={triggerRefresh}>
+            Refresh Analytics
+          </button>
+          <button className="btn-secondary" onClick={triggerOpenClawDailyReview}>
+            Run OC Daily Review
+          </button>
+        </div>
       </div>
 
       <div className="tabs" style={{ marginBottom: "1rem" }}>
@@ -376,7 +403,13 @@ export function Analytics() {
       {tab === "closed" && <ClosedTradesTab trades={closedTrades} />}
       {tab === "scores" && <StrategyScoresTab scores={analytics?.strategy_scores ?? []} />}
       {tab === "patterns" && <PatternsTab patterns={analytics?.patterns ?? []} />}
-      {tab === "suggestions" && <SuggestionsTab suggestions={analytics?.suggestions ?? []} />}
+      {tab === "suggestions" && (
+        <SuggestionsTab
+          suggestions={analytics?.suggestions ?? []}
+          onStatusUpdate={updateSuggestionStatus}
+          busySuggestionId={busySuggestionId}
+        />
+      )}
       {tab === "hourly" && <HourlyTab hourly={analytics?.hourly_performance ?? []} regime={analytics?.regime_performance ?? []} />}
       {tab === "db" && <DbExplorer />}
       {tab === "report" && <ReportTab report={report} />}
@@ -656,7 +689,15 @@ function PatternsTab({ patterns }: { patterns: PatternInsight[] }) {
   );
 }
 
-function SuggestionsTab({ suggestions }: { suggestions: ModSuggestion[] }) {
+function SuggestionsTab({
+  suggestions,
+  onStatusUpdate,
+  busySuggestionId,
+}: {
+  suggestions: ModSuggestion[];
+  onStatusUpdate: (id: number, status: string) => Promise<void>;
+  busySuggestionId: number | null;
+}) {
   if (suggestions.length === 0) return <div className="empty-state">No modification suggestions. All strategies performing within acceptable bounds.</div>;
 
   return (
@@ -667,12 +708,21 @@ function SuggestionsTab({ suggestions }: { suggestions: ModSuggestion[] }) {
             <span style={{ color: "var(--heading)", fontWeight: 600, fontSize: "1rem" }}>
               {s.title}
             </span>
-            <span className="badge" style={{
-              background: `${SUGGESTION_COLORS[s.suggestion_type]}22`,
-              color: SUGGESTION_COLORS[s.suggestion_type],
-            }}>
-              {s.suggestion_type.replace("_", " ").toUpperCase()}
-            </span>
+            <div style={{ display: "flex", gap: "0.4rem" }}>
+              <span className="badge" style={{
+                background: s.source === "openclaw" ? "rgba(147, 112, 219, 0.2)" : "rgba(88, 166, 255, 0.2)",
+                color: s.source === "openclaw" ? "var(--purple)" : "var(--accent)",
+              }}>
+                {s.source === "openclaw" ? "OPENCLAW" : "ANALYTICS"}
+              </span>
+              <span className="badge" style={{
+                background: `${SUGGESTION_COLORS[s.suggestion_type] || "var(--accent)"}22`,
+                color: SUGGESTION_COLORS[s.suggestion_type] || "var(--accent)",
+              }}>
+                {s.suggestion_type.replace("_", " ").toUpperCase()}
+              </span>
+              <span className="badge">{(s.status || "new").toUpperCase()}</span>
+            </div>
           </div>
           <div style={{ marginBottom: "0.4rem" }}>{s.description}</div>
           {(s.current_value || s.suggested_value) && (
@@ -692,7 +742,33 @@ function SuggestionsTab({ suggestions }: { suggestions: ModSuggestion[] }) {
           )}
           <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.3rem" }}>
             Based on {s.based_on_trades} trades · {(s.confidence * 100).toFixed(0)}% confidence
+            {s.updated_at ? ` · ${new Date(s.updated_at).toLocaleString()}` : ""}
           </div>
+          {s.source === "openclaw" && s.id > 0 && (
+            <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.55rem" }}>
+              <button
+                disabled={busySuggestionId === s.id}
+                className="btn-secondary"
+                onClick={() => onStatusUpdate(s.id, "accepted")}
+              >
+                Accept
+              </button>
+              <button
+                disabled={busySuggestionId === s.id}
+                className="btn-secondary"
+                onClick={() => onStatusUpdate(s.id, "implemented")}
+              >
+                Implemented
+              </button>
+              <button
+                disabled={busySuggestionId === s.id}
+                className="btn-secondary"
+                onClick={() => onStatusUpdate(s.id, "removed")}
+              >
+                Remove
+              </button>
+            </div>
+          )}
         </div>
       ))}
     </div>

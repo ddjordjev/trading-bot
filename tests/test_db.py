@@ -683,3 +683,47 @@ class TestHubDB:
         assert loaded[0]["symbol"] == "BTC/USDT"
         assert loaded[0]["sample_count"] == 61
         assert loaded[0]["chg_1h"] == pytest.approx(1.4)
+
+    def test_openclaw_report_and_suggestion_lifecycle(self, hub: HubDB):
+        report_id = hub.insert_openclaw_daily_report(
+            report_day="2026-02-24",
+            run_kind="startup",
+            requested_at="2026-02-24T00:00:00+00:00",
+            completed_at="2026-02-24T00:00:05+00:00",
+            lane_used="paid",
+            source_url="http://openclaw-bridge:18080/daily-review",
+            context_payload={"k": "v"},
+            response_payload={"summary": "ok", "suggestions": []},
+            status="ok",
+            error_text="",
+        )
+        assert report_id > 0
+
+        latest = hub.get_latest_openclaw_daily_report()
+        assert latest is not None
+        assert latest["lane_used"] == "paid"
+        assert latest["response"]["summary"] == "ok"
+
+        sid = hub.upsert_openclaw_suggestion(
+            {
+                "suggestion_type": "reduce_weight",
+                "title": "Reduce momentum",
+                "description": "Too volatile in current regime",
+                "strategy": "momentum",
+                "symbol": "BTC/USDT",
+                "confidence": 0.7,
+                "suggested_value": "weight=0.7",
+                "based_on_trades": 42,
+            },
+            report_id=report_id,
+        )
+        assert sid > 0
+        rows = hub.list_openclaw_suggestions()
+        assert len(rows) == 1
+        assert rows[0]["status"] == "new"
+
+        updated = hub.mark_openclaw_suggestion_status(sid, "implemented", notes="done")
+        assert updated is True
+        rows2 = hub.list_openclaw_suggestions(include_removed=True)
+        assert rows2[0]["status"] == "implemented"
+        assert rows2[0]["implemented_at"] != ""

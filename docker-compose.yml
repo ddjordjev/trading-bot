@@ -34,12 +34,19 @@ services:
       dockerfile: Dockerfile.hub
     container_name: bot-hub
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: true
+      - path: .env.openclaw.local
+        required: false
     environment:
       - TZ=UTC
       - DASHBOARD_PORT=9035
       - OPENCLAW_URL=http://openclaw-bridge:18080/intel
       - OPENCLAW_TIMEOUT_SECONDS=10
+      - OPENCLAW_DAILY_REVIEW_ENABLED=true
+      - OPENCLAW_DAILY_REVIEW_INTERVAL_HOURS=24
+      - OPENCLAW_DAILY_REVIEW_FORCE_PAID=true
     command: python hub_main.py
     ports:
       - "${DASHBOARD_PORT:-9035}:9035"
@@ -65,7 +72,11 @@ services:
       dockerfile: Dockerfile.bot
     container_name: openclaw-bridge
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: true
+      - path: .env.openclaw.local
+        required: false
     environment:
       - TZ=UTC
       - OPENCLAW_BRIDGE_HOST=0.0.0.0
