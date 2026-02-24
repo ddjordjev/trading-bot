@@ -38,6 +38,8 @@ services:
     environment:
       - TZ=UTC
       - DASHBOARD_PORT=9035
+      - OPENCLAW_URL=http://openclaw-bridge:18080/intel
+      - OPENCLAW_TIMEOUT_SECONDS=10
     command: python hub_main.py
     ports:
       - "${DASHBOARD_PORT:-9035}:9035"
@@ -49,6 +51,41 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 90s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ---- OpenClaw bridge: internal low-latency advisory endpoint for hub ----
+  openclaw-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    container_name: openclaw-bridge
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=UTC
+      - OPENCLAW_BRIDGE_HOST=0.0.0.0
+      - OPENCLAW_BRIDGE_PORT=18080
+      - OPENCLAW_BRIDGE_HUB_URL=http://bot-hub:9035
+      - OPENCLAW_BRIDGE_TIMEOUT_SECONDS=6
+      - OPENCLAW_BRIDGE_MAX_LATENCY_SECONDS=6.5
+      - OPENCLAW_BRIDGE_LOCAL_ENABLED=false
+      - OPENCLAW_BRIDGE_LOCAL_TIMEOUT_SECONDS=5
+      - OPENCLAW_BRIDGE_PAID_TIMEOUT_SECONDS=6
+      - OPENCLAW_BRIDGE_PAID_MAX_TOKENS=600
+    command: python scripts/openclaw_intel_bridge.py
+    depends_on:
+      bot-hub:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18080/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
       retries: 3
     logging:
       driver: "json-file"

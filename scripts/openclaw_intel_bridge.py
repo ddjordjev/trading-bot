@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -25,6 +26,7 @@ BRIDGE_PORT = int(os.getenv("OPENCLAW_BRIDGE_PORT", "18080"))
 HUB_URL = os.getenv("OPENCLAW_BRIDGE_HUB_URL", "http://localhost:9035")
 HUB_TOKEN = os.getenv("OPENCLAW_BRIDGE_HUB_TOKEN", "")
 OPENCLAW_TIMEOUT = float(os.getenv("OPENCLAW_BRIDGE_TIMEOUT_SECONDS", "8"))
+MAX_LATENCY_SECONDS = max(1.0, float(os.getenv("OPENCLAW_BRIDGE_MAX_LATENCY_SECONDS", "6.5")))
 
 LOCAL_ENABLED = os.getenv("OPENCLAW_BRIDGE_LOCAL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 LOCAL_OLLAMA_URL = os.getenv("OPENCLAW_BRIDGE_LOCAL_OLLAMA_URL", "http://127.0.0.1:11434")
@@ -550,6 +552,14 @@ _anthropic_client = AnthropicAdvisoryClient(
 )
 
 
+async def _run_with_deadline(coro: Any, deadline_ts: float) -> Any:
+    """Await a coroutine with a monotonic deadline."""
+    remaining = deadline_ts - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("latency_budget_exhausted")
+    return await asyncio.wait_for(coro, timeout=remaining)
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     oc_health = _openclaw_call("health")
@@ -566,6 +576,7 @@ async def health() -> dict[str, Any]:
 
 @app.get("/intel")
 async def intel() -> dict[str, Any]:
+    deadline_ts = time.monotonic() + MAX_LATENCY_SECONDS
     oc_status = _openclaw_call("status") or {}
     oc_presence = _openclaw_call("system-presence") or []
     hub_health = await _hub_get("/health")
@@ -593,7 +604,12 @@ async def intel() -> dict[str, Any]:
     context = _build_compact_context(hub_intel=hub_intel, trending=trending_list, queue=queue_list, intel_age=intel_age)
     examples = _load_recent_distilled_examples(DISTILL_PATH, LOCAL_RECENT_EXAMPLES)
 
-    local_payload = await _local_client.run(context=context, examples=examples)
+    local_timed_out = False
+    try:
+        local_payload = await _run_with_deadline(_local_client.run(context=context, examples=examples), deadline_ts)
+    except TimeoutError:
+        local_payload = None
+        local_timed_out = True
     local_norm = _normalize_advisory(local_payload or {}, fallback)
 
     use_sonnet = _should_escalate(local_payload=local_norm, fallback=fallback)
@@ -617,11 +633,21 @@ async def intel() -> dict[str, Any]:
                 bypass_cooldown=bypass_cooldown,
             )
             if allowed:
-                paid_payload, in_toks, out_toks, paid_model_used = await _anthropic_client.run(
-                    context=context,
-                    local_draft=local_norm,
-                    use_sonnet=use_sonnet,
-                )
+                try:
+                    paid_payload, in_toks, out_toks, paid_model_used = await _run_with_deadline(
+                        _anthropic_client.run(
+                            context=context,
+                            local_draft=local_norm,
+                            use_sonnet=use_sonnet,
+                        ),
+                        deadline_ts,
+                    )
+                except TimeoutError:
+                    paid_payload = None
+                    in_toks = 0
+                    out_toks = 0
+                    paid_model_used = ""
+                    budget_reason = "latency_budget_exhausted"
                 if paid_payload:
                     paid_norm = _normalize_advisory(paid_payload, local_norm)
                     _budget.record("sonnet" if use_sonnet else "haiku", in_toks, out_toks)
@@ -662,6 +688,8 @@ async def intel() -> dict[str, Any]:
             "local_model": LOCAL_MODEL,
             "paid_model_haiku": PAID_MODEL_HAIKU,
             "paid_model_sonnet": PAID_MODEL_SONNET,
+            "local_timed_out": local_timed_out,
+            "max_latency_seconds": MAX_LATENCY_SECONDS,
         },
     }
 

@@ -133,7 +133,13 @@ class OpenClawClient:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning("OpenClaw fetch error: {}", e)
+                logger.warning(
+                    "OpenClaw fetch error (url={}, timeout={}s, type={}): {!r}",
+                    self.base_url,
+                    self.timeout_seconds,
+                    type(e).__name__,
+                    e,
+                )
             await asyncio.sleep(self.poll_interval)
 
     async def fetch_once(self) -> OpenClawSnapshot | None:

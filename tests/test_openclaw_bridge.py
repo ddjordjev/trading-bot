@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import time
 from pathlib import Path
+
+import pytest
 
 
 def _load_bridge_module():
@@ -79,3 +82,26 @@ def test_budget_controller_enforces_paid_cooldown(tmp_path):
     ok_bypass, reason_bypass = ctl.can_afford("haiku", 1000, 1000, bypass_cooldown=True)
     assert ok_bypass is True
     assert reason_bypass == "ok"
+
+
+@pytest.mark.asyncio
+async def test_run_with_deadline_succeeds_when_budget_available():
+    bridge = _load_bridge_module()
+
+    async def _fast() -> str:
+        return "ok"
+
+    out = await bridge._run_with_deadline(_fast(), time.monotonic() + 1.0)
+    assert out == "ok"
+
+
+@pytest.mark.asyncio
+async def test_run_with_deadline_raises_when_budget_exhausted():
+    bridge = _load_bridge_module()
+
+    async def _slow() -> str:
+        await bridge.asyncio.sleep(0.05)
+        return "slow"
+
+    with pytest.raises(TimeoutError):
+        await bridge._run_with_deadline(_slow(), time.monotonic() + 0.01)

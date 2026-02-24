@@ -80,6 +80,24 @@ Validation:
 .venv/bin/python scripts/validate_openclaw_hub_integration.py --hub-url "http://localhost:9035" --dashboard-token "$DASHBOARD_TOKEN"
 ```
 
+### Color-Coded Log Overview
+
+For a readable OpenClaw stream (heartbeat/summaries/errors grouped by event), pipe raw JSON logs through:
+
+```bash
+openclaw logs --json --follow | .venv/bin/python scripts/openclaw_logs_overview.py
+```
+
+Useful options:
+
+```bash
+# Add periodic rollup counters every 60 lines
+openclaw logs --json --follow | .venv/bin/python scripts/openclaw_logs_overview.py --summary-every 60
+
+# Parse an existing log file
+.venv/bin/python scripts/openclaw_logs_overview.py /path/to/openclaw.log
+```
+
 ### Remote later (bearer auth)
 
 - `OPENCLAW_URL=https://<your-openclaw-host>/intel`
