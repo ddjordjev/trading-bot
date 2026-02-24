@@ -1,5 +1,20 @@
 import { useEffect, useState } from "react";
 
+function normalizeSummaryHtml(raw: string): string {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(raw, "text/html");
+
+  // Keep all summary links from hijacking the iframe context.
+  for (const anchor of Array.from(doc.querySelectorAll("a[href]"))) {
+    const href = (anchor.getAttribute("href") ?? "").trim();
+    if (!href || href.startsWith("#")) continue;
+    anchor.setAttribute("target", "_blank");
+    anchor.setAttribute("rel", "noopener noreferrer");
+  }
+
+  return `<!doctype html>\n${doc.documentElement.outerHTML}`;
+}
+
 export function Summary() {
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -11,7 +26,7 @@ export function Summary() {
         return r.text();
       })
       .then((raw) => {
-        setHtml(raw);
+        setHtml(normalizeSummaryHtml(raw));
       })
       .catch((e) => setError(e.message));
   }, []);
