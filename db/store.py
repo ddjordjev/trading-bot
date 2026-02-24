@@ -24,6 +24,7 @@ class TradeDB:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._create_tables()
+        self._ensure_trade_columns()
         logger.info("TradeDB connected: {}", self._path)
 
     def close(self) -> None:
@@ -62,7 +63,23 @@ class TradeDB:
                 day_of_week INTEGER DEFAULT 0,
                 volatility_pct REAL DEFAULT 0,
                 opened_at TEXT DEFAULT '',
-                closed_at TEXT DEFAULT ''
+                closed_at TEXT DEFAULT '',
+                planned_stop_loss REAL DEFAULT 0,
+                planned_tp1 REAL DEFAULT 0,
+                planned_tp2 REAL DEFAULT 0,
+                exchange_stop_loss REAL DEFAULT 0,
+                exchange_take_profit REAL DEFAULT 0,
+                bot_stop_loss REAL DEFAULT 0,
+                bot_take_profit REAL DEFAULT 0,
+                effective_stop_loss REAL DEFAULT 0,
+                effective_take_profit REAL DEFAULT 0,
+                stop_source TEXT DEFAULT 'none',
+                tp_source TEXT DEFAULT 'none',
+                close_source TEXT DEFAULT '',
+                close_reason TEXT DEFAULT '',
+                exchange_close_order_id TEXT DEFAULT '',
+                exchange_close_trade_id TEXT DEFAULT '',
+                close_detected_at TEXT DEFAULT ''
             );
 
             CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy);
@@ -70,6 +87,38 @@ class TradeDB:
             CREATE INDEX IF NOT EXISTS idx_trades_closed ON trades(closed_at);
             CREATE INDEX IF NOT EXISTS idx_trades_winner ON trades(is_winner);
         """)
+
+    def _ensure_trade_columns(self) -> None:
+        assert self._conn
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(trades)").fetchall()}
+        additions: dict[str, str] = {
+            "planned_stop_loss": "REAL DEFAULT 0",
+            "planned_tp1": "REAL DEFAULT 0",
+            "planned_tp2": "REAL DEFAULT 0",
+            "exchange_stop_loss": "REAL DEFAULT 0",
+            "exchange_take_profit": "REAL DEFAULT 0",
+            "bot_stop_loss": "REAL DEFAULT 0",
+            "bot_take_profit": "REAL DEFAULT 0",
+            "effective_stop_loss": "REAL DEFAULT 0",
+            "effective_take_profit": "REAL DEFAULT 0",
+            "stop_source": "TEXT DEFAULT 'none'",
+            "tp_source": "TEXT DEFAULT 'none'",
+            "close_source": "TEXT DEFAULT ''",
+            "close_reason": "TEXT DEFAULT ''",
+            "exchange_close_order_id": "TEXT DEFAULT ''",
+            "exchange_close_trade_id": "TEXT DEFAULT ''",
+            "close_detected_at": "TEXT DEFAULT ''",
+        }
+        altered = False
+        for name, ddl in additions.items():
+            if name in cols:
+                continue
+            self._conn.execute(f"ALTER TABLE trades ADD COLUMN {name} {ddl}")
+            altered = True
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_close_source ON trades(close_source)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_closed ON trades(symbol, closed_at)")
+        if altered:
+            self._conn.commit()
 
     def log_trade(self, trade: TradeRecord) -> int:
         assert self._conn
@@ -82,8 +131,14 @@ class TradeDB:
                 was_quick_trade, was_low_liquidity, dca_count, max_drawdown_pct,
                 market_regime, fear_greed, daily_tier, daily_pnl_at_entry,
                 signal_strength, hour_utc, day_of_week, volatility_pct,
-                opened_at, closed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                opened_at, closed_at,
+                planned_stop_loss, planned_tp1, planned_tp2,
+                exchange_stop_loss, exchange_take_profit,
+                bot_stop_loss, bot_take_profit,
+                effective_stop_loss, effective_take_profit,
+                stop_source, tp_source, close_source, close_reason,
+                exchange_close_order_id, exchange_close_trade_id, close_detected_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 trade.symbol,
@@ -113,6 +168,22 @@ class TradeDB:
                 trade.volatility_pct,
                 trade.opened_at,
                 trade.closed_at,
+                trade.planned_stop_loss,
+                trade.planned_tp1,
+                trade.planned_tp2,
+                trade.exchange_stop_loss,
+                trade.exchange_take_profit,
+                trade.bot_stop_loss,
+                trade.bot_take_profit,
+                trade.effective_stop_loss,
+                trade.effective_take_profit,
+                trade.stop_source,
+                trade.tp_source,
+                trade.close_source,
+                trade.close_reason,
+                trade.exchange_close_order_id,
+                trade.exchange_close_trade_id,
+                trade.close_detected_at,
             ),
         )
         self._conn.commit()
@@ -131,7 +202,12 @@ class TradeDB:
                 exit_price = ?, amount = ?, leverage = ?,
                 pnl_usd = ?, pnl_pct = ?, is_winner = ?,
                 hold_minutes = ?, dca_count = ?, max_drawdown_pct = ?,
-                action = 'close', closed_at = ?
+                action = 'close', closed_at = ?,
+                effective_stop_loss = ?, effective_take_profit = ?,
+                stop_source = ?, tp_source = ?,
+                close_source = ?, close_reason = ?,
+                exchange_close_order_id = ?, exchange_close_trade_id = ?,
+                close_detected_at = ?
             WHERE id = ?
         """,
             (
@@ -145,6 +221,15 @@ class TradeDB:
                 record.dca_count,
                 record.max_drawdown_pct,
                 record.closed_at,
+                record.effective_stop_loss,
+                record.effective_take_profit,
+                record.stop_source,
+                record.tp_source,
+                record.close_source,
+                record.close_reason,
+                record.exchange_close_order_id,
+                record.exchange_close_trade_id,
+                record.close_detected_at,
                 trade_id,
             ),
         )
@@ -359,4 +444,20 @@ class TradeDB:
             volatility_pct=_float(row["volatility_pct"]),
             opened_at=_str(row["opened_at"]),
             closed_at=_str(row["closed_at"]),
+            planned_stop_loss=_float(row["planned_stop_loss"]),
+            planned_tp1=_float(row["planned_tp1"]),
+            planned_tp2=_float(row["planned_tp2"]),
+            exchange_stop_loss=_float(row["exchange_stop_loss"]),
+            exchange_take_profit=_float(row["exchange_take_profit"]),
+            bot_stop_loss=_float(row["bot_stop_loss"]),
+            bot_take_profit=_float(row["bot_take_profit"]),
+            effective_stop_loss=_float(row["effective_stop_loss"]),
+            effective_take_profit=_float(row["effective_take_profit"]),
+            stop_source=_str(row["stop_source"]),
+            tp_source=_str(row["tp_source"]),
+            close_source=_str(row["close_source"]),
+            close_reason=_str(row["close_reason"]),
+            exchange_close_order_id=_str(row["exchange_close_order_id"]),
+            exchange_close_trade_id=_str(row["exchange_close_trade_id"]),
+            close_detected_at=_str(row["close_detected_at"]),
         )

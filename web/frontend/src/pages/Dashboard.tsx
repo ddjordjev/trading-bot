@@ -303,7 +303,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                 <th>Size</th>
                 <th>Margin</th>
                 <th>PnL</th>
-                <th>Stop Loss</th>
+                <th>SL / TP</th>
                 <th>Strategy</th>
                 <th>Age</th>
                 <th>Actions</th>

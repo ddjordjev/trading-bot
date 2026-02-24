@@ -100,6 +100,21 @@ class BinanceExchange(BaseExchange):
 
         return 1
 
+    @staticmethod
+    def _extract_position_level(raw_position: dict[str, Any], keys: tuple[str, ...]) -> float:
+        info = raw_position.get("info") or {}
+        for key in keys:
+            val = raw_position.get(key)
+            if val is None:
+                val = info.get(key)
+            try:
+                f = float(val or 0)
+                if f > 0:
+                    return f
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
     async def connect(self) -> None:
         logger.info("Connecting to Binance (sandbox={})", self.sandbox)
         await self._spot.load_markets()
@@ -205,6 +220,16 @@ class BinanceExchange(BaseExchange):
                     current_price=float(p.get("markPrice", 0) or 0),
                     leverage=self._infer_position_leverage(p),
                     market_type="futures",
+                    stop_loss=self._extract_position_level(
+                        p,
+                        ("stopLossPrice", "stopPrice", "sl", "slPrice"),
+                    )
+                    or None,
+                    take_profit=self._extract_position_level(
+                        p,
+                        ("takeProfitPrice", "tp", "tpPrice"),
+                    )
+                    or None,
                     unrealized_pnl=float(p.get("unrealizedPnl", 0) or 0),
                 )
             )

@@ -39,6 +39,22 @@ class TradeRecord(BaseModel):
 
     opened_at: str = ""
     closed_at: str = ""
+    planned_stop_loss: float = 0.0
+    planned_tp1: float = 0.0
+    planned_tp2: float = 0.0
+    exchange_stop_loss: float = 0.0
+    exchange_take_profit: float = 0.0
+    bot_stop_loss: float = 0.0
+    bot_take_profit: float = 0.0
+    effective_stop_loss: float = 0.0
+    effective_take_profit: float = 0.0
+    stop_source: str = "none"  # exchange | bot | none
+    tp_source: str = "none"  # exchange | bot | none
+    close_source: str = ""  # exchange_sl | exchange_tp | bot_stop | manual | recovery | unknown
+    close_reason: str = ""
+    exchange_close_order_id: str = ""
+    exchange_close_trade_id: str = ""
+    close_detected_at: str = ""
 
 
 class StrategyScore(BaseModel):

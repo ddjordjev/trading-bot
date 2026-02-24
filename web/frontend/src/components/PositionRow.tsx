@@ -108,27 +108,47 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
         {p.pnl_pct >= 0 ? "+" : ""}{p.pnl_pct.toFixed(2)}%
       </td>
       <td>
-        {p.stop_loss ? p.stop_loss.toFixed(p.stop_loss < 1 ? 6 : 2) : "—"}
         {(() => {
+          const sl = p.effective_stop_loss ?? p.stop_loss;
+          const tp = p.effective_take_profit ?? p.take_profit;
+          const e = p.entry_price;
+          const s = p.side.toLowerCase();
+          const isLong = s === "long" || s === "buy";
+          const tick =
+            e >= 10000 ? 10
+            : e >= 100 ? 1
+            : e >= 10 ? 0.1
+            : e >= 1 ? 0.001
+            : Math.max(e * 0.001, 1e-6);
+
           let label: "PR" | "BE" | "LO" = "LO";
-          if (p.stop_loss && p.entry_price > 0) {
-            const e = p.entry_price;
-            const tick =
-              e >= 10000 ? 10
-              : e >= 100 ? 1
-              : e >= 10 ? 0.1
-              : e >= 1 ? 0.001
-              : e * 0.1;
-            const s = p.side.toLowerCase();
-            const isLong = s === "long" || s === "buy";
-            const diff = isLong ? p.stop_loss - e : e - p.stop_loss;
-            label = diff > tick ? "PR" : diff > 0 ? "BE" : "LO";
+          if (sl && e > 0) {
+            const diff = isLong ? sl - e : e - sl;
+            label = diff > 2 * tick ? "PR" : diff > 0 ? "BE" : "LO";
           }
           const color = label === "PR" ? "var(--green)" : label === "LO" ? "var(--red)" : "var(--yellow)";
           return (
-            <span className="badge" style={{ background: color + "22", color, marginLeft: 4, fontSize: "0.65rem" }}>
-              {label}{p.breakeven_locked ? " ✓" : ""}
-            </span>
+            <>
+              <div>
+                <span style={{ color: "var(--text-muted)", fontSize: "0.65rem" }}>SL</span>{" "}
+                {sl ? sl.toFixed(sl < 1 ? 6 : 2) : "—"}
+                <span className="badge" style={{ background: color + "22", color, marginLeft: 4, fontSize: "0.65rem" }}>
+                  {label}{p.breakeven_locked ? " ✓" : ""}
+                </span>
+                {p.close_pending && (
+                  <span
+                    className="badge"
+                    style={{ background: "var(--red)22", color: "var(--red)", marginLeft: 4, fontSize: "0.65rem" }}
+                  >
+                    BREACHED
+                  </span>
+                )}
+              </div>
+              <div>
+                <span style={{ color: "var(--text-muted)", fontSize: "0.65rem" }}>TP</span>{" "}
+                {tp ? tp.toFixed(tp < 1 ? 6 : 2) : "—"}
+              </div>
+            </>
           );
         })()}
       </td>

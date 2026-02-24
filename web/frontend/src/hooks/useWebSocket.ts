@@ -58,6 +58,18 @@ export interface PositionInfo {
   market_type: string;
   strategy: string;
   stop_loss: number | null;
+  take_profit: number | null;
+  exchange_stop_loss: number | null;
+  exchange_take_profit: number | null;
+  bot_stop_loss: number | null;
+  bot_take_profit: number | null;
+  effective_stop_loss: number | null;
+  effective_take_profit: number | null;
+  stop_source: string;
+  tp_source: string;
+  risk_state: string;
+  close_pending: boolean;
+  close_reason_pending: string;
   notional_value: number;
   age_minutes: number;
   breakeven_locked: boolean;

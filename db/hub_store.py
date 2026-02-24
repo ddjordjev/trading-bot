@@ -37,6 +37,7 @@ class HubDB(TradeDB):
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._create_tables()
+        self._ensure_trade_columns()
         self._create_hub_tables()
         logger.info("HubDB connected: {}", self._path)
 
@@ -207,8 +208,21 @@ class HubDB(TradeDB):
                 was_quick_trade, was_low_liquidity, dca_count, max_drawdown_pct,
                 market_regime, fear_greed, daily_tier, daily_pnl_at_entry,
                 signal_strength, hour_utc, day_of_week, volatility_pct,
-                opened_at, closed_at, request_key, recovery_close
-            ) VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?)""",
+                opened_at, closed_at,
+                planned_stop_loss, planned_tp1, planned_tp2,
+                exchange_stop_loss, exchange_take_profit,
+                bot_stop_loss, bot_take_profit,
+                effective_stop_loss, effective_take_profit,
+                stop_source, tp_source, close_source, close_reason,
+                exchange_close_order_id, exchange_close_trade_id, close_detected_at,
+                request_key, recovery_close
+            ) VALUES (
+                ?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?
+            )""",
             (
                 bot_id,
                 trade.get("symbol", ""),
@@ -238,6 +252,22 @@ class HubDB(TradeDB):
                 trade.get("volatility_pct", 0),
                 trade.get("opened_at", ""),
                 trade.get("closed_at", ""),
+                trade.get("planned_stop_loss", 0),
+                trade.get("planned_tp1", 0),
+                trade.get("planned_tp2", 0),
+                trade.get("exchange_stop_loss", 0),
+                trade.get("exchange_take_profit", 0),
+                trade.get("bot_stop_loss", 0),
+                trade.get("bot_take_profit", 0),
+                trade.get("effective_stop_loss", 0),
+                trade.get("effective_take_profit", 0),
+                trade.get("stop_source", "none"),
+                trade.get("tp_source", "none"),
+                trade.get("close_source", ""),
+                trade.get("close_reason", ""),
+                trade.get("exchange_close_order_id", ""),
+                trade.get("exchange_close_trade_id", ""),
+                trade.get("close_detected_at", ""),
                 request_key,
                 int(trade.get("recovery_close", False)),
             ),
@@ -262,7 +292,13 @@ class HubDB(TradeDB):
                 action='close', exit_price=?, amount=?, leverage=?,
                 pnl_usd=?, pnl_pct=?, is_winner=?,
                 hold_minutes=?, dca_count=?, max_drawdown_pct=?,
-                closed_at=?, request_key=CASE WHEN ?='' THEN request_key ELSE ? END
+                closed_at=?,
+                effective_stop_loss=?, effective_take_profit=?,
+                stop_source=?, tp_source=?,
+                close_source=?, close_reason=?,
+                exchange_close_order_id=?, exchange_close_trade_id=?,
+                close_detected_at=?,
+                request_key=CASE WHEN ?='' THEN request_key ELSE ? END
             WHERE bot_id=? AND opened_at=? AND closed_at=''""",
             (
                 data.get("exit_price", 0),
@@ -275,6 +311,15 @@ class HubDB(TradeDB):
                 data.get("dca_count", 0),
                 data.get("max_drawdown_pct", 0),
                 data.get("closed_at", ""),
+                data.get("effective_stop_loss", 0),
+                data.get("effective_take_profit", 0),
+                data.get("stop_source", "none"),
+                data.get("tp_source", "none"),
+                data.get("close_source", ""),
+                data.get("close_reason", ""),
+                data.get("exchange_close_order_id", ""),
+                data.get("exchange_close_trade_id", ""),
+                data.get("close_detected_at", ""),
                 request_key,
                 request_key,
                 bot_id,
@@ -293,7 +338,8 @@ class HubDB(TradeDB):
         closed_at = datetime.now(UTC).isoformat()
         cursor = self._conn.execute(
             """UPDATE trades SET
-                action='close', recovery_close=1, closed_at=?
+                action='close', recovery_close=1, closed_at=?,
+                close_source='recovery', close_reason='missing_on_exchange'
             WHERE bot_id=? AND opened_at=? AND closed_at=''""",
             (closed_at, bot_id, opened_at),
         )

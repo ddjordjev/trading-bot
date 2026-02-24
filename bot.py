@@ -111,6 +111,7 @@ class TradingBot:
         self._recent_news: list[NewsItem] = []
         self._whale_alerted: set[str] = set()
         self._open_trades: dict[str, TradeRecord] = {}
+        self._position_targets: dict[str, dict[str, float]] = {}
         self._pending_hub_acks: dict[str, dict[str, Any]] = {}
         self._strategy_stats: dict[str, dict[str, Any]] = {}
         self._running = False
@@ -414,6 +415,7 @@ class TradingBot:
                         continue
                     ts = self.orders.trailing.active_stops.get(pos.symbol)
                     sp = self.orders.scaler.get(pos.symbol)
+                    risk = self._build_position_risk_snapshot(pos, ts)
                     pos_list.append(
                         {
                             "symbol": pos.symbol,
@@ -426,7 +428,6 @@ class TradingBot:
                             "leverage": pos.leverage,
                             "market_type": pos.market_type,
                             "strategy": pos.strategy,
-                            "stop_loss": (ts.current_stop if ts else pos.stop_loss),
                             "notional_value": pos.notional_value,
                             "age_minutes": 0,
                             "breakeven_locked": ts.breakeven_locked if ts else False,
@@ -434,6 +435,7 @@ class TradingBot:
                             "scale_phase": sp.phase.value if sp else "",
                             "dca_count": sp.adds if sp else 0,
                             "trade_url": self.settings.symbol_platform_url(pos.symbol, pos.market_type),
+                            **risk,
                         }
                     )
                 if pos_list:
@@ -621,6 +623,7 @@ class TradingBot:
         self._raw_balance = raw_balance
 
         positions = await self.exchange.fetch_positions()
+        await self._reconcile_runtime_open_trades(positions)
         # Shared-account mode: only include positions this bot owns.
         owned_symbols = set(self._open_trades.keys()) | set(self.orders.scaler.active_positions.keys())
         unrealized = sum(p.unrealized_pnl for p in positions if p.amount > 0 and p.symbol in owned_symbols)
@@ -1057,6 +1060,9 @@ class TradingBot:
             leverage=leverage,
             suggested_stop_loss=plan.stop_loss if plan and plan.stop_loss else None,
             suggested_take_profit=(plan.take_profit_targets[0] if plan and plan.take_profit_targets else None),
+            suggested_take_profit_2=(
+                plan.take_profit_targets[1] if plan and len(plan.take_profit_targets) > 1 else None
+            ),
         )
 
         plan_notes = plan.notes if plan else "no plan"
@@ -1119,8 +1125,22 @@ class TradingBot:
                 hour_utc=now.hour,
                 day_of_week=now.weekday(),
                 opened_at=now.isoformat(),
+                planned_stop_loss=signal.suggested_stop_loss or 0.0,
+                planned_tp1=signal.suggested_take_profit or 0.0,
+                planned_tp2=signal.suggested_take_profit_2 or 0.0,
+                bot_stop_loss=signal.suggested_stop_loss or 0.0,
+                bot_take_profit=signal.suggested_take_profit or 0.0,
+                effective_stop_loss=signal.suggested_stop_loss or 0.0,
+                effective_take_profit=signal.suggested_take_profit or 0.0,
+                stop_source="bot" if signal.suggested_stop_loss else "none",
+                tp_source="bot" if signal.suggested_take_profit else "none",
             )
             self._open_trades[signal.symbol] = record
+            self._position_targets[signal.symbol] = {
+                "planned_sl": signal.suggested_stop_loss or 0.0,
+                "tp1": signal.suggested_take_profit or 0.0,
+                "tp2": signal.suggested_take_profit_2 or 0.0,
+            }
             logger.debug("Opened trade for {} (in-memory)", signal.symbol)
             await self._push_trade_to_hub(record)
         except Exception as e:
@@ -1174,6 +1194,7 @@ class TradingBot:
                     pnl_pct = (entry_price - exit_price) / entry_price * 100
 
             open_rec = self._open_trades.pop(order.symbol, None)
+            target_rec = self._position_targets.pop(order.symbol, {})
             opened_at = open_rec.opened_at if open_rec else ""
             hold_minutes = 0.0
             if opened_at:
@@ -1184,6 +1205,15 @@ class TradingBot:
                     hold_minutes = (now - opened_dt).total_seconds() / 60
                 except Exception:
                     pass
+
+            reason_l = str(close_reason or "").lower()
+            close_source = (
+                "bot_stop"
+                if "stop" in reason_l
+                else "manual"
+                if ("manual" in reason_l or "close_all" in reason_l or "hub_disabled" in reason_l)
+                else "unknown"
+            )
 
             record = TradeRecord(
                 symbol=order.symbol,
@@ -1211,6 +1241,20 @@ class TradingBot:
                 day_of_week=now.weekday(),
                 opened_at=opened_at,
                 closed_at=now.isoformat(),
+                planned_stop_loss=(
+                    target_rec.get("planned_sl", 0.0)
+                    if target_rec
+                    else (open_rec.planned_stop_loss if open_rec else 0.0)
+                ),
+                planned_tp1=(target_rec.get("tp1", 0.0) if target_rec else (open_rec.planned_tp1 if open_rec else 0.0)),
+                planned_tp2=(target_rec.get("tp2", 0.0) if target_rec else (open_rec.planned_tp2 if open_rec else 0.0)),
+                effective_stop_loss=(open_rec.effective_stop_loss if open_rec else 0.0),
+                effective_take_profit=(open_rec.effective_take_profit if open_rec else 0.0),
+                stop_source=(open_rec.stop_source if open_rec else "none"),
+                tp_source=(open_rec.tp_source if open_rec else "none"),
+                close_source=close_source,
+                close_reason=close_reason,
+                close_detected_at=now.isoformat(),
             )
 
             self._realized_pnl += pnl_usd
@@ -1290,6 +1334,84 @@ class TradingBot:
                 self._whale_alerted.add(sym)
                 logger.info("WHALE ALERT sent for {} -- ${:.0f} notional at +{:.1f}%", sym, notional, profit_pct)
 
+    def _build_position_risk_snapshot(self, pos: Any, ts: Any | None) -> dict[str, Any]:
+        """Build explicit SL/TP source fields and risk state for dashboard payloads."""
+        symbol = str(getattr(pos, "symbol", "") or "")
+        entry = float(getattr(pos, "entry_price", 0.0) or 0.0)
+        current = float(getattr(pos, "current_price", 0.0) or 0.0)
+        side_raw = getattr(pos, "side", "") or ""
+        side = side_raw.value if hasattr(side_raw, "value") else str(side_raw)
+        side_l = side.lower()
+        is_long = side_l in ("buy", "long")
+
+        exchange_sl_raw = getattr(pos, "stop_loss", None)
+        exchange_tp_raw = getattr(pos, "take_profit", None)
+        exchange_sl = float(exchange_sl_raw) if exchange_sl_raw else 0.0
+        exchange_tp = float(exchange_tp_raw) if exchange_tp_raw else 0.0
+
+        bot_sl = float(getattr(ts, "current_stop", 0.0) or 0.0) if ts else 0.0
+        targets = self._position_targets.get(symbol, {})
+        bot_tp = float(targets.get("tp1", 0.0) or 0.0)
+
+        effective_sl = exchange_sl if exchange_sl > 0 else bot_sl
+        effective_tp = exchange_tp if exchange_tp > 0 else bot_tp
+        stop_source = "exchange" if exchange_sl > 0 else ("bot" if bot_sl > 0 else "none")
+        tp_source = "exchange" if exchange_tp > 0 else ("bot" if bot_tp > 0 else "none")
+
+        risk_state = "none"
+        close_pending = False
+        close_reason_pending = ""
+        if effective_sl > 0 and entry > 0 and current > 0:
+            breached = current <= effective_sl if is_long else current >= effective_sl
+            if breached:
+                risk_state = "breached_pending_close"
+                close_pending = True
+                close_reason_pending = "stop_breached"
+            else:
+                diff = effective_sl - entry if is_long else entry - effective_sl
+                if diff <= 0:
+                    risk_state = "loss"
+                else:
+                    tick = (
+                        10.0
+                        if entry >= 10000
+                        else 1.0
+                        if entry >= 100
+                        else 0.1
+                        if entry >= 10
+                        else 0.001
+                        if entry >= 1
+                        else max(entry * 0.001, 1e-6)
+                    )
+                    risk_state = "profit_lock" if diff > 2 * tick else "breakeven"
+
+        payload = {
+            "stop_loss": effective_sl or None,
+            "take_profit": effective_tp or None,
+            "exchange_stop_loss": exchange_sl or None,
+            "exchange_take_profit": exchange_tp or None,
+            "bot_stop_loss": bot_sl or None,
+            "bot_take_profit": bot_tp or None,
+            "effective_stop_loss": effective_sl or None,
+            "effective_take_profit": effective_tp or None,
+            "stop_source": stop_source,
+            "tp_source": tp_source,
+            "risk_state": risk_state,
+            "close_pending": close_pending,
+            "close_reason_pending": close_reason_pending,
+        }
+        rec = self._open_trades.get(symbol)
+        if rec:
+            rec.exchange_stop_loss = exchange_sl
+            rec.exchange_take_profit = exchange_tp
+            rec.bot_stop_loss = bot_sl
+            rec.bot_take_profit = bot_tp
+            rec.effective_stop_loss = effective_sl
+            rec.effective_take_profit = effective_tp
+            rec.stop_source = stop_source
+            rec.tp_source = tp_source
+        return payload
+
     # -- Shared State (inter-process communication) -- #
 
     async def _write_deployment_status(self) -> None:
@@ -1347,6 +1469,7 @@ class TradingBot:
         for pos in active_positions:
             ts = self.orders.trailing.active_stops.get(pos.symbol)
             sp = self.orders.scaler.get(pos.symbol)
+            risk = self._build_position_risk_snapshot(pos, ts)
             pos_list.append(
                 {
                     "symbol": pos.symbol,
@@ -1359,7 +1482,6 @@ class TradingBot:
                     "leverage": pos.leverage,
                     "market_type": pos.market_type,
                     "strategy": pos.strategy,
-                    "stop_loss": (ts.current_stop if ts else pos.stop_loss),
                     "notional_value": pos.notional_value,
                     "age_minutes": ((_time.time() - pos.opened_at.timestamp()) / 60 if pos.opened_at else 0),
                     "breakeven_locked": ts.breakeven_locked if ts else False,
@@ -1367,6 +1489,7 @@ class TradingBot:
                     "scale_phase": sp.phase.value if sp else "",
                     "dca_count": sp.adds if sp else 0,
                     "trade_url": self.settings.symbol_platform_url(pos.symbol, pos.market_type),
+                    **risk,
                 }
             )
 
@@ -1598,6 +1721,11 @@ class TradingBot:
             if self.settings.is_paper_local() or symbol in exchange_positions or (not positions_fetch_ok):
                 rec = TradeRecord(**{k: v for k, v in td.items() if k in TradeRecord.model_fields})
                 self._open_trades[symbol] = rec
+                self._position_targets[symbol] = {
+                    "planned_sl": float(rec.planned_stop_loss or 0.0),
+                    "tp1": float(rec.planned_tp1 or 0.0),
+                    "tp2": float(rec.planned_tp2 or 0.0),
+                }
                 recovered += 1
             else:
                 opened_at = td.get("opened_at", "")
@@ -1618,6 +1746,36 @@ class TradingBot:
             logger.info("Recovered {} open trades from hub", recovered)
         if dead:
             logger.info("Marked {} dead trades as recovery_close (no longer on exchange)", dead)
+
+    async def _reconcile_runtime_open_trades(self, positions: list[Any]) -> None:
+        """Keep local open-trade state aligned with live exchange positions."""
+        if self.settings.is_paper_local():
+            return
+        exchange_symbols = {p.symbol for p in positions if p.amount > 0}
+        stale_symbols = [sym for sym in list(self._open_trades.keys()) if sym not in exchange_symbols]
+        if not stale_symbols:
+            return
+
+        hub_url = self.settings.hub_url
+        bot_id = self.settings.bot_id or "default"
+        for sym in stale_symbols:
+            rec = self._open_trades.pop(sym, None)
+            self._position_targets.pop(sym, None)
+            self.orders.scaler.remove(sym)
+            self.orders.trailing.remove(sym)
+            self.orders.trailing.remove(f"{sym}:hedge")
+            self.orders.trailing.remove(f"{sym}:wick")
+            self.orders.hedger.remove(sym)
+            self.orders.wick_scalper.close(sym)
+            opened_at = rec.opened_at if rec else ""
+            if hub_url and self._hub_session and opened_at:
+                with contextlib.suppress(Exception):
+                    async with self._hub_session.post(
+                        f"{hub_url.rstrip('/')}/internal/recovery-close",
+                        json={"bot_id": bot_id, "opened_at": opened_at},
+                    ):
+                        pass
+            logger.warning("Runtime reconcile: removed stale local open trade {}", sym)
 
     def _get_strategy_stats(self, strategy: str, symbol: str = "") -> dict[str, Any]:
         """Look up strategy stats from in-memory cache (seeded from hub on startup)."""
@@ -1742,6 +1900,8 @@ class TradingBot:
             sig.tightened_stop = smart.tightened_stop
         if smart.take_profit_1 > 0 and not sig.suggested_take_profit:
             sig.suggested_take_profit = smart.take_profit_1
+        if smart.take_profit_2 > 0 and not sig.suggested_take_profit_2:
+            sig.suggested_take_profit_2 = smart.take_profit_2
 
         boost = 0.0
         if smart.has_pattern and smart.pattern:

@@ -28,6 +28,7 @@ class Signal(BaseModel):
     suggested_price: float | None = None
     suggested_stop_loss: float | None = None
     suggested_take_profit: float | None = None
+    suggested_take_profit_2: float | None = None
     tightened_stop: float | None = None  # textbook SL to tighten to after wick bounce
     market_type: str = "spot"
     leverage: int = 1

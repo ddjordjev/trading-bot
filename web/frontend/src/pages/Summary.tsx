@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 export function Summary() {
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetch("/api/summary-html")
@@ -12,24 +11,9 @@ export function Summary() {
         return r.text();
       })
       .then((raw) => {
-        const bodyMatch = raw.match(/<body[^>]*>([\s\S]*)<\/body>/i);
-        const styleMatch = raw.match(/<style[^>]*>([\s\S]*?)<\/style>/gi);
-        const styles = styleMatch ? styleMatch.join("\n") : "";
-        const body = bodyMatch ? bodyMatch[1] : raw;
-        setHtml(styles + body);
+        setHtml(raw);
       })
       .catch((e) => setError(e.message));
-  }, []);
-
-  const handleClick = useCallback((e: React.MouseEvent) => {
-    const target = e.target as HTMLElement;
-    const anchor = target.closest("a");
-    if (!anchor) return;
-    const href = anchor.getAttribute("href");
-    if (!href || !href.startsWith("#")) return;
-    e.preventDefault();
-    const el = containerRef.current?.querySelector(href);
-    if (el) el.scrollIntoView({ behavior: "smooth" });
   }, []);
 
   if (error) {
@@ -49,18 +33,17 @@ export function Summary() {
   }
 
   return (
-    <div
-      ref={containerRef}
+    <iframe
       className="summary-embed"
+      title="Trade Borg Summary"
+      srcDoc={html}
       style={{
+        width: "100%",
         height: "calc(100vh - 120px)",
-        overflow: "auto",
         border: "1px solid var(--border)",
         borderRadius: "var(--radius)",
-        padding: "1rem",
+        background: "var(--bg)",
       }}
-      onClick={handleClick}
-      dangerouslySetInnerHTML={{ __html: html }}
     />
   );
 }
