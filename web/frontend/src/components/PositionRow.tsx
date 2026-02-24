@@ -101,11 +101,11 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
       <td>${Math.round(p.notional_value).toLocaleString()}</td>
       <td>${Math.round(p.notional_value / Math.max(p.leverage, 1)).toLocaleString()}</td>
       <td className={pnlClass} style={{ fontWeight: 600 }}>
-        {p.pnl_pct >= 0 ? "+" : ""}{p.pnl_pct.toFixed(2)}%
-        <br />
         <span style={{ fontSize: "0.8rem" }}>
           ${p.pnl_usd >= 0 ? "+" : ""}{p.pnl_usd.toFixed(2)}
         </span>
+        <br />
+        {p.pnl_pct >= 0 ? "+" : ""}{p.pnl_pct.toFixed(2)}%
       </td>
       <td>
         {p.stop_loss ? p.stop_loss.toFixed(p.stop_loss < 1 ? 6 : 2) : "—"}

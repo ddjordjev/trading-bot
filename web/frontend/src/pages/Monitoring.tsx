@@ -83,10 +83,13 @@ export function Monitoring() {
     );
   }
 
-  const grafanaSrc =
+  const grafanaBase =
     grafana && grafanaReachable
-      ? `${window.location.protocol}//${window.location.hostname}:${grafana.port}/d/${grafana.dashboard_uid}/trading-bot?orgId=1&theme=dark&kiosk=tv&refresh=5s`
+      ? `${window.location.protocol}//${window.location.hostname}:${grafana.port}`
       : "";
+  const panelIds = [1, 2, 3, 4, 6, 7, 10, 11, 12, 13];
+  const soloPanelSrc = (panelId: number) =>
+    `${grafanaBase}/d-solo/${grafana?.dashboard_uid}/trading-bot?orgId=1&theme=dark&panelId=${panelId}&refresh=5s`;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
@@ -96,18 +99,29 @@ export function Monitoring() {
         </span>
       </div>
 
-      {grafanaSrc ? (
-        <iframe
-          title="Grafana Monitoring"
-          src={grafanaSrc}
+      {grafanaBase ? (
+        <div
           style={{
-            width: "100%",
-            minHeight: "1200px",
-            border: "1px solid var(--border, #30363d)",
-            borderRadius: "var(--radius, 8px)",
-            background: "var(--bg-secondary, #161b22)",
+            display: "grid",
+            gridTemplateColumns: "repeat(2, minmax(420px, 1fr))",
+            gap: "0.75rem",
           }}
-        />
+        >
+          {panelIds.map((panelId) => (
+            <iframe
+              key={panelId}
+              title={`Grafana Panel ${panelId}`}
+              src={soloPanelSrc(panelId)}
+              style={{
+                width: "100%",
+                height: "520px",
+                border: "1px solid var(--border, #30363d)",
+                borderRadius: "var(--radius, 8px)",
+                background: "var(--bg-secondary, #161b22)",
+              }}
+            />
+          ))}
+        </div>
       ) : (
         <div className="empty-state">
           <p style={{ color: "var(--text-muted)" }}>Grafana not reachable yet.</p>
