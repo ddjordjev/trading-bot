@@ -74,7 +74,17 @@ async def close_position(request: web.Request) -> web.Response:
 
     sig = Signal(symbol=symbol, action=SignalAction.CLOSE, strategy="dashboard", reason="Manual close from hub")
     try:
-        await _bot.orders.execute_signal(sig)
+        was_open = symbol in _bot._open_trades
+        # Route through bot-level signal handling so close bookkeeping stays
+        # consistent (trade log, realized PnL, daily target, hub sync).
+        await _bot._process_signal(sig)
+        if was_open and symbol in _bot._open_trades:
+            return _json(False, f"Close command did not complete for {symbol}")
+        import asyncio
+
+        task = asyncio.create_task(_nudge_hub(full_snapshot=True))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
         return _json(True, f"Closed {symbol}")
     except Exception as e:
         return _json(False, str(e))
@@ -85,28 +95,22 @@ async def take_profit(request: web.Request) -> web.Response:
         return _json(False, "Bot not initialized")
     data = await request.json()
     symbol = data.get("symbol", "")
-    pct = max(1, min(100, data.get("pct", 25)))
+    try:
+        pct = max(1.0, min(100.0, float(data.get("pct", 25))))
+    except (TypeError, ValueError):
+        pct = 25.0
     if not symbol:
         return _json(False, "Missing symbol")
     try:
-        positions = await _bot.exchange.fetch_positions()
-        pos = next((p for p in positions if p.symbol == symbol and p.amount > 0), None)
-        if not pos:
-            return _json(False, f"No open position for {symbol}")
-        close_amount = pos.amount * (pct / 100)
-        from core.models import MarketType, OrderSide, OrderType
+        order = await _bot.orders.manual_take_profit(symbol, float(pct))
+        if not order:
+            return _json(False, f"No tracked open position for {symbol}")
+        import asyncio
 
-        close_side = OrderSide.SELL if pos.side.value == "buy" else OrderSide.BUY
-        mkt = MarketType(pos.market_type) if pos.market_type in ("spot", "futures") else MarketType.SPOT
-        await _bot.exchange.place_order(
-            symbol=symbol,
-            side=close_side,
-            order_type=OrderType.MARKET,
-            amount=close_amount,
-            leverage=pos.leverage,
-            market_type=mkt,
-        )
-        return _json(True, f"Took {pct}% profit on {symbol} ({close_amount:.6f})")
+        task = asyncio.create_task(_nudge_hub(full_snapshot=True))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+        return _json(True, f"Took {pct}% profit on {symbol} ({order.filled:.6f})")
     except Exception as e:
         return _json(False, str(e))
 
@@ -116,7 +120,10 @@ async def tighten_stop(request: web.Request) -> web.Response:
         return _json(False, "Bot not initialized")
     data = await request.json()
     symbol = data.get("symbol", "")
-    pct = max(0.1, min(50, data.get("pct", 2)))
+    try:
+        pct = max(0.1, min(50.0, float(data.get("pct", 2))))
+    except (TypeError, ValueError):
+        pct = 2.0
     if not symbol:
         return _json(False, "Missing symbol")
     ts = _bot.orders.trailing.active_stops.get(symbol)
@@ -149,6 +156,10 @@ async def stop_trading(_request: web.Request) -> web.Response:
     if not _bot:
         return _json(False, "Bot not initialized")
     _bot.target.STOP_FILE.touch()
+    # Drop any in-memory proposal/signals so halt takes effect immediately.
+    _bot._hub_proposal = None
+    _bot.extreme_watcher.drain_signals()
+    await _bot.extreme_watcher.sync_watchlist({})
     import asyncio
 
     task = asyncio.create_task(_nudge_hub(full_snapshot=True))

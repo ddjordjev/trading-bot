@@ -49,7 +49,6 @@ if TYPE_CHECKING:
 _hub_state_ref: HubState | None = None
 _start_time: float = 0.0
 _log_buffer: deque[dict[str, Any]] = deque(maxlen=200)
-_background_tasks: list[asyncio.Task[None]] = []
 _bot_reports: dict[str, dict[str, Any]] = {}
 _BOT_REGISTRY = Path("data/bot_registry.json")
 _bot_urls: dict[str, str] = {}  # bot_id -> base URL (e.g. "http://bot-meanrev:9035")

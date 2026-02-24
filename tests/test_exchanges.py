@@ -235,6 +235,27 @@ class TestBinanceExchange:
         assert positions[0].unrealized_pnl == 200.0
 
     @pytest.mark.asyncio
+    async def test_fetch_positions_infers_leverage_from_margin_percentage(self, binance):
+        binance._futures.fetch_positions = AsyncMock(
+            return_value=[
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "long",
+                    "contracts": 0.1,
+                    "entryPrice": 50_000.0,
+                    "markPrice": 52_000.0,
+                    "leverage": None,
+                    "initialMarginPercentage": 0.33333334,
+                    "unrealizedPnl": 200.0,
+                },
+            ]
+        )
+        positions = await binance.fetch_positions()
+        assert len(positions) == 1
+        assert positions[0].symbol == "BTC/USDT"
+        assert positions[0].leverage == 3
+
+    @pytest.mark.asyncio
     async def test_fetch_positions_skips_zero_contracts(self, binance):
         binance._futures.fetch_positions = AsyncMock(
             return_value=[
@@ -389,6 +410,28 @@ class TestBybitExchange:
         assert len(positions) == 1
         assert positions[0].side == OrderSide.SELL
         assert positions[0].symbol == "ETH/USDT"
+
+    @pytest.mark.asyncio
+    async def test_fetch_positions_infers_leverage_from_notional_and_margin(self, bybit):
+        bybit._futures.fetch_positions = AsyncMock(
+            return_value=[
+                {
+                    "symbol": "ETH/USDT:USDT",
+                    "side": "short",
+                    "contracts": 1.0,
+                    "entryPrice": 3000.0,
+                    "markPrice": 2900.0,
+                    "leverage": None,
+                    "initialMargin": 100.0,
+                    "notional": -300.0,
+                    "unrealizedPnl": 100.0,
+                },
+            ]
+        )
+        positions = await bybit.fetch_positions()
+        assert len(positions) == 1
+        assert positions[0].symbol == "ETH/USDT"
+        assert positions[0].leverage == 3
 
     @pytest.mark.asyncio
     async def test_place_order_parsing(self, bybit):

@@ -15,7 +15,7 @@ HASH_FILE="$(git rev-parse --git-dir)/.env_secrets_hash"
 [ -f "$ENV_FILE" ] || exit 0
 command -v gh &>/dev/null || exit 0
 
-current_hash=$(grep -E '^(BINANCE_TEST_|BYBIT_TEST_|TRADING_MODE=|EXCHANGE=)' "$ENV_FILE" | shasum -a 256 | cut -d' ' -f1)
+current_hash=$( (grep -E '^(BINANCE_TEST_|BYBIT_TEST_|TRADING_MODE=|EXCHANGE=)' "$ENV_FILE" || true) | shasum -a 256 | cut -d' ' -f1)
 previous_hash=""
 [ -f "$HASH_FILE" ] && previous_hash=$(cat "$HASH_FILE")
 

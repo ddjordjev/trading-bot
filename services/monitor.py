@@ -132,6 +132,14 @@ class MonitorService:
         self._last_ta_refresh = 0.0
         self._exchange_symbols: dict[str, set[str]] = {}
         self._candle_fetcher: object | None = None
+        self._last_open_db_symbols: set[str] = set()
+
+    @staticmethod
+    def _intensity_for_level(level: DeploymentLevel) -> dict[str, float]:
+        if level in INTENSITY_TABLE:
+            return INTENSITY_TABLE[level]
+        # IDLE/WINDING_DOWN should not crash monitor loop; use conservative defaults.
+        return INTENSITY_TABLE[DeploymentLevel.HUNTING]
 
     @staticmethod
     def _as_bool(value: object, default: bool) -> bool:
@@ -160,6 +168,21 @@ class MonitorService:
         except (TypeError, ValueError):
             parsed = default
         return max(min_value, parsed)
+
+    @staticmethod
+    def _pair_symbol(symbol: str) -> str:
+        raw = (symbol or "").upper().split(":")[0]
+        if "/" in raw:
+            return raw
+        if raw.endswith("USDT") and len(raw) > 4:
+            return f"{raw[:-4]}/USDT"
+        if raw.endswith("USD") and len(raw) > 3:
+            return f"{raw[:-3]}/USD"
+        return f"{raw}/USDT"
+
+    @classmethod
+    def _symbol_key(cls, symbol: str) -> str:
+        return cls._pair_symbol(symbol).split("/", 1)[0]
 
     async def start(self) -> None:
         logger.info("=" * 50)
@@ -303,7 +326,7 @@ class MonitorService:
                 combined = self._aggregate_bot_statuses(all_statuses)
                 self._update_intensity(combined)
 
-                multipliers = INTENSITY_TABLE[self._current_level]
+                multipliers = self._intensity_for_level(self._current_level)
                 now = time.monotonic()
 
                 # Refresh exchange symbols every 5 min (retry every tick while empty)
@@ -418,7 +441,7 @@ class MonitorService:
         self._current_level = bot_status.level
 
         if old != self._current_level:
-            mult = INTENSITY_TABLE[self._current_level]["base"]
+            mult = self._intensity_for_level(self._current_level)["base"]
             logger.info("Monitor intensity: {} -> {} (poll mult: {:.1f}x)", old.value, self._current_level.value, mult)
 
     @staticmethod
@@ -482,8 +505,10 @@ class MonitorService:
             hub.connect()
             open_db_symbols = hub.get_open_trade_symbols()
             hub.close()
-        except Exception:
-            pass
+            self._last_open_db_symbols = set(open_db_symbols)
+        except Exception as e:
+            logger.warning("Skipping queue routing: failed reading open trades from hub.db: {}", e)
+            return
 
         existing = self.state.read_trade_queue()
         new_count = 0
@@ -643,23 +668,68 @@ class MonitorService:
         snap.position_size_multiplier = self._compute_size_mult(snap)
         snap.preferred_direction = self._compute_direction(snap)
 
-        # Trending
-        snap.hot_movers = [
-            TrendingSnapshot(
-                symbol=c.symbol,
-                name=c.name,
-                price=c.price,
-                market_cap=c.market_cap,
-                volume_24h=c.volume_24h,
-                change_1h=c.change_1h,
-                change_24h=c.change_24h,
-                change_7d=c.change_7d,
-                momentum_score=c.momentum_score,
-                is_low_liquidity=c.is_low_liquidity,
-                source="cryptobubbles",
+        # Trending (CEX-first): Binance scanner is the base stream; legacy
+        # scanner remains additive confidence/discovery.
+        merged_hot: list[TrendingSnapshot] = []
+        seen_hot: set[str] = set()
+
+        for c in self.binance_scanner.hot_movers:
+            key = self._symbol_key(c.symbol)
+            if key in seen_hot:
+                continue
+            seen_hot.add(key)
+            merged_hot.append(
+                TrendingSnapshot(
+                    symbol=self._pair_symbol(c.symbol),
+                    name=c.name,
+                    price=c.price,
+                    market_cap=c.market_cap,
+                    volume_24h=c.volume_24h,
+                    change_5m=c.change_5m,
+                    change_1h=c.change_1h,
+                    change_24h=c.change_24h,
+                    change_7d=c.change_7d,
+                    momentum_score=c.momentum_score,
+                    is_low_liquidity=c.is_low_liquidity,
+                    source="binance_scanner",
+                    cex_confidence=c.cex_confidence,
+                    cex_vol_accel=c.cex_vol_accel,
+                    cex_score=c.cex_score,
+                    cex_funding_rate=c.cex_funding_rate,
+                    cex_change_1m=c.cex_change_1m,
+                    cex_change_4h=c.cex_change_4h,
+                    cex_change_1d=c.cex_change_1d,
+                    cex_change_1w=c.cex_change_1w,
+                    cex_change_3w=c.cex_change_3w,
+                    cex_change_1mo=c.cex_change_1mo,
+                    cex_change_3mo=c.cex_change_3mo,
+                    cex_change_1y=c.cex_change_1y,
+                )
             )
-            for c in self.scanner.hot_movers
-        ]
+
+        for c in self.scanner.hot_movers:
+            key = self._symbol_key(c.symbol)
+            if key in seen_hot:
+                continue
+            seen_hot.add(key)
+            merged_hot.append(
+                TrendingSnapshot(
+                    symbol=self._pair_symbol(c.symbol),
+                    name=c.name,
+                    price=c.price,
+                    market_cap=c.market_cap,
+                    volume_24h=c.volume_24h,
+                    change_5m=c.change_5m,
+                    change_1h=c.change_1h,
+                    change_24h=c.change_24h,
+                    change_7d=c.change_7d,
+                    momentum_score=c.momentum_score,
+                    is_low_liquidity=c.is_low_liquidity,
+                    source="cryptobubbles",
+                )
+            )
+
+        snap.hot_movers = merged_hot
 
         snap.cmc_trending = [
             TrendingSnapshot(
@@ -668,6 +738,7 @@ class MonitorService:
                 price=c.price,
                 market_cap=c.market_cap,
                 volume_24h=c.volume_24h,
+                change_5m=c.change_5m,
                 change_1h=c.change_1h,
                 change_24h=c.change_24h,
                 change_7d=c.change_7d,
@@ -683,6 +754,7 @@ class MonitorService:
                 price=c.price,
                 market_cap=c.market_cap,
                 volume_24h=c.volume_24h,
+                change_5m=c.change_5m,
                 change_1h=c.change_1h,
                 change_24h=c.change_24h,
                 change_7d=c.change_7d,
@@ -733,6 +805,9 @@ class MonitorService:
         if self.scanner.hot_movers:
             sources.append("scanner")
             ts["scanner"] = now_iso
+        if self.binance_scanner.hot_movers:
+            sources.append("binance_scanner")
+            ts["binance_scanner"] = now_iso
         if self._recent_news:
             sources.append("news")
             ts["news"] = now_iso
@@ -793,7 +868,7 @@ class MonitorService:
                 seen.add(sym)
 
         for mover in snap.hot_movers[:10]:
-            sym = f"{mover.symbol.upper()}/USDT"
+            sym = self._pair_symbol(mover.symbol)
             if sym not in seen and not mover.is_low_liquidity:
                 candidates.append(sym)
                 seen.add(sym)
@@ -826,8 +901,10 @@ class MonitorService:
             hub.connect()
             open_db_symbols = hub.get_open_trade_symbols()
             hub.close()
-        except Exception:
-            pass
+            self._last_open_db_symbols = set(open_db_symbols)
+        except Exception as e:
+            logger.warning("Skipping extreme queueing: failed reading open trades from hub.db: {}", e)
+            return
 
         existing = self.state.read_trade_queue()
         added = 0
@@ -870,7 +947,7 @@ class MonitorService:
         min_vol = self.settings.extreme_min_volume_24h
         max_candidates = self.settings.extreme_max_candidates
 
-        all_coins = self.scanner.latest_scan
+        all_coins = list(self.binance_scanner.latest_scan) + list(self.scanner.latest_scan)
         if not all_coins:
             return
 
@@ -879,6 +956,7 @@ class MonitorService:
             all_tradeable |= syms
 
         extreme: list[ExtremeCandidate] = []
+        seen_pairs: set[str] = set()
         for coin in all_coins:
             hourly_abs = abs(coin.change_1h)
             if hourly_abs < min_hourly:
@@ -887,6 +965,8 @@ class MonitorService:
                 continue
 
             pair = coin.trading_pair
+            if pair in seen_pairs:
+                continue
             # Skip coins not available on any known exchange
             if all_tradeable and pair not in all_tradeable:
                 continue
@@ -914,6 +994,7 @@ class MonitorService:
                     supported_exchanges=supported,
                 )
             )
+            seen_pairs.add(pair)
 
         extreme.sort(key=lambda c: c.momentum_score, reverse=True)
         watchlist = ExtremeWatchlist(candidates=extreme[:max_candidates])

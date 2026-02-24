@@ -35,6 +35,7 @@ class HedgePair(BaseModel):
     hedge_side: str = ""  # opposite of main
     hedge_size: float = 0.0  # notional value of hedge (always smaller)
     hedge_entry: float = 0.0
+    hedge_leverage: int = 0
     hedge_pnl_pct: float = 0.0
     hedge_order_id: str = ""
 
@@ -60,10 +61,11 @@ class HedgePair(BaseModel):
             return False
         return self.reversal_score >= 0.5
 
-    def activate_hedge(self, entry_price: float, amount: float, order_id: str) -> None:
+    def activate_hedge(self, entry_price: float, amount: float, order_id: str, leverage: int = 0) -> None:
         self.hedge_side = "short" if self.main_side == "long" else "long"
         self.hedge_entry = entry_price
         self.hedge_size = entry_price * amount
+        self.hedge_leverage = leverage
         self.hedge_order_id = order_id
         self.state = HedgeState.ACTIVE
         self.hedged_at = datetime.now(UTC)
@@ -328,10 +330,10 @@ class HedgeManager:
             "reversal_score": pair.reversal_score,
         }
 
-    def activate(self, symbol: str, entry_price: float, amount: float, order_id: str) -> None:
+    def activate(self, symbol: str, entry_price: float, amount: float, order_id: str, leverage: int = 0) -> None:
         pair = self._pairs.get(symbol)
         if pair:
-            pair.activate_hedge(entry_price, amount, order_id)
+            pair.activate_hedge(entry_price, amount, order_id, leverage)
 
     def close(self, symbol: str) -> None:
         pair = self._pairs.get(symbol)

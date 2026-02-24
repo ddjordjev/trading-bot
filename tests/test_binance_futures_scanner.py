@@ -20,19 +20,32 @@ class TestBinanceFuturesScanner:
             top_movers_count=5,
             enabled=False,
         )
-        now = datetime.now(UTC).replace(second=0, microsecond=0)
-
-        btc = deque()
-        btc.append((now - timedelta(minutes=65), 100.0, 10_000_000.0, 1.0, 0.0001))
-        btc.append((now - timedelta(minutes=5), 104.0, 12_000_000.0, 2.0, 0.00012))
-        btc.append((now, 106.0, 20_000_000.0, 3.0, 0.00015))
-        scanner._samples["BTC/USDT"] = btc
-
-        eth = deque()
-        eth.append((now - timedelta(minutes=65), 100.0, 10_000_000.0, 1.0, 0.0001))
-        eth.append((now - timedelta(minutes=5), 100.2, 10_500_000.0, 1.1, 0.0001))
-        eth.append((now, 100.3, 10_700_000.0, 1.2, 0.0001))
-        scanner._samples["ETH/USDT"] = eth
+        scanner._states["BTC/USDT"] = {
+            "symbol": "BTC/USDT",
+            "last_price": 106.0,
+            "last_quote_volume": 20_000_000.0,
+            "last_change_24h": 3.0,
+            "last_funding_rate": 0.00015,
+            "chg_5m": 1.9,
+            "chg_1h": 6.0,
+            "chg_1w": 0.0,
+            "chg_1mo": 0.0,
+            "confidence": 1.0,
+            "score": 22.0,
+        }
+        scanner._states["ETH/USDT"] = {
+            "symbol": "ETH/USDT",
+            "last_price": 100.3,
+            "last_quote_volume": 10_700_000.0,
+            "last_change_24h": 1.2,
+            "last_funding_rate": 0.0001,
+            "chg_5m": 0.1,
+            "chg_1h": 0.3,
+            "chg_1w": 0.0,
+            "chg_1mo": 0.0,
+            "confidence": 1.0,
+            "score": 2.0,
+        }
 
         movers = scanner._compute_hot_movers()
         assert movers
@@ -54,3 +67,30 @@ class TestBinanceFuturesScanner:
         )
         scanner._evict_old_samples(now - timedelta(hours=1))
         assert len(scanner._samples["X/USDT"]) == 1
+
+    def test_update_symbol_state_populates_horizons(self, tmp_path):
+        scanner = BinanceFuturesScanner(
+            db_path=tmp_path / "hub.db",
+            enabled=False,
+        )
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
+        scanner._update_symbol_state(
+            symbol="SOL/USDT",
+            ts=now,
+            price=150.0,
+            quote_volume=10_000_000.0,
+            change_24h=1.0,
+            funding_rate=0.0001,
+        )
+        scanner._update_symbol_state(
+            symbol="SOL/USDT",
+            ts=now + timedelta(minutes=2),
+            price=153.0,
+            quote_volume=11_000_000.0,
+            change_24h=2.0,
+            funding_rate=0.00012,
+        )
+        st = scanner._states["SOL/USDT"]
+        assert st["sample_count"] == 2
+        assert st["chg_1m"] >= 0.0
+        assert "anchor_1h_ts" in st

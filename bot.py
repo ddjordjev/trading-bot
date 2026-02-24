@@ -132,7 +132,7 @@ class TradingBot:
         self._realized_pnl: float = 0.0
         self._enabled: bool = True  # hub-controlled enable flag
         self._hub_enabled: bool = True  # latest value from hub report response
-        self._validator = get_validator(self.settings.bot_style, paper_mode=self.settings.is_paper)
+        self._validator = get_validator(self.settings.bot_style, paper_mode=self.settings.is_paper())
 
     # -- Strategy Management --
 
@@ -381,7 +381,7 @@ class TradingBot:
             uptime_min = (datetime.now(UTC) - self._started_at).total_seconds() / 60
             warmup_done = uptime_min >= self._warmup_minutes
 
-        if warmup_done and self._hub_proposal:
+        if warmup_done and not self.target.manual_stop and self._hub_proposal:
             await self._process_trade_queue()
 
         try:
@@ -409,8 +409,11 @@ class TradingBot:
             logger.warning("Quick hub check error: {}", e)
             return
         self._retry_pending_hub_trades()
-        if warmup_done:
+        if warmup_done and not self.target.manual_stop:
             await self._process_trade_queue()
+        elif self.target.manual_stop:
+            # Drop any stale proposal while halted.
+            self._hub_proposal = None
 
     def _check_enabled(self) -> bool:
         """Check hub-controlled enable flag (received via /internal/report response)."""
@@ -526,8 +529,8 @@ class TradingBot:
 
                     expired = await self.orders.close_expired_quick_trades(self._active_signals)
                     for order in expired:
-                        self._log_closed_trade(order, "expired")
                         realized_pnl = self._calc_realized_pnl(order)
+                        self._log_closed_trade(order, "expired")
                         self.target.record_trade(realized_pnl=realized_pnl)
 
                 self.extreme_watcher.drain_signals()
@@ -668,14 +671,18 @@ class TradingBot:
         # 7. Close expired quick trades
         expired = await self.orders.close_expired_quick_trades(self._active_signals)
         for order in expired:
-            self._log_closed_trade(order, "expired")
             realized_pnl = self._calc_realized_pnl(order)
+            self._log_closed_trade(order, "expired")
             self.target.record_trade(realized_pnl=realized_pnl)
 
         await asyncio.sleep(0)
 
         # 8. Process trade queue (CRITICAL -> DAILY -> SWING)
-        await self._process_trade_queue()
+        if not self.target.manual_stop:
+            await self._process_trade_queue()
+        else:
+            # Defensive: never carry queue proposals while halted.
+            self._hub_proposal = None
 
         # 9. Read market intelligence from hub (no local fallback)
         intel_condition = self._read_shared_intel()
@@ -762,7 +769,7 @@ class TradingBot:
             await asyncio.sleep(0)
 
         # 13. Hedge check: open counter-positions on reversal signals
-        if self.settings.hedge_enabled:
+        if self.settings.hedge_enabled and not self.target.manual_stop:
             try:
                 hedges = await self.orders.try_hedge(candles_map)
                 if hedges:
@@ -772,7 +779,11 @@ class TradingBot:
 
         # 13.5 Extreme mover evaluation (every ~30s)
         now_mono = time.monotonic()
-        if self.settings.extreme_enabled and now_mono - self._last_extreme_eval >= self.settings.extreme_eval_interval:
+        if (
+            self.settings.extreme_enabled
+            and not self.target.manual_stop
+            and now_mono - self._last_extreme_eval >= self.settings.extreme_eval_interval
+        ):
             try:
                 await self._evaluate_extreme_candidates()
                 self._last_extreme_eval = now_mono
@@ -807,6 +818,10 @@ class TradingBot:
 
         self._hub_proposal = None
 
+        if self.target.manual_stop:
+            await self._report_queue_outcome(proposal.id, "rejected", "manual_stop")
+            return
+
         if not self.settings.is_market_type_allowed(proposal.market_type):
             await self._report_queue_outcome(
                 proposal.id, "rejected", f"market type '{proposal.market_type}' not allowed"
@@ -818,10 +833,6 @@ class TradingBot:
         max_pos = self.settings.effective_max_concurrent_positions
         if active_count >= max_pos:
             await self._report_queue_outcome(proposal.id, "rejected", "no free slots")
-            return
-
-        if self.target.manual_stop:
-            await self._report_queue_outcome(proposal.id, "rejected", "manual_stop")
             return
 
         if not self.target.should_trade():
@@ -1178,8 +1189,8 @@ class TradingBot:
             try:
                 order = await self.orders.execute_signal(signal)
                 if order:
-                    self._log_closed_trade(order, reason)
                     realized_pnl = self._calc_realized_pnl(order)
+                    self._log_closed_trade(order, reason)
                     self.target.record_trade(realized_pnl=realized_pnl)
                 logger.info("Closed {} ({})", pos.symbol, reason)
             except Exception as e:
@@ -1526,12 +1537,14 @@ class TradingBot:
             return
 
         exchange_positions: dict[str, Any] = {}
+        positions_fetch_ok = self.settings.is_paper_local()
         if not self.settings.is_paper_local():
             try:
                 positions = await self.exchange.fetch_positions()
                 for p in positions:
                     if p.amount > 0:
                         exchange_positions[p.symbol] = p
+                positions_fetch_ok = True
             except Exception as e:
                 logger.warning("Could not fetch exchange positions for reconciliation: {}", e)
 
@@ -1541,7 +1554,7 @@ class TradingBot:
             symbol = td.get("symbol", "")
             if not symbol:
                 continue
-            if self.settings.is_paper_local() or symbol in exchange_positions or (not exchange_positions):
+            if self.settings.is_paper_local() or symbol in exchange_positions or (not positions_fetch_ok):
                 rec = TradeRecord(**{k: v for k, v in td.items() if k in TradeRecord.model_fields})
                 self._open_trades[symbol] = rec
                 recovered += 1
@@ -1754,8 +1767,8 @@ class TradingBot:
         if order:
             realized_pnl = 0.0
             if is_close:
-                self._log_closed_trade(order, sig.strategy)
                 realized_pnl = self._calc_realized_pnl(order)
+                self._log_closed_trade(order, sig.strategy)
             else:
                 await self._log_opened_trade(sig, order, low_liquidity=low_liquidity)
             self._active_signals.append(sig)
@@ -1829,6 +1842,11 @@ class TradingBot:
 
     async def _evaluate_extreme_candidates(self) -> None:
         """Read extreme watchlist from hub (in-memory), approve candidates for WS subscription."""
+        if self.target.manual_stop:
+            if self.extreme_watcher.active_count > 0:
+                await self.extreme_watcher.sync_watchlist({})
+            return
+
         watchlist = self._hub_extreme_watchlist
         if not watchlist:
             return

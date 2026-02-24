@@ -34,6 +34,17 @@ interface Props {
   maxLines?: number;
 }
 
+function safeText(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 export function LogViewer({ logs, maxLines = 100 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -136,7 +147,7 @@ export function LogViewer({ logs, maxLines = 100 }: Props) {
               }}
             >
               <span style={{ color: "#484f58", flexShrink: 0 }}>
-                {log.ts}
+                {safeText(log.ts)}
               </span>
               <span
                 style={{
@@ -151,10 +162,10 @@ export function LogViewer({ logs, maxLines = 100 }: Props) {
                   textAlign: "center",
                 }}
               >
-                {log.level.slice(0, 5)}
+                {safeText(log.level).slice(0, 5)}
               </span>
               <span style={{ color: "#c9d1d9", wordBreak: "break-word" }}>
-                {log.msg}
+                {safeText(log.msg)}
               </span>
             </div>
           ))

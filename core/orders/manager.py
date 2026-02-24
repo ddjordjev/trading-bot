@@ -427,6 +427,54 @@ class OrderManager:
 
         return taken
 
+    async def manual_take_profit(self, symbol: str, pct: float) -> Order | None:
+        """Close a requested percentage of an open position with bookkeeping."""
+        positions = await self.exchange.fetch_positions()
+        pos = next((p for p in positions if p.symbol == symbol and p.amount > 0), None)
+        if not pos:
+            return None
+
+        sp = self.scaler.get(symbol)
+        if not sp:
+            return None
+
+        close_pct = max(1.0, min(100.0, pct))
+        amount = pos.amount * (close_pct / 100.0)
+        amount = min(amount, pos.amount)
+        if amount <= 0:
+            return None
+
+        close_side = OrderSide.SELL if sp.side == "long" else OrderSide.BUY
+        market_type = MarketType(sp.market_type) if sp.market_type else MarketType.FUTURES
+
+        order = await self.exchange.place_order(
+            symbol=symbol,
+            side=close_side,
+            order_type=OrderType.MARKET,
+            amount=amount,
+            leverage=sp.current_leverage,
+            market_type=market_type,
+        )
+        if order.status != OrderStatus.FILLED:
+            return None
+
+        pnl_portion = pos.unrealized_pnl * (amount / pos.amount) if pos.amount > 0 else 0.0
+        self.risk.record_pnl(pnl_portion)
+        sp.record_partial_close(order.filled)
+        self._log_trade(
+            Signal(
+                symbol=symbol,
+                action=SignalAction.CLOSE,
+                strategy=sp.strategy,
+                reason="manual_take_profit",
+                market_type=sp.market_type,
+            ),
+            order,
+            "manual_partial_close",
+            pnl_portion,
+        )
+        return order
+
     # ------------------------------------------------------------------ #
     #  Hedging: counter-positions on reversal signals
     # ------------------------------------------------------------------ #
@@ -514,7 +562,7 @@ class OrderManager:
 
             if order.status == OrderStatus.FILLED:
                 self._hedge_cooldowns.pop(symbol, None)
-                self.hedger.activate(symbol, order.average_price, order.filled, order.id)
+                self.hedger.activate(symbol, order.average_price, order.filled, order.id, params["leverage"])
 
                 hedge_side = params["side"]
                 hedge_pos = Position(
@@ -841,7 +889,7 @@ class OrderManager:
             side=close_side,
             order_type=OrderType.MARKET,
             amount=hedge_amount,
-            leverage=self.settings.default_leverage,
+            leverage=pair.hedge_leverage or self.settings.default_leverage,
             market_type=MarketType.FUTURES,
         )
         if order and order.status == OrderStatus.FILLED:

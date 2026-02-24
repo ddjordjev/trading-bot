@@ -176,8 +176,8 @@ export function App() {
       {tab === "Dashboard" && <Dashboard data={dashboardData} showBotColumn={bots.length > 1} bots={bots} exchangeFilter={exchangeFilter} onExchangeFilterChange={setExchangeFilter} exchanges={exchanges} />}
       {tab === "Intel" && <Intel wsIntel={dashboardData?.intel ?? null} />}
       {tab === "Scanner" && <Scanner />}
-      {tab === "Strategies" && <Strategies bots={[]} />}
-      {tab === "Analytics" && <Analytics bots={[]} />}
+      {tab === "Strategies" && <Strategies />}
+      {tab === "Analytics" && <Analytics />}
       {tab === "Monitoring" && <Monitoring />}
       {tab === "Settings" && <Settings />}
     </div>

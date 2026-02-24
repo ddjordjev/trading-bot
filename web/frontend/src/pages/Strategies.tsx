@@ -15,7 +15,7 @@ interface Strategy {
   bot_id?: string;
 }
 
-export function Strategies({ bots = [] }: { bots?: { bot_id: string; label?: string }[] }) {
+export function Strategies() {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -25,8 +25,6 @@ export function Strategies({ bots = [] }: { bots?: { bot_id: string; label?: str
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
-
-  const _multiBot = false;
 
   if (loading) return <div className="empty-state">Loading...</div>;
   if (strategies.length === 0) return <div className="empty-state">No active strategies</div>;

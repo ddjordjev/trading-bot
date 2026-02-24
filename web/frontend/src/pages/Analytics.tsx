@@ -279,15 +279,15 @@ function DbExplorer() {
   );
 }
 
-export function Analytics({ bots = [] }: { bots?: { bot_id: string }[] }) {
+export function Analytics() {
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [report, setReport] = useState<DailyReport | null>(null);
   const [closedTrades, setClosedTrades] = useState<ClosedTrade[]>([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<"live" | "closed" | "scores" | "patterns" | "suggestions" | "hourly" | "db" | "report">("live");
 
-  const refresh = async () => {
-    setLoading(true);
+  const refresh = async (silent = false) => {
+    if (!silent) setLoading(true);
     const [aRes, rRes, ctRes] = await Promise.allSettled([
       get<AnalyticsData>("/api/analytics"),
       get<DailyReport>("/api/daily-report"),
@@ -296,7 +296,7 @@ export function Analytics({ bots = [] }: { bots?: { bot_id: string }[] }) {
     if (aRes.status === "fulfilled") setAnalytics(aRes.value);
     if (rRes.status === "fulfilled") setReport(rRes.value);
     if (ctRes.status === "fulfilled") setClosedTrades(ctRes.value);
-    setLoading(false);
+    if (!silent) setLoading(false);
   };
 
   const triggerRefresh = async () => {
@@ -305,12 +305,17 @@ export function Analytics({ bots = [] }: { bots?: { bot_id: string }[] }) {
   };
 
   useEffect(() => {
-    refresh();
-    const iv = setInterval(refresh, 10000);
+    refresh(false);
+    const iv = setInterval(() => {
+      // Keep DB explorer stable while user inspects rows.
+      if (tab !== "db") {
+        refresh(true);
+      }
+    }, 10000);
     return () => clearInterval(iv);
-  }, []);
+  }, [tab]);
 
-  if (loading) return <div className="empty-state">Loading analytics...</div>;
+  if (loading && !analytics) return <div className="empty-state">Loading analytics...</div>;
 
   return (
     <div>

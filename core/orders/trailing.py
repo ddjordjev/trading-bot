@@ -223,7 +223,9 @@ class TrailingStop(BaseModel):
         elif entry >= 1:
             tick = 0.001
         else:
-            tick = entry * 0.1
+            # Small-cap symbols still need a minimal fee-covering nudge,
+            # but never a large % jump that can force an immediate stop-out.
+            tick = max(entry * 0.001, 1e-6)
         return entry + tick if long else entry - tick
 
     @property

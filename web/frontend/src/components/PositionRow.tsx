@@ -44,30 +44,6 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
 
   return (
     <tr>
-      {showBot && (
-        <td>
-          <span style={{
-            fontSize: "0.75rem",
-            fontWeight: 600,
-            color: BOT_COLORS[botId] || "var(--text-muted)",
-            textTransform: "uppercase",
-          }}>
-            {botId || "—"}
-          </span>
-        </td>
-      )}
-      {showBot && (
-        <td>
-          <span style={{
-            fontSize: "0.75rem",
-            fontWeight: 500,
-            color: "var(--text-muted)",
-            textTransform: "uppercase",
-          }}>
-            {exchangeName || "—"}
-          </span>
-        </td>
-      )}
       <td>
         {p.trade_url ? (
           <a
@@ -86,6 +62,30 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
           {p.side === "buy" ? "LONG" : p.side === "sell" ? "SHORT" : p.side.toUpperCase()} · {p.leverage}x · {p.market_type}
         </span>
       </td>
+      {showBot && (
+        <td>
+          <span style={{
+            fontSize: "0.75rem",
+            fontWeight: 500,
+            color: "var(--text-muted)",
+            textTransform: "uppercase",
+          }}>
+            {exchangeName || "—"}
+          </span>
+        </td>
+      )}
+      {showBot && (
+        <td>
+          <span style={{
+            fontSize: "0.75rem",
+            fontWeight: 600,
+            color: BOT_COLORS[botId] || "var(--text-muted)",
+            textTransform: "uppercase",
+          }}>
+            {botId || "—"}
+          </span>
+        </td>
+      )}
       <td>{p.entry_price.toFixed(p.entry_price < 1 ? 6 : 2)}</td>
       <td>{p.current_price.toFixed(p.current_price < 1 ? 6 : 2)}</td>
       <td>${Math.round(p.notional_value).toLocaleString()}</td>

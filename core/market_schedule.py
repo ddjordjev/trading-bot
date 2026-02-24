@@ -35,15 +35,26 @@ class MarketSession:
     def _local_now(self) -> datetime:
         return datetime.now(UTC).astimezone(self.timezone)
 
+    @staticmethod
+    def _as_aware_utc(dt: datetime | None) -> datetime | None:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+
     def is_weekend(self, dt: datetime | None = None) -> bool:
+        dt = self._as_aware_utc(dt)
         local = dt.astimezone(self.timezone) if dt else self._local_now()
         return local.isoweekday() in self.weekend_days
 
     def is_holiday(self, dt: datetime | None = None) -> bool:
+        dt = self._as_aware_utc(dt)
         local = dt.astimezone(self.timezone) if dt else self._local_now()
         return local.date() in self.holidays
 
     def is_open(self, dt: datetime | None = None) -> bool:
+        dt = self._as_aware_utc(dt)
         local = dt.astimezone(self.timezone) if dt else self._local_now()
         if self.is_weekend(dt) or self.is_holiday(dt):
             return False
@@ -52,6 +63,7 @@ class MarketSession:
 
     def is_in_open_window(self, window_minutes: int = 120, dt: datetime | None = None) -> bool:
         """True if we're within `window_minutes` of market open."""
+        dt = self._as_aware_utc(dt)
         local = dt.astimezone(self.timezone) if dt else self._local_now()
         if self.is_weekend(dt) or self.is_holiday(dt):
             return False
@@ -61,6 +73,7 @@ class MarketSession:
 
     def next_open(self, dt: datetime | None = None) -> datetime:
         """Next market open as a UTC datetime."""
+        dt = self._as_aware_utc(dt)
         local = dt.astimezone(self.timezone) if dt else self._local_now()
         candidate = local.replace(
             hour=self.open_time.hour, minute=self.open_time.minute, second=0, microsecond=0, fold=0
@@ -75,6 +88,7 @@ class MarketSession:
 
     def next_close(self, dt: datetime | None = None) -> datetime:
         """Next market close as a UTC datetime (accounts for early closes)."""
+        dt = self._as_aware_utc(dt)
         local = dt.astimezone(self.timezone) if dt else self._local_now()
         close = self.early_closes.get(local.date(), self.close_time)
         candidate = local.replace(hour=close.hour, minute=close.minute, second=0, microsecond=0, fold=0)
@@ -89,9 +103,11 @@ class MarketSession:
         return candidate.astimezone(UTC)
 
     def time_to_open(self, dt: datetime | None = None) -> timedelta:
+        dt = self._as_aware_utc(dt)
         return self.next_open(dt) - (dt or datetime.now(UTC))
 
     def time_to_close(self, dt: datetime | None = None) -> timedelta:
+        dt = self._as_aware_utc(dt)
         if self.is_open(dt):
             return self.next_close(dt) - (dt or datetime.now(UTC))
         return timedelta(0)
@@ -134,7 +150,6 @@ _ASIA_HK = MarketSession(
 
 # ── Holiday Fetcher ──────────────────────────────────────────────────────────
 
-FMP_BASE = "https://financialmodelingprep.com/api/v3/is-the-market-open"
 FMP_HOLIDAYS_URL = "https://financialmodelingprep.com/stable/holidays-by-exchange"
 
 

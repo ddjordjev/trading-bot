@@ -168,6 +168,18 @@ class TestMonitorService:
         assert "FAKE/USDT" not in monitor._tv_symbols
         assert "BTC/USDT" in monitor._tv_symbols
 
+    def test_build_ta_candidates_handles_pair_symbols(self, monitor):
+        """TA candidates should not double-suffix pair-formatted symbols."""
+        monitor.signal_gen._major_symbols = {"ETH/USDT"}
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(symbol="BTC/USDT", is_low_liquidity=False),
+            ]
+        )
+        candidates = monitor._build_ta_candidates(snap)
+        assert "BTC/USDT" in candidates
+        assert "BTC/USDT/USDT" not in candidates
+
     def test_route_to_bots_drops_unavailable_symbols(self, monitor):
         """Proposals for symbols not on any exchange are filtered out before queuing."""
         from shared.models import SignalPriority, TradeProposal, TradeQueue
@@ -389,6 +401,25 @@ class TestSignalGenerator:
         actionable = empty_queue.get_actionable(SignalPriority.CRITICAL)
         assert any("PEPE" in p.symbol for p in actionable)
 
+    def test_generate_handles_pair_formatted_hot_mover_symbol(self, gen, empty_queue):
+        snap = IntelSnapshot(
+            hot_movers=[
+                TrendingSnapshot(
+                    symbol="PEPE/USDT",
+                    change_1h=10.0,
+                    change_24h=6.0,
+                    volume_24h=10e6,
+                    is_low_liquidity=False,
+                )
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        actionable = empty_queue.get_actionable(SignalPriority.CRITICAL) + empty_queue.get_actionable(
+            SignalPriority.DAILY
+        )
+        assert any(p.symbol == "PEPE/USDT" for p in actionable)
+        assert not any("/USDT/USDT" in p.symbol for p in actionable)
+
     def test_generate_daily_fear_accumulation(self, gen, empty_queue):
         snap = IntelSnapshot(
             fear_greed=25,
@@ -450,6 +481,63 @@ class TestSignalGenerator:
         symbols = [m.symbol.upper() for m in merged]
         assert symbols.count("BTC") == 1
         assert "ETH" in symbols
+
+    def test_merge_trending_deduplicates_pair_and_token_formats(self, gen):
+        snap = IntelSnapshot(
+            hot_movers=[TrendingSnapshot(symbol="BTC/USDT", source="a")],
+            cmc_trending=[TrendingSnapshot(symbol="BTC", source="b")],
+        )
+        merged = gen._merge_trending(snap)
+        assert len(merged) == 1
+
+    def test_cex_weighting_boosts_trend_aligned_signal(self, gen, empty_queue):
+        snap = IntelSnapshot(
+            tv_btc_consensus="neutral",
+            hot_movers=[
+                TrendingSnapshot(
+                    symbol="PEPE/USDT",
+                    source="binance_scanner",
+                    change_5m=2.5,
+                    change_1h=7.0,
+                    change_24h=3.0,
+                    cex_change_4h=10.0,
+                    cex_confidence=0.95,
+                    cex_vol_accel=1.8,
+                    cex_score=20.0,
+                    volume_24h=20e6,
+                    is_low_liquidity=False,
+                )
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        daily = empty_queue.get_actionable(SignalPriority.DAILY)
+        proposal = next(p for p in daily if p.strategy == "trending_momentum" and p.symbol == "PEPE/USDT")
+        # Baseline without cex weighting would be 0.55 for this setup.
+        assert proposal.strength > 0.55
+
+    def test_cex_weighting_penalizes_trend_misaligned_signal(self, gen, empty_queue):
+        snap = IntelSnapshot(
+            tv_btc_consensus="neutral",
+            hot_movers=[
+                TrendingSnapshot(
+                    symbol="PEPE/USDT",
+                    source="binance_scanner",
+                    change_5m=-2.0,
+                    change_1h=-8.0,
+                    change_24h=3.0,  # still produces a LONG trending_momentum proposal
+                    cex_change_4h=-12.0,
+                    cex_confidence=0.95,
+                    cex_vol_accel=1.2,
+                    cex_score=12.0,
+                    volume_24h=20e6,
+                    is_low_liquidity=False,
+                )
+            ],
+        )
+        gen.generate(snap, empty_queue)
+        daily = empty_queue.get_actionable(SignalPriority.DAILY)
+        proposal = next(p for p in daily if p.strategy == "trending_momentum" and p.symbol == "PEPE/USDT")
+        assert proposal.strength < 0.55
 
     def test_count_directional_agreement_zero_for_neutral(self, gen):
         snap = IntelSnapshot(preferred_direction="neutral")

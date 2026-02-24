@@ -155,19 +155,19 @@ class TestBeWithFeeOffset:
 
     def test_long_sub_dollar(self):
         result = TrailingStop._be_with_fee_offset(0.43, long=True)
-        assert result == pytest.approx(0.473)  # < 1 → tick = 10% of entry
+        assert result == pytest.approx(0.43043)  # < 1 → tick = 0.1% of entry
 
     def test_short_sub_dollar(self):
         result = TrailingStop._be_with_fee_offset(0.43, long=False)
-        assert result == pytest.approx(0.387)
+        assert result == pytest.approx(0.42957)
 
     def test_long_micro_price(self):
         result = TrailingStop._be_with_fee_offset(0.005, long=True)
-        assert result == pytest.approx(0.0055)  # < 1 → tick = 10% of entry
+        assert result == pytest.approx(0.005005)  # < 1 → tick = 0.1% of entry
 
     def test_short_micro_price(self):
         result = TrailingStop._be_with_fee_offset(0.005, long=False)
-        assert result == pytest.approx(0.0045)
+        assert result == pytest.approx(0.004995)
 
     def test_very_small_price(self):
         result = TrailingStop._be_with_fee_offset(0.00025, long=True)

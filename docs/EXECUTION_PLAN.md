@@ -65,7 +65,7 @@ writes the file, the bot detects it and starts up.
 
 | Container | Role | Balance |
 |-----------|------|---------|
-| bot-hub | Dashboard, coordination, trade persistence (hub.db) | $0 |
+| bot-hub | Dashboard, coordination, trade persistence (hub.db), CEX scanner aggregation | $0 |
 
 ### Trading Modes
 
@@ -224,7 +224,7 @@ to suggest.
 ### 2. Preflight Check
 
 ```bash
-python scripts/preflight_check.py
+.venv/bin/python scripts/preflight_check.py
 ```
 
 This validates: API keys (Binance testnet), exchange connectivity, USDT balance,
@@ -280,11 +280,15 @@ Verify:
 Watch logs for ~10–15 minutes and confirm the full pipeline:
 
 ```
-Monitor polls intel → writes IntelSnapshot to HubState → SignalGenerator produces TradeProposals
+Monitor polls intel + BinanceFuturesScanner updates incremental symbol state
+  (`cex_binance_symbol_state`) and minute snapshots (`cex_binance_snapshots`)
+  → merged hot movers (Binance primary, legacy scanner additive)
+  → writes IntelSnapshot to HubState → SignalGenerator produces TradeProposals
   → proposals stored in HubState trade queue → active bots receive via /internal/report response
   → bot validates + executes → PaperExchange.place_order() → trade pushed to hub via HTTP
 Hub writes hub.db → Analytics reads hub.db → computes strategy weights → persists analytics
-Idle bots report IDLE status to hub every 10s — no exchange connection, no trading
+Idle bots stay in lean idle mode (activation-file watch only): no exchange
+connection and no hub communication until activated
 ```
 
 If no trades fire naturally (market is quiet), verify the signal path is at least
@@ -314,7 +318,7 @@ This is the critical first day. The priority is: **make sure everything works.**
 ```bash
 cd /Users/damirdjordjev/workspace/trading-bot
 # Ensure .env has TRADING_MODE=paper_live
-python scripts/preflight_check.py
+.venv/bin/python scripts/preflight_check.py
 ```
 
 Fix any issues before proceeding.
@@ -380,10 +384,10 @@ docker compose down
 
 ```bash
 # Terminal 1: Hub (dashboard + monitor + analytics)
-python hub_main.py
+.venv/bin/python hub_main.py
 
 # Terminal 2: Bot
-BOT_ID=momentum BOT_STYLE=momentum python bot.py
+BOT_ID=momentum BOT_STYLE=momentum .venv/bin/python bot.py
 ```
 
 ---
@@ -453,6 +457,8 @@ Host paths are configured in `.env`:
 | Data | Host location | Notes |
 |------|--------------|-------|
 | Hub database | `$HOST_DATA_DIR/hub.db` | **Sole** persistent trade + analytics DB (critical) |
+| Binance snapshots | `hub.db.cex_binance_snapshots` | Minute-level Binance futures snapshot history |
+| Binance symbol state | `hub.db.cex_binance_symbol_state` | Incremental one-row-per-symbol multi-horizon aggregates |
 | Analytics | `$HOST_DATA_DIR/analytics_state.json` | Persisted strategy scores (survives restarts) |
 | Bot logs | `$HOST_LOGS_DIR/bot_*.log` | 1-day rotation, 30-day retention |
 | Monitor logs | `$HOST_LOGS_DIR/monitor_*.log` | 1-day rotation, 30-day retention |

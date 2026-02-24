@@ -136,7 +136,8 @@
 <div class="section-card">
 <h3>Architecture: Hub + Bots</h3>
 <p>The hub (<code>hub_main.py</code>) is the central brain — it runs Monitor, Analytics, and SignalGenerator
-in-process, stores all shared state in <code>HubState</code> (in-memory), and serves the dashboard.
+in-process, runs BinanceFuturesScanner incremental CEX aggregation, stores all shared state in
+<code>HubState</code> (in-memory), and serves the dashboard.
 Trading bots are lightweight executors that consume proposals from the hub via HTTP.</p>
 
 <h3>Fast Monitor Loop (~1-2 seconds)</h3>
@@ -220,6 +221,7 @@ Trading bots are lightweight executors that consume proposals from the hub via H
   <tr><td><code>volatility/detector.py</code></td><td>Price spike detection engine</td></tr>
   <tr><td><code>news/monitor.py</code></td><td>RSS feed monitoring, sentiment analysis, spike correlation</td></tr>
   <tr><td><code>scanner/trending.py</code></td><td>Multi-source scanner: CryptoBubbles + CMC + CoinGecko</td></tr>
+  <tr><td><code>scanner/binance_futures.py</code></td><td>Binance futures scanner with incremental per-symbol horizons (1m..1y), DB-backed snapshots/state, primary CEX hot-mover stream</td></tr>
   <tr><td><code>notifications/notifier.py</code></td><td>Email alerts with bounded queue (liquidation, stops, daily summary, legendary ride)</td></tr>
   <tr><td><code>db/store.py</code></td><td>Per-bot SQLite trade database (legacy — bots now push trades to hub)</td></tr>
   <tr><td><code>db/hub_store.py</code></td><td>Hub SQLite database — merged trade history for all bots (the sole persistent DB)</td></tr>
@@ -272,10 +274,10 @@ uses <code>data/</code>. In Docker this is bind-mounted from <code>$HOST_DATA_DI
 <table>
   <tr><th colspan="3" style="text-align:left; padding-top:1rem;">Persistent (on disk)</th></tr>
   <tr><th>Path</th><th>Created By</th><th>Purpose</th></tr>
-  <tr><td><code>data/hub.db</code></td><td>Hub (<code>db/hub_store.py</code>)</td><td>SQLite — merged trade history for all bots (critical)</td></tr>
+  <tr><td><code>data/hub.db</code></td><td>Hub (<code>db/hub_store.py</code>)</td><td>SQLite — merged trade history + CEX scanner tables (<code>cex_binance_snapshots</code>, <code>cex_binance_symbol_state</code>)</td></tr>
   <tr><td><code>data/analytics_state.json</code></td><td>Hub (<code>hub/state.py</code>)</td><td>Strategy scores, patterns, suggestions (survives restarts)</td></tr>
   <tr><td><code>data/bot_registry.json</code></td><td>Hub (<code>web/server.py</code>)</td><td>Known bot IDs and their command-server URLs</td></tr>
-  <tr><td><code>logs/bot_*.log</code></td><td>Each bot (<code>bot.py</code>)</td><td>Rotated daily, 30-day retention (Docker: <code>bot-logs</code> volume)</td></tr>
+  <tr><td><code>logs/bot_*.log</code></td><td>Each bot (<code>bot.py</code>)</td><td>Rotated daily, 30-day retention (host bind mount via <code>$HOST_LOGS_DIR</code>)</td></tr>
   <tr><td><code>logs/hub_*.log</code></td><td>Hub (<code>hub_main.py</code>)</td><td>Rotated daily, 14-day retention</td></tr>
 
   <tr><th colspan="3" style="text-align:left; padding-top:1rem;">In-memory (HubState — lost on restart)</th></tr>
@@ -646,6 +648,9 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
 <h3 id="s7-14">7.14 Trending / Scanner</h3>
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
+  <tr><td>Binance futures-native scanner with incremental per-symbol aggregation (1m/5m/1h/4h/1d/1w/3w/1mo/3mo/1y) and one-row-per-symbol state</td><td><span class="badge done">Done</span></td><td class="file">scanner/binance_futures.py, db/hub_store.py (<code>cex_binance_symbol_state</code>)</td></tr>
+  <tr><td>CEX-first hot movers: Binance scanner is primary stream; legacy scanner remains additive confidence/discovery</td><td><span class="badge done">Done</span></td><td class="file">services/monitor.py → merged <code>snap.hot_movers</code></td></tr>
+  <tr><td>Signal strength directly weighted by CEX state (confidence, vol_accel, multi-horizon trend alignment)</td><td><span class="badge done">Done</span></td><td class="file">services/signal_generator.py → <code>_cex_strength_modifier()</code></td></tr>
   <tr><td>Monitor cryptobubbles.com, coinmarketcap.com, and coingecko.com for trending/tradable coins</td><td><span class="badge done">Done</span></td><td class="file">scanner/trending.py → TrendingScanner (multi-source)</td></tr>
   <tr><td>Trending coins fed into trade queue as proposals (hub-side)</td><td><span class="badge done">Done</span></td><td class="file">services/signal_generator.py, services/monitor.py</td></tr>
   <tr><td>Flag low-liquidity trending coins for gambling-only</td><td><span class="badge done">Done</span></td><td class="file">scanner/trending.py → TrendingCoin.is_low_liquidity</td></tr>

@@ -245,9 +245,13 @@ class MexcExchange(BaseExchange):
 
     async def watch_ticker(self, symbol: str, callback: Callable[..., Any]) -> None:
         async def _loop() -> None:
+            supports_ws = hasattr(self._spot, "watch_ticker")
             while True:
                 try:
-                    data = await self._spot.watch_ticker(symbol)
+                    if supports_ws:
+                        data = await self._spot.watch_ticker(symbol)
+                    else:
+                        data = await self._spot.fetch_ticker(symbol)
                     ticker = Ticker(
                         symbol=symbol,
                         bid=data.get("bid", 0) or 0,
@@ -258,6 +262,8 @@ class MexcExchange(BaseExchange):
                         timestamp=ts_to_dt(data.get("timestamp")),
                     )
                     await callback(ticker)
+                    if not supports_ws:
+                        await asyncio.sleep(1)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -269,10 +275,15 @@ class MexcExchange(BaseExchange):
 
     async def watch_candles(self, symbol: str, timeframe: str, callback: Callable[..., Any]) -> None:
         async def _loop() -> None:
+            supports_ws = hasattr(self._spot, "watch_ohlcv")
             while True:
                 try:
-                    data = await self._spot.watch_ohlcv(symbol, timeframe)
-                    for c in data:
+                    if supports_ws:
+                        data = await self._spot.watch_ohlcv(symbol, timeframe)
+                    else:
+                        data = await self._spot.fetch_ohlcv(symbol, timeframe, limit=2)
+                    candles = data if supports_ws else data[-1:]
+                    for c in candles:
                         candle = Candle(
                             timestamp=ts_to_dt(c[0]),
                             open=c[1],
@@ -282,6 +293,8 @@ class MexcExchange(BaseExchange):
                             volume=c[5],
                         )
                         await callback(candle)
+                    if not supports_ws:
+                        await asyncio.sleep(2)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:

@@ -163,7 +163,7 @@ export function Settings() {
         paddingRight: "1rem",
         display: "flex", flexDirection: "column",
       }}>
-        <div style={{ flex: 1 }}>
+        <div>
           {UPPER_LINKS.map((link) => (
             <button
               key={link.id}
@@ -186,7 +186,7 @@ export function Settings() {
 
         <div style={{
           borderTop: "1px solid var(--border)",
-          paddingTop: "0.5rem", marginTop: "0.5rem",
+          paddingTop: "0.5rem", marginTop: "0.25rem",
         }}>
           {LOWER_LINKS.map((link) => (
             <button

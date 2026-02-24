@@ -195,7 +195,7 @@ class TradeDB:
 
     def get_strategy_stats(self, strategy: str, symbol: str = "") -> dict[str, Any]:
         assert self._conn
-        where = "strategy = ?"
+        where = "strategy = ? AND action = 'close'"
         params: list[str] = [strategy]
         if symbol:
             where += " AND symbol = ?"

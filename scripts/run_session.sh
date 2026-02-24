@@ -33,8 +33,13 @@ cmd_start() {
     sleep 3
     docker compose ps
     log "Dashboard: http://localhost:${DASHBOARD_PORT:-9035}"
-    log "Exchange:  $(grep EXCHANGE_PLATFORM_URL .env | cut -d= -f2-)"
-    if [ -z "$(grep EXCHANGE_PLATFORM_URL .env | cut -d= -f2-)" ]; then
+    local exchange_url=""
+    if [ -f .env ]; then
+        exchange_url="$(grep -E '^EXCHANGE_PLATFORM_URL=' .env | head -n1 | cut -d= -f2- || true)"
+    fi
+    if [ -n "$exchange_url" ]; then
+        log "Exchange:  $exchange_url"
+    else
         log "Exchange:  https://demo.binance.com/en/futures (auto-detected)"
     fi
 }
@@ -78,6 +83,7 @@ cmd_snapshot() {
     local ts=$(date -u +"%Y-%m-%d_%H%M")
     local file="docs/reports/snapshot_${ts}.md"
     log "Taking snapshot → $file"
+    mkdir -p "$(dirname "$file")"
 
     cat > "$file" << SNAP
 # Snapshot — $ts UTC

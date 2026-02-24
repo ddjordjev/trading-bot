@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -22,6 +23,19 @@ class TrendingCoin(BaseModel):
     change_24h: float = 0.0
     change_7d: float = 0.0
     change_30d: float = 0.0
+    # CEX incremental-state enrichments (optional; default for non-CEX scanners)
+    cex_confidence: float = 0.0
+    cex_vol_accel: float = 0.0
+    cex_score: float = 0.0
+    cex_funding_rate: float = 0.0
+    cex_change_1m: float = 0.0
+    cex_change_4h: float = 0.0
+    cex_change_1d: float = 0.0
+    cex_change_1w: float = 0.0
+    cex_change_3w: float = 0.0
+    cex_change_1mo: float = 0.0
+    cex_change_3mo: float = 0.0
+    cex_change_1y: float = 0.0
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     exchange_pair: str = ""
 
@@ -117,6 +131,8 @@ class TrendingScanner:
         self._callbacks.append(callback)
 
     async def start(self) -> None:
+        if self._running:
+            return
         self._running = True
         self._background_tasks.append(asyncio.create_task(self._scan_loop()))
         logger.info(
@@ -129,6 +145,13 @@ class TrendingScanner:
 
     async def stop(self) -> None:
         self._running = False
+        tasks = [t for t in self._background_tasks if not t.done()]
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._background_tasks.clear()
 
     @property
     def hot_movers(self) -> list[TrendingCoin]:
@@ -238,7 +261,12 @@ class TrendingScanner:
             logger.warning("Cryptobubbles fetch failed: {} -- using fallback", e)
             return await self._fallback_fetch()
 
+        if not isinstance(data, list):
+            return await self._fallback_fetch()
+
         for item in data:
+            if not isinstance(item, dict):
+                continue
             try:
                 symbol = item.get("symbol", "")
                 if not symbol:

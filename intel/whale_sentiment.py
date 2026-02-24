@@ -76,7 +76,6 @@ class WhaleSentiment:
     COINGLASS_LS_URL = "https://open-api-v4.coinglass.com/api/futures/globalLongShortAccountRatio/history"
     COINGLASS_FUNDING_URL = "https://open-api-v4.coinglass.com/api/futures/funding/history"
     COINGLASS_OI_URL = "https://open-api-v4.coinglass.com/api/futures/openInterest/ohlc-history"
-    COINGLASS_OI_HISTORY_URL = "https://open-api-v4.coinglass.com/api/futures/openInterest/ohlc-history"
     COINGLASS_TOP_TRADERS_URL = "https://open-api-v4.coinglass.com/api/futures/topLongShortAccountRatio/history"
 
     def __init__(self, symbols: list[str] | None = None, poll_interval: int = 300, coinglass_key: str = ""):

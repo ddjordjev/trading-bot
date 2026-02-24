@@ -55,6 +55,8 @@ class CompoundMomentumStrategy(BaseStrategy):
 
         self._in_position = False
         self._position_side: str | None = None
+        self.breakout_threshold_pct = max(self.breakout_threshold_pct, 0.0001)
+        self.spike_pct = max(self.spike_pct, 0.0001)
 
     def set_position_state(self, has_position: bool, side: str | None = None) -> None:
         self._in_position = has_position

@@ -19,18 +19,27 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
   const [actionTarget, setActionTarget] = useState("all");
   const [bulkAction, setBulkAction] = useState("");
   const [manualStopOverride, setManualStopOverride] = useState<boolean | null>(null);
+  const hasData = !!data;
 
-  if (!data) return <div className="empty-state">Connecting...</div>;
+  const s = (data?.status ?? {}) as Partial<FullSnapshot["status"]>;
+  const num = (v: unknown, fallback = 0) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const str = (v: unknown, fallback = "") => (typeof v === "string" ? v : fallback);
+  const bool = (v: unknown, fallback = false) => (typeof v === "boolean" ? v : fallback);
+  const positions = Array.isArray(data?.positions) ? data.positions : [];
+  const wickScalps = Array.isArray(data?.wick_scalps) ? data.wick_scalps : [];
+  const logs = Array.isArray(data?.logs) ? data.logs : [];
 
-  const s = data.status;
   const manualStopActive = manualStopOverride ?? s.manual_stop_active;
-  const pnlClass = s.daily_pnl_pct >= 0 ? "pnl-positive" : "pnl-negative";
+  const pnlClass = num(s.daily_pnl_pct) >= 0 ? "pnl-positive" : "pnl-negative";
 
-  const eb = data.exchange_balances ?? {};
+  const eb = data?.exchange_balances ?? {};
   const exchangeBalance = exchangeFilter === "all"
     ? Object.values(eb).reduce((a, b) => a + b, 0)
     : eb[exchangeFilter] ?? 0;
-  const displayBalance = exchangeBalance > 0 ? exchangeBalance : s.balance;
+  const displayBalance = exchangeBalance > 0 ? exchangeBalance : num(s.balance);
 
   const visibleBots = exchangeFilter === "all"
     ? bots
@@ -93,13 +102,15 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
 
   useEffect(() => {
     if (manualStopOverride === null) return;
-    if (s.manual_stop_active === manualStopOverride) {
+    if (bool(s.manual_stop_active) === manualStopOverride) {
       setManualStopOverride(null);
       return;
     }
     const timer = setTimeout(() => setManualStopOverride(null), 10000);
     return () => clearTimeout(timer);
   }, [manualStopOverride, s.manual_stop_active]);
+
+  if (!hasData) return <div className="empty-state">Connecting...</div>;
 
   const fmtUptime = (sec: number) => {
     const h = Math.floor(sec / 3600);
@@ -114,32 +125,32 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
           <div className="label">Balance / Available</div>
           <div className="value">${Math.round(displayBalance).toLocaleString()}</div>
           <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: 2 }}>
-            ${Math.round(s.available_margin).toLocaleString()} available
+            ${Math.round(num(s.available_margin)).toLocaleString()} available
           </div>
         </div>
         <div className="stat-card">
           <div className="label">Daily PnL</div>
           <div className={`value ${pnlClass}`}>
-            {s.daily_pnl >= 0 ? "+" : ""}${s.daily_pnl.toFixed(2)}
+            {num(s.daily_pnl) >= 0 ? "+" : ""}${num(s.daily_pnl).toFixed(2)}
           </div>
           <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: 2 }}>
-            {s.daily_pnl_pct >= 0 ? "+" : ""}{s.daily_pnl_pct.toFixed(2)}%
+            {num(s.daily_pnl_pct) >= 0 ? "+" : ""}{num(s.daily_pnl_pct).toFixed(2)}%
           </div>
         </div>
         <div className="stat-card">
           <div className="label">Total Growth</div>
-          <div className={`value ${s.total_growth_pct >= 0 ? "pnl-positive" : "pnl-negative"}`}>
-            {s.total_growth_usd >= 0 ? "+" : ""}${s.total_growth_usd.toFixed(2)}
+          <div className={`value ${num(s.total_growth_pct) >= 0 ? "pnl-positive" : "pnl-negative"}`}>
+            {num(s.total_growth_usd) >= 0 ? "+" : ""}${num(s.total_growth_usd).toFixed(2)}
           </div>
           <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: 2 }}>
-            {s.total_growth_pct >= 0 ? "+" : ""}{s.total_growth_pct.toFixed(1)}%
+            {num(s.total_growth_pct) >= 0 ? "+" : ""}{num(s.total_growth_pct).toFixed(1)}%
           </div>
         </div>
-        {s.profit_buffer_pct > 0 && (
+        {num(s.profit_buffer_pct) > 0 && (
           <div className="stat-card">
             <div className="label">Profit Buffer</div>
             <div className="value" style={{ color: "var(--green)" }}>
-              {s.profit_buffer_pct.toFixed(1)}%
+              {num(s.profit_buffer_pct).toFixed(1)}%
             </div>
             <button
               style={{
@@ -156,32 +167,32 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
         )}
         <div className="stat-card">
           <div className="label">Bot Status</div>
-          <div className="value" style={{ color: s.running ? "var(--green)" : "var(--red)" }}>
-            {s.running ? "Running" : "Stopped"}
+          <div className="value" style={{ color: bool(s.running) ? "var(--green)" : "var(--red)" }}>
+            {bool(s.running) ? "Running" : "Stopped"}
             {manualStopActive && <span style={{ color: "var(--yellow)", fontSize: "0.7rem" }}> (HALTED)</span>}
           </div>
         </div>
-        {s.exchange_url && (
+        {str(s.exchange_url) && (
           <div className="stat-card">
             <div className="label">Exchange</div>
             <div className="value">
               <a
-                href={s.exchange_url}
+                href={str(s.exchange_url)}
                 target="_blank"
                 rel="noopener noreferrer"
                 style={{ color: "var(--accent)", textDecoration: "none", fontSize: "0.9rem" }}
               >
-                {s.exchange_name} ↗
+                {str(s.exchange_name)} ↗
               </a>
               <div style={{ fontSize: "0.65rem", color: "var(--text-muted)", marginTop: 2 }}>
-                {s.trading_mode.startsWith("paper") ? s.trading_mode.toUpperCase().replace("_", " ") : "LIVE"}
+                {str(s.trading_mode).startsWith("paper") ? str(s.trading_mode).toUpperCase().replace("_", " ") : "LIVE"}
               </div>
             </div>
           </div>
         )}
         <div className="stat-card">
           <div className="label">Uptime</div>
-          <div className="value">{fmtUptime(s.uptime_seconds)}</div>
+          <div className="value">{fmtUptime(num(s.uptime_seconds))}</div>
         </div>
       </div>
 
@@ -254,7 +265,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
             </button>
             <button
               className="btn-danger"
-              title="Close all open positions at market. Use with caution."
+              title="Closes all current positions in the market. If you want to stop new trading from happening, click Halt first."
               onClick={() => {
                 const targets = resolveTargets("Close All");
                 if (!targets || targets.length === 0) return;
@@ -275,18 +286,18 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
       </div>
 
       <h3 style={{ color: "var(--heading)", marginBottom: "0.5rem" }}>
-        Open Positions ({data.positions.length})
+        Open Positions ({positions.length})
       </h3>
-      {data.positions.length === 0 ? (
+      {positions.length === 0 ? (
         <div className="empty-state">No open positions</div>
       ) : (
         <div style={{ overflowX: "auto" }}>
           <table>
             <thead>
               <tr>
-                {showBotColumn && <th>Bot strategy</th>}
-                {showBotColumn && <th>Exchange</th>}
                 <th>Symbol</th>
+                {showBotColumn && <th>Exchange</th>}
+                {showBotColumn && <th>Bot strategy</th>}
                 <th>Entry</th>
                 <th>Current</th>
                 <th>Size</th>
@@ -299,7 +310,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
               </tr>
             </thead>
             <tbody>
-              {data.positions.map((p) => (
+              {positions.map((p) => (
                 <PositionRow key={`${(p as any).bot_id || ""}:${p.symbol}`} position={p} onAction={() => {}} showBot={showBotColumn} bulkAction={bulkAction} />
               ))}
             </tbody>
@@ -307,17 +318,17 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
         </div>
       )}
 
-      {data.wick_scalps.length > 0 && (
+      {wickScalps.length > 0 && (
         <>
           <h3 style={{ color: "var(--heading)", margin: "1.5rem 0 0.5rem" }}>
-            Active Wick Scalps ({data.wick_scalps.length})
+            Active Wick Scalps ({wickScalps.length})
           </h3>
           <table>
             <thead>
               <tr>
-                {showBotColumn && <th>Bot</th>}
-                {showBotColumn && <th>Exchange</th>}
                 <th>Symbol</th>
+                {showBotColumn && <th>Exchange</th>}
+                {showBotColumn && <th>Bot</th>}
                 <th>Side</th>
                 <th>Entry</th>
                 <th>Amount</th>
@@ -326,11 +337,11 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
               </tr>
             </thead>
             <tbody>
-              {data.wick_scalps.map((ws) => (
+              {wickScalps.map((ws) => (
                 <tr key={`${(ws as any).bot_id || ""}:${ws.symbol}`}>
-                  {showBotColumn && <td style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)" }}>{(ws as any).bot_id || "—"}</td>}
-                  {showBotColumn && <td style={{ fontSize: "0.75rem", fontWeight: 500, textTransform: "uppercase", color: "var(--text-muted)" }}>{(ws as any).exchange_name || "—"}</td>}
                   <td>{ws.symbol}</td>
+                  {showBotColumn && <td style={{ fontSize: "0.75rem", fontWeight: 500, textTransform: "uppercase", color: "var(--text-muted)" }}>{(ws as any).exchange_name || "—"}</td>}
+                  {showBotColumn && <td style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)" }}>{(ws as any).bot_id || "—"}</td>}
                   <td>{ws.scalp_side.toUpperCase()}</td>
                   <td>{ws.entry_price.toFixed(ws.entry_price < 1 ? 6 : 2)}</td>
                   <td>{ws.amount.toFixed(6)}</td>
@@ -354,7 +365,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
           Live Logs
         </h3>
       </div>
-      {logsExpanded && <LogViewer logs={data.logs ?? []} />}
+      {logsExpanded && <LogViewer logs={logs} />}
     </div>
   );
 }

@@ -101,7 +101,7 @@ class TradeProposal(BaseModel):
                 if now > deadline:
                     return True
             except (ValueError, TypeError):
-                pass
+                return True
         if self.max_age_seconds > 0:
             try:
                 created = datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
@@ -110,7 +110,7 @@ class TradeProposal(BaseModel):
                 if (now - created).total_seconds() > self.max_age_seconds:
                     return True
             except (ValueError, TypeError):
-                pass
+                return True
         return False
 
     @property
@@ -135,12 +135,6 @@ class TradeQueue(BaseModel):
 
     proposals: list[TradeProposal] = []
     updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
-
-    _PRIORITY_ORDER: dict[SignalPriority, int] = {
-        SignalPriority.CRITICAL: 0,
-        SignalPriority.DAILY: 1,
-        SignalPriority.SWING: 2,
-    }
 
     @property
     def total(self) -> int:
@@ -300,12 +294,25 @@ class TrendingSnapshot(BaseModel):
     price: float = 0.0
     market_cap: float = 0.0
     volume_24h: float = 0.0
+    change_5m: float = 0.0
     change_1h: float = 0.0
     change_24h: float = 0.0
     change_7d: float = 0.0
     momentum_score: float = 0.0
     is_low_liquidity: bool = False
     source: str = ""
+    cex_confidence: float = 0.0
+    cex_vol_accel: float = 0.0
+    cex_score: float = 0.0
+    cex_funding_rate: float = 0.0
+    cex_change_1m: float = 0.0
+    cex_change_4h: float = 0.0
+    cex_change_1d: float = 0.0
+    cex_change_1w: float = 0.0
+    cex_change_3w: float = 0.0
+    cex_change_1mo: float = 0.0
+    cex_change_3mo: float = 0.0
+    cex_change_1y: float = 0.0
 
 
 class IntelSnapshot(BaseModel):

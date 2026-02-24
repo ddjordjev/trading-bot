@@ -136,7 +136,7 @@ export function Monitoring() {
   const [data, setData] = useState<MetricsData | null>(null);
   const [grafana, setGrafana] = useState<GrafanaConfig | null>(null);
   const [grafanaReachable, setGrafanaReachable] = useState<boolean | null>(null);
-  const [useGrafana, setUseGrafana] = useState(true);
+  const [redirecting, setRedirecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchMetrics = useCallback(() => {
@@ -166,6 +166,14 @@ export function Monitoring() {
       .catch(() => setGrafanaReachable(false));
   }, []);
 
+  useEffect(() => {
+    if (!grafana || grafanaReachable !== true || redirecting) return;
+    const base = `${window.location.protocol}//${window.location.hostname}:${grafana.port}`;
+    const src = `${base}/d/${grafana.dashboard_uid}/trading-bot?orgId=1&kiosk&theme=dark`;
+    setRedirecting(true);
+    window.location.assign(src);
+  }, [grafana, grafanaReachable, redirecting]);
+
   if (error && !data) {
     return (
       <div className="empty-state">
@@ -185,30 +193,10 @@ export function Monitoring() {
     );
   }
 
-  if (useGrafana && grafana) {
-    const base = `${window.location.protocol}//${window.location.hostname}:${grafana.port}`;
-    const src = `${base}/d/${grafana.dashboard_uid}/trading-bot?orgId=1&kiosk&theme=dark`;
+  if (redirecting) {
     return (
-      <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <button
-            onClick={() => setUseGrafana(false)}
-            style={{ fontSize: "0.8rem", background: "none", border: "1px solid var(--border)", borderRadius: 4, padding: "0.25rem 0.5rem", color: "var(--text-muted)", cursor: "pointer" }}
-          >
-            Back to built-in
-          </button>
-          <a href={base} target="_blank" rel="noopener noreferrer" style={{ fontSize: "0.8rem" }}>
-            Open Grafana
-          </a>
-        </div>
-        <div style={{
-          border: "1px solid var(--border)", borderRadius: "var(--radius)",
-          overflow: "hidden", background: "#0d1117",
-        }}>
-          <iframe src={src} title="Grafana Dashboard" style={{
-            width: "100%", height: "calc(100vh - 180px)", border: "none", display: "block",
-          }} />
-        </div>
+      <div className="empty-state">
+        <p style={{ color: "var(--text-muted)" }}>Opening full-page Grafana...</p>
       </div>
     );
   }
@@ -219,13 +207,13 @@ export function Monitoring() {
         <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
           Auto-refreshing every 5s
         </span>
-        {grafanaReachable && (
-          <button
-            onClick={() => setUseGrafana(true)}
-            style={{ fontSize: "0.8rem", background: "none", border: "1px solid var(--border)", borderRadius: 4, padding: "0.25rem 0.5rem", color: "var(--text-muted)", cursor: "pointer" }}
+        {grafana && (
+          <a
+            href={`${window.location.protocol}//${window.location.hostname}:${grafana.port}/d/${grafana.dashboard_uid}/trading-bot?orgId=1&kiosk&theme=dark`}
+            style={{ fontSize: "0.8rem" }}
           >
-            Switch to Grafana
-          </button>
+            Open full-page Grafana
+          </a>
         )}
       </div>
       <BuiltInDashboard data={data} />

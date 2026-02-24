@@ -65,6 +65,41 @@ class BinanceExchange(BaseExchange):
     def _client(self, market_type: MarketType = MarketType.SPOT) -> ccxt.binance:
         return self._futures if market_type == MarketType.FUTURES else self._spot
 
+    @staticmethod
+    def _infer_position_leverage(raw_position: dict[str, Any]) -> int:
+        """Infer leverage when the exchange payload omits explicit value."""
+        raw_leverage = raw_position.get("leverage")
+        try:
+            if raw_leverage is not None:
+                parsed = round(float(raw_leverage))
+                if parsed > 0:
+                    return parsed
+        except (TypeError, ValueError):
+            pass
+
+        # Binance demo payload can include initialMarginPercentage (e.g. 0.3333 for 3x).
+        try:
+            margin_pct = float(raw_position.get("initialMarginPercentage", 0) or 0)
+            if margin_pct > 0:
+                inferred = round(1.0 / margin_pct)
+                if inferred > 0:
+                    return inferred
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+
+        info = raw_position.get("info") or {}
+        try:
+            initial_margin = float(raw_position.get("initialMargin") or info.get("positionInitialMargin") or 0)
+            notional = abs(float(raw_position.get("notional") or info.get("notional") or 0))
+            if initial_margin > 0 and notional > 0:
+                inferred = round(notional / initial_margin)
+                if inferred > 0:
+                    return inferred
+        except (TypeError, ValueError):
+            pass
+
+        return 1
+
     async def connect(self) -> None:
         logger.info("Connecting to Binance (sandbox={})", self.sandbox)
         await self._spot.load_markets()
@@ -168,7 +203,7 @@ class BinanceExchange(BaseExchange):
                     amount=amt,
                     entry_price=float(p.get("entryPrice", 0) or 0),
                     current_price=float(p.get("markPrice", 0) or 0),
-                    leverage=int(p.get("leverage", 1) or 1),
+                    leverage=self._infer_position_leverage(p),
                     market_type="futures",
                     unrealized_pnl=float(p.get("unrealizedPnl", 0) or 0),
                 )
@@ -192,8 +227,8 @@ class BinanceExchange(BaseExchange):
         params: dict[str, Any] = {}
         if stop_price is not None:
             params["stopPrice"] = stop_price
-        if market_type == MarketType.FUTURES:
-            await self.set_leverage(symbol, leverage)
+        if market_type == MarketType.FUTURES and not await self.set_leverage(symbol, leverage):
+            raise RuntimeError(f"Leverage set failed for {symbol} ({leverage}x); aborting order placement")
 
         logger.info(
             "Placing {} {} {} {} @ {} (leverage={})",
@@ -275,12 +310,14 @@ class BinanceExchange(BaseExchange):
             for d in raw
         ]
 
-    async def set_leverage(self, symbol: str, leverage: int) -> None:
+    async def set_leverage(self, symbol: str, leverage: int) -> bool:
         try:
             await self._futures.set_leverage(leverage, symbol)
             logger.debug("Leverage set to {}x for {}", leverage, symbol)
+            return True
         except Exception as e:
             logger.warning("Could not set leverage for {}: {}", symbol, e)
+            return False
 
     async def get_available_symbols(self, market_type: MarketType = MarketType.SPOT) -> list[str]:
         client = self._client(market_type)
@@ -288,9 +325,13 @@ class BinanceExchange(BaseExchange):
 
     async def watch_ticker(self, symbol: str, callback: Callable[..., Any]) -> None:
         async def _loop() -> None:
+            supports_ws = hasattr(self._spot, "watch_ticker")
             while True:
                 try:
-                    data = await self._spot.watch_ticker(symbol)
+                    if supports_ws:
+                        data = await self._spot.watch_ticker(symbol)
+                    else:
+                        data = await self._spot.fetch_ticker(symbol)
                     ticker = Ticker(
                         symbol=symbol,
                         bid=data.get("bid", 0) or 0,
@@ -301,6 +342,8 @@ class BinanceExchange(BaseExchange):
                         timestamp=ts_to_dt(data.get("timestamp")),
                     )
                     await callback(ticker)
+                    if not supports_ws:
+                        await asyncio.sleep(1)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -316,10 +359,15 @@ class BinanceExchange(BaseExchange):
 
     async def watch_candles(self, symbol: str, timeframe: str, callback: Callable[..., Any]) -> None:
         async def _loop() -> None:
+            supports_ws = hasattr(self._spot, "watch_ohlcv")
             while True:
                 try:
-                    data = await self._spot.watch_ohlcv(symbol, timeframe)
-                    for c in data:
+                    if supports_ws:
+                        data = await self._spot.watch_ohlcv(symbol, timeframe)
+                    else:
+                        data = await self._spot.fetch_ohlcv(symbol, timeframe, limit=2)
+                    candles = data if supports_ws else data[-1:]
+                    for c in candles:
                         candle = Candle(
                             timestamp=ts_to_dt(c[0]),
                             open=c[1],
@@ -329,6 +377,8 @@ class BinanceExchange(BaseExchange):
                             volume=c[5],
                         )
                         await callback(candle)
+                    if not supports_ws:
+                        await asyncio.sleep(2)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:

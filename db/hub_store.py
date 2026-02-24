@@ -64,10 +64,57 @@ class HubDB(TradeDB):
                 PRIMARY KEY (timestamp, symbol)
             );
 
+            CREATE TABLE IF NOT EXISTS cex_binance_symbol_state (
+                symbol TEXT PRIMARY KEY,
+                updated_at TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                last_price REAL NOT NULL DEFAULT 0,
+                last_quote_volume REAL NOT NULL DEFAULT 0,
+                last_change_24h REAL NOT NULL DEFAULT 0,
+                last_funding_rate REAL NOT NULL DEFAULT 0,
+                avg_quote_volume REAL NOT NULL DEFAULT 0,
+                vol_accel REAL NOT NULL DEFAULT 0,
+                confidence REAL NOT NULL DEFAULT 0,
+                score REAL NOT NULL DEFAULT 0,
+                chg_1m REAL NOT NULL DEFAULT 0,
+                chg_5m REAL NOT NULL DEFAULT 0,
+                chg_1h REAL NOT NULL DEFAULT 0,
+                chg_4h REAL NOT NULL DEFAULT 0,
+                chg_1d REAL NOT NULL DEFAULT 0,
+                chg_1w REAL NOT NULL DEFAULT 0,
+                chg_3w REAL NOT NULL DEFAULT 0,
+                chg_1mo REAL NOT NULL DEFAULT 0,
+                chg_3mo REAL NOT NULL DEFAULT 0,
+                chg_1y REAL NOT NULL DEFAULT 0,
+                anchor_1m_ts TEXT NOT NULL DEFAULT '',
+                anchor_5m_ts TEXT NOT NULL DEFAULT '',
+                anchor_1h_ts TEXT NOT NULL DEFAULT '',
+                anchor_4h_ts TEXT NOT NULL DEFAULT '',
+                anchor_1d_ts TEXT NOT NULL DEFAULT '',
+                anchor_1w_ts TEXT NOT NULL DEFAULT '',
+                anchor_3w_ts TEXT NOT NULL DEFAULT '',
+                anchor_1mo_ts TEXT NOT NULL DEFAULT '',
+                anchor_3mo_ts TEXT NOT NULL DEFAULT '',
+                anchor_1y_ts TEXT NOT NULL DEFAULT '',
+                anchor_1m_price REAL NOT NULL DEFAULT 0,
+                anchor_5m_price REAL NOT NULL DEFAULT 0,
+                anchor_1h_price REAL NOT NULL DEFAULT 0,
+                anchor_4h_price REAL NOT NULL DEFAULT 0,
+                anchor_1d_price REAL NOT NULL DEFAULT 0,
+                anchor_1w_price REAL NOT NULL DEFAULT 0,
+                anchor_3w_price REAL NOT NULL DEFAULT 0,
+                anchor_1mo_price REAL NOT NULL DEFAULT 0,
+                anchor_3mo_price REAL NOT NULL DEFAULT 0,
+                anchor_1y_price REAL NOT NULL DEFAULT 0
+            );
+
             CREATE INDEX IF NOT EXISTS idx_cex_binance_ts
                 ON cex_binance_snapshots(timestamp);
             CREATE INDEX IF NOT EXISTS idx_cex_binance_symbol_ts
                 ON cex_binance_snapshots(symbol, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_cex_binance_state_updated_at
+                ON cex_binance_symbol_state(updated_at);
         """)
         self._ensure_bot_id_column()
         self._ensure_request_key_column()
@@ -200,11 +247,12 @@ class HubDB(TradeDB):
     def mark_recovery_close(self, bot_id: str, opened_at: str) -> bool:
         """Mark an open trade as closed due to bot recovery (no exit stats)."""
         assert self._conn
+        closed_at = datetime.now(UTC).isoformat()
         cursor = self._conn.execute(
             """UPDATE trades SET
                 action='close', recovery_close=1, closed_at=?
             WHERE bot_id=? AND opened_at=? AND closed_at=''""",
-            (opened_at, bot_id, opened_at),
+            (closed_at, bot_id, opened_at),
         )
         self._conn.commit()
         return cursor.rowcount > 0
@@ -229,7 +277,7 @@ class HubDB(TradeDB):
     def get_strategy_stats_for_bot(self, bot_id: str, strategy: str, symbol: str = "") -> dict[str, Any]:
         """Strategy stats scoped to a single bot (excludes recovery_close trades)."""
         assert self._conn
-        where = "bot_id=? AND strategy=? AND recovery_close=0"
+        where = "bot_id=? AND strategy=? AND recovery_close=0 AND action='close'"
         params: list[str | int] = [bot_id, strategy]
         if symbol:
             where += " AND symbol=?"
@@ -261,7 +309,7 @@ class HubDB(TradeDB):
                 SUM(CASE WHEN is_winner=0 AND pnl_usd!=0 THEN 1 ELSE 0 END) as losers,
                 SUM(pnl_usd) as total_pnl
             FROM trades
-            WHERE bot_id=? AND recovery_close=0
+            WHERE bot_id=? AND recovery_close=0 AND action='close'
             GROUP BY strategy, symbol""",
             (bot_id,),
         ).fetchall()
@@ -399,6 +447,126 @@ class HubDB(TradeDB):
         cur = self._conn.execute("DELETE FROM cex_binance_snapshots WHERE timestamp < ?", (cutoff_iso,))
         self._conn.commit()
         return cur.rowcount if cur.rowcount is not None else 0
+
+    def save_binance_symbol_states(self, rows: list[dict[str, Any]]) -> None:
+        """Upsert one state row per symbol for incremental scanner metrics."""
+        if not rows:
+            return
+        assert self._conn
+        self._conn.executemany(
+            """
+            INSERT INTO cex_binance_symbol_state (
+                symbol, updated_at, first_seen_at, sample_count,
+                last_price, last_quote_volume, last_change_24h, last_funding_rate,
+                avg_quote_volume, vol_accel, confidence, score,
+                chg_1m, chg_5m, chg_1h, chg_4h, chg_1d, chg_1w, chg_3w, chg_1mo, chg_3mo, chg_1y,
+                anchor_1m_ts, anchor_5m_ts, anchor_1h_ts, anchor_4h_ts, anchor_1d_ts, anchor_1w_ts, anchor_3w_ts, anchor_1mo_ts, anchor_3mo_ts, anchor_1y_ts,
+                anchor_1m_price, anchor_5m_price, anchor_1h_price, anchor_4h_price, anchor_1d_price, anchor_1w_price, anchor_3w_price, anchor_1mo_price, anchor_3mo_price, anchor_1y_price
+            ) VALUES (
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            ON CONFLICT(symbol) DO UPDATE SET
+                updated_at=excluded.updated_at,
+                first_seen_at=excluded.first_seen_at,
+                sample_count=excluded.sample_count,
+                last_price=excluded.last_price,
+                last_quote_volume=excluded.last_quote_volume,
+                last_change_24h=excluded.last_change_24h,
+                last_funding_rate=excluded.last_funding_rate,
+                avg_quote_volume=excluded.avg_quote_volume,
+                vol_accel=excluded.vol_accel,
+                confidence=excluded.confidence,
+                score=excluded.score,
+                chg_1m=excluded.chg_1m,
+                chg_5m=excluded.chg_5m,
+                chg_1h=excluded.chg_1h,
+                chg_4h=excluded.chg_4h,
+                chg_1d=excluded.chg_1d,
+                chg_1w=excluded.chg_1w,
+                chg_3w=excluded.chg_3w,
+                chg_1mo=excluded.chg_1mo,
+                chg_3mo=excluded.chg_3mo,
+                chg_1y=excluded.chg_1y,
+                anchor_1m_ts=excluded.anchor_1m_ts,
+                anchor_5m_ts=excluded.anchor_5m_ts,
+                anchor_1h_ts=excluded.anchor_1h_ts,
+                anchor_4h_ts=excluded.anchor_4h_ts,
+                anchor_1d_ts=excluded.anchor_1d_ts,
+                anchor_1w_ts=excluded.anchor_1w_ts,
+                anchor_3w_ts=excluded.anchor_3w_ts,
+                anchor_1mo_ts=excluded.anchor_1mo_ts,
+                anchor_3mo_ts=excluded.anchor_3mo_ts,
+                anchor_1y_ts=excluded.anchor_1y_ts,
+                anchor_1m_price=excluded.anchor_1m_price,
+                anchor_5m_price=excluded.anchor_5m_price,
+                anchor_1h_price=excluded.anchor_1h_price,
+                anchor_4h_price=excluded.anchor_4h_price,
+                anchor_1d_price=excluded.anchor_1d_price,
+                anchor_1w_price=excluded.anchor_1w_price,
+                anchor_3w_price=excluded.anchor_3w_price,
+                anchor_1mo_price=excluded.anchor_1mo_price,
+                anchor_3mo_price=excluded.anchor_3mo_price,
+                anchor_1y_price=excluded.anchor_1y_price
+            """,
+            [
+                (
+                    str(r.get("symbol", "")),
+                    str(r.get("updated_at", "")),
+                    str(r.get("first_seen_at", "")),
+                    int(r.get("sample_count", 0)),
+                    float(r.get("last_price", 0.0)),
+                    float(r.get("last_quote_volume", 0.0)),
+                    float(r.get("last_change_24h", 0.0)),
+                    float(r.get("last_funding_rate", 0.0)),
+                    float(r.get("avg_quote_volume", 0.0)),
+                    float(r.get("vol_accel", 0.0)),
+                    float(r.get("confidence", 0.0)),
+                    float(r.get("score", 0.0)),
+                    float(r.get("chg_1m", 0.0)),
+                    float(r.get("chg_5m", 0.0)),
+                    float(r.get("chg_1h", 0.0)),
+                    float(r.get("chg_4h", 0.0)),
+                    float(r.get("chg_1d", 0.0)),
+                    float(r.get("chg_1w", 0.0)),
+                    float(r.get("chg_3w", 0.0)),
+                    float(r.get("chg_1mo", 0.0)),
+                    float(r.get("chg_3mo", 0.0)),
+                    float(r.get("chg_1y", 0.0)),
+                    str(r.get("anchor_1m_ts", "")),
+                    str(r.get("anchor_5m_ts", "")),
+                    str(r.get("anchor_1h_ts", "")),
+                    str(r.get("anchor_4h_ts", "")),
+                    str(r.get("anchor_1d_ts", "")),
+                    str(r.get("anchor_1w_ts", "")),
+                    str(r.get("anchor_3w_ts", "")),
+                    str(r.get("anchor_1mo_ts", "")),
+                    str(r.get("anchor_3mo_ts", "")),
+                    str(r.get("anchor_1y_ts", "")),
+                    float(r.get("anchor_1m_price", 0.0)),
+                    float(r.get("anchor_5m_price", 0.0)),
+                    float(r.get("anchor_1h_price", 0.0)),
+                    float(r.get("anchor_4h_price", 0.0)),
+                    float(r.get("anchor_1d_price", 0.0)),
+                    float(r.get("anchor_1w_price", 0.0)),
+                    float(r.get("anchor_3w_price", 0.0)),
+                    float(r.get("anchor_1mo_price", 0.0)),
+                    float(r.get("anchor_3mo_price", 0.0)),
+                    float(r.get("anchor_1y_price", 0.0)),
+                )
+                for r in rows
+            ],
+        )
+        self._conn.commit()
+
+    def load_binance_symbol_states(self) -> list[sqlite3.Row]:
+        """Load all persisted one-row-per-symbol aggregate states."""
+        assert self._conn
+        return self._conn.execute("SELECT * FROM cex_binance_symbol_state ORDER BY symbol ASC").fetchall()
 
     @property
     def conn(self) -> sqlite3.Connection | None:

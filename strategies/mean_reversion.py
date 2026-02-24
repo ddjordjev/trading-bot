@@ -21,7 +21,7 @@ class MeanReversionStrategy(BaseStrategy):
     def __init__(self, symbol: str, market_type: str = "spot", leverage: int = 1, **params: Any):
         super().__init__(symbol, market_type, leverage, **params)
         self.ma_period = int(params.get("ma_period", 50))
-        self.deviation_pct = float(params.get("deviation_pct", 2.0))
+        self.deviation_pct = max(float(params.get("deviation_pct", 2.0)), 0.0001)
 
     def analyze(self, candles: list[Candle], ticker: Ticker | None = None) -> Signal | None:
         df = self.candles_to_df(candles)

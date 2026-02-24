@@ -1,8 +1,7 @@
-const TOKEN = localStorage.getItem("dashboard_token") || "";
-
 function headers(): HeadersInit {
   const h: HeadersInit = { "Content-Type": "application/json" };
-  if (TOKEN) h["Authorization"] = `Bearer ${TOKEN}`;
+  const token = localStorage.getItem("dashboard_token") || "";
+  if (token) h["Authorization"] = `Bearer ${token}`;
   return h;
 }
 
@@ -34,5 +33,6 @@ export function setToken(token: string) {
 export function wsUrl(): string {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const token = localStorage.getItem("dashboard_token") || "";
-  return `${proto}//${window.location.host}/ws?token=${token}`;
+  const params = new URLSearchParams({ token });
+  return `${proto}//${window.location.host}/ws?${params.toString()}`;
 }

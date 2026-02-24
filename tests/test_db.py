@@ -628,3 +628,58 @@ class TestHubDB:
         loaded = hub.load_binance_snapshots_since("2026-02-20T00:00:00+00:00")
         assert len(loaded) == 1
         assert loaded[0]["timestamp"] == "2026-02-23T10:00:00+00:00"
+
+    def test_binance_symbol_states_roundtrip(self, hub: HubDB):
+        hub.save_binance_symbol_states(
+            [
+                {
+                    "symbol": "BTC/USDT",
+                    "updated_at": "2026-02-23T10:00:00+00:00",
+                    "first_seen_at": "2026-02-23T09:00:00+00:00",
+                    "sample_count": 61,
+                    "last_price": 50100.0,
+                    "last_quote_volume": 1200000000.0,
+                    "last_change_24h": 2.8,
+                    "last_funding_rate": 0.00012,
+                    "avg_quote_volume": 1000000000.0,
+                    "vol_accel": 1.2,
+                    "confidence": 1.0,
+                    "score": 8.5,
+                    "chg_1m": 0.1,
+                    "chg_5m": 0.6,
+                    "chg_1h": 1.4,
+                    "chg_4h": 2.1,
+                    "chg_1d": 2.8,
+                    "chg_1w": 0.0,
+                    "chg_3w": 0.0,
+                    "chg_1mo": 0.0,
+                    "chg_3mo": 0.0,
+                    "chg_1y": 0.0,
+                    "anchor_1m_ts": "2026-02-23T09:59:00+00:00",
+                    "anchor_5m_ts": "2026-02-23T09:55:00+00:00",
+                    "anchor_1h_ts": "2026-02-23T09:00:00+00:00",
+                    "anchor_4h_ts": "2026-02-23T06:00:00+00:00",
+                    "anchor_1d_ts": "2026-02-22T10:00:00+00:00",
+                    "anchor_1w_ts": "2026-02-16T10:00:00+00:00",
+                    "anchor_3w_ts": "2026-02-02T10:00:00+00:00",
+                    "anchor_1mo_ts": "2026-01-23T10:00:00+00:00",
+                    "anchor_3mo_ts": "2025-11-23T10:00:00+00:00",
+                    "anchor_1y_ts": "2025-02-23T10:00:00+00:00",
+                    "anchor_1m_price": 50050.0,
+                    "anchor_5m_price": 49800.0,
+                    "anchor_1h_price": 49400.0,
+                    "anchor_4h_price": 49000.0,
+                    "anchor_1d_price": 48750.0,
+                    "anchor_1w_price": 48000.0,
+                    "anchor_3w_price": 47000.0,
+                    "anchor_1mo_price": 45000.0,
+                    "anchor_3mo_price": 40000.0,
+                    "anchor_1y_price": 25000.0,
+                }
+            ]
+        )
+        loaded = hub.load_binance_symbol_states()
+        assert len(loaded) == 1
+        assert loaded[0]["symbol"] == "BTC/USDT"
+        assert loaded[0]["sample_count"] == 61
+        assert loaded[0]["chg_1h"] == pytest.approx(1.4)

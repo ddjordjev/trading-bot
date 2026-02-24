@@ -960,6 +960,37 @@ class TestProcessTradeQueueRejectsAndUpdates:
         assert "tier=" in bot._report_queue_outcome.call_args[0][2]
 
     @pytest.mark.asyncio
+    async def test_process_trade_queue_rejects_manual_stop_before_execution(self, bot, mock_exchange):
+        from datetime import timedelta
+
+        from shared.models import SignalPriority, TradeProposal
+
+        bot._started_at = datetime.now(UTC) - timedelta(minutes=10)
+        bot._warmup_minutes = 1
+        p = TradeProposal(
+            priority=SignalPriority.CRITICAL,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="m",
+            reason="r",
+            strength=0.9,
+            market_type="futures",
+            supported_exchanges=["MEXC"],
+        )
+        bot._hub_proposal = p
+        bot._report_queue_outcome = AsyncMock()
+        mock_exchange.fetch_positions = AsyncMock(return_value=[])
+        bot.target.reset_day(100.0)
+        bot.target.update_balance(100.0)
+
+        with patch.object(type(bot.target), "manual_stop", PropertyMock(return_value=True)):
+            await bot._process_trade_queue()
+
+        bot._report_queue_outcome.assert_called_once()
+        assert bot._report_queue_outcome.call_args[0][2] == "manual_stop"
+        mock_exchange.fetch_positions.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_process_trade_queue_consumed_reports_immediately(self, bot, mock_exchange):
         from datetime import timedelta
 
@@ -1811,6 +1842,40 @@ class TestTickStrategyLoop:
             await bot._tick()
 
         bot.orders.try_hedge.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_tick_manual_stop_skips_new_entry_paths(self, bot, mock_exchange):
+        mock_exchange.fetch_balance = AsyncMock(return_value={"USDT": 500.0})
+        mock_exchange.fetch_positions = AsyncMock(return_value=[])
+        bot._strategies = []
+        bot.settings.hedge_enabled = True
+        bot.settings.extreme_enabled = True
+        bot._last_extreme_eval = 0.0
+
+        bot.orders.check_stops = AsyncMock(return_value=[])
+        bot.orders.try_scale_in = AsyncMock(return_value=[])
+        bot.orders.try_lever_up = AsyncMock(return_value=[])
+        bot.orders.try_partial_take = AsyncMock(return_value=[])
+        bot._check_whale_positions = AsyncMock()
+        bot.orders.try_wick_scalps = AsyncMock(return_value=[])
+        bot.orders.close_expired_quick_trades = AsyncMock(return_value=[])
+        bot._process_trade_queue = AsyncMock()
+        bot.orders.try_hedge = AsyncMock(return_value=[MagicMock()])
+        bot._evaluate_extreme_candidates = AsyncMock()
+        bot._read_shared_intel = MagicMock(return_value=None)
+        bot._write_deployment_status = AsyncMock()
+        bot._log_status = AsyncMock()
+        bot._check_daily_reset = AsyncMock()
+
+        with (
+            patch.object(type(bot.target), "manual_close_all", PropertyMock(return_value=False)),
+            patch.object(type(bot.target), "manual_stop", PropertyMock(return_value=True)),
+        ):
+            await bot._tick()
+
+        bot._process_trade_queue.assert_not_called()
+        bot.orders.try_hedge.assert_not_called()
+        bot._evaluate_extreme_candidates.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_tick_write_deployment_status_exception_caught(self, bot, mock_exchange):

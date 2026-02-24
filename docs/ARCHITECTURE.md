@@ -42,10 +42,10 @@
 ┌─────────────────────────────────────────────────┐
 │                    HOST                          │
 │                                                  │
-│  HOST_DATA_DIR (/workspace/trading-bot-data)     │
+│  HOST_DATA_DIR (/Users/damirdjordjev/workspace/trading-bot-data)     │
 │    └── hub.db          ← sole persistent DB      │
 │                                                  │
-│  HOST_LOGS_DIR (/workspace/trading-bot-logs)     │
+│  HOST_LOGS_DIR (/Users/damirdjordjev/workspace/trading-bot-logs)     │
 │    └── bot_*.log, hub_*.log                      │
 └──────────────────────┬──────────────────────────┘
                        │ bind mounts
@@ -68,12 +68,15 @@ Entry point: `hub_main.py` → FastAPI on port 9035.
 Runs in-process:
 - **MonitorService** — polls external APIs (TradingView, CoinMarketCap,
   CoinGecko, Fear&Greed, liquidations, macro, whales), writes IntelSnapshot
-  to HubState. Also runs TrendingScanner for hot movers.
+  to HubState. Also orchestrates CEX/native + legacy trending streams for
+  hot movers.
 - **BinanceFuturesScanner** — exchange-native scanner that polls Binance
   public futures endpoints (`/fapi/v1/ticker/24hr`, `/fapi/v1/premiumIndex`),
   persists minute snapshots to hub.db, restores rolling history on restart,
   and computes confidence-weighted hot movers from local rolling data.
-  This scanner is currently data-only (no direct proposal routing yet).
+  It also maintains incremental per-symbol aggregate state (single row per
+  symbol) across horizons (`1m/5m/1h/4h/1d/1w/3w/1mo/3mo/1y`) and feeds the
+  primary CEX hot-mover stream used by SignalGenerator.
 - **SignalGenerator** — converts intel + trending data into TradeProposal
   objects with priority (CRITICAL/DAILY/SWING) and strength scores.
   Proposals are filtered for symbol availability BEFORE entering the queue.
@@ -88,8 +91,9 @@ Runs in-process:
 - **Internal API** — `/internal/report` (bot ↔ hub), `/internal/trade`
   (trade persistence), `/internal/trades/{bot_id}/open` (recovery).
 
-State: single `HubState` instance (in-memory). Only analytics_state.json
-is persisted to disk. Everything else is ephemeral.
+State: single `HubState` instance (in-memory). Persistent disk state includes
+hub.db (trade history + Binance scanner tables) and `analytics_state.json`.
+Everything else is ephemeral.
 
 Does NOT: connect to exchanges, place orders, manage positions.
 
@@ -104,12 +108,12 @@ Each bot is configured via environment variables:
 - Risk/leverage/tick overrides per profile
 
 **Active bots** (`is_default=True` in `config/bot_profiles.py`):
-extreme, hedger, momentum, indicators, meanrev, swing.
+extreme, momentum, indicators, meanrev, swing.
 They connect to the exchange and trade proposals received from the hub
 queue. Bots do NOT register local strategies — all trade ideas originate
 from the hub's SignalGenerator. The bot validates and executes.
 
-**Idle bots** (`is_default=False`): scalper, fullstack, conservative,
+**Idle bots** (`is_default=False`): hedger, scalper, fullstack, conservative,
 aggressive. They start in lean idle mode — no exchange connection,
 no hub communication. They check a local activation file
 (`data/{bot_id}/activate`) every 10s. The file is written by the hub's
@@ -130,7 +134,8 @@ Monitor startup → CCXT load_markets() for all exchanges
                               ↓
 External APIs → MonitorService → IntelSnapshot (HubState)
                                        ↓
-TrendingScanner → hot movers ──→ SignalGenerator
+BinanceFuturesScanner (primary) + TrendingScanner (additive)
+                    → merged hot movers ──→ SignalGenerator
                                        ↓
                               TradeProposal objects
                               (tagged with supported_exchanges)
@@ -161,7 +166,7 @@ seconds so the hub always knows what each bot holds (max 5s lag). The `ready`
 flag is false during warmup (1 min) — hub returns no proposal until the bot
 is ready. When ready, hub picks the best matching proposal (filtered by bot
 style, exchange, priority, dedup against hub.db and active symbols), locks
-it for 60s, and returns it. Full ticks also include `bot_status` and
+it for 300s, and returns it. Full ticks also include `bot_status` and
 `positions` for dashboard reporting.
 
 **POST /internal/queue-update** — immediate consume/reject
@@ -336,6 +341,7 @@ hub already curated. They do not scan the market independently:
 |------|-------|-----------------|
 | Trade history | hub.db (host bind mount) | Yes |
 | Binance scanner snapshots | hub.db (`cex_binance_snapshots`) | Yes |
+| Binance scanner per-symbol state | hub.db (`cex_binance_symbol_state`) | Yes |
 | Analytics scores | analytics_state.json (host) | Yes |
 | Bot status | HubState (memory) | No |
 | Intel snapshots | HubState (memory) | No |
@@ -344,7 +350,7 @@ hub already curated. They do not scan the market independently:
 
 **hub.db** is the ONLY persistent database. Lives on host at
 `$HOST_DATA_DIR/hub.db`. Never delete. Backups in
-`/workspace/trading-bot-backups/`.
+`/Users/damirdjordjev/workspace/trading-bot-backups/`.
 
 **analytics_state.json** persists strategy weights, patterns, and
 suggestions so they survive hub restarts. It's a JSON file because
@@ -403,7 +409,7 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
 | `hub/state.py` | Single in-memory state (HubState) |
 | `web/server.py` | Dashboard + /internal endpoints |
 | `services/monitor.py` | Intel polling + signal routing |
-| `scanner/binance_futures.py` | Binance futures native scanner (DB-backed rolling history) |
+| `scanner/binance_futures.py` | Binance futures native scanner (DB-backed rolling history + incremental per-symbol horizons) |
 | `services/signal_generator.py` | Proposal creation |
 | `services/analytics_service.py` | Strategy scoring from trade history |
 | `analytics/engine.py` | Analytics computation logic |
@@ -438,7 +444,7 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
 - **Don't persist state in bots.** No local DB, no state files. Everything
   goes to hub.db via HTTP.
 
-- **Don't add complexity to the queue.** Serve 1 proposal, lock 60s, bot
+- **Don't add complexity to the queue.** Serve 1 proposal, lock 300s, bot
   reports immediately. No broadcasting, no copy-on-read, no round-robin.
   Don't buffer queue outcomes — always report consumed/rejected right away.
 

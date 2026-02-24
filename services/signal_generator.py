@@ -70,6 +70,16 @@ class SignalGenerator:
     """
 
     MIN_QUEUE_SIZE = 10
+    _CEX_TREND_STRATEGIES = {
+        "extreme_mover",
+        "trending_momentum",
+        "major_momentum",
+        "multi_intel_convergence",
+        "major_intel_direction",
+        "major_swing",
+        "trending_filler",
+        "major_filler",
+    }
 
     def __init__(self, preferred_market_type: str = "futures", major_symbols: set[str] | None = None) -> None:
         self._preferred_market_type = preferred_market_type
@@ -101,6 +111,7 @@ class SignalGenerator:
         self._quick_trade_penalty: float = 1.0  # multiplier for scalp/quick proposals
         self._current_regime: str = "normal"  # set each generate() call
         self._current_hour: int = -1  # set each generate() call
+        self._cex_symbol_state: dict[str, dict[str, float]] = {}
 
     # ------------------------------------------------------------------
     # Analytics feedback
@@ -278,6 +289,7 @@ class SignalGenerator:
         """Evaluate the current intel snapshot and append new proposals."""
         self._current_regime = snap.regime
         self._current_hour = datetime.now(UTC).hour
+        self._cex_symbol_state = self._build_cex_symbol_state(snap)
 
         self._purge_cooldowns()
         queue.purge_stale()
@@ -340,7 +352,7 @@ class SignalGenerator:
         for mover in snap.hot_movers[:5]:
             if abs(mover.change_1h) >= 8.0 and not mover.is_low_liquidity:
                 side = "long" if mover.change_1h > 0 else "short"
-                sym = f"{mover.symbol.upper()}/USDT"
+                sym = self._pair_symbol(mover.symbol)
                 self._propose(
                     q,
                     TradeProposal(
@@ -372,7 +384,7 @@ class SignalGenerator:
                 continue
 
             side = "long" if mover.change_24h > 0 else "short"
-            sym = f"{mover.symbol.upper()}/USDT"
+            sym = self._pair_symbol(mover.symbol)
 
             tv_aligned = (tv_direction == side) or tv_direction == "neutral"
             strength = 0.40
@@ -439,7 +451,7 @@ class SignalGenerator:
 
         # Major coins momentum — lower threshold than altcoins (2% vs 5%)
         for mover in self._merge_trending(snap):
-            sym = f"{mover.symbol.upper()}/USDT"
+            sym = self._pair_symbol(mover.symbol)
             if sym not in self._major_symbols:
                 continue
             if abs(mover.change_24h) < 2.0:
@@ -688,7 +700,7 @@ class SignalGenerator:
         for mover in candidates:
             if added >= needed:
                 break
-            sym = f"{mover.symbol.upper()}/USDT"
+            sym = self._pair_symbol(mover.symbol)
             if sym in existing_syms:
                 continue
             if mover.is_low_liquidity:
@@ -887,7 +899,8 @@ class SignalGenerator:
         # Apply analytics modifier to strength
         raw_strength = proposal.strength
         modifier = self._analytics_strength_modifier(proposal.strategy, proposal.symbol, is_quick=proposal.quick_trade)
-        proposal.strength = round(raw_strength * modifier, 4)
+        cex_modifier = self._cex_strength_modifier(proposal)
+        proposal.strength = round(raw_strength * modifier * cex_modifier, 4)
 
         key = f"{proposal.priority.value}_{proposal.symbol}_{proposal.strategy}"
 
@@ -907,14 +920,16 @@ class SignalGenerator:
         missing = sorted(all_ex - set(proposal.supported_exchanges))
         exchange_note = f" (not on: {', '.join(missing)})" if missing else ""
         analytics_note = f" [analytics: {modifier:.2f}x]" if modifier != 1.0 else ""
+        cex_note = f" [cex: {cex_modifier:.2f}x]" if cex_modifier != 1.0 else ""
         logger.info(
-            "QUEUE [{}] {} {} — {} (str={:.2f}){}{}",
+            "QUEUE [{}] {} {} — {} (str={:.2f}){}{}{}",
             proposal.priority.value.upper(),
             proposal.side.upper(),
             proposal.symbol,
             proposal.reason,
             proposal.strength,
             analytics_note,
+            cex_note,
             exchange_note,
         )
 
@@ -927,10 +942,82 @@ class SignalGenerator:
         seen: set[str] = set()
         result: list[TrendingSnapshot] = []
         for coin in snap.hot_movers + snap.cmc_trending + snap.coingecko_trending:
-            if coin.symbol.upper() not in seen:
-                seen.add(coin.symbol.upper())
+            key = self._symbol_key(coin.symbol)
+            if key not in seen:
+                seen.add(key)
                 result.append(coin)
         return result
+
+    def _build_cex_symbol_state(self, snap: IntelSnapshot) -> dict[str, dict[str, float]]:
+        out: dict[str, dict[str, float]] = {}
+        for mover in snap.hot_movers:
+            if mover.source != "binance_scanner":
+                continue
+            key = self._symbol_key(mover.symbol)
+            out[key] = {
+                "confidence": mover.cex_confidence,
+                "vol_accel": mover.cex_vol_accel,
+                "score": mover.cex_score,
+                "chg_1m": mover.cex_change_1m,
+                "chg_5m": mover.change_5m,
+                "chg_1h": mover.change_1h,
+                "chg_4h": mover.cex_change_4h,
+                "chg_1d": mover.cex_change_1d,
+                "chg_1w": mover.cex_change_1w,
+            }
+        return out
+
+    @staticmethod
+    def _clamp(value: float, lo: float, hi: float) -> float:
+        return max(lo, min(hi, value))
+
+    def _cex_strength_modifier(self, proposal: TradeProposal) -> float:
+        apply_cex = True if proposal.strategy.startswith("ta_") else proposal.strategy in self._CEX_TREND_STRATEGIES
+        if not apply_cex:
+            return 1.0
+
+        st = self._cex_symbol_state.get(self._symbol_key(proposal.symbol))
+        if not st:
+            return 1.0
+
+        # Confidence acts as a base scalar: low history = mild de-prioritization,
+        # mature history = moderate boost.
+        confidence = self._clamp(st.get("confidence", 0.0), 0.0, 1.2)
+        confidence_mod = 0.75 + 0.5 * confidence
+
+        # Volume acceleration above its own rolling baseline boosts urgency.
+        vol_accel = st.get("vol_accel", 1.0)
+        vol_mod = 1.0 + self._clamp((vol_accel - 1.0) * 0.25, -0.15, 0.20)
+
+        side_sign = 1.0 if proposal.side == "long" else -1.0
+        signed_trend = 0.0
+        signed_trend += side_sign * st.get("chg_5m", 0.0) * 0.30
+        signed_trend += side_sign * st.get("chg_1h", 0.0) * 0.45
+        signed_trend += side_sign * st.get("chg_4h", 0.0) * 0.25
+        trend_mod = 1.0 + self._clamp(signed_trend / 20.0, -0.20, 0.25)
+        # Strongly opposite multi-horizon momentum should suppress trend-following
+        # entries even if confidence/volume are high.
+        misalign_penalty = 1.0 + self._clamp(signed_trend / 10.0, -0.45, 0.0)
+
+        score_mod = 1.0 + self._clamp(st.get("score", 0.0) / 25.0, 0.0, 0.15)
+
+        return self._clamp(confidence_mod * vol_mod * trend_mod * score_mod * misalign_penalty, 0.60, 1.50)
+
+    @staticmethod
+    def _pair_symbol(symbol: str) -> str:
+        raw = (symbol or "").upper().split(":")[0]
+        if "/" in raw:
+            return raw
+        if raw.endswith("USDT") and len(raw) > 4:
+            return f"{raw[:-4]}/USDT"
+        if raw.endswith("USD") and len(raw) > 3:
+            return f"{raw[:-3]}/USD"
+        return f"{raw}/USDT"
+
+    @classmethod
+    def _symbol_key(cls, symbol: str) -> str:
+        pair = cls._pair_symbol(symbol)
+        return pair.split("/", 1)[0]
 
     def _count_directional_agreement(self, snap: IntelSnapshot) -> int:
         """Count how many independent intel sources agree on the preferred direction."""

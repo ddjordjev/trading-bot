@@ -33,7 +33,7 @@ class Notifier:
         self.smtp_password = settings.smtp_password
         self.notify_email = settings.notify_email
         self.enabled_types = set(settings.notification_list)
-        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=100)
+        self._queue: asyncio.Queue[tuple[str, str, int]] = asyncio.Queue(maxsize=100)
         self._running = False
         self._background_tasks: list[asyncio.Task[None]] = []
 
@@ -65,7 +65,7 @@ class Notifier:
         if self._queue.full():
             logger.warning("Notification queue full ({}), dropping: {}", self._queue.maxsize, subject)
             return
-        await self._queue.put((subject, body))
+        await self._queue.put((subject, body, 0))
 
     async def alert_liquidation(self, symbol: str, pnl: float, balance: float) -> None:
         await self.send(
@@ -174,14 +174,19 @@ class Notifier:
     async def _process_queue(self) -> None:
         while self._running:
             try:
-                subject, body = await asyncio.wait_for(self._queue.get(), timeout=5.0)
+                subject, body, attempts = await asyncio.wait_for(self._queue.get(), timeout=5.0)
                 ok = await self._send_email(subject, body)
                 if not ok:
-                    # Re-queue once on failure so transient errors can recover
-                    try:
-                        self._queue.put_nowait((subject, body))
-                    except asyncio.QueueFull:
-                        logger.warning("Notification dropped after send failure (queue full): {}", subject)
+                    # Retry a few times with short backoff, then drop to avoid
+                    # poisoning the queue with one permanently failing message.
+                    if attempts < 3:
+                        await asyncio.sleep(min(2**attempts, 4))
+                        try:
+                            self._queue.put_nowait((subject, body, attempts + 1))
+                        except asyncio.QueueFull:
+                            logger.warning("Notification dropped after send failure (queue full): {}", subject)
+                    else:
+                        logger.error("Notification dropped after {} failed attempts: {}", attempts + 1, subject)
             except TimeoutError:
                 continue
             except Exception as e:

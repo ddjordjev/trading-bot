@@ -197,7 +197,7 @@ class Settings(BaseSettings):
     binance_scanner_min_quote_volume: float = 5_000_000.0
     binance_scanner_top_movers_count: int = 15
     binance_scanner_history_hours: int = 24
-    binance_scanner_retention_days: int = 7
+    binance_scanner_retention_days: int = 3
 
     # Dashboard (hub only)
     dashboard_host: str = "0.0.0.0"
