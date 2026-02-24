@@ -940,9 +940,9 @@ def _build_merged_snapshot() -> dict[str, Any]:
         ex_bal = rpt.get("exchange_balance", 0)
         if ex_name and ex_bal:
             exchange_balances[ex_name] = max(exchange_balances.get(ex_name, 0), ex_bal)
-            exchange_available[ex_name] = max(
-                exchange_available.get(ex_name, 0.0), float(s.get("available_margin", 0.0))
-            )
+            # exchange_balance is the raw free USDT fetched from the exchange.
+            # Use it as account-level available margin anchor.
+            exchange_available[ex_name] = max(exchange_available.get(ex_name, 0.0), float(ex_bal))
 
         total_balance += s.get("balance", 0)
         total_available += s.get("available_margin", 0)

@@ -136,7 +136,6 @@ export function Monitoring() {
   const [data, setData] = useState<MetricsData | null>(null);
   const [grafana, setGrafana] = useState<GrafanaConfig | null>(null);
   const [grafanaReachable, setGrafanaReachable] = useState<boolean | null>(null);
-  const [redirecting, setRedirecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchMetrics = useCallback(() => {
@@ -166,14 +165,6 @@ export function Monitoring() {
       .catch(() => setGrafanaReachable(false));
   }, []);
 
-  useEffect(() => {
-    if (!grafana || grafanaReachable !== true || redirecting) return;
-    const base = `${window.location.protocol}//${window.location.hostname}:${grafana.port}`;
-    const src = `${base}/d/${grafana.dashboard_uid}/trading-bot?orgId=1&kiosk&theme=dark`;
-    setRedirecting(true);
-    window.location.assign(src);
-  }, [grafana, grafanaReachable, redirecting]);
-
   if (error && !data) {
     return (
       <div className="empty-state">
@@ -193,13 +184,10 @@ export function Monitoring() {
     );
   }
 
-  if (redirecting) {
-    return (
-      <div className="empty-state">
-        <p style={{ color: "var(--text-muted)" }}>Opening full-page Grafana...</p>
-      </div>
-    );
-  }
+  const grafanaSrc =
+    grafana && grafanaReachable
+      ? `${window.location.protocol}//${window.location.hostname}:${grafana.port}/d/${grafana.dashboard_uid}/trading-bot?orgId=1&kiosk&theme=dark`
+      : "";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
@@ -216,7 +204,21 @@ export function Monitoring() {
           </a>
         )}
       </div>
-      <BuiltInDashboard data={data} />
+      {grafanaSrc ? (
+        <iframe
+          title="Grafana Monitoring"
+          src={grafanaSrc}
+          style={{
+            width: "100%",
+            minHeight: "75vh",
+            border: "1px solid var(--border, #30363d)",
+            borderRadius: "var(--radius, 8px)",
+            background: "var(--bg-secondary, #161b22)",
+          }}
+        />
+      ) : (
+        <BuiltInDashboard data={data} />
+      )}
     </div>
   );
 }

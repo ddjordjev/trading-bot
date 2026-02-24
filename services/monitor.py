@@ -738,10 +738,10 @@ class MonitorService:
                 price=c.price,
                 market_cap=c.market_cap,
                 volume_24h=c.volume_24h,
-                change_5m=c.change_5m,
-                change_1h=c.change_1h,
-                change_24h=c.change_24h,
-                change_7d=c.change_7d,
+                change_5m=float(getattr(c, "change_5m", 0.0) or 0.0),
+                change_1h=float(getattr(c, "change_1h", 0.0) or 0.0),
+                change_24h=float(getattr(c, "change_24h", 0.0) or 0.0),
+                change_7d=float(getattr(c, "change_7d", 0.0) or 0.0),
                 source="coinmarketcap",
             )
             for c in self.cmc.all_interesting[:15]
@@ -754,10 +754,10 @@ class MonitorService:
                 price=c.price,
                 market_cap=c.market_cap,
                 volume_24h=c.volume_24h,
-                change_5m=c.change_5m,
-                change_1h=c.change_1h,
-                change_24h=c.change_24h,
-                change_7d=c.change_7d,
+                change_5m=float(getattr(c, "change_5m", 0.0) or 0.0),
+                change_1h=float(getattr(c, "change_1h", 0.0) or 0.0),
+                change_24h=float(getattr(c, "change_24h", 0.0) or 0.0),
+                change_7d=float(getattr(c, "change_7d", 0.0) or 0.0),
                 source="coingecko",
             )
             for c in self.gecko.all_interesting[:15]

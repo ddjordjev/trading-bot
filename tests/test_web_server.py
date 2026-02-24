@@ -786,10 +786,10 @@ class TestInternalReport:
         from web.server import _build_merged_snapshot
 
         snap = _build_merged_snapshot()
-        # equity = available + used_margin + unrealized = 4000 + (1200/12) + 50 = 4150
-        assert snap["status"]["balance"] == pytest.approx(4150.0)
-        assert snap["status"]["available_margin"] == pytest.approx(4000.0)
-        assert snap["exchange_balances"]["BINANCE"] == pytest.approx(4150.0)
+        # equity = available + used_margin + unrealized = 5000 + (1200/12) + 50 = 5150
+        assert snap["status"]["balance"] == pytest.approx(5150.0)
+        assert snap["status"]["available_margin"] == pytest.approx(5000.0)
+        assert snap["exchange_balances"]["BINANCE"] == pytest.approx(5150.0)
         _bot_reports.clear()
 
 
