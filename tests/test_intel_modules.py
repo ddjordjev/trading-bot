@@ -2223,7 +2223,7 @@ class TestLiquidationMonitorFetch:
         assert monitor_no_key._latest.total_24h == pytest.approx(343_050_000)
         assert monitor_no_key._latest.long_24h == pytest.approx(249_890_000)
         assert monitor_no_key._latest.short_24h == pytest.approx(93_160_000)
-        assert monitor_no_key._warned_no_key is True
+        assert monitor_no_key._latest.total_24h_text == "$343.05M"
 
     @pytest.mark.asyncio
     @patch("intel.liquidations.aiohttp.ClientSession")
@@ -2277,27 +2277,53 @@ class TestLiquidationMonitorFetch:
 
     @pytest.mark.asyncio
     @patch("intel.liquidations.aiohttp.ClientSession")
-    async def test_fetch_success_list_format(self, mock_session_class, monitor):
-        data = {
-            "code": "0",
-            "msg": "success",
-            "data": [
-                {
-                    "exchange": "All",
-                    "liquidation_usd": 85_000_000,
-                    "long_liquidation_usd": 50_000_000,
-                    "short_liquidation_usd": 35_000_000,
-                },
-                {
-                    "exchange": "Bybit",
-                    "liquidation_usd": 30_000_000,
-                    "long_liquidation_usd": 18_000_000,
-                    "short_liquidation_usd": 12_000_000,
-                },
-            ],
-        }
+    async def test_fetch_no_api_key_ignores_summary_zero_picks_card_value(self, mock_session_class, monitor_no_key):
+        html = """
+        <div class="font3 fw5 MuiBox-root cg-style-0">24h Rekt</div>
+        <div>According to CoinGlass data, total liquidations comes in at $0.</div>
+        <div class="Number undefined">
+          <span>$</span>
+          <span>342.63M</span>
+        </div>
+        <div class="Number undefined">
+          <span>$</span>
+          <span>250.30M</span>
+        </div>
+        <div class="Number undefined">
+          <span>$</span>
+          <span>92.34M</span>
+        </div>
+        """
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.text = AsyncMock(return_value=html)
+        mock_get = MagicMock()
+        mock_get.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_get.__aexit__ = AsyncMock(return_value=None)
         mock_sess = MagicMock()
-        mock_sess.get.return_value = _make_liq_get_mock(200, data)
+        mock_sess.get.return_value = mock_get
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await monitor_no_key._fetch()
+
+        assert monitor_no_key._latest is not None
+        assert monitor_no_key._latest.total_24h == pytest.approx(342_630_000)
+        assert monitor_no_key._latest.long_24h == pytest.approx(250_300_000)
+        assert monitor_no_key._latest.short_24h == pytest.approx(92_340_000)
+
+    @pytest.mark.asyncio
+    @patch("intel.liquidations.aiohttp.ClientSession")
+    async def test_fetch_success_list_format(self, mock_session_class, monitor):
+        html = "<div>24h Rekt $85.00M Long $50.00M Short $35.00M</div>"
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.text = AsyncMock(return_value=html)
+        mock_get = MagicMock()
+        mock_get.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_get.__aexit__ = AsyncMock(return_value=None)
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = mock_get
         mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
         mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
@@ -2311,16 +2337,15 @@ class TestLiquidationMonitorFetch:
     @pytest.mark.asyncio
     @patch("intel.liquidations.aiohttp.ClientSession")
     async def test_fetch_success_dict_format(self, mock_session_class, monitor):
-        data = {
-            "code": "0",
-            "data": {
-                "liquidation_usd": 500_000_000,
-                "long_liquidation_usd": 300_000_000,
-                "short_liquidation_usd": 200_000_000,
-            },
-        }
+        html = "<div>24h Rekt $500.00M Long $300.00M Short $200.00M</div>"
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.text = AsyncMock(return_value=html)
+        mock_get = MagicMock()
+        mock_get.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_get.__aexit__ = AsyncMock(return_value=None)
         mock_sess = MagicMock()
-        mock_sess.get.return_value = _make_liq_get_mock(200, data)
+        mock_sess.get.return_value = mock_get
         mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
         mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
@@ -2334,25 +2359,15 @@ class TestLiquidationMonitorFetch:
     @pytest.mark.asyncio
     @patch("intel.liquidations.aiohttp.ClientSession")
     async def test_fetch_list_no_all_entry_sums_exchanges(self, mock_session_class, monitor):
-        data = {
-            "code": "0",
-            "data": [
-                {
-                    "exchange": "Binance",
-                    "liquidation_usd": 40_000_000,
-                    "long_liquidation_usd": 25_000_000,
-                    "short_liquidation_usd": 15_000_000,
-                },
-                {
-                    "exchange": "Bybit",
-                    "liquidation_usd": 30_000_000,
-                    "long_liquidation_usd": 18_000_000,
-                    "short_liquidation_usd": 12_000_000,
-                },
-            ],
-        }
+        html = "<div>24h Rekt $70.00M Long $43.00M Short $27.00M</div>"
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.text = AsyncMock(return_value=html)
+        mock_get = MagicMock()
+        mock_get.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_get.__aexit__ = AsyncMock(return_value=None)
         mock_sess = MagicMock()
-        mock_sess.get.return_value = _make_liq_get_mock(200, data)
+        mock_sess.get.return_value = mock_get
         mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
         mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
@@ -2378,7 +2393,7 @@ class TestLiquidationMonitorFetch:
     @pytest.mark.asyncio
     @patch("intel.liquidations.aiohttp.ClientSession")
     async def test_fetch_exception(self, mock_session_class, monitor):
-        mock_sess = AsyncMock()
+        mock_sess = MagicMock()
         mock_get = MagicMock()
         mock_get.__aenter__ = AsyncMock(side_effect=ConnectionError("offline"))
         mock_get.__aexit__ = AsyncMock(return_value=None)
@@ -2405,30 +2420,24 @@ class TestLiquidationMonitorFetch:
     @pytest.mark.asyncio
     @patch("intel.liquidations.aiohttp.ClientSession")
     async def test_fetch_parses_wrapped_camel_case_and_commas(self, mock_session_class, monitor):
-        data = {
-            "code": "0",
-            "data": {
-                "list": [
-                    {
-                        "exchangeName": "All",
-                        "liquidationUsd": "1,250,000.50",
-                        "longLiquidationUsd": "700000",
-                        "shortLiquidationUsd": "550000.50",
-                    }
-                ]
-            },
-        }
+        html = "<div>24h Rekt $1.25M Long $700.00K Short $550.00K</div>"
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.text = AsyncMock(return_value=html)
+        mock_get = MagicMock()
+        mock_get.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_get.__aexit__ = AsyncMock(return_value=None)
         mock_sess = MagicMock()
-        mock_sess.get.return_value = _make_liq_get_mock(200, data)
+        mock_sess.get.return_value = mock_get
         mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
         mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
 
         await monitor._fetch()
 
         assert monitor._latest is not None
-        assert monitor._latest.total_24h == 1_250_000.50
+        assert monitor._latest.total_24h == 1_250_000
         assert monitor._latest.long_24h == 700_000
-        assert monitor._latest.short_24h == 550_000.50
+        assert monitor._latest.short_24h == 550_000
 
 
 class TestLiquidationMonitorPollLoopAndLifecycle:
@@ -2454,14 +2463,10 @@ class TestLiquidationMonitorPollLoopAndLifecycle:
     @pytest.mark.asyncio
     async def test_start_sets_running_and_creates_task(self):
         monitor = LiquidationMonitor(poll_interval=300)
-        with (
-            patch.object(monitor, "_poll_loop", new_callable=AsyncMock),
-            patch.object(monitor, "_binance_ws_loop", new_callable=AsyncMock),
-            patch.object(monitor, "_bybit_ws_loop", new_callable=AsyncMock),
-        ):
+        with patch.object(monitor, "_poll_loop", new_callable=AsyncMock):
             await monitor.start()
         assert monitor._running is True
-        assert len(monitor._background_tasks) == 3
+        assert len(monitor._background_tasks) == 1
         await monitor.stop()
         assert monitor._running is False
         assert len(monitor._background_tasks) == 0
@@ -2473,48 +2478,12 @@ class TestLiquidationMonitorPollLoopAndLifecycle:
         await monitor.stop()
         assert monitor._running is False
 
-    def test_consume_binance_force_order_updates_aggregate(self):
+    def test_rebuild_combined_snapshot_uses_coinglass_only(self):
         monitor = LiquidationMonitor(poll_interval=300)
-        now_ms = int(datetime.now(UTC).timestamp() * 1000)
-        payload = {
-            "e": "forceOrder",
-            "E": now_ms,
-            "o": {
-                "S": "SELL",
-                "z": "0.5",
-                "ap": "100000",
-                "T": now_ms,
-            },
-        }
-        monitor._consume_binance_force_order(payload)
-
+        monitor._coinglass_latest = LiquidationSnapshot(total_24h=123_000_000, total_24h_text="$123.00M")
+        monitor._rebuild_combined_snapshot()
         assert monitor.latest is not None
-        assert monitor.latest.long_24h == 50_000.0
-        assert monitor.latest.short_24h == 0.0
-        assert monitor.latest.total_24h == 50_000.0
-
-    def test_consume_bybit_liquidation_updates_aggregate(self):
-        monitor = LiquidationMonitor(poll_interval=300)
-        now_ms = int(datetime.now(UTC).timestamp() * 1000)
-        payload = {
-            "topic": "allLiquidation.BTCUSDT",
-            "ts": now_ms,
-            "data": [
-                {
-                    "T": now_ms,
-                    "s": "BTCUSDT",
-                    "S": "Buy",
-                    "v": "0.25",
-                    "p": "100000",
-                }
-            ],
-        }
-        monitor._consume_bybit_liquidation(payload)
-
-        assert monitor.latest is not None
-        assert monitor.latest.long_24h == 25_000.0
-        assert monitor.latest.short_24h == 0.0
-        assert monitor.latest.total_24h == 25_000.0
+        assert monitor.latest.total_24h == 123_000_000
 
 
 # ── MacroCalendar HTTP fetch, poll_loop, start/stop ────────────────────

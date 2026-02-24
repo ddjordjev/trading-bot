@@ -41,6 +41,11 @@ try without it first, that just wastes time on a guaranteed failure.
 
 ## Docker Deployment Protocol
 
+This section has two deploy rules. Use the default rule unless the user
+explicitly asks for fast local-test deploy behavior.
+
+### Rule 1 — Normal deploy cycle (default)
+
 **NEVER rebuild or restart Docker containers eagerly.** Follow this exact
 sequence every time, no shortcuts:
 
@@ -70,6 +75,26 @@ sequence every time, no shortcuts:
   master — THEN deploy.
 - If the user isn't present (no explicit "deploy" / "rebuild" / "run"),
   stop after pushing. Don't touch Docker.
+
+### Rule 2 — allow fast deploys for local tests
+
+When the user explicitly asks for a fast deploy/local test deploy, allow
+deploying current local changes directly (including uncommitted changes).
+Do **not** require commit, push, CI, or squash first.
+
+Use this full deploy cycle directly:
+```bash
+docker compose down
+# Wipe ephemeral state so bots start fresh from defaults:
+find "$HOST_DATA_DIR" \( -name "*.json" -o -name "*.lock" -o -name "activate" -o -name "STOP" -o -name "CLOSE_ALL" \) | xargs rm -f
+docker compose build
+docker compose up -d
+```
+
+**Rules:**
+- Never rebuild "just the bots" or "just the hub". Always bring everything
+  down, rebuild everything, bring everything up. No partial deploys.
+- Use this rule only when user intent is explicitly fast local testing.
 
 ## No polling loops — save tokens
 

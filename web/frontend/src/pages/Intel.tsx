@@ -133,7 +133,9 @@ export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
         <div className="card">
           <h3 style={{ color: "var(--heading)", marginBottom: "0.8rem" }}>Liquidations (24h)</h3>
           <div style={{ fontSize: "1.5rem", fontWeight: 700, color: "var(--heading)" }}>
-            {liquidationAvailable ? formatUsdCompact(intel.liquidation_24h) : "Data unavailable"}
+            {liquidationAvailable
+              ? (intel.liquidation_24h_text?.trim() || formatUsdCompact(intel.liquidation_24h))
+              : "Data unavailable"}
           </div>
           {intel.mass_liquidation && (
             <div style={{
@@ -151,7 +153,7 @@ export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
           </div>
           {!liquidationAvailable && (
             <div style={{ marginTop: "0.4rem", color: "var(--text-muted)", fontSize: "0.78rem" }}>
-              Source feed inactive (CoinGlass API)
+              Source feed inactive (CoinGlass liquidations)
             </div>
           )}
         </div>

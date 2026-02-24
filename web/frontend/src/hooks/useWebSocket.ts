@@ -91,6 +91,7 @@ export interface IntelSnapshot {
   fear_greed: number;
   fear_greed_bias: string;
   liquidation_24h: number;
+  liquidation_24h_text: string;
   mass_liquidation: boolean;
   liquidation_bias: string;
   macro_event_imminent: boolean;

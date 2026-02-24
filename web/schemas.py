@@ -103,6 +103,7 @@ class IntelSnapshot(BaseModel):
     fear_greed: int = 50
     fear_greed_bias: str = "neutral"
     liquidation_24h: float = 0.0
+    liquidation_24h_text: str = ""
     mass_liquidation: bool = False
     liquidation_bias: str = "neutral"
     macro_event_imminent: bool = False

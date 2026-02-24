@@ -149,6 +149,8 @@ function DbExplorer() {
   const [tableData, setTableData] = useState<DbTableData | null>(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [selectedCell, setSelectedCell] = useState<{ column: string; value: string } | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     get<DbTable[]>("/api/db/tables").then(setTables).catch(() => {});
@@ -166,6 +168,19 @@ function DbExplorer() {
   const selectTable = (name: string) => {
     setSelected(name);
     setPage(1);
+    setSelectedCell(null);
+    setCopied(false);
+  };
+
+  const copySelectedCell = async () => {
+    if (!selectedCell) return;
+    try {
+      await navigator.clipboard.writeText(selectedCell.value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
   };
 
   return (
@@ -221,14 +236,26 @@ function DbExplorer() {
                     borderBottom: "1px solid var(--border, #30363d)",
                     background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.02)",
                   }}>
-                    {tableData.columns.map(col => (
-                      <td key={col} style={{
-                        padding: "0.4rem 0.6rem", whiteSpace: "nowrap",
-                        maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis",
-                      }}>
-                        {row[col] == null ? <span style={{ opacity: 0.3 }}>NULL</span> : String(row[col])}
-                      </td>
-                    ))}
+                    {tableData.columns.map(col => {
+                      const cellValue = row[col] == null ? "NULL" : String(row[col]);
+                      return (
+                        <td
+                          key={col}
+                          title={cellValue}
+                          onClick={() => {
+                            setSelectedCell({ column: col, value: cellValue });
+                            setCopied(false);
+                          }}
+                          style={{
+                            padding: "0.4rem 0.6rem", whiteSpace: "nowrap",
+                            maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis",
+                            cursor: "pointer",
+                          }}
+                        >
+                          {row[col] == null ? <span style={{ opacity: 0.3 }}>NULL</span> : cellValue}
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))}
                 {tableData.rows.length === 0 && (
@@ -277,6 +304,56 @@ function DbExplorer() {
                   Next
                 </button>
               </div>
+            </div>
+          )}
+
+          {selectedCell && (
+            <div style={{
+              borderTop: "1px solid var(--border, #30363d)",
+              padding: "0.65rem 0.75rem",
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.45rem",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem" }}>
+                <span style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
+                  Full value: <code>{selectedCell.column}</code>
+                </span>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  {copied && <span style={{ fontSize: "0.72rem", color: "var(--green)" }}>Copied</span>}
+                  <button
+                    type="button"
+                    onClick={copySelectedCell}
+                    style={{
+                      padding: "0.2rem 0.5rem",
+                      fontSize: "0.72rem",
+                      cursor: "pointer",
+                      background: "none",
+                      border: "1px solid var(--border)",
+                      borderRadius: 4,
+                      color: "var(--text-muted)",
+                    }}
+                  >
+                    Copy
+                  </button>
+                </div>
+              </div>
+              <textarea
+                readOnly
+                value={selectedCell.value}
+                style={{
+                  width: "100%",
+                  minHeight: 82,
+                  resize: "vertical",
+                  border: "1px solid var(--border, #30363d)",
+                  borderRadius: 6,
+                  background: "var(--bg, #0d1117)",
+                  color: "var(--text, #c9d1d9)",
+                  padding: "0.45rem 0.55rem",
+                  fontSize: "0.75rem",
+                  lineHeight: 1.45,
+                }}
+              />
             </div>
           )}
         </div>

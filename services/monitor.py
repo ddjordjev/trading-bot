@@ -667,6 +667,7 @@ class MonitorService:
         liq = self.liquidations.latest
         if liq:
             snap.liquidation_24h = liq.total_24h
+            snap.liquidation_24h_text = liq.total_24h_text
             snap.mass_liquidation = liq.is_mass_liquidation
             snap.liquidation_bias = self.liquidations.reversal_bias()
 
