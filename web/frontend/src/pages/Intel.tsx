@@ -62,6 +62,7 @@ export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
   if (!intel) return <div className="empty-state">Intel module not active</div>;
 
   const regimeColor = REGIME_COLORS[intel.regime] || "var(--text)";
+  const liquidationAvailable = Array.isArray(intel.sources_active) && intel.sources_active.includes("liquidations");
 
   return (
     <div>
@@ -99,7 +100,7 @@ export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
         <div className="card">
           <h3 style={{ color: "var(--heading)", marginBottom: "0.8rem" }}>Liquidations (24h)</h3>
           <div style={{ fontSize: "1.5rem", fontWeight: 700, color: "var(--heading)" }}>
-            {formatUsdCompact(intel.liquidation_24h)}
+            {liquidationAvailable ? formatUsdCompact(intel.liquidation_24h) : "Data unavailable"}
           </div>
           {intel.mass_liquidation && (
             <div style={{
@@ -115,6 +116,11 @@ export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
               {intel.liquidation_bias.toUpperCase()}
             </strong>
           </div>
+          {!liquidationAvailable && (
+            <div style={{ marginTop: "0.4rem", color: "var(--text-muted)", fontSize: "0.78rem" }}>
+              Source feed inactive (CoinGlass API)
+            </div>
+          )}
         </div>
       </div>
 

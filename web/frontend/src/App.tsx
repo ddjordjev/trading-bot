@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useWebSocket } from "./hooks/useWebSocket";
 import type { FullSnapshot } from "./hooks/useWebSocket";
 import { Dashboard } from "./pages/Dashboard";
@@ -75,6 +75,11 @@ export function App() {
       bots: snapshot.bots,
     };
   }, [snapshot, selected, exchangeFilter]);
+
+  useEffect(() => {
+    // Ensure each top-level tab starts at the top of the page.
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [tab]);
 
   return (
     <div className="app-container">

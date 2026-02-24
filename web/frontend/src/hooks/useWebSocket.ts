@@ -91,6 +91,8 @@ export interface IntelSnapshot {
   position_size_multiplier: number;
   should_reduce_exposure: boolean;
   preferred_direction: string;
+  source_timestamps?: Record<string, string>;
+  sources_active?: string[];
 }
 
 export interface WickScalpInfo {

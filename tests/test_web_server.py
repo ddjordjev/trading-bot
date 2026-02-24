@@ -1104,6 +1104,7 @@ class TestCloseAllStopResume:
             r = await client.post("/api/close-all")
         assert r.status_code == 200
         assert r.json()["success"] is True
+        assert broadcast.await_count == 2
 
     async def test_close_all_ok(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
@@ -1112,7 +1113,7 @@ class TestCloseAllStopResume:
             r = await client.post("/api/close-all")
             assert r.status_code == 200
             assert r.json()["success"] is True
-            broadcast.assert_awaited_once()
+            assert broadcast.await_count == 2
 
     async def test_stop_trading_no_bot(self, client):
         with patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast:
@@ -1525,8 +1526,9 @@ class TestBroadcastActions:
                 r = await client.post("/api/close-all")
                 assert r.status_code == 200
                 assert r.json()["success"] is True
-                assert fwd.await_count == 2
                 calls = [c[0] for c in fwd.call_args_list]
+                assert ("meanrev", "/api/stop-trading", {}) in calls
+                assert ("momentum", "/api/stop-trading", {}) in calls
                 assert ("meanrev", "/api/close-all", {}) in calls
                 assert ("momentum", "/api/close-all", {}) in calls
         finally:

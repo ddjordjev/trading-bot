@@ -143,6 +143,11 @@ async def tighten_stop(request: web.Request) -> web.Response:
 async def close_all(_request: web.Request) -> web.Response:
     if not _bot:
         return _json(False, "Bot not initialized")
+    # Make close-all a hard kill switch: block new entries first, then close.
+    _bot.target.STOP_FILE.touch()
+    _bot._hub_proposal = None
+    _bot.extreme_watcher.drain_signals()
+    await _bot.extreme_watcher.sync_watchlist({})
     await _bot._close_all_positions("Hub: close all")
     import asyncio
 

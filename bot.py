@@ -575,7 +575,9 @@ class TradingBot:
         self._raw_balance = raw_balance
 
         positions = await self.exchange.fetch_positions()
-        unrealized = sum(p.unrealized_pnl for p in positions if p.amount > 0)
+        # Shared-account mode: only include positions this bot owns.
+        owned_symbols = set(self._open_trades.keys()) | set(self.orders.scaler.active_positions.keys())
+        unrealized = sum(p.unrealized_pnl for p in positions if p.amount > 0 and p.symbol in owned_symbols)
         balance = self._session_start_balance + self._realized_pnl + unrealized
         self.target.update_balance(balance)
 
@@ -1964,7 +1966,8 @@ class TradingBot:
             if self.target._last_reset and self.target._last_reset.date() == now.date():
                 return
             positions = await self.exchange.fetch_positions()
-            unrealized = sum(p.unrealized_pnl for p in positions if p.amount > 0)
+            owned_symbols = set(self._open_trades.keys()) | set(self.orders.scaler.active_positions.keys())
+            unrealized = sum(p.unrealized_pnl for p in positions if p.amount > 0 and p.symbol in owned_symbols)
             eod_balance = self._session_start_balance + self._realized_pnl + unrealized
 
             logger.info("=== DAILY RESET ===")

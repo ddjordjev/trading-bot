@@ -628,14 +628,24 @@ async def tighten_stop(body: PositionTightenStopBody, _: str = Depends(verify_to
 @app.post("/api/close-all", response_model=ActionResponse)
 async def close_all(body: BotActionBody | None = None, _: str = Depends(verify_token)) -> ActionResponse:
     bid = (body.bot_id if body else "") or ""
+    # Safety-first: hard-stop new entries before force-closing positions.
+    _GLOBAL_STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _GLOBAL_STOP_FILE.touch()
+    logger.info("Global STOP file created — close-all will run in halted mode")
     if _hub_state_ref is not None:
         _hub_state_ref.read_trade_queue().proposals.clear()
         logger.info("Trade queue purged (close-all)")
     if bid and bid != "all":
-        return await _forward_to_bot(bid, "/api/close-all", {})
-    result = await _broadcast_to_remote_bots("/api/close-all", {})
+        stop_resp = await _forward_to_bot(bid, "/api/stop-trading", {})
+        close_resp = await _forward_to_bot(bid, "/api/close-all", {})
+        ok = stop_resp.success and close_resp.success
+        msg = f"halt={stop_resp.message or 'ok'}; close={close_resp.message or 'ok'}"
+        nudge_ws()
+        return ActionResponse(success=ok, message=msg)
+    stop_result = await _broadcast_to_remote_bots("/api/stop-trading", {})
+    close_result = await _broadcast_to_remote_bots("/api/close-all", {})
     nudge_ws()
-    return ActionResponse(success=True, message=result or "broadcast sent")
+    return ActionResponse(success=True, message=f"stop: {stop_result}; close: {close_result}")
 
 
 _GLOBAL_STOP_FILE = Path("data/STOP")

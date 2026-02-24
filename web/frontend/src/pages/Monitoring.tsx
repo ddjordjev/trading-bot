@@ -198,9 +198,11 @@ export function Monitoring() {
         {grafana && (
           <a
             href={`${window.location.protocol}//${window.location.hostname}:${grafana.port}/d/${grafana.dashboard_uid}/trading-bot?orgId=1&kiosk&theme=dark`}
+            target="_blank"
+            rel="noopener noreferrer"
             style={{ fontSize: "0.8rem" }}
           >
-            Open full-page Grafana
+            Open full-page Grafana (new tab)
           </a>
         )}
       </div>
@@ -210,7 +212,8 @@ export function Monitoring() {
           src={grafanaSrc}
           style={{
             width: "100%",
-            minHeight: "75vh",
+            minHeight: "84vh",
+            height: "calc(100vh - 140px)",
             border: "1px solid var(--border, #30363d)",
             borderRadius: "var(--radius, 8px)",
             background: "var(--bg-secondary, #161b22)",

@@ -2335,6 +2335,34 @@ class TestLiquidationMonitorFetch:
 
         assert monitor._latest is None
 
+    @pytest.mark.asyncio
+    @patch("intel.liquidations.aiohttp.ClientSession")
+    async def test_fetch_parses_wrapped_camel_case_and_commas(self, mock_session_class, monitor):
+        data = {
+            "code": "0",
+            "data": {
+                "list": [
+                    {
+                        "exchangeName": "All",
+                        "liquidationUsd": "1,250,000.50",
+                        "longLiquidationUsd": "700000",
+                        "shortLiquidationUsd": "550000.50",
+                    }
+                ]
+            },
+        }
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = _make_liq_get_mock(200, data)
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await monitor._fetch()
+
+        assert monitor._latest is not None
+        assert monitor._latest.total_24h == 1_250_000.50
+        assert monitor._latest.long_24h == 700_000
+        assert monitor._latest.short_24h == 550_000.50
+
 
 class TestLiquidationMonitorPollLoopAndLifecycle:
     @pytest.mark.asyncio

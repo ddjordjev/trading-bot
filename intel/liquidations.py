@@ -149,28 +149,53 @@ class LiquidationMonitor:
             logger.warning("CoinGlass fetch failed: {}", e)
             return
 
+        def _num(v: object) -> float:
+            if v is None:
+                return 0.0
+            if isinstance(v, (int, float)):
+                return float(v)
+            if isinstance(v, str):
+                cleaned = v.replace(",", "").replace("$", "").strip()
+                if not cleaned:
+                    return 0.0
+                return float(cleaned)
+            return 0.0
+
+        def _pick(item: dict, keys: tuple[str, ...]) -> float:
+            for k in keys:
+                if k in item:
+                    return _num(item.get(k))
+            return 0.0
+
         try:
             if not isinstance(data, dict):
                 return
             info = data.get("data", [])
+            # Some API variants wrap rows in {"list": [...]}.
+            if isinstance(info, dict) and isinstance(info.get("list"), list):
+                info = info.get("list", [])
 
             if isinstance(info, list):
                 for item in info:
-                    ex = item.get("exchange", "")
-                    if ex == "All":
-                        snap.total_24h = float(item.get("liquidation_usd", 0) or 0)
-                        snap.long_24h = float(item.get("long_liquidation_usd", 0) or 0)
-                        snap.short_24h = float(item.get("short_liquidation_usd", 0) or 0)
+                    if not isinstance(item, dict):
+                        continue
+                    ex = str(item.get("exchange", item.get("exchangeName", ""))).strip()
+                    if ex.lower() == "all":
+                        snap.total_24h = _pick(item, ("liquidation_usd", "liquidationUsd", "totalUsd"))
+                        snap.long_24h = _pick(item, ("long_liquidation_usd", "longLiquidationUsd", "longUsd"))
+                        snap.short_24h = _pick(item, ("short_liquidation_usd", "shortLiquidationUsd", "shortUsd"))
                         break
                 else:
                     for item in info:
-                        snap.total_24h += float(item.get("liquidation_usd", 0) or 0)
-                        snap.long_24h += float(item.get("long_liquidation_usd", 0) or 0)
-                        snap.short_24h += float(item.get("short_liquidation_usd", 0) or 0)
+                        if not isinstance(item, dict):
+                            continue
+                        snap.total_24h += _pick(item, ("liquidation_usd", "liquidationUsd", "totalUsd"))
+                        snap.long_24h += _pick(item, ("long_liquidation_usd", "longLiquidationUsd", "longUsd"))
+                        snap.short_24h += _pick(item, ("short_liquidation_usd", "shortLiquidationUsd", "shortUsd"))
             elif isinstance(info, dict):
-                snap.total_24h = float(info.get("liquidation_usd", 0) or 0)
-                snap.long_24h = float(info.get("long_liquidation_usd", 0) or 0)
-                snap.short_24h = float(info.get("short_liquidation_usd", 0) or 0)
+                snap.total_24h = _pick(info, ("liquidation_usd", "liquidationUsd", "totalUsd"))
+                snap.long_24h = _pick(info, ("long_liquidation_usd", "longLiquidationUsd", "longUsd"))
+                snap.short_24h = _pick(info, ("short_liquidation_usd", "shortLiquidationUsd", "shortUsd"))
         except (ValueError, TypeError, KeyError) as e:
             logger.warning("CoinGlass parse error: {}", e)
             return
