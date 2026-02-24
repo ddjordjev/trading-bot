@@ -116,7 +116,7 @@ class BaseExchange(ABC):
     # -- Futures specific --
 
     @abstractmethod
-    async def set_leverage(self, symbol: str, leverage: int) -> None: ...
+    async def set_leverage(self, symbol: str, leverage: int) -> bool: ...
 
     # -- Symbols --
 

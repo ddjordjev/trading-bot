@@ -910,6 +910,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
     bot_count = 0
     first_status: dict[str, Any] = {}
     exchange_balances: dict[str, float] = {}
+    exchange_available: dict[str, float] = {}
 
     for rpt in reports:
         s = rpt.get("status", {})
@@ -928,6 +929,9 @@ def _build_merged_snapshot() -> dict[str, Any]:
         ex_bal = rpt.get("exchange_balance", 0)
         if ex_name and ex_bal:
             exchange_balances[ex_name] = max(exchange_balances.get(ex_name, 0), ex_bal)
+            exchange_available[ex_name] = max(
+                exchange_available.get(ex_name, 0.0), float(s.get("available_margin", 0.0))
+            )
 
         total_balance += s.get("balance", 0)
         total_available += s.get("available_margin", 0)
@@ -971,9 +975,34 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
     intel = _intel_snapshot()
 
-    real_balance = sum(exchange_balances.values()) if exchange_balances else total_balance
-    real_margin_used = sum(p.get("notional_value", 0) / max(p.get("leverage", 1), 1) for p in all_positions)
-    real_available = max(0.0, real_balance - real_margin_used)
+    # When raw exchange balances are available, treat them as account-level
+    # anchors and compute dashboard equity from available + used margin + uPnL.
+    if exchange_balances:
+        exchange_margin_used: dict[str, float] = {}
+        exchange_unrealized: dict[str, float] = {}
+        for p in all_positions:
+            ex = str(p.get("exchange_name", "") or "")
+            if not ex:
+                continue
+            lev = max(float(p.get("leverage", 1) or 1), 1.0)
+            notional = float(p.get("notional_value", 0) or 0)
+            exchange_margin_used[ex] = exchange_margin_used.get(ex, 0.0) + (notional / lev)
+            upnl = float(p.get("pnl_usd", p.get("pnl", 0)) or 0)
+            exchange_unrealized[ex] = exchange_unrealized.get(ex, 0.0) + upnl
+
+        exchange_equity: dict[str, float] = {}
+        for ex in exchange_balances:
+            available = max(0.0, exchange_available.get(ex, 0.0))
+            used = max(0.0, exchange_margin_used.get(ex, 0.0))
+            upnl = exchange_unrealized.get(ex, 0.0)
+            exchange_equity[ex] = max(0.0, available + used + upnl)
+
+        real_balance = sum(exchange_equity.values())
+        real_available = sum(max(0.0, v) for v in exchange_available.values())
+        exchange_balances = exchange_equity
+    else:
+        real_balance = total_balance
+        real_available = max(0.0, total_available)
 
     merged_status = {
         "bot_id": "all",

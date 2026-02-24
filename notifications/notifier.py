@@ -174,7 +174,13 @@ class Notifier:
     async def _process_queue(self) -> None:
         while self._running:
             try:
-                subject, body, attempts = await asyncio.wait_for(self._queue.get(), timeout=5.0)
+                item = await asyncio.wait_for(self._queue.get(), timeout=5.0)
+                if len(item) == 3:
+                    subject, body, attempts = item
+                else:
+                    # Backward compatibility for tests/legacy queue entries.
+                    subject, body = item  # type: ignore[misc]
+                    attempts = 0
                 ok = await self._send_email(subject, body)
                 if not ok:
                     # Retry a few times with short backoff, then drop to avoid

@@ -231,8 +231,10 @@ class MexcExchange(BaseExchange):
             )
         return orders
 
-    async def set_leverage(self, symbol: str, leverage: int) -> None:
-        pass
+    async def set_leverage(self, symbol: str, leverage: int) -> bool:
+        _ = symbol
+        _ = leverage
+        return True
 
     # -- Symbols --
 

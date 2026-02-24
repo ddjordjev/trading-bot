@@ -368,9 +368,10 @@ class PaperExchange(BaseExchange):
     ) -> list[Order]:
         return [o for o in self._orders.values() if o.status == OrderStatus.OPEN and (not symbol or o.symbol == symbol)]
 
-    async def set_leverage(self, symbol: str, leverage: int) -> None:
+    async def set_leverage(self, symbol: str, leverage: int) -> bool:
         self._leverage_map[symbol] = leverage
         logger.debug("[PAPER] Leverage set to {}x for {}", leverage, symbol)
+        return True
 
     async def get_available_symbols(self, market_type: MarketType = MarketType.SPOT) -> list[str]:
         return await self._real.get_available_symbols(market_type)
