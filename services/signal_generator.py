@@ -112,6 +112,7 @@ class SignalGenerator:
         self._current_regime: str = "normal"  # set each generate() call
         self._current_hour: int = -1  # set each generate() call
         self._cex_symbol_state: dict[str, dict[str, float]] = {}
+        self._openclaw_snapshot: IntelSnapshot | None = None
 
     # ------------------------------------------------------------------
     # Analytics feedback
@@ -290,6 +291,7 @@ class SignalGenerator:
         self._current_regime = snap.regime
         self._current_hour = datetime.now(UTC).hour
         self._cex_symbol_state = self._build_cex_symbol_state(snap)
+        self._openclaw_snapshot = snap
 
         self._purge_cooldowns()
         queue.purge_stale()
@@ -632,7 +634,7 @@ class SignalGenerator:
         if direction not in ("long", "short"):
             return
 
-        regime_ok = (direction == "long" and snap.regime in ("risk_on", "neutral")) or (
+        regime_ok = (direction == "long" and snap.regime in ("risk_on", "normal")) or (
             direction == "short" and snap.regime in ("risk_off", "caution")
         )
         if not regime_ok:
@@ -900,7 +902,8 @@ class SignalGenerator:
         raw_strength = proposal.strength
         modifier = self._analytics_strength_modifier(proposal.strategy, proposal.symbol, is_quick=proposal.quick_trade)
         cex_modifier = self._cex_strength_modifier(proposal)
-        proposal.strength = round(raw_strength * modifier * cex_modifier, 4)
+        openclaw_modifier = self._openclaw_strength_modifier(proposal)
+        proposal.strength = round(raw_strength * modifier * cex_modifier * openclaw_modifier, 4)
 
         key = f"{proposal.priority.value}_{proposal.symbol}_{proposal.strategy}"
 
@@ -921,8 +924,9 @@ class SignalGenerator:
         exchange_note = f" (not on: {', '.join(missing)})" if missing else ""
         analytics_note = f" [analytics: {modifier:.2f}x]" if modifier != 1.0 else ""
         cex_note = f" [cex: {cex_modifier:.2f}x]" if cex_modifier != 1.0 else ""
+        openclaw_note = f" [openclaw: {openclaw_modifier:.2f}x]" if openclaw_modifier != 1.0 else ""
         logger.info(
-            "QUEUE [{}] {} {} — {} (str={:.2f}){}{}{}",
+            "QUEUE [{}] {} {} — {} (str={:.2f}){}{}{}{}",
             proposal.priority.value.upper(),
             proposal.side.upper(),
             proposal.symbol,
@@ -930,6 +934,7 @@ class SignalGenerator:
             proposal.strength,
             analytics_note,
             cex_note,
+            openclaw_note,
             exchange_note,
         )
 
@@ -1002,6 +1007,60 @@ class SignalGenerator:
         score_mod = 1.0 + self._clamp(st.get("score", 0.0) / 25.0, 0.0, 0.15)
 
         return self._clamp(confidence_mod * vol_mod * trend_mod * score_mod * misalign_penalty, 0.60, 1.50)
+
+    def _openclaw_strength_modifier(self, proposal: TradeProposal) -> float:
+        """Apply advisory-only OpenClaw soft weighting.
+
+        OpenClaw never creates trades directly. This only nudges proposal
+        strength based on regime/sentiment commentary already merged into
+        the hub IntelSnapshot.
+        """
+        snap = self._openclaw_snapshot
+        if snap is None:
+            return 1.0
+
+        regime = (snap.openclaw_regime or "unknown").lower()
+        confidence = self._clamp(float(snap.openclaw_regime_confidence or 0.0), 0.0, 1.0)
+        if regime == "unknown" or confidence <= 0:
+            return 1.0
+
+        side_sign = 1.0 if proposal.side == "long" else -1.0
+        mod = 1.0
+
+        # Regime directional tilt (small, confidence-weighted)
+        regime_bias = 0.12 * confidence
+        if regime == "risk_on":
+            mod *= 1.0 + (regime_bias * side_sign)
+        elif regime in {"risk_off", "caution"}:
+            mod *= 1.0 - (regime_bias * side_sign)
+
+        # Sentiment score uses 0-100 scale centered at 50.
+        sentiment = self._clamp(float(snap.openclaw_sentiment_score or 50), 0.0, 100.0)
+        sentiment_centered = (sentiment - 50.0) / 50.0  # [-1, 1]
+        mod *= 1.0 + (0.10 * confidence * sentiment_centered * side_sign)
+
+        # Long/short ratio contrarian nudge to avoid crowded side.
+        lsr = float(snap.openclaw_long_short_ratio or 0.0)
+        if lsr > 1.15:
+            mod *= 0.95 if proposal.side == "long" else 1.05
+        elif 0 < lsr < 0.85:
+            mod *= 1.05 if proposal.side == "long" else 0.95
+
+        # If OpenClaw explicitly mentions symbol+side, give a mild confidence boost.
+        symbol = self._pair_symbol(proposal.symbol)
+        for idea in snap.openclaw_idea_briefs[:10]:
+            idea_symbol = self._pair_symbol(str(idea.get("symbol", "")))
+            if idea_symbol != symbol:
+                continue
+            idea_side = str(idea.get("side", "neutral")).lower()
+            idea_conf = self._clamp(float(idea.get("confidence", 0.0) or 0.0), 0.0, 1.0)
+            if idea_side == proposal.side:
+                mod *= 1.0 + (0.08 * idea_conf)
+            elif idea_side in {"long", "short"}:
+                mod *= 1.0 - (0.08 * idea_conf)
+            break
+
+        return self._clamp(mod, 0.75, 1.25)
 
     @staticmethod
     def _pair_symbol(symbol: str) -> str:

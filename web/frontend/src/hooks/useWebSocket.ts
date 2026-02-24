@@ -91,6 +91,16 @@ export interface IntelSnapshot {
   position_size_multiplier: number;
   should_reduce_exposure: boolean;
   preferred_direction: string;
+  openclaw_regime: string;
+  openclaw_regime_confidence: number;
+  openclaw_regime_why: string[];
+  openclaw_sentiment_score: number;
+  openclaw_long_short_ratio: number;
+  openclaw_liquidations_24h_usd: number;
+  openclaw_open_interest_24h_usd: number;
+  openclaw_idea_briefs: Record<string, unknown>[];
+  openclaw_failure_triage: Record<string, unknown>[];
+  openclaw_experiments: Record<string, unknown>[];
   source_timestamps?: Record<string, string>;
   sources_active?: string[];
 }

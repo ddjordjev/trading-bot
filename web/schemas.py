@@ -103,6 +103,18 @@ class IntelSnapshot(BaseModel):
     position_size_multiplier: float = 1.0
     should_reduce_exposure: bool = False
     preferred_direction: str = "neutral"
+    openclaw_regime: str = "unknown"
+    openclaw_regime_confidence: float = 0.0
+    openclaw_regime_why: list[str] = []
+    openclaw_sentiment_score: int = 50
+    openclaw_long_short_ratio: float = 0.0
+    openclaw_liquidations_24h_usd: float = 0.0
+    openclaw_open_interest_24h_usd: float = 0.0
+    openclaw_idea_briefs: list[dict[str, Any]] = []
+    openclaw_failure_triage: list[dict[str, Any]] = []
+    openclaw_experiments: list[dict[str, Any]] = []
+    source_timestamps: dict[str, str] = {}
+    sources_active: list[str] = []
 
 
 class TrendingCoinInfo(BaseModel):
@@ -116,6 +128,7 @@ class TrendingCoinInfo(BaseModel):
     change_24h: float = 0.0
     is_low_liquidity: bool = False
     has_dynamic_strategy: bool = False
+    source: str = ""
 
 
 class StrategyInfo(BaseModel):

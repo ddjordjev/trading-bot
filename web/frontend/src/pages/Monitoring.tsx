@@ -87,7 +87,7 @@ export function Monitoring() {
     grafana && grafanaReachable
       ? `${window.location.protocol}//${window.location.hostname}:${grafana.port}`
       : "";
-  const panelIds = [1, 2, 3, 4, 6, 7, 10, 11, 12, 13];
+  const panelIds = [1, 2, 3, 4, 6, 7, 10, 11];
   const soloPanelSrc = (panelId: number) =>
     `${grafanaBase}/d-solo/${grafana?.dashboard_uid}/trading-bot?orgId=1&theme=dark&panelId=${panelId}&refresh=5s`;
 

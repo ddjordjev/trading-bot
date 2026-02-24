@@ -12,6 +12,7 @@ interface TrendingCoin {
   change_24h: number;
   is_low_liquidity: boolean;
   has_dynamic_strategy: boolean;
+  source?: string;
 }
 
 interface TradeQueueItem {
@@ -22,6 +23,17 @@ interface TradeQueueItem {
   age_seconds: number;
   reason: string;
   supported_exchanges: string[];
+}
+
+function buildExchangeSymbolUrl(symbol: string, exchange: string | undefined): string {
+  const ex = (exchange || "").toLowerCase();
+  if (!symbol || !ex) return "";
+  const clean = symbol.replace("/", "").toUpperCase();
+
+  if (ex === "binance") return `https://www.binance.com/en/futures/${clean}`;
+  if (ex === "bybit") return `https://www.bybit.com/trade/usdt/${clean}`;
+  if (ex === "mexc") return `https://www.mexc.com/exchange/${clean.replace("USDT", "_USDT")}`;
+  return "";
 }
 
 export function Scanner() {
@@ -70,7 +82,24 @@ export function Scanner() {
             <tbody>
               {tradeQueue.map((p, i) => (
                   <tr key={`${p.symbol}-${p.side}-${i}`}>
-                    <td style={{ fontWeight: 600 }}>{p.symbol}</td>
+                    <td style={{ fontWeight: 600 }}>
+                      {(() => {
+                        const primaryExchange = (p.supported_exchanges || [])[0];
+                        const href = buildExchangeSymbolUrl(p.symbol, primaryExchange);
+                        if (!href) return p.symbol;
+                        return (
+                          <a
+                            href={href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 700 }}
+                            title={primaryExchange ? `Open on ${primaryExchange}` : "Open symbol"}
+                          >
+                            {p.symbol} ↗
+                          </a>
+                        );
+                      })()}
+                    </td>
                     <td style={{ color: p.side === "long" || p.side === "buy" ? "var(--green)" : "var(--red)" }}>
                       {p.side === "buy" ? "LONG" : p.side === "sell" ? "SHORT" : p.side.toUpperCase()}
                     </td>
@@ -110,7 +139,19 @@ export function Scanner() {
             {coins.map((c) => (
               <tr key={c.symbol}>
                 <td>
-                  <strong>{c.symbol}</strong>
+                  {c.source === "binance_scanner" ? (
+                    <a
+                      href={buildExchangeSymbolUrl(c.symbol, "BINANCE")}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 700 }}
+                      title="Open on BINANCE"
+                    >
+                      {c.symbol} ↗
+                    </a>
+                  ) : (
+                    <strong>{c.symbol}</strong>
+                  )}
                   {c.name && <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginLeft: 4 }}>{c.name}</span>}
                 </td>
                 <td>${c.price < 1 ? c.price.toFixed(6) : c.price.toFixed(2)}</td>

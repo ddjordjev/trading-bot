@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Trading Bot — Session Runner
-# Usage: ./scripts/run_session.sh [start|stop|status|logs|rebuild|preflight]
+# Usage: ./scripts/run_session.sh [start|stop|status|logs|rebuild|preflight|openclaw-preflight]
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -19,6 +19,11 @@ err()  { echo -e "${RED}[BOT]${NC} $1"; }
 cmd_preflight() {
     log "Running preflight checks..."
     "$ROOT/.venv/bin/python" scripts/preflight_check.py
+}
+
+cmd_openclaw_preflight() {
+    log "Running OpenClaw preflight..."
+    "$ROOT/scripts/openclaw_preflight.sh"
 }
 
 cmd_build() {
@@ -114,6 +119,7 @@ SNAP
 
 case "${1:-help}" in
     preflight) cmd_preflight ;;
+    openclaw-preflight) cmd_openclaw_preflight ;;
     build)     cmd_build ;;
     start)     cmd_start ;;
     stop)      cmd_stop ;;
@@ -139,9 +145,10 @@ case "${1:-help}" in
         echo "Synced $count secrets from .env → GitHub"
         ;;
     help|*)
-        echo "Usage: $0 {preflight|build|start|stop|status|logs|rebuild|snapshot|sync-secrets}"
+        echo "Usage: $0 {preflight|openclaw-preflight|build|start|stop|status|logs|rebuild|snapshot|sync-secrets}"
         echo ""
         echo "  preflight    — Run pre-flight checks (API keys, connectivity)"
+        echo "  openclaw-preflight — Validate OpenClaw endpoint + hub integration surfaces"
         echo "  build        — Build Docker images"
         echo "  start        — Start all services (docker compose up -d)"
         echo "  stop         — Stop all services"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from datetime import UTC, datetime
 
 import aiohttp
@@ -10,55 +11,57 @@ from pydantic import BaseModel, Field, ValidationError
 
 
 class OpenClawRegimeCommentary(BaseModel):
-    regime: str = "unknown"
-    confidence: float = 0.0
-    why: list[str] = []
+    regime: str = Field(default="unknown", max_length=32)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    why: list[str] = Field(default_factory=list, max_length=20)
 
 
 class OpenClawIdeaBrief(BaseModel):
-    symbol: str = ""
-    side: str = "neutral"
-    timeframe: str = ""
-    confidence: float = 0.0
-    thesis: str = ""
-    evidence: list[str] = []
-    risk_notes: list[str] = []
+    symbol: str = Field(default="", max_length=32)
+    side: str = Field(default="neutral", max_length=16)
+    timeframe: str = Field(default="", max_length=32)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    thesis: str = Field(default="", max_length=512)
+    evidence: list[str] = Field(default_factory=list, max_length=20)
+    risk_notes: list[str] = Field(default_factory=list, max_length=20)
 
 
 class OpenClawAltData(BaseModel):
-    long_short_ratio: float = 0.0
-    liquidations_24h_usd: float = 0.0
-    open_interest_24h_usd: float = 0.0
-    sentiment_score: int = 50
+    long_short_ratio: float = Field(default=0.0, ge=0.0, le=10.0)
+    liquidations_24h_usd: float = Field(default=0.0, ge=0.0)
+    open_interest_24h_usd: float = Field(default=0.0, ge=0.0)
+    sentiment_score: int = Field(default=50, ge=0, le=100)
 
 
 class OpenClawTriageEntry(BaseModel):
-    severity: str = "info"
-    component: str = ""
-    issue: str = ""
-    likely_root_cause: str = ""
-    suggested_checks: list[str] = []
+    severity: str = Field(default="info", max_length=16)
+    component: str = Field(default="", max_length=64)
+    issue: str = Field(default="", max_length=512)
+    likely_root_cause: str = Field(default="", max_length=512)
+    suggested_checks: list[str] = Field(default_factory=list, max_length=20)
 
 
 class OpenClawExperiment(BaseModel):
-    name: str = ""
-    safety: str = "paper_only"
-    expected_effect: str = ""
-    rollback_rule: str = ""
+    name: str = Field(default="", max_length=128)
+    safety: str = Field(default="paper_only", max_length=32)
+    expected_effect: str = Field(default="", max_length=512)
+    rollback_rule: str = Field(default="", max_length=512)
 
 
 class OpenClawSnapshot(BaseModel):
     as_of: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     regime_commentary: OpenClawRegimeCommentary = OpenClawRegimeCommentary()
-    idea_briefs: list[OpenClawIdeaBrief] = []
+    idea_briefs: list[OpenClawIdeaBrief] = Field(default_factory=list, max_length=25)
     alt_data: OpenClawAltData = OpenClawAltData()
-    failure_triage: list[OpenClawTriageEntry] = []
-    experiments: list[OpenClawExperiment] = []
+    failure_triage: list[OpenClawTriageEntry] = Field(default_factory=list, max_length=25)
+    experiments: list[OpenClawExperiment] = Field(default_factory=list, max_length=25)
     fetched_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class OpenClawClient:
     """Pull advisory intelligence from an OpenClaw service endpoint."""
+
+    _MAX_RESPONSE_BYTES = 256_000
 
     def __init__(
         self,
@@ -147,13 +150,20 @@ class OpenClawClient:
         ):
             if resp.status != 200:
                 logger.warning("OpenClaw returned HTTP {}", resp.status)
+                self._latest = None
                 return None
-            raw = await resp.json()
+            body = await resp.read()
+            if len(body) > self._MAX_RESPONSE_BYTES:
+                logger.warning("OpenClaw payload too large: {} bytes", len(body))
+                self._latest = None
+                return None
+            raw = json.loads(body.decode("utf-8"))
 
         try:
             parsed = OpenClawSnapshot.model_validate(raw)
         except ValidationError as e:
             logger.warning("OpenClaw payload validation failed: {}", e)
+            self._latest = None
             return None
 
         parsed.fetched_at = datetime.now(UTC).isoformat()

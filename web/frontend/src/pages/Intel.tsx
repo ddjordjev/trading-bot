@@ -221,7 +221,7 @@ export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
         </h3>
         {news.length === 0 ? (
           <div style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
-            No news items yet. Feed refreshes every 60s.
+            No news items yet. Feed refreshes every 30s.
           </div>
         ) : (
           <div style={{ maxHeight: 350, overflowY: "auto" }}>

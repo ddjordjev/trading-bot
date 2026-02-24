@@ -130,7 +130,7 @@
 <!-- ============================================================ -->
 
 <div class="section-card" style="text-align:center;">
-<img src="/docs-static/architecture.jpg" alt="Trade Borg Architecture" style="max-width:100%; border-radius:8px; margin:1rem 0;">
+<img src="architecture.jpg" onerror="this.onerror=null;this.src='/docs-static/architecture.jpg';" alt="Trade Borg Architecture" style="max-width:100%; border-radius:8px; margin:1rem 0;">
 </div>
 
 <div class="section-card">
@@ -215,6 +215,7 @@ Trading bots are lightweight executors that consume proposals from the hub via H
   <tr><td><code>intel/tradingview.py</code></td><td>TradingView scanner: oscillators, MAs, summary ratings, signal_boost</td></tr>
   <tr><td><code>intel/coinmarketcap.py</code></td><td>CMC trending, gainers/losers, new listings</td></tr>
   <tr><td><code>intel/coingecko.py</code></td><td>CoinGecko trending, top volume, movers, sparklines</td></tr>
+  <tr><td><code>intel/openclaw.py</code></td><td>OpenClaw advisory client and payload models (API-only intelligence feed)</td></tr>
   <tr><td><code>intel/defillama.py</code></td><td>DeFiLlama TVL flows — capital movement, chain rotation</td></tr>
   <tr><td><code>intel/santiment.py</code></td><td>Santiment social volume, sentiment, dev activity, whale txns</td></tr>
   <tr><td><code>intel/market_intel.py</code></td><td>Orchestrator: combines all 9 intel sources into MarketCondition</td></tr>
@@ -251,6 +252,7 @@ Trading bots are lightweight executors that consume proposals from the hub via H
   <tr><td><code>scripts/build-dashboard.sh</code></td><td>Build the React frontend for production</td></tr>
   <tr><td><code>scripts/preflight_check.py</code></td><td>Pre-live sanity check: API keys, balance, futures, leverage, risk</td></tr>
   <tr><td><code>scripts/run_session.sh</code></td><td>10-day session helper: start/stop/status/snapshot/logs</td></tr>
+  <tr><td><code>scripts/openclaw_intel_bridge.py</code></td><td>Optional local OpenClaw bridge exposing advisory intel JSON endpoint</td></tr>
   <tr><td><code>Dockerfile.hub</code></td><td>Hub image — full Python + Node.js (frontend build), entry: hub_main.py</td></tr>
   <tr><td><code>Dockerfile.bot</code></td><td>Bot image — trimmed Python only (no frontend/Node.js), entry: bot.py</td></tr>
   <tr><td><code>docker-compose.yml</code></td><td>11 services: 1 hub + 10 bots (5 active, 5 idle) + Prometheus + Grafana + Loki</td></tr>
@@ -260,6 +262,7 @@ Trading bots are lightweight executors that consume proposals from the hub via H
   <tr><td><code>grafana/provisioning/</code></td><td>Grafana auto-provisioning: datasource (Prometheus) + dashboard provider</td></tr>
   <tr><td><code>grafana/dashboards/trading-bot.json</code></td><td>Pre-built Grafana dashboard: 25+ panels (system, process, methods, trading)</td></tr>
   <tr><td><code>docs/refactoring_plan.md</code></td><td>Architecture refactoring decisions and changelog</td></tr>
+  <tr><td><code>docs/open_claw_integration_playbook.md</code></td><td>OpenClaw integration guardrails (API-only, advisory, no execution access)</td></tr>
   <tr><td><code>docs/new_ideas.md</code></td><td>Backlog of ideas not yet in summary.html section 6</td></tr>
   <tr><td><code>docs/current_issues.md</code></td><td>Known issues and recent session changes</td></tr>
   <tr><td><code>loki/</code></td><td>Loki + Promtail config and Dockerfiles for log aggregation</td></tr>
@@ -755,7 +758,7 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
   <tr><td>Strategies tab: static + dynamic</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Strategies.tsx</td></tr>
   <tr><td>Analytics tab: PnL history, compound report, projections</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Analytics.tsx</td></tr>
   <tr><td>Monitoring tab: embedded Grafana dashboard (CPU, memory, disk, method perf)</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Monitoring.tsx</td></tr>
-  <tr><td>Modules tab: toggle intel/scanner/news/volatility</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Modules.tsx</td></tr>
+  <tr><td>Settings → Modules: runtime module controls including OpenClaw advisory feed toggle</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Settings.tsx, web/server.py → /api/modules + /api/module/{name}/toggle</td></tr>
   <tr><td>Summary tab: embedded requirements HTML doc</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Summary.tsx</td></tr>
   <tr><td>Token-based auth for remote access</td><td><span class="badge done">Done</span></td><td class="file">web/auth.py, DASHBOARD_TOKEN env var</td></tr>
   <tr><td>WebSocket real-time updates (2s interval)</td><td><span class="badge done">Done</span></td><td class="file">web/server.py WebSocket endpoint</td></tr>
@@ -774,7 +777,7 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
 <h3 id="s7-22">7.22 Service Architecture &amp; Adaptive Monitoring</h3>
 
 <div class="principle">
-  <strong>Hub-centric architecture.</strong> Monitor and Analytics run as async tasks inside the hub process. All shared state (intel, trade queue, analytics, bot reports) lives in HubState (in-memory). Trading bots are lightweight executors that receive data from the hub via HTTP <code>/internal/report</code>. Monitoring intensity adapts to bot deployment status.
+  <strong>Hub-centric architecture.</strong> Monitor and Analytics run as async tasks inside the hub process. All shared state (intel, trade queue, analytics, bot reports) lives in HubState (in-memory). Trading bots are lightweight executors. OpenClaw is integrated as an advisory-only intel source (API in/out, no execution access). Monitoring intensity adapts to bot deployment status.
 </div>
 
 <table>
@@ -782,8 +785,8 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
   <tr><td>Monitor runs in-process inside hub (intel feeds + signal generation)</td><td><span class="badge done">Done</span></td><td class="file">services/monitor.py, hub_main.py</td></tr>
   <tr><td>Analytics runs in-process inside hub (hub.db → scores, patterns)</td><td><span class="badge done">Done</span></td><td class="file">services/analytics_service.py, hub_main.py</td></tr>
   <tr><td>In-memory state via HubState (replaces file-based SharedState)</td><td><span class="badge done">Done</span></td><td class="file">hub/state.py → HubState</td></tr>
-  <tr><td>Bots POST snapshots to hub, receive intel/queue/analytics in response</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _report_to_hub(), web/server.py → /internal/report</td></tr>
-  <tr><td>Bot reads intel from hub HTTP response (no file access)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → hub response parsing</td></tr>
+  <tr><td>Bots POST snapshots to hub and receive enablement + optional queue proposal in response</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _report_to_hub(), web/server.py → /internal/report</td></tr>
+  <tr><td>Bots fetch cached intel/analytics/extreme watchlist via dedicated endpoint (no file access)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _fetch_hub_intel(), web/server.py → /internal/intel</td></tr>
   <tr>
     <td>Adaptive monitoring intensity:<br>
       <strong>HUNTING</strong> (idle) → full speed (1.0x)<br>
@@ -794,7 +797,8 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
     <td><span class="badge done">Done</span></td>
     <td class="file">services/monitor.py → INTENSITY_TABLE</td>
   </tr>
-  <tr><td>Docker Compose: 1 hub + 10 bots (all active by default) + Prometheus + Grafana + Loki with host bind mounts</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml, Dockerfile.hub, Dockerfile.bot</td></tr>
+  <tr><td>Docker Compose: 1 hub + 10 bots (5 active defaults + 5 idle by default) + Prometheus + Grafana + Loki with host bind mounts</td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml, config/bot_profiles.py, Dockerfile.hub, Dockerfile.bot</td></tr>
+  <tr><td>OpenClaw advisory feed merged into IntelSnapshot with runtime isolation toggle (disable clears OpenClaw data immediately)</td><td><span class="badge done">Done</span></td><td class="file">intel/openclaw.py, services/monitor.py, web/server.py, shared/models.py</td></tr>
   <tr><td>Per-bot-type validators for queue proposal spot-checking</td><td><span class="badge done">Done</span></td><td class="file">validators/ (momentum, indicators, meanrev, swing, extreme)</td></tr>
 </table>
 

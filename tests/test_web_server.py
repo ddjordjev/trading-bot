@@ -423,6 +423,35 @@ class TestGetIntelTrendingStrategies:
         assert data["macro_event_imminent"] is True
         assert "FOMC" in data["next_macro_event"]
 
+    async def test_intel_includes_openclaw_fields(self, client):
+        from shared.models import IntelSnapshot
+
+        hub_state = MagicMock()
+        snap = IntelSnapshot(
+            regime="normal",
+            sources_active=["openclaw"],
+            openclaw_regime="risk_on",
+            openclaw_regime_confidence=0.82,
+            openclaw_regime_why=["fear reset", "liquidation imbalance"],
+            openclaw_sentiment_score=14,
+            openclaw_long_short_ratio=0.91,
+            openclaw_liquidations_24h_usd=321_000_000,
+            openclaw_open_interest_24h_usd=89_000_000_000,
+            openclaw_idea_briefs=[{"symbol": "SOL/USDT", "side": "long"}],
+            openclaw_failure_triage=[{"severity": "high", "component": "monitor"}],
+            openclaw_experiments=[{"name": "reduce size in caution"}],
+        )
+        hub_state.read_intel.return_value = snap
+        with patch("web.server._hub_state_ref", hub_state):
+            r = await client.get("/api/intel")
+        assert r.status_code == 200
+        data = r.json()
+        assert data is not None
+        assert data["openclaw_regime"] == "risk_on"
+        assert data["openclaw_regime_confidence"] == 0.82
+        assert data["openclaw_sentiment_score"] == 14
+        assert data["openclaw_idea_briefs"][0]["symbol"] == "SOL/USDT"
+
     async def test_trending_no_bot(self, client):
         set_bot(None)  # type: ignore[arg-type]
         r = await client.get("/api/trending")
@@ -441,6 +470,7 @@ class TestGetIntelTrendingStrategies:
                     price=0.08,
                     volume_24h=1e9,
                     market_cap=11e9,
+                    change_5m=0.9,
                     change_1h=2.0,
                     change_24h=10.0,
                 ),
@@ -453,6 +483,7 @@ class TestGetIntelTrendingStrategies:
         data = r.json()
         assert len(data) == 1
         assert data[0]["symbol"] == "DOGE/USDT"
+        assert data[0]["change_5m"] == 0.9
         assert data[0]["change_24h"] == 10.0
 
     async def test_strategies_no_bot(self, client):
@@ -609,6 +640,17 @@ class TestInternalReport:
         r = await client.post("/internal/report", json={"exchange": "MEXC"})
         assert r.status_code == 200
         assert len(_bot_reports) == 0
+
+    async def test_post_report_ignores_malformed_position_entries(self, client):
+        payload = {
+            "bot_id": "momentum",
+            "exchange": "MEXC",
+            "status": {"running": True},
+            "positions": ["bad-row", {"symbol": "BTC/USDT"}, 123],
+        }
+        r = await client.post("/internal/report", json=payload)
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
 
     async def test_post_trade_with_request_key_dedup(self, client):
         payload = {
@@ -838,18 +880,33 @@ class TestGetModulesDailyReportAnalytics:
 
     async def test_modules_with_bot(self, client):
         hub_state = MagicMock()
-        hub_state.read_intel.return_value = MagicMock(regime="normal", hot_movers=[], news_items=[])
+        hub_state.read_intel.return_value = MagicMock(
+            regime="normal",
+            hot_movers=[],
+            news_items=[],
+            openclaw_regime="risk_on",
+            openclaw_regime_confidence=0.7,
+            openclaw_idea_briefs=[{"symbol": "BTC/USDT"}],
+            openclaw_failure_triage=[],
+            openclaw_experiments=[],
+        )
         hub_state.read_analytics.return_value = MagicMock(weights={})
-        with patch("web.server._hub_state_ref", hub_state):
+        monitor = MagicMock()
+        monitor.is_openclaw_enabled.return_value = True
+        with patch("web.server._hub_state_ref", hub_state), patch("web.server._monitor_ref", monitor):
             r = await client.get("/api/modules")
         assert r.status_code == 200
         data = r.json()
-        assert len(data) >= 4
+        assert len(data) >= 5
         names = [m["name"] for m in data]
         assert "intel" in names
         assert "scanner" in names
         assert "news" in names
         assert "analytics" in names
+        assert "openclaw" in names
+        openclaw = next(m for m in data if m["name"] == "openclaw")
+        assert openclaw["enabled"] is True
+        assert openclaw["stats"]["connected"] is True
 
     async def test_daily_report_no_bot(self, client):
         set_bot(None)  # type: ignore[arg-type]
@@ -1245,6 +1302,19 @@ class TestToggleModule:
         data = r.json()
         assert data["success"] is True
         assert "enabled" in data["message"].lower()
+        monitor.set_openclaw_enabled.assert_awaited_once_with(True)
+
+    async def test_toggle_openclaw_enable_failure_returns_error(self, client):
+        monitor = MagicMock()
+        monitor.is_openclaw_enabled.return_value = False
+        monitor.set_openclaw_enabled = AsyncMock(return_value=False)
+        with patch("web.server._monitor_ref", monitor):
+            r = await client.post("/api/module/openclaw/toggle")
+
+        assert r.status_code == 200
+        data = r.json()
+        assert data["success"] is False
+        assert "enable failed" in data["message"].lower()
         monitor.set_openclaw_enabled.assert_awaited_once_with(True)
 
 

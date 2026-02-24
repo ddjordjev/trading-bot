@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -21,6 +22,9 @@ class _FakeResponse:
     async def json(self):
         return self._payload
 
+    async def read(self):
+        return json.dumps(self._payload).encode("utf-8")
+
 
 class _FakeSession:
     def __init__(self, status: int, payload: dict):
@@ -37,6 +41,17 @@ class _FakeSession:
     def get(self, _url: str, *, headers: dict[str, str]):
         self.last_headers = headers
         return _FakeResponse(self._status, self._payload)
+
+
+class _LargeBodyResponse(_FakeResponse):
+    async def read(self):
+        return b"{" + (b" " * (OpenClawClient._MAX_RESPONSE_BYTES + 10)) + b"}"
+
+
+class _LargeBodySession(_FakeSession):
+    def get(self, _url: str, *, headers: dict[str, str]):
+        self.last_headers = headers
+        return _LargeBodyResponse(self._status, self._payload)
 
 
 @pytest.mark.asyncio
@@ -87,5 +102,30 @@ async def test_fetch_once_returns_none_on_invalid_payload():
     with patch("intel.openclaw.aiohttp.ClientSession", return_value=fake_session):
         result = await client.fetch_once()
 
+    assert result is None
+    assert client.latest is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_once_clears_latest_on_non_200_after_success():
+    ok_payload = {"regime_commentary": {"regime": "risk_on", "confidence": 0.5}}
+    client = OpenClawClient(enabled=True, base_url="http://127.0.0.1:18080/intel")
+
+    with patch("intel.openclaw.aiohttp.ClientSession", return_value=_FakeSession(200, ok_payload)):
+        first = await client.fetch_once()
+    assert first is not None
+    assert client.latest is not None
+
+    with patch("intel.openclaw.aiohttp.ClientSession", return_value=_FakeSession(503, {})):
+        second = await client.fetch_once()
+    assert second is None
+    assert client.latest is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_once_rejects_oversized_payload():
+    client = OpenClawClient(enabled=True, base_url="http://127.0.0.1:18080/intel")
+    with patch("intel.openclaw.aiohttp.ClientSession", return_value=_LargeBodySession(200, {})):
+        result = await client.fetch_once()
     assert result is None
     assert client.latest is None

@@ -12,6 +12,7 @@ interface Module {
 export function Modules() {
   const [modules, setModules] = useState<Module[]>([]);
   const [loading, setLoading] = useState(true);
+  const [feedback, setFeedback] = useState<string>("");
 
   const refresh = () => {
     get<Module[]>("/api/modules").then(setModules).catch(() => {}).finally(() => setLoading(false));
@@ -22,7 +23,8 @@ export function Modules() {
   }, []);
 
   const toggle = async (name: string) => {
-    await post(`/api/module/${name}/toggle`);
+    const res = await post<{ success: boolean; message: string }>(`/api/module/${name}/toggle`);
+    setFeedback(res.message || (res.success ? "Module updated" : "Module update failed"));
     refresh();
   };
 
@@ -30,6 +32,11 @@ export function Modules() {
 
   return (
     <div>
+      {feedback && (
+        <div className="card" style={{ marginBottom: "1rem", fontSize: "0.85rem" }}>
+          {feedback}
+        </div>
+      )}
       <div className="module-grid">
         {modules.map((m) => (
           <div className="module-card" key={m.name}>
@@ -38,6 +45,7 @@ export function Modules() {
               <button
                 className={`toggle ${m.enabled ? "on" : "off"}`}
                 onClick={() => toggle(m.name)}
+                disabled={m.name !== "openclaw"}
                 title={m.description || (m.enabled ? "Disable this module" : "Enable this module")}
               />
             </div>

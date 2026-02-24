@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -165,8 +166,8 @@ class Settings(BaseSettings):
     openclaw_enabled: bool = True  # advisory-only external intelligence source
     openclaw_url: str = "http://host.docker.internal:18080/intel"  # OpenClaw intelligence JSON endpoint
     openclaw_token: str = ""  # optional bearer token for OpenClaw endpoint
-    openclaw_poll_interval: int = 120  # seconds between OpenClaw pulls
-    openclaw_timeout_seconds: int = 8  # per-request timeout for OpenClaw fetches
+    openclaw_poll_interval: int = Field(default=120, ge=15, le=3600)  # seconds between OpenClaw pulls
+    openclaw_timeout_seconds: int = Field(default=8, ge=2, le=60)  # per-request timeout for OpenClaw fetches
     fear_greed_poll: int = 3600  # how often to poll Fear & Greed (seconds)
     liquidation_poll: int = 300  # CoinGlass liquidation poll interval
     macro_calendar_poll: int = 1800  # ForexFactory calendar poll interval
@@ -241,6 +242,10 @@ class Settings(BaseSettings):
     @property
     def intel_symbol_list(self) -> list[str]:
         return [s.strip().upper() for s in self.intel_symbols.split(",") if s.strip()]
+
+    @property
+    def openclaw_configured(self) -> bool:
+        return bool((self.openclaw_url or "").strip())
 
     @property
     def news_source_list(self) -> list[str]:

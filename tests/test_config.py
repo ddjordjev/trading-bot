@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 
 class TestSettings:
@@ -44,6 +45,21 @@ class TestSettings:
         assert settings.max_notional_position == 100_000.0
         assert settings.openclaw_enabled is True
         assert settings.openclaw_url.endswith("/intel")
+        assert settings.openclaw_configured is True
+
+    def test_openclaw_poll_interval_validation(self, monkeypatch):
+        monkeypatch.setenv("OPENCLAW_POLL_INTERVAL", "5")
+        from config.settings import Settings
+
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_openclaw_timeout_validation(self, monkeypatch):
+        monkeypatch.setenv("OPENCLAW_TIMEOUT_SECONDS", "1")
+        from config.settings import Settings
+
+        with pytest.raises(ValidationError):
+            Settings()
 
     def test_is_live(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "live")

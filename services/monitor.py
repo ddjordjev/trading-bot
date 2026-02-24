@@ -530,6 +530,7 @@ class MonitorService:
             all_tradeable |= syms
 
         open_db_symbols: set[str] = set()
+        hub = None
         try:
             from pathlib import Path
 
@@ -538,11 +539,14 @@ class MonitorService:
             hub = HubDB(path=Path("data/hub.db"))
             hub.connect()
             open_db_symbols = hub.get_open_trade_symbols()
-            hub.close()
             self._last_open_db_symbols = set(open_db_symbols)
         except Exception as e:
             logger.warning("Skipping queue routing: failed reading open trades from hub.db: {}", e)
             return
+        finally:
+            with contextlib.suppress(Exception):
+                if hub is not None:
+                    hub.close()
 
         existing = self.state.read_trade_queue()
         new_count = 0
@@ -949,6 +953,7 @@ class MonitorService:
             return
 
         open_db_symbols: set[str] = set()
+        hub = None
         try:
             from pathlib import Path
 
@@ -957,11 +962,14 @@ class MonitorService:
             hub = HubDB(path=Path("data/hub.db"))
             hub.connect()
             open_db_symbols = hub.get_open_trade_symbols()
-            hub.close()
             self._last_open_db_symbols = set(open_db_symbols)
         except Exception as e:
             logger.warning("Skipping extreme queueing: failed reading open trades from hub.db: {}", e)
             return
+        finally:
+            with contextlib.suppress(Exception):
+                if hub is not None:
+                    hub.close()
 
         existing = self.state.read_trade_queue()
         added = 0

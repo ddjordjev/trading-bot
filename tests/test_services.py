@@ -673,6 +673,20 @@ class TestSignalGenerator:
         swing = empty_queue.get_actionable(SignalPriority.SWING)
         assert not any(p.strategy == "major_swing" for p in swing)
 
+    def test_major_swing_generated_in_normal_regime(self, gen, empty_queue):
+        """Long direction in normal regime should still allow major swings."""
+        snap = IntelSnapshot(
+            preferred_direction="long",
+            regime="normal",
+            fear_greed_bias="long",
+            liquidation_bias="long",
+            whale_bias="long",
+            tv_btc_consensus="long",
+        )
+        gen.generate(snap, empty_queue)
+        swing = empty_queue.get_actionable(SignalPriority.SWING)
+        assert any(p.strategy == "major_swing" for p in swing)
+
     def test_custom_major_symbols(self, empty_queue):
         """SignalGenerator accepts custom major symbol set."""
         from services.signal_generator import SignalGenerator
@@ -1104,6 +1118,62 @@ class TestSignalGeneratorAnalytics:
         )
         mod = gen._analytics_strength_modifier("trending_momentum", "BTC/USDT")
         assert mod == 1.5
+
+    def test_openclaw_modifier_is_neutral_without_openclaw_data(self, gen):
+        proposal = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="trending_momentum",
+            strength=1.0,
+            source="monitor",
+        )
+        assert gen._openclaw_strength_modifier(proposal) == 1.0
+
+    def test_openclaw_modifier_boosts_aligned_and_penalizes_opposed_direction(self, gen):
+        gen._openclaw_snapshot = IntelSnapshot(
+            openclaw_regime="risk_on",
+            openclaw_regime_confidence=0.9,
+            openclaw_sentiment_score=75,
+            openclaw_long_short_ratio=0.8,
+        )
+        long_prop = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="trending_momentum",
+            strength=1.0,
+            source="monitor",
+        )
+        short_prop = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="BTC/USDT",
+            side="short",
+            strategy="trending_momentum",
+            strength=1.0,
+            source="monitor",
+        )
+        long_mod = gen._openclaw_strength_modifier(long_prop)
+        short_mod = gen._openclaw_strength_modifier(short_prop)
+        assert long_mod > 1.0
+        assert short_mod < 1.0
+
+    def test_openclaw_idea_brief_boosts_matching_symbol_and_side(self, gen):
+        gen._openclaw_snapshot = IntelSnapshot(
+            openclaw_regime="risk_on",
+            openclaw_regime_confidence=0.6,
+            openclaw_sentiment_score=55,
+            openclaw_idea_briefs=[{"symbol": "SOL/USDT", "side": "long", "confidence": 0.9}],
+        )
+        prop = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="SOL/USDT",
+            side="long",
+            strategy="trending_momentum",
+            strength=1.0,
+            source="monitor",
+        )
+        assert gen._openclaw_strength_modifier(prop) > 1.0
 
     # --- End-to-end: proposals get reduced strength ---
 

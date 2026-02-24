@@ -360,10 +360,12 @@ async def get_trending(_: str = Depends(verify_token)) -> list[TrendingCoinInfo]
             price=m.price,
             volume_24h=m.volume_24h,
             market_cap=m.market_cap,
+            change_5m=float(getattr(m, "change_5m", 0.0) or 0.0),
             change_1h=m.change_1h,
             change_24h=m.change_24h,
             is_low_liquidity=m.is_low_liquidity,
             has_dynamic_strategy=False,
+            source=str(getattr(m, "source", "") or ""),
         )
         for m in snap.hot_movers
     ]
@@ -746,14 +748,22 @@ async def toggle_module(name: str, _: str = Depends(verify_token)) -> ActionResp
     requested_enabled = not currently_enabled
     enabled_now = await _monitor_ref.set_openclaw_enabled(requested_enabled)
 
-    if not enabled_now:
-        # Immediate hard-isolation: scrub OpenClaw data from shared intel snapshot.
-        _clear_openclaw_intel_cache()
-        nudge_ws()
-        return ActionResponse(success=True, message="OpenClaw intelligence disabled and isolated")
+    if requested_enabled:
+        if enabled_now:
+            nudge_ws()
+            return ActionResponse(success=True, message="OpenClaw intelligence enabled")
+        return ActionResponse(
+            success=False,
+            message="OpenClaw enable failed (check URL/config and service health)",
+        )
 
+    if enabled_now:
+        return ActionResponse(success=False, message="OpenClaw disable failed")
+
+    # Immediate hard-isolation: scrub OpenClaw data from shared intel snapshot.
+    _clear_openclaw_intel_cache()
     nudge_ws()
-    return ActionResponse(success=True, message="OpenClaw intelligence enabled")
+    return ActionResponse(success=True, message="OpenClaw intelligence disabled and isolated")
 
 
 def _clear_openclaw_intel_cache() -> None:
@@ -1155,7 +1165,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
 
 @app.post("/internal/report")
-async def receive_bot_report(request: Request) -> dict[str, Any]:
+async def receive_bot_report(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
     """Bots POST snapshots here; hub returns all data bots need.
 
     Bots never touch the shared data volume — the hub acts as a proxy:
@@ -1189,7 +1199,11 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
             combined_symbols |= set(open_symbols)
         if "positions" in data:
             positions = data["positions"] or []
-            combined_symbols |= {p["symbol"] for p in positions if p.get("symbol")}
+            combined_symbols |= {
+                str(p.get("symbol", "")).strip()
+                for p in positions
+                if isinstance(p, dict) and str(p.get("symbol", "")).strip()
+            }
         if exchange and combined_symbols:
             _hub_state_ref.update_bot_positions(bot_id, exchange, combined_symbols)
         elif exchange and open_symbols is not None:
@@ -1247,7 +1261,7 @@ async def receive_bot_report(request: Request) -> dict[str, Any]:
 
 
 @app.post("/internal/queue-update")
-async def queue_update(request: Request) -> dict[str, Any]:
+async def queue_update(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
     """Immediate consume/reject report from a bot — updates the queue right away."""
     data = await request.json()
     bot_id = data.get("bot_id", "")
@@ -1271,7 +1285,7 @@ async def queue_update(request: Request) -> dict[str, Any]:
 
 
 @app.get("/internal/intel")
-async def get_bot_intel() -> dict[str, Any]:
+async def get_bot_intel(_: str = Depends(verify_token)) -> dict[str, Any]:
     """Bots fetch the cached intel snapshot, analytics, and extreme watchlist.
 
     Returns the full snapshot as-is — bots decide what applies to them.
@@ -1292,7 +1306,7 @@ async def get_bot_intel() -> dict[str, Any]:
 
 
 @app.post("/internal/trade")
-async def receive_trade(request: Request) -> dict[str, Any]:
+async def receive_trade(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
     """Bots push trade open/close events here. Hub writes to its own DB.
 
     Accepts ``request_key`` for idempotent writes and deferred ack.
@@ -1317,7 +1331,7 @@ async def receive_trade(request: Request) -> dict[str, Any]:
 
 
 @app.get("/internal/trades/{bot_id}/open")
-async def get_bot_open_trades(bot_id: str) -> list[dict[str, Any]]:
+async def get_bot_open_trades(bot_id: str, _: str = Depends(verify_token)) -> list[dict[str, Any]]:
     """Return open (unclosed) trades for a bot — used on bot startup to recover state."""
     hub = _get_hub_db()
     trades = hub.get_open_trades_for_bot(bot_id)
@@ -1325,14 +1339,14 @@ async def get_bot_open_trades(bot_id: str) -> list[dict[str, Any]]:
 
 
 @app.get("/internal/trades/{bot_id}/stats")
-async def get_bot_strategy_stats(bot_id: str) -> dict[str, dict[str, Any]]:
+async def get_bot_strategy_stats(bot_id: str, _: str = Depends(verify_token)) -> dict[str, dict[str, Any]]:
     """Return per-strategy stats for a bot, keyed by 'strategy:symbol'."""
     hub = _get_hub_db()
     return hub.get_all_strategy_stats_for_bot(bot_id)
 
 
 @app.post("/internal/recovery-close")
-async def recovery_close_trade(request: Request) -> dict[str, Any]:
+async def recovery_close_trade(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
     """Bot reports a trade that died while it was down. No exit stats."""
     data = await request.json()
     bot_id = data.get("bot_id", "")

@@ -222,7 +222,10 @@ class TradingBot:
 
         default = profile.is_default if profile else False
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as sess:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=5),
+                headers=self._hub_auth_headers(),
+            ) as sess:
                 payload = {"bot_id": bot_id, "bot_style": self.settings.bot_style}
                 async with sess.post(f"{hub_url}/internal/report", json=payload) as resp:
                     data = await resp.json()
@@ -232,6 +235,17 @@ class TradingBot:
         except Exception:
             logger.warning("Hub unreachable during activation check — defaulting to idle")
             return False
+
+    def _hub_auth_headers(self) -> dict[str, str]:
+        token = str(getattr(self.settings, "dashboard_token", "") or "").strip()
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
+    def _new_hub_session(self, timeout_seconds: float) -> aiohttp.ClientSession:
+        return aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(force_close=True),
+            timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+            headers=self._hub_auth_headers(),
+        )
 
     async def _lean_idle_loop(self) -> None:
         """Minimal loop for inactive bots — no exchange, no strategies, no hub communication.
@@ -371,10 +385,7 @@ class TradingBot:
         if not hub_url or not self._multibot:
             return
         if not self._hub_session:
-            self._hub_session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(force_close=True),
-                timeout=aiohttp.ClientTimeout(total=10),
-            )
+            self._hub_session = self._new_hub_session(timeout_seconds=10)
 
         warmup_done = True
         if self._started_at:
@@ -1446,10 +1457,7 @@ class TradingBot:
     async def _post_to_hub(self, hub_url: str, payload: dict[str, Any]) -> None:
         """POST status to hub. Returns enabled flag, confirmed keys, and queue proposal."""
         if not self._hub_session:
-            self._hub_session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(force_close=True),
-                timeout=aiohttp.ClientTimeout(total=10),
-            )
+            self._hub_session = self._new_hub_session(timeout_seconds=10)
 
         payload["open_symbols"] = list(self._open_trades.keys())
         warmup_done = True
@@ -1482,10 +1490,7 @@ class TradingBot:
         if not hub_url or not self._multibot:
             return
         if not self._hub_session:
-            self._hub_session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(force_close=True),
-                timeout=aiohttp.ClientTimeout(total=10),
-            )
+            self._hub_session = self._new_hub_session(timeout_seconds=10)
         try:
             url = f"{hub_url.rstrip('/')}/internal/intel"
             async with self._hub_session.get(url) as resp:
@@ -1512,10 +1517,7 @@ class TradingBot:
         if not request_key:
             request_key = uuid.uuid4().hex
         if not self._hub_session:
-            self._hub_session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(force_close=True),
-                timeout=aiohttp.ClientTimeout(total=5),
-            )
+            self._hub_session = self._new_hub_session(timeout_seconds=5)
         payload = {
             "bot_id": self.settings.bot_id or "default",
             "action": record.action,
@@ -1542,10 +1544,7 @@ class TradingBot:
         target = hub_url
         bot_id = self.settings.bot_id or "default"
         if not self._hub_session:
-            self._hub_session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(force_close=True),
-                timeout=aiohttp.ClientTimeout(total=10),
-            )
+            self._hub_session = self._new_hub_session(timeout_seconds=10)
         try:
             async with self._hub_session.get(f"{target.rstrip('/')}/internal/trades/{bot_id}/open") as resp:
                 if resp.status == 200:
