@@ -162,6 +162,11 @@ class Settings(BaseSettings):
     coinglass_api_key: str = ""  # optional, for CoinGlass premium endpoints
     fmp_api_key: str = ""  # Financial Modeling Prep (market holidays)
     intel_enabled: bool = True  # master switch for all external feeds
+    openclaw_enabled: bool = True  # advisory-only external intelligence source
+    openclaw_url: str = "http://host.docker.internal:18080/intel"  # OpenClaw intelligence JSON endpoint
+    openclaw_token: str = ""  # optional bearer token for OpenClaw endpoint
+    openclaw_poll_interval: int = 120  # seconds between OpenClaw pulls
+    openclaw_timeout_seconds: int = 8  # per-request timeout for OpenClaw fetches
     fear_greed_poll: int = 3600  # how often to poll Fear & Greed (seconds)
     liquidation_poll: int = 300  # CoinGlass liquidation poll interval
     macro_calendar_poll: int = 1800  # ForexFactory calendar poll interval

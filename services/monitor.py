@@ -27,6 +27,7 @@ from intel.coinmarketcap import CoinMarketCapClient
 from intel.fear_greed import FearGreedClient
 from intel.liquidations import LiquidationMonitor
 from intel.macro_calendar import MacroCalendar
+from intel.openclaw import OpenClawClient
 from intel.tradingview import TradingViewClient
 from intel.whale_sentiment import WhaleSentiment
 from news import NewsItem, NewsMonitor
@@ -87,6 +88,13 @@ class MonitorService:
         self.gecko = CoinGeckoClient(
             api_key=self.settings.coingecko_api_key,
             poll_interval=self.settings.coingecko_poll_interval,
+        )
+        self.openclaw = OpenClawClient(
+            enabled=self._as_bool(getattr(self.settings, "openclaw_enabled", False), False),
+            base_url=str(getattr(self.settings, "openclaw_url", "") or ""),
+            token=str(getattr(self.settings, "openclaw_token", "") or ""),
+            poll_interval=self._as_int(getattr(self.settings, "openclaw_poll_interval", 120), 120, min_value=15),
+            timeout_seconds=self._as_int(getattr(self.settings, "openclaw_timeout_seconds", 8), 8, min_value=2),
         )
         self.scanner = TrendingScanner(
             poll_interval=60,
@@ -188,7 +196,7 @@ class MonitorService:
         logger.info("=" * 50)
         logger.info("MONITOR SERVICE v1.0")
         logger.info("Adaptive intensity: ON")
-        logger.info("Sources: F&G, Liquidations, Macro, Whales, TV, CMC, CoinGecko, Scanner, BinanceScanner")
+        logger.info("Sources: F&G, Liquidations, Macro, Whales, TV, CMC, CoinGecko, OpenClaw, Scanner, BinanceScanner")
         logger.info("=" * 50)
 
         self._running = True
@@ -213,6 +221,7 @@ class MonitorService:
         await self.tv.start()
         await self.cmc.start()
         await self.gecko.start()
+        await self.openclaw.start()
         await self.scanner.start()
         await self.binance_scanner.start()
         await self.news.start()
@@ -232,6 +241,7 @@ class MonitorService:
         await self.tv.stop()
         await self.cmc.stop()
         await self.gecko.stop()
+        await self.openclaw.stop()
         await self.scanner.stop()
         await self.binance_scanner.stop()
         await self.news.stop()
@@ -675,6 +685,7 @@ class MonitorService:
         snap.regime = self._derive_regime(snap)
         snap.position_size_multiplier = self._compute_size_mult(snap)
         snap.preferred_direction = self._compute_direction(snap)
+        self._apply_openclaw(snapshot=snap)
 
         # Trending (CEX-first): Binance scanner is the base stream; legacy
         # scanner remains additive confidence/discovery.
@@ -810,6 +821,9 @@ class MonitorService:
         if self.gecko.trending:
             sources.append("coingecko")
             ts["coingecko"] = now_iso
+        if self.openclaw.latest:
+            sources.append("openclaw")
+            ts["openclaw"] = now_iso
         if self.scanner.hot_movers:
             sources.append("scanner")
             ts["scanner"] = now_iso
@@ -826,6 +840,25 @@ class MonitorService:
         snap.source_timestamps = merged_ts
 
         return snap
+
+    def _apply_openclaw(self, snapshot: IntelSnapshot) -> None:
+        """Merge OpenClaw advisory outputs into the cached hub snapshot."""
+        data = self.openclaw.latest
+        if data is None:
+            return
+
+        commentary = data.regime_commentary
+        alt = data.alt_data
+        snapshot.openclaw_regime = commentary.regime or "unknown"
+        snapshot.openclaw_regime_confidence = float(commentary.confidence or 0.0)
+        snapshot.openclaw_regime_why = list(commentary.why or [])
+        snapshot.openclaw_sentiment_score = int(alt.sentiment_score or 50)
+        snapshot.openclaw_long_short_ratio = float(alt.long_short_ratio or 0.0)
+        snapshot.openclaw_liquidations_24h_usd = float(alt.liquidations_24h_usd or 0.0)
+        snapshot.openclaw_open_interest_24h_usd = float(alt.open_interest_24h_usd or 0.0)
+        snapshot.openclaw_idea_briefs = [i.model_dump() for i in data.idea_briefs[:10]]
+        snapshot.openclaw_failure_triage = [t.model_dump() for t in data.failure_triage[:10]]
+        snapshot.openclaw_experiments = [e.model_dump() for e in data.experiments[:10]]
 
     def _derive_regime(self, snap: IntelSnapshot) -> str:
         if self.fear_greed.is_extreme_fear and snap.mass_liquidation:

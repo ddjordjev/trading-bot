@@ -2152,3 +2152,65 @@ class TestBotProfiles:
             assert profile["balance"] == pytest.approx(520.0)
         finally:
             _bot_reports.clear()
+
+    async def test_profile_status_uses_runtime_not_enabled(self, client, mock_bot):
+        set_bot(mock_bot)
+        hub = _get_hub_db()
+        hub.set_bot_enabled("extreme", True)
+        _bot_reports.clear()
+        report_bot_snapshot(
+            {
+                "bot_id": "extreme",
+                "exchange": "BINANCE",
+                "status": {"running": False, "available_margin": 1000.0},
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+        try:
+            r = await client.get("/api/bot-profiles")
+            assert r.status_code == 200
+            data = r.json()
+            profile = next(p for p in data if p["id"] == "extreme")
+            assert profile["enabled"] is True
+            assert profile["container_status"] == "idle"
+        finally:
+            _bot_reports.clear()
+
+    async def test_profile_status_winding_down_when_disabled_with_positions(self, client, mock_bot):
+        set_bot(mock_bot)
+        hub = _get_hub_db()
+        hub.set_bot_enabled("indicators", False)
+        _bot_reports.clear()
+        report_bot_snapshot(
+            {
+                "bot_id": "indicators",
+                "exchange": "BINANCE",
+                "status": {"running": False, "available_margin": 800.0},
+                "positions": [{"symbol": "BTC/USDT", "notional_value": 100.0, "leverage": 5, "pnl_usd": 1.0}],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+        try:
+            r = await client.get("/api/bot-profiles")
+            assert r.status_code == 200
+            data = r.json()
+            profile = next(p for p in data if p["id"] == "indicators")
+            assert profile["enabled"] is False
+            assert profile["container_status"] == "winding_down"
+        finally:
+            _bot_reports.clear()
+
+    async def test_profile_status_idle_when_enabled_without_reports(self, client, mock_bot):
+        set_bot(mock_bot)
+        hub = _get_hub_db()
+        hub.set_bot_enabled("extreme", True)
+        _bot_reports.clear()
+        r = await client.get("/api/bot-profiles")
+        assert r.status_code == 200
+        data = r.json()
+        profile = next(p for p in data if p["id"] == "extreme")
+        assert profile["enabled"] is True
+        assert profile["container_status"] == "idle"

@@ -1,5 +1,4 @@
 import { useEffect, useState, useCallback } from "react";
-import { get } from "../api/client";
 
 interface SystemMetrics {
   cpu_pct: number;
@@ -22,11 +21,6 @@ interface MetricsData {
   uptime_seconds: number;
   system: SystemMetrics;
   process: ProcessMetrics;
-}
-
-interface GrafanaConfig {
-  port: number;
-  dashboard_uid: string;
 }
 
 function formatUptime(seconds: number): string {
@@ -62,6 +56,52 @@ function MetricCard({ label, value, sub, color }: {
   );
 }
 
+function CircularGauge({ label, value, color }: { label: string; value: number; color: string }) {
+  const clamped = Math.max(0, Math.min(100, value));
+  const radius = 46;
+  const stroke = 8;
+  const circumference = 2 * Math.PI * radius;
+  const dashOffset = circumference * (1 - clamped / 100);
+
+  return (
+    <div
+      style={{
+        background: "var(--bg-card, #161b22)",
+        border: "1px solid var(--border, #30363d)",
+        borderRadius: "var(--radius, 8px)",
+        padding: "0.9rem",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: "0.4rem",
+      }}
+    >
+      <div style={{ fontSize: "0.75rem", color: "var(--text-muted, #8b949e)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+        {label}
+      </div>
+      <svg width="120" height="120" viewBox="0 0 120 120" role="img" aria-label={`${label} ${clamped}%`}>
+        <circle cx="60" cy="60" r={radius} fill="none" stroke="var(--border, #30363d)" strokeWidth={stroke} />
+        <circle
+          cx="60"
+          cy="60"
+          r={radius}
+          fill="none"
+          stroke={color}
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={dashOffset}
+          transform="rotate(-90 60 60)"
+          style={{ transition: "stroke-dashoffset 0.5s ease" }}
+        />
+        <text x="60" y="66" textAnchor="middle" fontSize="20" fontWeight="700" fill="var(--text, #c9d1d9)">
+          {Math.round(clamped)}%
+        </text>
+      </svg>
+    </div>
+  );
+}
+
 function ProgressBar({ pct, color }: { pct: number; color: string }) {
   return (
     <div style={{
@@ -78,9 +118,18 @@ function ProgressBar({ pct, color }: { pct: number; color: string }) {
 function BuiltInDashboard({ data }: { data: MetricsData }) {
   const s = data.system;
   const p = data.process;
+  const cpuColor = s.cpu_pct > 80 ? "#f85149" : s.cpu_pct > 50 ? "#d29922" : "#3fb950";
+  const memColor = s.mem_pct > 85 ? "#f85149" : s.mem_pct > 60 ? "#d29922" : "#3fb950";
+  const diskColor = s.disk_pct > 90 ? "#f85149" : s.disk_pct > 70 ? "#d29922" : "#3fb950";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "0.75rem" }}>
+        <CircularGauge label="CPU" value={s.cpu_pct} color={cpuColor} />
+        <CircularGauge label="Memory" value={s.mem_pct} color={memColor} />
+        <CircularGauge label="Disk" value={s.disk_pct} color={diskColor} />
+      </div>
+
       {/* System & Process */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.25rem" }}>
         <div>
@@ -98,19 +147,19 @@ function BuiltInDashboard({ data }: { data: MetricsData }) {
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem", marginBottom: "0.25rem" }}>
                 <span>CPU</span><span>{s.cpu_pct}%</span>
               </div>
-              <ProgressBar pct={s.cpu_pct} color={s.cpu_pct > 80 ? "#f85149" : s.cpu_pct > 50 ? "#d29922" : "#3fb950"} />
+              <ProgressBar pct={s.cpu_pct} color={cpuColor} />
             </div>
             <div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem", marginBottom: "0.25rem" }}>
                 <span>Memory</span><span>{s.mem_used_gb} / {s.mem_total_gb} GB ({s.mem_pct}%)</span>
               </div>
-              <ProgressBar pct={s.mem_pct} color={s.mem_pct > 85 ? "#f85149" : s.mem_pct > 60 ? "#d29922" : "#3fb950"} />
+              <ProgressBar pct={s.mem_pct} color={memColor} />
             </div>
             <div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem", marginBottom: "0.25rem" }}>
                 <span>Disk</span><span>{s.disk_used_gb} GB used, {s.disk_free_gb} GB free ({s.disk_pct}%)</span>
               </div>
-              <ProgressBar pct={s.disk_pct} color={s.disk_pct > 90 ? "#f85149" : s.disk_pct > 70 ? "#d29922" : "#3fb950"} />
+              <ProgressBar pct={s.disk_pct} color={diskColor} />
             </div>
           </div>
         </div>
@@ -134,8 +183,6 @@ function BuiltInDashboard({ data }: { data: MetricsData }) {
 
 export function Monitoring() {
   const [data, setData] = useState<MetricsData | null>(null);
-  const [grafana, setGrafana] = useState<GrafanaConfig | null>(null);
-  const [grafanaReachable, setGrafanaReachable] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const fetchMetrics = useCallback(() => {
@@ -150,20 +197,6 @@ export function Monitoring() {
     const iv = setInterval(fetchMetrics, 5000);
     return () => clearInterval(iv);
   }, [fetchMetrics]);
-
-  useEffect(() => {
-    fetch("/api/grafana-url")
-      .then(r => r.json())
-      .then(cfg => {
-        setGrafana(cfg);
-        const img = new Image();
-        img.onload = () => setGrafanaReachable(true);
-        img.onerror = () => setGrafanaReachable(false);
-        img.src = `${window.location.protocol}//${window.location.hostname}:${cfg.port}/public/img/grafana_icon.svg`;
-        setTimeout(() => setGrafanaReachable(prev => prev === null ? false : prev), 3000);
-      })
-      .catch(() => setGrafanaReachable(false));
-  }, []);
 
   if (error && !data) {
     return (
@@ -184,44 +217,14 @@ export function Monitoring() {
     );
   }
 
-  const grafanaSrc =
-    grafana && grafanaReachable
-      ? `${window.location.protocol}//${window.location.hostname}:${grafana.port}/d/${grafana.dashboard_uid}/trading-bot?orgId=1&kiosk&theme=dark`
-      : "";
-
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
           Auto-refreshing every 5s
         </span>
-        {grafana && (
-          <a
-            href={`${window.location.protocol}//${window.location.hostname}:${grafana.port}/d/${grafana.dashboard_uid}/trading-bot?orgId=1&kiosk&theme=dark`}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ fontSize: "0.8rem" }}
-          >
-            Open full-page Grafana (new tab)
-          </a>
-        )}
       </div>
-      {grafanaSrc ? (
-        <iframe
-          title="Grafana Monitoring"
-          src={grafanaSrc}
-          style={{
-            width: "100%",
-            minHeight: "84vh",
-            height: "calc(100vh - 140px)",
-            border: "1px solid var(--border, #30363d)",
-            borderRadius: "var(--radius, 8px)",
-            background: "var(--bg-secondary, #161b22)",
-          }}
-        />
-      ) : (
-        <BuiltInDashboard data={data} />
-      )}
+      <BuiltInDashboard data={data} />
     </div>
   );
 }

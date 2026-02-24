@@ -441,7 +441,14 @@ async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
 async def get_modules(_: str = Depends(verify_token)) -> list[ModuleStatus]:
     if _hub_state_ref is None:
         return []
+    settings = get_settings()
     snap = _hub_state_ref.read_intel()
+    has_openclaw_data = bool(
+        snap.openclaw_idea_briefs
+        or snap.openclaw_failure_triage
+        or snap.openclaw_experiments
+        or snap.openclaw_regime != "unknown"
+    )
     return [
         ModuleStatus(
             name="intel",
@@ -470,6 +477,19 @@ async def get_modules(_: str = Depends(verify_token)) -> list[ModuleStatus]:
             enabled=True,
             description="Strategy scoring, pattern detection, suggestions (in-process)",
             stats={"strategies_scored": len(_hub_state_ref.read_analytics().weights)},
+        ),
+        ModuleStatus(
+            name="openclaw",
+            display_name="OpenClaw Intelligence",
+            enabled=bool(getattr(settings, "openclaw_enabled", True)),
+            description="External advisory intelligence feed (API-only, no execution access)",
+            stats={
+                "connected": has_openclaw_data,
+                "regime": snap.openclaw_regime,
+                "confidence": snap.openclaw_regime_confidence,
+                "ideas": len(snap.openclaw_idea_briefs),
+                "triage": len(snap.openclaw_failure_triage),
+            },
         ),
     ]
 
@@ -704,7 +724,7 @@ async def reset_profit_buffer(_: str = Depends(verify_token)) -> ActionResponse:
 
 @app.post("/api/module/{name}/toggle", response_model=ActionResponse)
 async def toggle_module(name: str, _: str = Depends(verify_token)) -> ActionResponse:
-    if name not in ("intel", "news", "scanner", "analytics"):
+    if name not in ("intel", "news", "scanner", "analytics", "openclaw"):
         return ActionResponse(success=False, message=f"Unknown module: {name}")
     return ActionResponse(success=False, message=f"{name} is managed by the hub — toggle not supported")
 
@@ -726,10 +746,18 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
             continue
         enabled = enabled_map.get(p.id, p.is_default)
         rpt = _bot_reports.get(p.id, {})
-        container_status = ("running" if enabled else "idle") if rpt else "idle"
-
         s = rpt.get("status", {})
         positions = rpt.get("positions", [])
+        if not rpt:
+            container_status = "idle"
+        else:
+            running = bool(s.get("running"))
+            if running:
+                container_status = "running"
+            elif not enabled and positions:
+                container_status = "winding_down"
+            else:
+                container_status = "idle"
         summary = hub.get_bot_summary(p.id)
         balance_now: float | None
         if s:

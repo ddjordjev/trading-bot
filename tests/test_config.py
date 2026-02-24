@@ -42,6 +42,8 @@ class TestSettings:
         assert settings.max_daily_loss_pct == 3.0
         assert settings.initial_risk_amount == 50.0
         assert settings.max_notional_position == 100_000.0
+        assert settings.openclaw_enabled is True
+        assert settings.openclaw_url.endswith("/intel")
 
     def test_is_live(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "live")
