@@ -288,10 +288,18 @@ class MonitorService:
                 continue
             ex = cls({"enableRateLimit": True})
             try:
+                # In paper_live with Binance, gate symbols by testnet availability
+                # so bots/scanner do not surface pairs not tradable on demo futures.
+                if exchange_id == "binance" and self.settings.trading_mode == "paper_live":
+                    with contextlib.suppress(Exception):
+                        ex.set_sandbox_mode(True)
                 await ex.load_markets()
                 symbols = {s.split(":")[0] for s in ex.markets}
                 fresh[exchange_id.upper()] = symbols
-                logger.info("Fetched {} symbols from {}", len(symbols), exchange_id.upper())
+                if exchange_id == "binance" and self.settings.trading_mode == "paper_live":
+                    logger.info("Fetched {} symbols from {} TESTNET", len(symbols), exchange_id.upper())
+                else:
+                    logger.info("Fetched {} symbols from {}", len(symbols), exchange_id.upper())
             except Exception as e:
                 logger.warning("Failed to fetch symbols from {}: {}", exchange_id.upper(), e)
             finally:

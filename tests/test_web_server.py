@@ -532,6 +532,39 @@ class TestGetStrategiesNoneStats:
         assert data[0]["fail_count"] == 0
         _bot_reports.clear()
 
+    async def test_strategies_open_now_uses_live_positions_not_cached_value(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports.clear()
+        report_bot_snapshot(
+            {
+                "bot_id": "test",
+                "exchange": "MEXC",
+                "status": {},
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [
+                    {
+                        "name": "manual_override",
+                        "symbol": "BTC/USDT",
+                        "market_type": "futures",
+                        "leverage": 10,
+                        "is_dynamic": False,
+                        "open_now": 1,
+                        "applied_count": 0,
+                        "success_count": 0,
+                        "fail_count": 0,
+                    },
+                ],
+            }
+        )
+        r = await client.get("/api/strategies")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "manual_override"
+        assert data[0]["open_now"] == 0
+        _bot_reports.clear()
+
 
 # ── POST /internal/report & merged snapshot ──────────────────────────
 

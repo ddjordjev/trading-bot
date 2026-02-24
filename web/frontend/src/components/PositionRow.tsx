@@ -58,7 +58,17 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
           <strong>{p.symbol}</strong>
         )}
         <br />
-        <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+        <span
+          style={{
+            fontSize: "0.75rem",
+            color:
+              p.side.toLowerCase() === "buy" || p.side.toLowerCase() === "long"
+                ? "var(--green)"
+                : p.side.toLowerCase() === "sell" || p.side.toLowerCase() === "short"
+                  ? "var(--red)"
+                  : "var(--text-muted)",
+          }}
+        >
           {p.side === "buy" ? "LONG" : p.side === "sell" ? "SHORT" : p.side.toUpperCase()} · {p.leverage}x · {p.market_type}
         </span>
       </td>

@@ -342,7 +342,9 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                   <td>{ws.symbol}</td>
                   {showBotColumn && <td style={{ fontSize: "0.75rem", fontWeight: 500, textTransform: "uppercase", color: "var(--text-muted)" }}>{(ws as any).exchange_name || "—"}</td>}
                   {showBotColumn && <td style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)" }}>{(ws as any).bot_id || "—"}</td>}
-                  <td>{ws.scalp_side.toUpperCase()}</td>
+                  <td style={{ color: ws.scalp_side.toLowerCase() === "long" ? "var(--green)" : ws.scalp_side.toLowerCase() === "short" ? "var(--red)" : "var(--text)" }}>
+                    {ws.scalp_side.toUpperCase()}
+                  </td>
                   <td>{ws.entry_price.toFixed(ws.entry_price < 1 ? 6 : 2)}</td>
                   <td>{ws.amount.toFixed(6)}</td>
                   <td>{ws.age_minutes.toFixed(0)}m</td>

@@ -365,9 +365,27 @@ async def get_trending(_: str = Depends(verify_token)) -> list[TrendingCoinInfo]
 @app.get("/api/strategies", response_model=list[StrategyInfo])
 async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
     grouped: dict[tuple[str, bool], StrategyInfo] = {}
+    open_counts_by_strategy: dict[str, int] = {}
 
     # Source 1: live bot reports (strategies currently running on connected bots)
     for rpt in _bot_reports.values():
+        # Open strategy count is derived from live positions, not strategy cache,
+        # to avoid stale "open" badges after positions are closed.
+        live_counts: dict[str, int] = {}
+        for pos in rpt.get("positions", []):
+            try:
+                amt = float(pos.get("amount", 0) or 0)
+            except (TypeError, ValueError):
+                amt = 0.0
+            if amt <= 0:
+                continue
+            strategy_name = str(pos.get("strategy", "") or "").strip()
+            if not strategy_name:
+                continue
+            live_counts[strategy_name] = live_counts.get(strategy_name, 0) + 1
+        for name, cnt in live_counts.items():
+            open_counts_by_strategy[name] = open_counts_by_strategy.get(name, 0) + cnt
+
         for s in rpt.get("strategies", []):
             name = s.get("name", "")
             is_dyn = s.get("is_dynamic", False)
@@ -382,7 +400,6 @@ async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
                     is_dynamic=is_dyn,
                 )
             g = grouped[key]
-            g.open_now += s.get("open_now", 0)
             g.applied_count += s.get("applied_count", 0)
             g.success_count += s.get("success_count", 0)
             g.fail_count += s.get("fail_count", 0)
@@ -413,6 +430,9 @@ async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
                 g.applied_count = w.total_trades
                 g.success_count = round(w.win_rate * w.total_trades)
                 g.fail_count = w.total_trades - g.success_count
+
+    for g in grouped.values():
+        g.open_now = open_counts_by_strategy.get(g.name, 0)
 
     return list(grouped.values())
 

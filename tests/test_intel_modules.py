@@ -2387,12 +2387,17 @@ class TestLiquidationMonitorPollLoopAndLifecycle:
     @pytest.mark.asyncio
     async def test_start_sets_running_and_creates_task(self):
         monitor = LiquidationMonitor(poll_interval=300)
-        with patch.object(monitor, "_poll_loop", new_callable=AsyncMock):
+        with (
+            patch.object(monitor, "_poll_loop", new_callable=AsyncMock),
+            patch.object(monitor, "_binance_ws_loop", new_callable=AsyncMock),
+            patch.object(monitor, "_bybit_ws_loop", new_callable=AsyncMock),
+        ):
             await monitor.start()
         assert monitor._running is True
-        assert len(monitor._background_tasks) == 1
+        assert len(monitor._background_tasks) == 3
         await monitor.stop()
         assert monitor._running is False
+        assert len(monitor._background_tasks) == 0
 
     @pytest.mark.asyncio
     async def test_stop_clears_running(self):
@@ -2400,6 +2405,49 @@ class TestLiquidationMonitorPollLoopAndLifecycle:
         monitor._running = True
         await monitor.stop()
         assert monitor._running is False
+
+    def test_consume_binance_force_order_updates_aggregate(self):
+        monitor = LiquidationMonitor(poll_interval=300)
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        payload = {
+            "e": "forceOrder",
+            "E": now_ms,
+            "o": {
+                "S": "SELL",
+                "z": "0.5",
+                "ap": "100000",
+                "T": now_ms,
+            },
+        }
+        monitor._consume_binance_force_order(payload)
+
+        assert monitor.latest is not None
+        assert monitor.latest.long_24h == 50_000.0
+        assert monitor.latest.short_24h == 0.0
+        assert monitor.latest.total_24h == 50_000.0
+
+    def test_consume_bybit_liquidation_updates_aggregate(self):
+        monitor = LiquidationMonitor(poll_interval=300)
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        payload = {
+            "topic": "allLiquidation.BTCUSDT",
+            "ts": now_ms,
+            "data": [
+                {
+                    "T": now_ms,
+                    "s": "BTCUSDT",
+                    "S": "Buy",
+                    "v": "0.25",
+                    "p": "100000",
+                }
+            ],
+        }
+        monitor._consume_bybit_liquidation(payload)
+
+        assert monitor.latest is not None
+        assert monitor.latest.long_24h == 25_000.0
+        assert monitor.latest.short_24h == 0.0
+        assert monitor.latest.total_24h == 25_000.0
 
 
 # ── MacroCalendar HTTP fetch, poll_loop, start/stop ────────────────────

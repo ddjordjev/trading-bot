@@ -392,6 +392,41 @@ class TradingBot:
                 "open_symbols": list(self._open_trades.keys()),
                 "ready": warmup_done and not self.target.manual_stop,
             }
+            # Keep dashboard PnL/price near-real-time between full ticks.
+            # Without this, position rows can look stale and then "jump" on full tick.
+            owned_symbols = set(self._open_trades.keys()) | set(self.orders.scaler.active_positions.keys())
+            if owned_symbols:
+                positions = await self.exchange.fetch_positions()
+                pos_list: list[dict[str, Any]] = []
+                for pos in positions:
+                    if pos.amount <= 0 or pos.symbol not in owned_symbols:
+                        continue
+                    ts = self.orders.trailing.active_stops.get(pos.symbol)
+                    sp = self.orders.scaler.get(pos.symbol)
+                    pos_list.append(
+                        {
+                            "symbol": pos.symbol,
+                            "side": pos.side.value if hasattr(pos.side, "value") else str(pos.side),
+                            "amount": pos.amount,
+                            "entry_price": pos.entry_price,
+                            "current_price": pos.current_price,
+                            "pnl_pct": pos.pnl_pct,
+                            "pnl_usd": pos.unrealized_pnl,
+                            "leverage": pos.leverage,
+                            "market_type": pos.market_type,
+                            "strategy": pos.strategy,
+                            "stop_loss": (ts.current_stop if ts else pos.stop_loss),
+                            "notional_value": pos.notional_value,
+                            "age_minutes": 0,
+                            "breakeven_locked": ts.breakeven_locked if ts else False,
+                            "scale_mode": sp.mode.value if sp else "",
+                            "scale_phase": sp.phase.value if sp else "",
+                            "dca_count": sp.adds if sp else 0,
+                            "trade_url": self.settings.symbol_platform_url(pos.symbol, pos.market_type),
+                        }
+                    )
+                if pos_list:
+                    payload["positions"] = pos_list
 
             url = f"{hub_url.rstrip('/')}/internal/report"
             async with self._hub_session.post(url, json=payload) as resp:
