@@ -11,7 +11,6 @@ import aiohttp
 import uvicorn
 from fastapi import FastAPI
 
-
 BRIDGE_HOST = os.getenv("OPENCLAW_BRIDGE_HOST", "0.0.0.0")
 BRIDGE_PORT = int(os.getenv("OPENCLAW_BRIDGE_PORT", "18080"))
 HUB_URL = os.getenv("OPENCLAW_BRIDGE_HUB_URL", "http://localhost:9035")
@@ -44,11 +43,13 @@ async def _hub_get(path: str) -> Any:
     if HUB_TOKEN:
         headers["Authorization"] = f"Bearer {HUB_TOKEN}"
     timeout = aiohttp.ClientTimeout(total=OPENCLAW_TIMEOUT)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(f"{HUB_URL}{path}", headers=headers) as resp:
-            if resp.status != 200:
-                return None
-            return await resp.json()
+    async with (
+        aiohttp.ClientSession(timeout=timeout) as session,
+        session.get(f"{HUB_URL}{path}", headers=headers) as resp,
+    ):
+        if resp.status != 200:
+            return None
+        return await resp.json()
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:

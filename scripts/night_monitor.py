@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_DIR = ROOT / "docs" / "reports"
 API_BASE = "http://localhost:9035"
@@ -43,10 +42,10 @@ def _scan_logs(since: str) -> dict:
         out = _run(["docker", "compose", "logs", "--since", since, svc])
         lines = out.splitlines()
         findings[svc] = {
-            "errors": sum(1 for l in lines if " ERROR " in l),
-            "critical": sum(1 for l in lines if " CRITICAL " in l),
-            "tracebacks": sum(1 for l in lines if "Traceback" in l),
-            "warnings": sum(1 for l in lines if " WARNING " in l),
+            "errors": sum(1 for line in lines if " ERROR " in line),
+            "critical": sum(1 for line in lines if " CRITICAL " in line),
+            "tracebacks": sum(1 for line in lines if "Traceback" in line),
+            "warnings": sum(1 for line in lines if " WARNING " in line),
         }
     return findings
 
