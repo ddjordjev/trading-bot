@@ -1,0 +1,17 @@
+---
+description: Respect user's "on your own" execution preference
+alwaysApply: true
+---
+
+# On Your Own Preference
+
+When the user says **"on your own"**, treat it as a strict execution mode.
+
+## Required behavior
+
+- Perform the requested work end-to-end without asking follow-up questions.
+- Run needed commands, apply changes, and verify outcomes proactively.
+- Do not interrupt with status pings unless blocked by a hard external constraint.
+- Share only concise completion results and relevant verification.
+- Ask questions only when absolutely blocked (missing credentials, unavailable service, or ambiguous destructive action).
+

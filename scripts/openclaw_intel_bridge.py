@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,11 @@ import aiohttp
 import uvicorn
 from fastapi import FastAPI
 
-from intel.openclaw import OpenClawSnapshot
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from intel.openclaw import OpenClawSnapshot  # noqa: E402
 
 BRIDGE_HOST = os.getenv("OPENCLAW_BRIDGE_HOST", "0.0.0.0")
 BRIDGE_PORT = int(os.getenv("OPENCLAW_BRIDGE_PORT", "18080"))
@@ -105,7 +110,10 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 def _openclaw_call(method: str) -> Any:
     cmd = ["openclaw", "gateway", "call", method, "--json"]
-    res = subprocess.run(cmd, capture_output=True, text=True, timeout=20, check=False)
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=20, check=False)
+    except Exception:
+        return None
     if res.returncode != 0:
         return None
     text = (res.stdout or "").strip()
