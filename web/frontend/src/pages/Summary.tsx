@@ -4,6 +4,16 @@ function normalizeSummaryHtml(raw: string): string {
   const parser = new DOMParser();
   const doc = parser.parseFromString(raw, "text/html");
 
+  // Force link navigation out of the iframe context.
+  let head = doc.head;
+  if (!head) {
+    head = doc.createElement("head");
+    doc.documentElement.insertBefore(head, doc.body ?? null);
+  }
+  const base = doc.createElement("base");
+  base.setAttribute("target", "_blank");
+  head.appendChild(base);
+
   // Keep all summary links from hijacking the iframe context.
   for (const anchor of Array.from(doc.querySelectorAll("a[href]"))) {
     const href = (anchor.getAttribute("href") ?? "").trim();
@@ -52,6 +62,7 @@ export function Summary() {
       className="summary-embed"
       title="Trade Borg Summary"
       srcDoc={html}
+      sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
       style={{
         width: "100%",
         height: "calc(100vh - 120px)",
