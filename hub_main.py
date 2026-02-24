@@ -28,7 +28,7 @@ from hub.state import HubState
 from notifications.notifier import NotificationType, Notifier
 from services.analytics_service import AnalyticsService
 from services.monitor import MonitorService
-from web.server import _bot_reports, app, set_hub_state, setup_log_capture
+from web.server import _bot_reports, app, set_hub_state, set_monitor_service, setup_log_capture
 
 _hub_state: HubState | None = None
 _monitor: MonitorService | None = None
@@ -154,6 +154,7 @@ async def _start_services(state: HubState) -> None:
     settings = get_settings()
 
     _monitor = MonitorService(settings=settings, state=state)
+    set_monitor_service(_monitor)
     _analytics = AnalyticsService(refresh_interval=300, state=state)
     _notifier = Notifier(settings)
     await _notifier.start()

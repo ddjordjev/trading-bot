@@ -41,39 +41,42 @@ def monitor(mock_settings, tmp_path):
                         with patch("services.monitor.TradingViewClient") as mock_tv:
                             with patch("services.monitor.CoinMarketCapClient") as mock_cmc:
                                 with patch("services.monitor.CoinGeckoClient") as mock_gecko:
-                                    with patch("services.monitor.TrendingScanner") as mock_scanner:
-                                        with patch("services.monitor.SignalGenerator") as _mock_sg:
-                                            with patch("services.monitor.get_settings", return_value=mock_settings):
-                                                from services.monitor import MonitorService
+                                    with patch("services.monitor.OpenClawClient") as mock_openclaw:
+                                        with patch("services.monitor.TrendingScanner") as mock_scanner:
+                                            with patch("services.monitor.SignalGenerator") as _mock_sg:
+                                                with patch("services.monitor.get_settings", return_value=mock_settings):
+                                                    from services.monitor import MonitorService
 
-                                                # Build mock state
-                                                mock_state = MagicMock()
-                                                mock_state.read_bot_status.return_value = BotDeploymentStatus(
-                                                    level=DeploymentLevel.HUNTING
-                                                )
-                                                mock_state.read_all_bot_statuses.return_value = []
-                                                mock_state.read_trade_queue.return_value = TradeQueue()
-                                                mock_state.write_intel = MagicMock()
-                                                mock_state.write_trade_queue = MagicMock()
-                                                mock_state_cls.return_value = mock_state
+                                                    # Build mock state
+                                                    mock_state = MagicMock()
+                                                    mock_state.read_bot_status.return_value = BotDeploymentStatus(
+                                                        level=DeploymentLevel.HUNTING
+                                                    )
+                                                    mock_state.read_all_bot_statuses.return_value = []
+                                                    mock_state.read_trade_queue.return_value = TradeQueue()
+                                                    mock_state.write_intel = MagicMock()
+                                                    mock_state.write_trade_queue = MagicMock()
+                                                    mock_state_cls.return_value = mock_state
 
-                                                # Async start/stop for all clients
-                                                for m in (
-                                                    mock_fg,
-                                                    mock_liq,
-                                                    mock_macro,
-                                                    mock_whales,
-                                                    mock_tv,
-                                                    mock_cmc,
-                                                    mock_gecko,
-                                                    mock_scanner,
-                                                ):
-                                                    m.return_value.start = AsyncMock()
-                                                    m.return_value.stop = AsyncMock()
+                                                    # Async start/stop for all clients
+                                                    for m in (
+                                                        mock_fg,
+                                                        mock_liq,
+                                                        mock_macro,
+                                                        mock_whales,
+                                                        mock_tv,
+                                                        mock_cmc,
+                                                        mock_gecko,
+                                                        mock_openclaw,
+                                                        mock_scanner,
+                                                    ):
+                                                        m.return_value.start = AsyncMock()
+                                                        m.return_value.stop = AsyncMock()
+                                                    mock_openclaw.return_value.latest = None
 
-                                                svc = MonitorService(settings=mock_settings)
-                                                svc.state = mock_state
-                                                return svc
+                                                    svc = MonitorService(settings=mock_settings)
+                                                    svc.state = mock_state
+                                                    return svc
 
 
 # ── start / stop / _run_loop ───────────────────────────────────────────────
@@ -90,6 +93,7 @@ async def test_start_starts_all_clients_and_enters_loop(monitor):
     monitor.tv.start.assert_awaited_once()
     monitor.cmc.start.assert_awaited_once()
     monitor.gecko.start.assert_awaited_once()
+    monitor.openclaw.start.assert_awaited_once()
     monitor.scanner.start.assert_awaited_once()
     monitor._run_loop.assert_awaited_once()
     assert monitor._running is True
@@ -107,7 +111,30 @@ async def test_stop_sets_running_false_and_stops_clients(monitor):
     monitor.tv.stop.assert_awaited_once()
     monitor.cmc.stop.assert_awaited_once()
     monitor.gecko.stop.assert_awaited_once()
+    monitor.openclaw.stop.assert_awaited_once()
     monitor.scanner.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_set_openclaw_enabled_false_stops_and_clears(monitor):
+    monitor.openclaw.base_url = "http://localhost:18080/intel"
+    monitor.openclaw.set_enabled = AsyncMock(return_value=False)
+    monitor.openclaw.fetch_once = AsyncMock()
+    enabled = await monitor.set_openclaw_enabled(False)
+    assert enabled is False
+    monitor.openclaw.set_enabled.assert_awaited_once_with(False)
+    monitor.openclaw.fetch_once.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_openclaw_enabled_true_fetches_immediately(monitor):
+    monitor.openclaw.base_url = "http://localhost:18080/intel"
+    monitor.openclaw.set_enabled = AsyncMock(return_value=True)
+    monitor.openclaw.fetch_once = AsyncMock()
+    enabled = await monitor.set_openclaw_enabled(True)
+    assert enabled is True
+    monitor.openclaw.set_enabled.assert_awaited_once_with(True)
+    monitor.openclaw.fetch_once.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -273,6 +300,65 @@ def test_build_snapshot_includes_fear_greed_and_liquidations(monitor):
     assert snap.liquidation_bias == "short"
     assert "fear_greed" in snap.sources_active
     assert "liquidations" in snap.sources_active
+
+
+def test_build_snapshot_merges_openclaw_advisory_payload(monitor):
+    from intel.openclaw import (
+        OpenClawAltData,
+        OpenClawIdeaBrief,
+        OpenClawRegimeCommentary,
+        OpenClawSnapshot,
+        OpenClawTriageEntry,
+    )
+
+    monitor.fear_greed.value = 50
+    monitor.fear_greed.trade_direction_bias = MagicMock(return_value="neutral")
+    monitor.fear_greed.position_bias = MagicMock(return_value=1.0)
+    monitor.fear_greed.is_extreme_fear = False
+    monitor.fear_greed.is_extreme_greed = False
+    monitor.fear_greed.is_fear = False
+    monitor.fear_greed.is_greed = False
+    monitor.fear_greed.latest = True
+
+    monitor.liquidations.latest = None
+    monitor.liquidations.reversal_bias = MagicMock(return_value="neutral")
+    monitor.liquidations.aggression_boost = MagicMock(return_value=1.0)
+    monitor.macro.has_imminent_event = MagicMock(return_value=False)
+    monitor.macro.exposure_multiplier = MagicMock(return_value=1.0)
+    monitor.macro.is_spike_opportunity = MagicMock(return_value=False)
+    monitor.macro.next_event_info = MagicMock(return_value="")
+    monitor.whales.contrarian_bias = MagicMock(return_value="neutral")
+    monitor.whales.get = MagicMock(return_value=None)
+    monitor.tv.consensus = MagicMock(return_value="neutral")
+    monitor.tv.signal_boost = MagicMock(return_value=1.0)
+    monitor.tv._cache = {}
+    monitor.scanner.hot_movers = []
+    monitor.cmc.trending = []
+    monitor.cmc.all_interesting = []
+    monitor.gecko.trending = []
+    monitor.gecko.all_interesting = []
+
+    monitor.openclaw.latest = OpenClawSnapshot(
+        regime_commentary=OpenClawRegimeCommentary(regime="risk_on", confidence=0.77, why=["fear reset"]),
+        alt_data=OpenClawAltData(
+            sentiment_score=12,
+            long_short_ratio=0.88,
+            liquidations_24h_usd=321_000_000,
+            open_interest_24h_usd=89_000_000_000,
+        ),
+        idea_briefs=[OpenClawIdeaBrief(symbol="SOL/USDT", side="long", confidence=0.66)],
+        failure_triage=[OpenClawTriageEntry(severity="high", component="monitor", issue="stale intel")],
+    )
+
+    mult = {"base": 1.0, "tv": 1.0, "scanner": 1.0, "intel": 1.0}
+    snap = monitor._build_snapshot(mult)
+    assert snap.openclaw_regime == "risk_on"
+    assert snap.openclaw_regime_confidence == 0.77
+    assert snap.openclaw_sentiment_score == 12
+    assert snap.openclaw_long_short_ratio == 0.88
+    assert snap.openclaw_liquidations_24h_usd == 321_000_000
+    assert len(snap.openclaw_idea_briefs) == 1
+    assert "openclaw" in snap.sources_active
 
 
 # ── _derive_regime ───────────────────────────────────────────────────────

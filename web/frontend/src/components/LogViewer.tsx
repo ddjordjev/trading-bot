@@ -56,8 +56,9 @@ export function LogViewer({ logs, maxLines = 100 }: Props) {
     .slice(-maxLines);
 
   useEffect(() => {
-    if (autoScroll && bottomRef.current) {
-      bottomRef.current.scrollIntoView({ behavior: "smooth" });
+    if (autoScroll && containerRef.current) {
+      const el = containerRef.current;
+      el.scrollTop = el.scrollHeight;
     }
   }, [visible.length, autoScroll]);
 
@@ -177,7 +178,10 @@ export function LogViewer({ logs, maxLines = 100 }: Props) {
         <div
           onClick={() => {
             setAutoScroll(true);
-            bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+            const el = containerRef.current;
+            if (el) {
+              el.scrollTop = el.scrollHeight;
+            }
           }}
           style={{
             textAlign: "center",

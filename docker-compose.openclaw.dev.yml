@@ -1,0 +1,55 @@
+services:
+  openclaw-hub:
+    build:
+      context: .
+      dockerfile: Dockerfile.hub
+    container_name: openclaw-hub
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=UTC
+      - DASHBOARD_PORT=9135
+      - OPENCLAW_ENABLED=true
+      - OPENCLAW_URL=${OPENCLAW_URL:-http://host.docker.internal:18080/intel}
+      - OPENCLAW_TOKEN=${OPENCLAW_TOKEN:-}
+      - OPENCLAW_POLL_INTERVAL=${OPENCLAW_POLL_INTERVAL:-120}
+      - OPENCLAW_TIMEOUT_SECONDS=${OPENCLAW_TIMEOUT_SECONDS:-8}
+    command: python hub_main.py
+    ports:
+      - "9135:9135"
+    volumes:
+      - ${HOST_DATA_DIR}:/app/data
+      - ${HOST_LOGS_DIR}:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9135/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+
+  openclaw-momentum:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    container_name: openclaw-momentum
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=UTC
+      - BOT_ID=momentum
+      - BOT_STYLE=momentum
+      - DASHBOARD_PORT=9136
+      - HUB_URL=http://openclaw-hub:9135
+    command: python bot.py
+    depends_on:
+      openclaw-hub:
+        condition: service_healthy
+    volumes:
+      - ${HOST_DATA_DIR}:/app/data
+      - ${HOST_LOGS_DIR}:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('ok')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3

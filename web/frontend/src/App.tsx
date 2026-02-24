@@ -77,8 +77,10 @@ export function App() {
   }, [snapshot, selected, exchangeFilter]);
 
   useEffect(() => {
-    // Ensure each top-level tab starts at the top of the page.
+    // Ensure each top-level tab starts at the top of every scroll root.
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
   }, [tab]);
 
   return (

@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from hub.state import HubState
 
 _hub_state_ref: HubState | None = None
+_monitor_ref: Any | None = None
 _start_time: float = 0.0
 _log_buffer: deque[dict[str, Any]] = deque(maxlen=200)
 _bot_reports: dict[str, dict[str, Any]] = {}
@@ -118,6 +119,12 @@ def set_hub_state(state: HubState) -> None:
     _hub_state_ref = state
     if not _start_time:
         _start_time = time.time()
+
+
+def set_monitor_service(monitor: Any) -> None:
+    """Called by hub_main.py to expose monitor runtime controls to API handlers."""
+    global _monitor_ref
+    _monitor_ref = monitor
 
 
 FRONTEND_DIR = Path(__file__).parent / "frontend" / "dist"
@@ -442,6 +449,17 @@ async def get_modules(_: str = Depends(verify_token)) -> list[ModuleStatus]:
     if _hub_state_ref is None:
         return []
     snap = _hub_state_ref.read_intel()
+    openclaw_regime = str(getattr(snap, "openclaw_regime", "unknown") or "unknown")
+    openclaw_confidence = float(getattr(snap, "openclaw_regime_confidence", 0.0) or 0.0)
+    openclaw_ideas = list(getattr(snap, "openclaw_idea_briefs", []) or [])
+    openclaw_triage = list(getattr(snap, "openclaw_failure_triage", []) or [])
+    openclaw_experiments = list(getattr(snap, "openclaw_experiments", []) or [])
+    openclaw_enabled = (
+        bool(_monitor_ref.is_openclaw_enabled())
+        if _monitor_ref and hasattr(_monitor_ref, "is_openclaw_enabled")
+        else True
+    )
+    has_openclaw_data = bool(openclaw_ideas or openclaw_triage or openclaw_experiments or openclaw_regime != "unknown")
     return [
         ModuleStatus(
             name="intel",
@@ -470,6 +488,19 @@ async def get_modules(_: str = Depends(verify_token)) -> list[ModuleStatus]:
             enabled=True,
             description="Strategy scoring, pattern detection, suggestions (in-process)",
             stats={"strategies_scored": len(_hub_state_ref.read_analytics().weights)},
+        ),
+        ModuleStatus(
+            name="openclaw",
+            display_name="OpenClaw Intelligence",
+            enabled=openclaw_enabled,
+            description="External advisory intelligence feed (API-only, no execution access)",
+            stats={
+                "connected": openclaw_enabled and has_openclaw_data,
+                "regime": openclaw_regime,
+                "confidence": openclaw_confidence,
+                "ideas": len(openclaw_ideas),
+                "triage": len(openclaw_triage),
+            },
         ),
     ]
 
@@ -704,9 +735,46 @@ async def reset_profit_buffer(_: str = Depends(verify_token)) -> ActionResponse:
 
 @app.post("/api/module/{name}/toggle", response_model=ActionResponse)
 async def toggle_module(name: str, _: str = Depends(verify_token)) -> ActionResponse:
-    if name not in ("intel", "news", "scanner", "analytics"):
+    if name not in ("intel", "news", "scanner", "analytics", "openclaw"):
         return ActionResponse(success=False, message=f"Unknown module: {name}")
-    return ActionResponse(success=False, message=f"{name} is managed by the hub — toggle not supported")
+    if name != "openclaw":
+        return ActionResponse(success=False, message=f"{name} is managed by the hub — toggle not supported")
+    if _monitor_ref is None or not hasattr(_monitor_ref, "set_openclaw_enabled"):
+        return ActionResponse(success=False, message="OpenClaw runtime toggle unavailable")
+
+    currently_enabled = bool(_monitor_ref.is_openclaw_enabled())
+    requested_enabled = not currently_enabled
+    enabled_now = await _monitor_ref.set_openclaw_enabled(requested_enabled)
+
+    if not enabled_now:
+        # Immediate hard-isolation: scrub OpenClaw data from shared intel snapshot.
+        _clear_openclaw_intel_cache()
+        nudge_ws()
+        return ActionResponse(success=True, message="OpenClaw intelligence disabled and isolated")
+
+    nudge_ws()
+    return ActionResponse(success=True, message="OpenClaw intelligence enabled")
+
+
+def _clear_openclaw_intel_cache() -> None:
+    if _hub_state_ref is None:
+        return
+    snap = _hub_state_ref.read_intel().model_copy(deep=True)
+    snap.openclaw_regime = "unknown"
+    snap.openclaw_regime_confidence = 0.0
+    snap.openclaw_regime_why = []
+    snap.openclaw_sentiment_score = 50
+    snap.openclaw_long_short_ratio = 0.0
+    snap.openclaw_liquidations_24h_usd = 0.0
+    snap.openclaw_open_interest_24h_usd = 0.0
+    snap.openclaw_idea_briefs = []
+    snap.openclaw_failure_triage = []
+    snap.openclaw_experiments = []
+    snap.sources_active = [s for s in snap.sources_active if s != "openclaw"]
+    source_ts = dict(snap.source_timestamps or {})
+    source_ts.pop("openclaw", None)
+    snap.source_timestamps = source_ts
+    _hub_state_ref.write_intel(snap)
 
 
 # --------------- Bot Profiles (dynamic container management) ---------------
@@ -726,10 +794,18 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
             continue
         enabled = enabled_map.get(p.id, p.is_default)
         rpt = _bot_reports.get(p.id, {})
-        container_status = ("running" if enabled else "idle") if rpt else "idle"
-
         s = rpt.get("status", {})
         positions = rpt.get("positions", [])
+        if not rpt:
+            container_status = "idle"
+        else:
+            running = bool(s.get("running"))
+            if running:
+                container_status = "running"
+            elif not enabled and positions:
+                container_status = "winding_down"
+            else:
+                container_status = "idle"
         summary = hub.get_bot_summary(p.id)
         balance_now: float | None
         if s:

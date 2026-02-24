@@ -121,7 +121,11 @@ export function BotProfiles() {
                     className={`toggle ${p.enabled ? "on" : "off"}`}
                     onClick={() => toggle(p.id)}
                     disabled={isToggling}
-                    title={p.enabled ? "Disable — winds down positions, bot goes idle" : "Enable — bot resumes trading"}
+                    title={
+                      p.enabled
+                        ? "Profile enabled. Disable to force idle."
+                        : "Profile disabled. Enable to allow trading."
+                    }
                   />
                 )}
               </div>
@@ -157,6 +161,18 @@ export function BotProfiles() {
                         ? "Disabling..."
                         : "Enabling..."
                       : st.label}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    padding: "0.15rem 0",
+                  }}
+                >
+                  <span style={{ color: "var(--text-muted)" }}>profile</span>
+                  <span style={{ color: p.enabled ? "var(--green)" : "#6e7681" }}>
+                    {p.enabled ? "Enabled" : "Disabled"}
                   </span>
                 </div>
                 {overrideKeys.length > 0 && (

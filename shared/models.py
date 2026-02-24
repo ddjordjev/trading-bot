@@ -350,6 +350,18 @@ class IntelSnapshot(BaseModel):
     # News
     news_items: list[dict[str, Any]] = []
 
+    # OpenClaw advisory intelligence (never direct execution authority)
+    openclaw_regime: str = "unknown"
+    openclaw_regime_confidence: float = 0.0
+    openclaw_regime_why: list[str] = []
+    openclaw_sentiment_score: int = 50
+    openclaw_long_short_ratio: float = 0.0
+    openclaw_liquidations_24h_usd: float = 0.0
+    openclaw_open_interest_24h_usd: float = 0.0
+    openclaw_idea_briefs: list[dict[str, Any]] = []
+    openclaw_failure_triage: list[dict[str, Any]] = []
+    openclaw_experiments: list[dict[str, Any]] = []
+
     # Monitoring metadata
     monitor_intensity: str = "normal"
     poll_multiplier: float = 1.0
