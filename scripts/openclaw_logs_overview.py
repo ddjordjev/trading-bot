@@ -71,6 +71,20 @@ def _coerce_dict(value: Any) -> dict[str, Any] | None:
     return None
 
 
+def _coerce_json(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
 def _parse_line(line: str) -> tuple[dict[str, Any] | None, str]:
     raw = line.rstrip("\n")
     payload = _try_json(raw)
@@ -133,6 +147,13 @@ def _event_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
 def _event_name(payload: dict[str, Any], event_payload: dict[str, Any] | None) -> str:
     if event_payload:
         event = str(event_payload.get("event", "")).strip()
+        if not event:
+            event = str(event_payload.get("type", "")).strip()
+        if not event:
+            event = str(event_payload.get("name", "")).strip()
+        if not event:
+            # Some OpenClaw payloads place heartbeat under an empty-string key.
+            event = str(event_payload.get("", "")).strip()
         if event:
             return event
     event = str(payload.get("event", "")).strip()
@@ -241,6 +262,59 @@ def _format_raw(raw_line: str, c: Colors) -> str:
     return f"{c.dim}{trimmed}{c.reset}"
 
 
+def _is_heartbeat_noise(event: str, raw_line: str) -> bool:
+    text = (raw_line or "").lower()
+    if event.lower() == "heartbeat":
+        return True
+    return all(
+        marker in text
+        for marker in (
+            "heartbeat",
+            "host",
+            "ip",
+            "version",
+            "platform",
+            "devicefamily",
+        )
+    )
+
+
+def _is_openclaw_presence_noise(payload: dict[str, Any]) -> bool:
+    """Drop OpenClaw 'presence list' lines that are operationally useless."""
+    if str(payload.get("type", "")).lower() != "log":
+        return False
+    msg_json = _coerce_json(payload.get("message"))
+    if not isinstance(msg_json, list) or not msg_json:
+        return False
+    first = msg_json[0] if isinstance(msg_json[0], dict) else None
+    if not first:
+        return False
+    keys = {"host", "ip", "version", "platform", "deviceFamily", "mode", "reason"}
+    return keys.issubset(set(first.keys()))
+
+
+def _is_openclaw_heartbeat_snapshot_noise(payload: dict[str, Any]) -> bool:
+    """Drop periodic heartbeat snapshot blobs with session inventory."""
+    if str(payload.get("type", "")).lower() != "log":
+        return False
+    msg_json = _coerce_json(payload.get("message"))
+    if not isinstance(msg_json, dict):
+        return False
+    if "heartbeat" not in msg_json:
+        return False
+    return "sessions" in msg_json and "channelSummary" in msg_json
+
+
+def _is_noise_payload(payload: dict[str, Any], event: str, raw_line: str) -> bool:
+    if str(payload.get("type", "")).lower() == "meta":
+        return True
+    return (
+        _is_heartbeat_noise(event, raw_line)
+        or _is_openclaw_presence_noise(payload)
+        or _is_openclaw_heartbeat_snapshot_noise(payload)
+    )
+
+
 def _print_summary(counter: Counter[str], lines_seen: int, c: Colors) -> None:
     top = ", ".join(f"{event}:{count}" for event, count in counter.most_common(4))
     print(f"{c.magenta}--- summary lines={lines_seen} events=[{top}] ---{c.reset}", flush=True)
@@ -290,6 +364,11 @@ def main() -> int:
         default=0,
         help="Print short event-count summary every N lines (0 disables).",
     )
+    parser.add_argument(
+        "--show-heartbeats",
+        action="store_true",
+        help="Show heartbeat/system-presence noise (hidden by default).",
+    )
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI colors.")
     args = parser.parse_args()
 
@@ -303,10 +382,13 @@ def main() -> int:
         for line in _stream_lines(path, follow=args.follow):
             payload, raw_line = _parse_line(line)
             if payload is None:
-                print(_format_raw(raw_line, c), flush=True)
+                if args.show_heartbeats or not _is_heartbeat_noise("raw", raw_line):
+                    print(_format_raw(raw_line, c), flush=True)
                 continue
 
             event, rendered = _format_line(payload, raw_line, c)
+            if not args.show_heartbeats and _is_noise_payload(payload, event, raw_line):
+                continue
             print(rendered, flush=True)
             line_count += 1
             event_counts[event] += 1

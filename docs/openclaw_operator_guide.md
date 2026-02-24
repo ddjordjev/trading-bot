@@ -88,6 +88,12 @@ For a readable OpenClaw stream (heartbeat/summaries/errors grouped by event), pi
 openclaw logs --json --follow | .venv/bin/python scripts/openclaw_logs_overview.py
 ```
 
+Heartbeat/system-presence noise is hidden by default. Show it when needed:
+
+```bash
+openclaw logs --json --follow | .venv/bin/python scripts/openclaw_logs_overview.py --show-heartbeats
+```
+
 Useful options:
 
 ```bash
