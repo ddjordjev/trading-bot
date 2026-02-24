@@ -2203,10 +2203,53 @@ class TestLiquidationMonitorFetch:
         return LiquidationMonitor(poll_interval=300, api_key="")
 
     @pytest.mark.asyncio
-    async def test_fetch_no_api_key_skips(self, monitor_no_key):
+    @patch("intel.liquidations.aiohttp.ClientSession")
+    async def test_fetch_no_api_key_uses_web_fallback(self, mock_session_class, monitor_no_key):
+        html = "<div>24h Rekt $343.05M Long $249.89M Short $93.16M</div>"
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.text = AsyncMock(return_value=html)
+        mock_get = MagicMock()
+        mock_get.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_get.__aexit__ = AsyncMock(return_value=None)
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = mock_get
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
         await monitor_no_key._fetch()
-        assert monitor_no_key._latest is None
+
+        assert monitor_no_key._latest is not None
+        assert monitor_no_key._latest.total_24h == pytest.approx(343_050_000)
+        assert monitor_no_key._latest.long_24h == pytest.approx(249_890_000)
+        assert monitor_no_key._latest.short_24h == pytest.approx(93_160_000)
         assert monitor_no_key._warned_no_key is True
+
+    @pytest.mark.asyncio
+    @patch("intel.liquidations.aiohttp.ClientSession")
+    async def test_fetch_no_api_key_parses_dom_split_currency_value(self, mock_session_class, monitor_no_key):
+        html = """
+        <div class="font3 fw5 MuiBox-root cg-style-0">24h Rekt</div>
+        <div class="Number undefined">
+          <span>$</span>
+          <span>341.85M</span>
+        </div>
+        """
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.text = AsyncMock(return_value=html)
+        mock_get = MagicMock()
+        mock_get.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_get.__aexit__ = AsyncMock(return_value=None)
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = mock_get
+        mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session_class.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await monitor_no_key._fetch()
+
+        assert monitor_no_key._latest is not None
+        assert monitor_no_key._latest.total_24h == pytest.approx(341_850_000)
 
     @pytest.mark.asyncio
     @patch("intel.liquidations.aiohttp.ClientSession")

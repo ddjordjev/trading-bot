@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 from datetime import UTC, datetime
 
 import aiohttp
@@ -58,6 +59,7 @@ class LiquidationMonitor:
 
     API_URL_V4 = "https://open-api-v4.coinglass.com/api/futures/liquidation/exchange-list"
     API_URL_V3 = "https://open-api-v3.coinglass.com/api/futures/liquidation/exchange-list"
+    WEB_URL = "https://www.coinglass.com/LiquidationData"
     BINANCE_LIQ_STREAM = "wss://fstream.binance.com/ws/!forceOrder@arr"
     BYBIT_LIQ_STREAM = "wss://stream.bybit.com/v5/public/linear"
     BYBIT_TOP_SYMBOLS: tuple[str, ...] = (
@@ -151,41 +153,9 @@ class LiquidationMonitor:
             await asyncio.sleep(self.poll_interval)
 
     async def _fetch(self) -> None:
-        if not self.api_key:
-            if not self._warned_no_key:
-                logger.warning(
-                    "No CoinGlass API key set (COINGLASS_API_KEY). "
-                    "Liquidation data unavailable. Get a free key at https://www.coinglass.com/pricing"
-                )
-                self._warned_no_key = True
-            return
-
-        snap = LiquidationSnapshot(timestamp=datetime.now(UTC))
-        headers = {"CG-API-KEY": self.api_key}
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                for url in (self.API_URL_V4, self.API_URL_V3):
-                    try:
-                        async with session.get(
-                            url,
-                            headers=headers,
-                            params={"symbol": "", "range": "24h"},
-                            timeout=aiohttp.ClientTimeout(total=15),
-                        ) as resp:
-                            if resp.status != 200:
-                                continue
-                            data = await resp.json()
-                            if isinstance(data, dict) and data.get("data"):
-                                break
-                    except Exception:
-                        continue
-                else:
-                    logger.warning("CoinGlass: all endpoints returned empty or errored")
-                    return
-        except Exception as e:
-            logger.warning("CoinGlass fetch failed: {}", e)
-            return
+        if not self.api_key and not self._warned_no_key:
+            logger.warning("No CoinGlass API key set (COINGLASS_API_KEY). Using webpage fallback for liquidations.")
+            self._warned_no_key = True
 
         def _num(v: object) -> float:
             if v is None:
@@ -205,37 +175,184 @@ class LiquidationMonitor:
                     return _num(item.get(k))
             return 0.0
 
-        try:
-            if not isinstance(data, dict):
-                return
-            info = data.get("data", [])
-            # Some API variants wrap rows in {"list": [...]}.
-            if isinstance(info, dict) and isinstance(info.get("list"), list):
-                info = info.get("list", [])
+        def _parse_compact_usd(token: str) -> float:
+            t = (token or "").strip().lower().replace(",", "")
+            if not t:
+                return 0.0
+            mult = 1.0
+            if t.endswith("billion"):
+                mult = 1e9
+                t = t[:-7].strip()
+            elif t.endswith("million"):
+                mult = 1e6
+                t = t[:-7].strip()
+            elif t.endswith("thousand"):
+                mult = 1e3
+                t = t[:-8].strip()
+            elif t.endswith("b"):
+                mult = 1e9
+                t = t[:-1].strip()
+            elif t.endswith("m"):
+                mult = 1e6
+                t = t[:-1].strip()
+            elif t.endswith("k"):
+                mult = 1e3
+                t = t[:-1].strip()
+            try:
+                return float(t) * mult
+            except (TypeError, ValueError):
+                return 0.0
 
-            if isinstance(info, list):
-                for item in info:
-                    if not isinstance(item, dict):
-                        continue
-                    ex = str(item.get("exchange", item.get("exchangeName", ""))).strip()
-                    if ex.lower() == "all":
-                        snap.total_24h = _pick(item, ("liquidation_usd", "liquidationUsd", "totalUsd"))
-                        snap.long_24h = _pick(item, ("long_liquidation_usd", "longLiquidationUsd", "longUsd"))
-                        snap.short_24h = _pick(item, ("short_liquidation_usd", "shortLiquidationUsd", "shortUsd"))
-                        break
-                else:
-                    for item in info:
-                        if not isinstance(item, dict):
+        def _parse_liquidations_from_html(html: str) -> LiquidationSnapshot | None:
+            idx = html.lower().find("24h rekt")
+            if idx < 0:
+                return None
+            window = html[idx : idx + 1600]
+            # Prefer the exact DOM pattern seen on CoinGlass cards:
+            # label "24h Rekt" followed by a Number container with "$" and value text.
+            dom_match = re.search(
+                r"24h\s*Rekt.*?\$[^0-9]*([0-9][0-9,]*(?:\.[0-9]+)?\s*(?:[kmb]|million|billion|thousand)?)",
+                window,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if dom_match:
+                total = _parse_compact_usd(dom_match.group(1))
+                if total > 0:
+                    long_match = re.search(
+                        r"Long[^0-9$]*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?\s*(?:[kmb]|million|billion|thousand)?)",
+                        window,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    )
+                    short_match = re.search(
+                        r"Short[^0-9$]*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?\s*(?:[kmb]|million|billion|thousand)?)",
+                        window,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    )
+                    long_24h = _parse_compact_usd(long_match.group(1)) if long_match else 0.0
+                    short_24h = _parse_compact_usd(short_match.group(1)) if short_match else 0.0
+                    if long_24h <= 0 and short_24h <= 0:
+                        long_24h = total * 0.5
+                        short_24h = total * 0.5
+                    return LiquidationSnapshot(
+                        total_24h=total,
+                        long_24h=long_24h,
+                        short_24h=short_24h,
+                        timestamp=datetime.now(UTC),
+                    )
+            nums = re.findall(
+                r"\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?\s*(?:[kmb]|million|billion|thousand)?)",
+                window,
+                flags=re.IGNORECASE,
+            )
+            parsed = [_parse_compact_usd(n) for n in nums]
+            parsed = [p for p in parsed if p > 0]
+            if not parsed:
+                return None
+            total = parsed[0]
+            long_24h = parsed[1] if len(parsed) > 1 else 0.0
+            short_24h = parsed[2] if len(parsed) > 2 else 0.0
+            if long_24h <= 0 and short_24h <= 0:
+                long_24h = total * 0.5
+                short_24h = total * 0.5
+            return LiquidationSnapshot(
+                total_24h=total,
+                long_24h=long_24h,
+                short_24h=short_24h,
+                timestamp=datetime.now(UTC),
+            )
+
+        snap: LiquidationSnapshot | None = None
+        try:
+            async with aiohttp.ClientSession() as session:
+                if self.api_key:
+                    headers = {"CG-API-KEY": self.api_key}
+                    for url in (self.API_URL_V4, self.API_URL_V3):
+                        try:
+                            async with session.get(
+                                url,
+                                headers=headers,
+                                params={"symbol": "", "range": "24h"},
+                                timeout=aiohttp.ClientTimeout(total=15),
+                            ) as resp:
+                                if resp.status != 200:
+                                    continue
+                                data = await resp.json()
+                                if not isinstance(data, dict):
+                                    continue
+                                info = data.get("data", [])
+                                # Some API variants wrap rows in {"list": [...]}.
+                                if isinstance(info, dict) and isinstance(info.get("list"), list):
+                                    info = info.get("list", [])
+
+                                api_snap = LiquidationSnapshot(timestamp=datetime.now(UTC))
+                                if isinstance(info, list):
+                                    for item in info:
+                                        if not isinstance(item, dict):
+                                            continue
+                                        ex = str(item.get("exchange", item.get("exchangeName", ""))).strip()
+                                        if ex.lower() == "all":
+                                            api_snap.total_24h = _pick(
+                                                item, ("liquidation_usd", "liquidationUsd", "totalUsd")
+                                            )
+                                            api_snap.long_24h = _pick(
+                                                item, ("long_liquidation_usd", "longLiquidationUsd", "longUsd")
+                                            )
+                                            api_snap.short_24h = _pick(
+                                                item, ("short_liquidation_usd", "shortLiquidationUsd", "shortUsd")
+                                            )
+                                            break
+                                    else:
+                                        for item in info:
+                                            if not isinstance(item, dict):
+                                                continue
+                                            api_snap.total_24h += _pick(
+                                                item, ("liquidation_usd", "liquidationUsd", "totalUsd")
+                                            )
+                                            api_snap.long_24h += _pick(
+                                                item, ("long_liquidation_usd", "longLiquidationUsd", "longUsd")
+                                            )
+                                            api_snap.short_24h += _pick(
+                                                item, ("short_liquidation_usd", "shortLiquidationUsd", "shortUsd")
+                                            )
+                                elif isinstance(info, dict):
+                                    api_snap.total_24h = _pick(info, ("liquidation_usd", "liquidationUsd", "totalUsd"))
+                                    api_snap.long_24h = _pick(
+                                        info, ("long_liquidation_usd", "longLiquidationUsd", "longUsd")
+                                    )
+                                    api_snap.short_24h = _pick(
+                                        info, ("short_liquidation_usd", "shortLiquidationUsd", "shortUsd")
+                                    )
+                                if api_snap.total_24h > 0:
+                                    snap = api_snap
+                                    break
+                        except Exception:
                             continue
-                        snap.total_24h += _pick(item, ("liquidation_usd", "liquidationUsd", "totalUsd"))
-                        snap.long_24h += _pick(item, ("long_liquidation_usd", "longLiquidationUsd", "longUsd"))
-                        snap.short_24h += _pick(item, ("short_liquidation_usd", "shortLiquidationUsd", "shortUsd"))
-            elif isinstance(info, dict):
-                snap.total_24h = _pick(info, ("liquidation_usd", "liquidationUsd", "totalUsd"))
-                snap.long_24h = _pick(info, ("long_liquidation_usd", "longLiquidationUsd", "longUsd"))
-                snap.short_24h = _pick(info, ("short_liquidation_usd", "shortLiquidationUsd", "shortUsd"))
-        except (ValueError, TypeError, KeyError) as e:
-            logger.warning("CoinGlass parse error: {}", e)
+
+                # If key is missing/invalid/unavailable, scrape webpage value.
+                if snap is None:
+                    try:
+                        async with session.get(
+                            self.WEB_URL,
+                            headers={
+                                "User-Agent": (
+                                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                    "Chrome/122.0.0.0 Safari/537.36"
+                                )
+                            },
+                            timeout=aiohttp.ClientTimeout(total=20),
+                        ) as resp:
+                            if resp.status == 200:
+                                html = await resp.text()
+                                snap = _parse_liquidations_from_html(html)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning("Liquidation fetch failed: {}", e)
+            return
+
+        if snap is None:
+            logger.warning("Liquidation sources returned empty data")
             return
 
         self._coinglass_latest = snap
@@ -289,20 +406,8 @@ class LiquidationMonitor:
         self._rebuild_combined_snapshot()
 
     def _rebuild_combined_snapshot(self) -> None:
-        """Summarize all available liquidation sources into one snapshot."""
-        snaps = [s for s in (self._coinglass_latest, self._streams_latest) if s is not None]
-        if not snaps:
-            self._latest = None
-            return
-        self._latest = LiquidationSnapshot(
-            total_24h=sum(s.total_24h for s in snaps),
-            long_24h=sum(s.long_24h for s in snaps),
-            short_24h=sum(s.short_24h for s in snaps),
-            total_1h=sum(s.total_1h for s in snaps),
-            long_1h=sum(s.long_1h for s in snaps),
-            short_1h=sum(s.short_1h for s in snaps),
-            timestamp=datetime.now(UTC),
-        )
+        """Prefer CoinGlass/API/web snapshot; fall back to exchange streams."""
+        self._latest = self._coinglass_latest or self._streams_latest
 
     def _consume_binance_force_order(self, payload: dict) -> None:
         data = payload.get("data", payload) if isinstance(payload, dict) else {}

@@ -63,6 +63,7 @@ export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
 
   const regimeColor = REGIME_COLORS[intel.regime] || "var(--text)";
   const liquidationAvailable = Array.isArray(intel.sources_active) && intel.sources_active.includes("liquidations");
+  const fearGreedAvailable = Array.isArray(intel.sources_active) && intel.sources_active.includes("fear_greed");
 
   return (
     <div>
@@ -95,7 +96,39 @@ export function Intel({ wsIntel }: { wsIntel: IntelSnapshot | null }) {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem", marginBottom: "1.5rem" }}>
-        <FearGreedGauge value={intel.fear_greed} />
+        {fearGreedAvailable ? (
+          <FearGreedGauge value={intel.fear_greed} />
+        ) : (
+          <div className="card" style={{ textAlign: "center" }}>
+            <div style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginBottom: "0.5rem" }}>
+              FEAR & GREED INDEX
+              <span
+                title="Fear & Greed feed is temporarily unavailable. Value is hidden until fresh data arrives."
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: "1rem",
+                  height: "1rem",
+                  borderRadius: "50%",
+                  border: "1px solid var(--border)",
+                  color: "var(--text-muted)",
+                  fontSize: "0.7rem",
+                  marginLeft: "0.45rem",
+                  cursor: "help",
+                  userSelect: "none",
+                }}
+              >
+                i
+              </span>
+            </div>
+            <div style={{ fontSize: "2.5rem", fontWeight: 700, color: "var(--text-muted)" }}>-</div>
+            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginBottom: "0.5rem" }}>Unavailable</div>
+            <div className="gauge-bar">
+              <div className="gauge-fill" style={{ width: "0%", background: "var(--border)" }} />
+            </div>
+          </div>
+        )}
 
         <div className="card">
           <h3 style={{ color: "var(--heading)", marginBottom: "0.8rem" }}>Liquidations (24h)</h3>
