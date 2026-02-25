@@ -141,8 +141,36 @@ class TestBinanceExchange:
                     }
                 ),
                 fetch_open_orders=AsyncMock(return_value=[]),
+                fapiPrivatePostAlgoOrder=AsyncMock(
+                    return_value={
+                        "algoId": "algo-1",
+                        "symbol": "BTCUSDT",
+                        "side": "SELL",
+                        "orderType": "STOP_MARKET",
+                        "quantity": "0.1",
+                        "triggerPrice": "90.0",
+                        "algoStatus": "NEW",
+                        "actualPrice": "0.0",
+                    }
+                ),
+                fapiPrivateGetOpenAlgoOrders=AsyncMock(return_value=[]),
+                fapiPrivateGetAlgoOrder=AsyncMock(
+                    return_value={
+                        "algoId": "algo-1",
+                        "symbol": "BTCUSDT",
+                        "side": "SELL",
+                        "orderType": "STOP_MARKET",
+                        "quantity": "0.1",
+                        "triggerPrice": "90.0",
+                        "algoStatus": "NEW",
+                        "actualPrice": "0.0",
+                    }
+                ),
+                fapiPrivateDeleteAlgoOrder=AsyncMock(return_value={"algoId": "algo-1"}),
                 set_leverage=AsyncMock(),
                 markets={"BTC/USDT": {}, "ETH/USDT": {}},
+                market=MagicMock(return_value={"id": "BTCUSDT"}),
+                markets_by_id={"BTCUSDT": [{"symbol": "BTC/USDT:USDT"}]},
             )
             from core.exchange.binance import BinanceExchange
 
@@ -338,11 +366,12 @@ class TestBinanceExchange:
             market_type=MarketType.FUTURES,
         )
         binance._futures.set_leverage.assert_not_awaited()
-        kwargs = binance._futures.create_order.call_args.kwargs
+        binance._futures.create_order.assert_not_awaited()
+        kwargs = binance._futures.fapiPrivatePostAlgoOrder.call_args.args[0]
+        assert kwargs["algoType"] == "CONDITIONAL"
         assert kwargs["type"] == "STOP_MARKET"
-        assert kwargs["params"]["reduceOnly"] is True
-        assert kwargs["params"]["closePosition"] is False
-        assert kwargs["params"]["stopPrice"] == 90.0
+        assert kwargs["triggerPrice"] == 90.0
+        assert kwargs["reduceOnly"] == "true"
 
     @pytest.mark.asyncio
     async def test_fetch_open_orders_parses_stop_types_and_stop_price(self, binance):
@@ -360,10 +389,36 @@ class TestBinanceExchange:
                 }
             ]
         )
+        binance._futures.fapiPrivateGetOpenAlgoOrders = AsyncMock(
+            return_value=[
+                {
+                    "algoId": "algo-2",
+                    "symbol": "BTCUSDT",
+                    "side": "SELL",
+                    "orderType": "STOP_MARKET",
+                    "quantity": "0.1",
+                    "triggerPrice": "90.5",
+                    "algoStatus": "NEW",
+                    "actualPrice": "0.0",
+                }
+            ]
+        )
         orders = await binance.fetch_open_orders("BTC/USDT", market_type=MarketType.FUTURES)
-        assert len(orders) == 1
+        assert len(orders) == 2
         assert orders[0].order_type == OrderType.STOP_LOSS
         assert orders[0].stop_price == 91.23
+        assert orders[1].id == "algo-2"
+        assert orders[1].order_type == OrderType.STOP_LOSS
+        assert orders[1].stop_price == 90.5
+
+    @pytest.mark.asyncio
+    async def test_fetch_order_fallbacks_to_algo_for_futures_protection(self, binance):
+        binance._futures.fetch_order = AsyncMock(side_effect=Exception("not found"))
+        order = await binance.fetch_order("algo-1", "BTC/USDT", market_type=MarketType.FUTURES)
+        assert order.id == "algo-1"
+        assert order.order_type == OrderType.STOP_LOSS
+        assert order.status == OrderStatus.OPEN
+        binance._futures.fapiPrivateGetAlgoOrder.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_cancel_order(self, binance):
@@ -371,6 +426,14 @@ class TestBinanceExchange:
         assert order.id == "ord-1"
         assert order.status == OrderStatus.CANCELLED
         binance._spot.cancel_order.assert_awaited_once_with("ord-1", "BTC/USDT")
+
+    @pytest.mark.asyncio
+    async def test_cancel_order_fallbacks_to_algo_on_futures(self, binance):
+        binance._futures.cancel_order = AsyncMock(side_effect=Exception("Unknown order sent"))
+        order = await binance.cancel_order("algo-1", "BTC/USDT", market_type=MarketType.FUTURES)
+        assert order.id == "algo-1"
+        assert order.status == OrderStatus.CANCELLED
+        binance._futures.fapiPrivateDeleteAlgoOrder.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_get_available_symbols_spot(self, binance):

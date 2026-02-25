@@ -68,6 +68,7 @@ class OrderManager:
         self._protection_orders: dict[str, dict[str, Any]] = {}
         self._protection_retry_after: dict[str, datetime] = {}
         self._protection_replace_min_interval_secs = 10
+        self._protection_place_min_interval_secs = 10
 
     # ------------------------------------------------------------------ #
     #  Signal execution
@@ -403,6 +404,18 @@ class OrderManager:
             sl_order_id = ""
 
         if not sl_order_id:
+            if not self._is_extreme_bot:
+                last_place_at = state.get("sl_last_place_at")
+                if isinstance(last_place_at, datetime):
+                    elapsed = (datetime.now(UTC) - last_place_at).total_seconds()
+                    if elapsed < self._protection_place_min_interval_secs:
+                        logger.debug(
+                            "Protection sync {}: skipping SL create due to {}s cadence gate (elapsed={:.2f}s)",
+                            symbol,
+                            self._protection_place_min_interval_secs,
+                            elapsed,
+                        )
+                        return
             try:
                 sl_order = await self.exchange.place_order(
                     symbol=symbol,
@@ -428,6 +441,7 @@ class OrderManager:
             logger.info("Protection SL synced on {} @ {:.6f}", symbol, bot_stop)
             self._protection_retry_after.pop(symbol, None)
             state["sl_last_replace_at"] = datetime.now(UTC)
+            state["sl_last_place_at"] = datetime.now(UTC)
 
         state["sl_order_id"] = sl_order_id
         state["sl_price"] = bot_stop

@@ -65,6 +65,65 @@ class BinanceExchange(BaseExchange):
     def _client(self, market_type: MarketType = MarketType.SPOT) -> ccxt.binance:
         return self._futures if market_type == MarketType.FUTURES else self._spot
 
+    def _futures_market_id(self, symbol: str) -> str:
+        try:
+            market = self._futures.market(symbol)
+            market_id = market.get("id")
+            if isinstance(market_id, str) and market_id:
+                return market_id
+        except Exception:
+            pass
+        return symbol.replace("/", "").split(":")[0]
+
+    def _symbol_from_futures_market_id(self, market_id: str) -> str:
+        try:
+            by_id = self._futures.markets_by_id.get(market_id)
+            if isinstance(by_id, list) and by_id:
+                maybe_symbol = by_id[0].get("symbol")
+                if isinstance(maybe_symbol, str) and maybe_symbol:
+                    return maybe_symbol.split(":")[0]
+            if isinstance(by_id, dict):
+                maybe_symbol = by_id.get("symbol")
+                if isinstance(maybe_symbol, str) and maybe_symbol:
+                    return maybe_symbol.split(":")[0]
+        except Exception:
+            pass
+        if market_id.endswith("USDT") and len(market_id) > 4:
+            return f"{market_id[:-4]}/USDT"
+        return market_id
+
+    @staticmethod
+    def _parse_algo_status(raw_status: str) -> OrderStatus:
+        status = str(raw_status or "").strip().upper()
+        if status in {"NEW", "WORKING"}:
+            return OrderStatus.OPEN
+        if status in {"FILLED", "TRIGGERED", "FINISHED"}:
+            return OrderStatus.FILLED
+        if status in {"CANCELED", "CANCELLED", "EXPIRED"}:
+            return OrderStatus.CANCELLED
+        if status in {"REJECTED", "FAILED"}:
+            return OrderStatus.FAILED
+        return OrderStatus.PENDING
+
+    def _to_algo_order(self, raw: dict[str, Any], symbol_hint: str, market_type: MarketType) -> Order:
+        order_type = parse_order_type(str(raw.get("orderType", "")))
+        symbol_raw = str(raw.get("symbol") or "")
+        symbol = self._symbol_from_futures_market_id(symbol_raw) if symbol_raw else symbol_hint
+        side_raw = str(raw.get("side", "")).lower()
+        qty = raw.get("quantity", 0) or raw.get("origQty", 0) or 0
+        return Order(
+            id=str(raw.get("algoId", "") or raw.get("orderId", "") or ""),
+            symbol=symbol,
+            side=OrderSide.BUY if side_raw == "buy" else OrderSide.SELL,
+            order_type=order_type,
+            amount=float(qty or 0),
+            stop_price=parse_stop_price(raw),
+            status=self._parse_algo_status(str(raw.get("algoStatus", ""))),
+            filled=0.0,
+            average_price=float(raw.get("actualPrice", 0) or 0),
+            market_type=market_type.value,
+        )
+
     @staticmethod
     def _infer_position_leverage(raw_position: dict[str, Any]) -> int:
         """Infer leverage when the exchange payload omits explicit value."""
@@ -273,6 +332,44 @@ class BinanceExchange(BaseExchange):
             params["stopPrice"] = stop_price
         is_protection_order = order_type in (OrderType.STOP_LOSS, OrderType.TAKE_PROFIT)
         if market_type == MarketType.FUTURES and is_protection_order:
+            market_id = self._futures_market_id(symbol)
+            algo_type = "STOP_MARKET" if order_type == OrderType.STOP_LOSS else "TAKE_PROFIT_MARKET"
+            payload: dict[str, Any] = {
+                "symbol": market_id,
+                "side": side.value.upper(),
+                "algoType": "CONDITIONAL",
+                "type": algo_type,
+                "quantity": amount,
+                "triggerPrice": stop_price,
+                "timeInForce": "GTC",
+                "reduceOnly": "true",
+                "closePosition": "false",
+                "workingType": "CONTRACT_PRICE",
+            }
+            logger.info(
+                "Placing {} {} {} {} @ {} (leverage={}, stop_price={}, params={})",
+                market_type.value,
+                side.value,
+                ccxt_type,
+                symbol,
+                price or "market",
+                leverage,
+                stop_price if stop_price is not None else "none",
+                payload,
+            )
+            data = await self._futures.fapiPrivatePostAlgoOrder(payload)
+            order = self._to_algo_order(data, symbol, market_type)
+            logger.info(
+                "Order accepted {} {} {} id={} status={} trigger={}",
+                market_type.value,
+                ccxt_type,
+                symbol,
+                order.id,
+                order.status.value,
+                order.stop_price if order.stop_price is not None else "none",
+            )
+            return order
+        if market_type == MarketType.FUTURES and is_protection_order:
             params["reduceOnly"] = True
             # Avoid over-closing when account mode supports one-way futures.
             params["closePosition"] = False
@@ -335,7 +432,16 @@ class BinanceExchange(BaseExchange):
 
     async def cancel_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
         client = self._client(market_type)
-        data = await client.cancel_order(order_id, symbol)
+        try:
+            data = await client.cancel_order(order_id, symbol)
+        except Exception as err:
+            if market_type != MarketType.FUTURES:
+                raise
+            market_id = self._futures_market_id(symbol)
+            try:
+                data = await self._futures.fapiPrivateDeleteAlgoOrder({"symbol": market_id, "algoId": order_id})
+            except Exception as algo_err:
+                raise err from algo_err
         return Order(
             id=order_id,
             symbol=symbol,
@@ -348,6 +454,29 @@ class BinanceExchange(BaseExchange):
 
     async def fetch_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
         client = self._client(market_type)
+        if market_type == MarketType.FUTURES:
+            try:
+                data = await client.fetch_order(order_id, symbol, params={"stop": True})
+                return Order(
+                    id=order_id,
+                    symbol=symbol,
+                    side=OrderSide.BUY if data.get("side") == "buy" else OrderSide.SELL,
+                    order_type=parse_order_type(str(data.get("type", ""))),
+                    amount=float(data.get("amount", 0) or 0),
+                    stop_price=parse_stop_price(data),
+                    status=parse_order_status(str(data.get("status", "")).lower()),
+                    filled=float(data.get("filled", 0) or 0),
+                    average_price=float(data.get("average", 0) or 0),
+                    market_type=market_type.value,
+                )
+            except Exception as stop_err:
+                market_id = self._futures_market_id(symbol)
+                try:
+                    data = await self._futures.fapiPrivateGetAlgoOrder({"symbol": market_id, "algoId": order_id})
+                    return self._to_algo_order(data, symbol, market_type)
+                except Exception as algo_err:
+                    raise stop_err from algo_err
+
         data = await client.fetch_order(order_id, symbol)
         return Order(
             id=order_id,
@@ -356,7 +485,7 @@ class BinanceExchange(BaseExchange):
             order_type=parse_order_type(str(data.get("type", ""))),
             amount=float(data.get("amount", 0) or 0),
             stop_price=parse_stop_price(data),
-            status=parse_order_status(data.get("status", "")),
+            status=parse_order_status(str(data.get("status", "")).lower()),
             filled=float(data.get("filled", 0) or 0),
             average_price=float(data.get("average", 0) or 0),
             market_type=market_type.value,
@@ -367,7 +496,7 @@ class BinanceExchange(BaseExchange):
     ) -> list[Order]:
         client = self._client(market_type)
         raw = await client.fetch_open_orders(symbol)
-        return [
+        orders = [
             Order(
                 id=str(d.get("id", "")),
                 symbol=d.get("symbol", ""),
@@ -375,12 +504,49 @@ class BinanceExchange(BaseExchange):
                 order_type=parse_order_type(str(d.get("type", ""))),
                 amount=float(d.get("amount", 0) or 0),
                 stop_price=parse_stop_price(d),
-                status=parse_order_status(d.get("status", "")),
+                status=parse_order_status(str(d.get("status", "")).lower()),
                 filled=float(d.get("filled", 0) or 0),
                 market_type=market_type.value,
             )
             for d in raw
         ]
+        if market_type != MarketType.FUTURES:
+            return orders
+        try:
+            stop_raw = await client.fetch_open_orders(symbol, params={"stop": True})
+        except Exception:
+            stop_raw = []
+        for entry in stop_raw:
+            orders.append(
+                Order(
+                    id=str(entry.get("id", "")),
+                    symbol=entry.get("symbol", ""),
+                    side=OrderSide.BUY if entry.get("side") == "buy" else OrderSide.SELL,
+                    order_type=parse_order_type(str(entry.get("type", ""))),
+                    amount=float(entry.get("amount", 0) or 0),
+                    stop_price=parse_stop_price(entry),
+                    status=parse_order_status(str(entry.get("status", "")).lower()),
+                    filled=float(entry.get("filled", 0) or 0),
+                    market_type=market_type.value,
+                )
+            )
+        params: dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = self._futures_market_id(symbol)
+        try:
+            algo_raw = await self._futures.fapiPrivateGetOpenAlgoOrders(params)
+        except Exception:
+            algo_raw = []
+        for entry in algo_raw:
+            orders.append(self._to_algo_order(entry, symbol or "", market_type))
+        deduped: list[Order] = []
+        seen_ids: set[str] = set()
+        for order in orders:
+            if order.id in seen_ids:
+                continue
+            seen_ids.add(order.id)
+            deduped.append(order)
+        return deduped
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
         try:
