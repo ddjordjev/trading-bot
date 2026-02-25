@@ -1308,6 +1308,7 @@ class TestToggleModule:
         r = await client.post("/api/module/intel/toggle")
         assert r.status_code == 200
         assert r.json()["success"] is False
+        assert "unavailable" in r.json()["message"].lower()
 
     async def test_toggle_unknown_module(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
@@ -1318,24 +1319,34 @@ class TestToggleModule:
 
     async def test_toggle_news(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        r = await client.post("/api/module/news/toggle")
+        monitor = MagicMock()
+        monitor.is_module_enabled.return_value = True
+        monitor.set_module_enabled = AsyncMock(return_value=False)
+        with patch("web.server._monitor_ref", monitor):
+            r = await client.post("/api/module/news/toggle")
         assert r.status_code == 200
-        assert r.json()["success"] is False
-        assert "hub" in r.json()["message"].lower()
+        assert r.json()["success"] is True
+        assert "disabled" in r.json()["message"].lower()
+        monitor.set_module_enabled.assert_awaited_once_with("news", False)
 
     async def test_toggle_intel_disable(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        r = await client.post("/api/module/intel/toggle")
+        monitor = MagicMock()
+        monitor.is_module_enabled.return_value = True
+        monitor.set_module_enabled = AsyncMock(return_value=False)
+        with patch("web.server._monitor_ref", monitor):
+            r = await client.post("/api/module/intel/toggle")
         assert r.status_code == 200
-        assert r.json()["success"] is False
-        assert "hub" in r.json()["message"].lower()
+        assert r.json()["success"] is True
+        assert "disabled" in r.json()["message"].lower()
+        monitor.set_module_enabled.assert_awaited_once_with("intel", False)
 
     async def test_toggle_openclaw_disables_and_clears_snapshot(self, client):
         from shared.models import IntelSnapshot
 
         monitor = MagicMock()
-        monitor.is_openclaw_enabled.return_value = True
-        monitor.set_openclaw_enabled = AsyncMock(return_value=False)
+        monitor.is_module_enabled.return_value = True
+        monitor.set_module_enabled = AsyncMock(return_value=False)
         hub_state = MagicMock()
         hub_state.read_intel.return_value = IntelSnapshot(
             sources_active=["fear_greed", "openclaw"],
@@ -1352,7 +1363,7 @@ class TestToggleModule:
         data = r.json()
         assert data["success"] is True
         assert "disabled" in data["message"].lower()
-        monitor.set_openclaw_enabled.assert_awaited_once_with(False)
+        monitor.set_module_enabled.assert_awaited_once_with("openclaw", False)
         hub_state.write_intel.assert_called_once()
         written = hub_state.write_intel.call_args[0][0]
         assert written.openclaw_regime == "unknown"
@@ -1361,8 +1372,8 @@ class TestToggleModule:
 
     async def test_toggle_openclaw_enables(self, client):
         monitor = MagicMock()
-        monitor.is_openclaw_enabled.return_value = False
-        monitor.set_openclaw_enabled = AsyncMock(return_value=True)
+        monitor.is_module_enabled.return_value = False
+        monitor.set_module_enabled = AsyncMock(return_value=True)
         with patch("web.server._monitor_ref", monitor):
             r = await client.post("/api/module/openclaw/toggle")
 
@@ -1370,12 +1381,12 @@ class TestToggleModule:
         data = r.json()
         assert data["success"] is True
         assert "enabled" in data["message"].lower()
-        monitor.set_openclaw_enabled.assert_awaited_once_with(True)
+        monitor.set_module_enabled.assert_awaited_once_with("openclaw", True)
 
     async def test_toggle_openclaw_enable_failure_returns_error(self, client):
         monitor = MagicMock()
-        monitor.is_openclaw_enabled.return_value = False
-        monitor.set_openclaw_enabled = AsyncMock(return_value=False)
+        monitor.is_module_enabled.return_value = False
+        monitor.set_module_enabled = AsyncMock(return_value=False)
         with patch("web.server._monitor_ref", monitor):
             r = await client.post("/api/module/openclaw/toggle")
 
@@ -1383,7 +1394,7 @@ class TestToggleModule:
         data = r.json()
         assert data["success"] is False
         assert "enable failed" in data["message"].lower()
-        monitor.set_openclaw_enabled.assert_awaited_once_with(True)
+        monitor.set_module_enabled.assert_awaited_once_with("openclaw", True)
 
 
 # ── Reset Profit Buffer ──────────────────────────────────────────────────
@@ -1895,19 +1906,27 @@ class TestClosedTrades:
 
 
 class TestModuleToggleMultibot:
-    async def test_intel_toggle_rejected_in_multibot(self, client, mock_bot):
+    async def test_intel_toggle_allowed_in_multibot(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        r = await client.post("/api/module/intel/toggle")
+        monitor = MagicMock()
+        monitor.is_module_enabled.return_value = True
+        monitor.set_module_enabled = AsyncMock(return_value=False)
+        with patch("web.server._monitor_ref", monitor):
+            r = await client.post("/api/module/intel/toggle")
         assert r.status_code == 200
-        assert r.json()["success"] is False
-        assert "hub" in r.json()["message"].lower()
+        assert r.json()["success"] is True
+        monitor.set_module_enabled.assert_awaited_once_with("intel", False)
 
-    async def test_news_toggle_rejected_in_multibot(self, client, mock_bot):
+    async def test_news_toggle_allowed_in_multibot(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
-        r = await client.post("/api/module/news/toggle")
+        monitor = MagicMock()
+        monitor.is_module_enabled.return_value = True
+        monitor.set_module_enabled = AsyncMock(return_value=False)
+        with patch("web.server._monitor_ref", monitor):
+            r = await client.post("/api/module/news/toggle")
         assert r.status_code == 200
-        assert r.json()["success"] is False
-        assert "hub" in r.json()["message"].lower()
+        assert r.json()["success"] is True
+        monitor.set_module_enabled.assert_awaited_once_with("news", False)
 
     async def test_unknown_module_rejected(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]

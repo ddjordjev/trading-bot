@@ -459,6 +459,22 @@ async def get_modules(_: str = Depends(verify_token)) -> list[ModuleStatus]:
     if _hub_state_ref is None:
         return []
     snap = _hub_state_ref.read_intel()
+    intel_enabled = (
+        bool(_monitor_ref.is_intel_enabled()) if _monitor_ref and hasattr(_monitor_ref, "is_intel_enabled") else True
+    )
+    scanner_enabled = (
+        bool(_monitor_ref.is_scanner_enabled())
+        if _monitor_ref and hasattr(_monitor_ref, "is_scanner_enabled")
+        else True
+    )
+    news_enabled = (
+        bool(_monitor_ref.is_news_enabled()) if _monitor_ref and hasattr(_monitor_ref, "is_news_enabled") else True
+    )
+    analytics_enabled = (
+        bool(_monitor_ref.is_analytics_enabled())
+        if _monitor_ref and hasattr(_monitor_ref, "is_analytics_enabled")
+        else True
+    )
     openclaw_regime = str(getattr(snap, "openclaw_regime", "unknown") or "unknown")
     openclaw_confidence = float(getattr(snap, "openclaw_regime_confidence", 0.0) or 0.0)
     openclaw_ideas = list(getattr(snap, "openclaw_idea_briefs", []) or [])
@@ -474,28 +490,28 @@ async def get_modules(_: str = Depends(verify_token)) -> list[ModuleStatus]:
         ModuleStatus(
             name="intel",
             display_name="Market Intelligence",
-            enabled=True,
+            enabled=intel_enabled,
             description="Fear & Greed, liquidations, macro calendar, whale sentiment (in-process)",
             stats={"regime": snap.regime},
         ),
         ModuleStatus(
             name="scanner",
             display_name="Trending Scanner",
-            enabled=True,
+            enabled=scanner_enabled,
             description="CryptoBubbles-style trending coin scanner (in-process)",
             stats={"trending_count": len(snap.hot_movers)},
         ),
         ModuleStatus(
             name="news",
             display_name="News Monitor",
-            enabled=True,
+            enabled=news_enabled,
             description="RSS feed monitoring for spike correlation (in-process)",
             stats={"recent_count": len(snap.news_items)},
         ),
         ModuleStatus(
             name="analytics",
             display_name="Analytics Engine",
-            enabled=True,
+            enabled=analytics_enabled,
             description="Strategy scoring, pattern detection, suggestions (in-process)",
             stats={"strategies_scored": len(_hub_state_ref.read_analytics().weights)},
         ),
@@ -795,31 +811,34 @@ async def reset_profit_buffer(_: str = Depends(verify_token)) -> ActionResponse:
 async def toggle_module(name: str, _: str = Depends(verify_token)) -> ActionResponse:
     if name not in ("intel", "news", "scanner", "analytics", "openclaw"):
         return ActionResponse(success=False, message=f"Unknown module: {name}")
-    if name != "openclaw":
-        return ActionResponse(success=False, message=f"{name} is managed by the hub — toggle not supported")
-    if _monitor_ref is None or not hasattr(_monitor_ref, "set_openclaw_enabled"):
-        return ActionResponse(success=False, message="OpenClaw runtime toggle unavailable")
+    if (
+        _monitor_ref is None
+        or not hasattr(_monitor_ref, "set_module_enabled")
+        or not hasattr(_monitor_ref, "is_module_enabled")
+    ):
+        return ActionResponse(success=False, message=f"{name} runtime toggle unavailable")
 
-    currently_enabled = bool(_monitor_ref.is_openclaw_enabled())
+    currently_enabled = bool(_monitor_ref.is_module_enabled(name))
     requested_enabled = not currently_enabled
-    enabled_now = await _monitor_ref.set_openclaw_enabled(requested_enabled)
+    enabled_now = await _monitor_ref.set_module_enabled(name, requested_enabled)
 
     if requested_enabled:
         if enabled_now:
             nudge_ws()
-            return ActionResponse(success=True, message="OpenClaw intelligence enabled")
+            return ActionResponse(success=True, message=f"{name} enabled")
         return ActionResponse(
             success=False,
-            message="OpenClaw enable failed (check URL/config and service health)",
+            message=f"{name} enable failed",
         )
 
     if enabled_now:
-        return ActionResponse(success=False, message="OpenClaw disable failed")
+        return ActionResponse(success=False, message=f"{name} disable failed")
 
-    # Immediate hard-isolation: scrub OpenClaw data from shared intel snapshot.
-    _clear_openclaw_intel_cache()
+    # Immediate hard-isolation for OpenClaw data. Other modules refresh on next monitor tick.
+    if name == "openclaw":
+        _clear_openclaw_intel_cache()
     nudge_ws()
-    return ActionResponse(success=True, message="OpenClaw intelligence disabled and isolated")
+    return ActionResponse(success=True, message=f"{name} disabled")
 
 
 def _clear_openclaw_intel_cache() -> None:

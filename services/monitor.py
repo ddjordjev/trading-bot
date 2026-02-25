@@ -35,6 +35,7 @@ from scanner.binance_futures import BinanceFuturesScanner
 from scanner.trending import TrendingScanner
 from services.signal_generator import SignalGenerator
 from shared.models import (
+    AnalyticsSnapshot,
     BotDeploymentStatus,
     DeploymentLevel,
     ExtremeCandidate,
@@ -141,6 +142,13 @@ class MonitorService:
         self._exchange_symbols: dict[str, set[str]] = {}
         self._candle_fetcher: object | None = None
         self._last_open_db_symbols: set[str] = set()
+        self._module_enabled: dict[str, bool] = {
+            "intel": True,
+            "scanner": True,
+            "news": bool(getattr(self.news, "enabled", True)),
+            "analytics": True,
+            "openclaw": bool(getattr(self.openclaw, "is_enabled", self.openclaw.enabled)),
+        }
 
     @staticmethod
     def _intensity_for_level(level: DeploymentLevel) -> dict[str, float]:
@@ -248,7 +256,22 @@ class MonitorService:
         logger.info("Monitor service stopped")
 
     def is_openclaw_enabled(self) -> bool:
-        return bool(getattr(self.openclaw, "is_enabled", self.openclaw.enabled))
+        return self.is_module_enabled("openclaw")
+
+    def is_module_enabled(self, name: str) -> bool:
+        return bool(self._module_enabled.get(name, True))
+
+    def is_intel_enabled(self) -> bool:
+        return self.is_module_enabled("intel")
+
+    def is_scanner_enabled(self) -> bool:
+        return self.is_module_enabled("scanner")
+
+    def is_news_enabled(self) -> bool:
+        return self.is_module_enabled("news")
+
+    def is_analytics_enabled(self) -> bool:
+        return self.is_module_enabled("analytics")
 
     async def set_openclaw_enabled(self, enabled: bool) -> bool:
         """Runtime toggle for OpenClaw advisory ingestion."""
@@ -257,13 +280,63 @@ class MonitorService:
             return False
 
         enabled_now = await self.openclaw.set_enabled(enabled)
+        self._module_enabled["openclaw"] = bool(enabled_now)
         if enabled_now:
             # Try one immediate refresh so module state updates without waiting poll interval.
             with contextlib.suppress(Exception):
                 await self.openclaw.fetch_once()
         return enabled_now
 
+    async def set_module_enabled(self, name: str, enabled: bool) -> bool:
+        if name not in {"intel", "scanner", "news", "analytics", "openclaw"}:
+            return False
+
+        if name == "openclaw":
+            return await self.set_openclaw_enabled(enabled)
+
+        self._module_enabled[name] = bool(enabled)
+
+        if name == "news":
+            self.news.enabled = bool(enabled)
+            if enabled and self._running:
+                with contextlib.suppress(Exception):
+                    await self.news.start()
+            if not enabled:
+                with contextlib.suppress(Exception):
+                    await self.news.stop()
+                self._recent_news = []
+            return True
+
+        if name == "scanner":
+            self.binance_scanner.enabled = bool(enabled)
+            if enabled and self._running:
+                with contextlib.suppress(Exception):
+                    await self.scanner.start()
+                with contextlib.suppress(Exception):
+                    await self.binance_scanner.start()
+            if not enabled:
+                with contextlib.suppress(Exception):
+                    await self.scanner.stop()
+                with contextlib.suppress(Exception):
+                    await self.binance_scanner.stop()
+                self.scanner._hot_movers = []
+                self.scanner._latest_scan = []
+                self.binance_scanner._hot_movers = []
+                self.binance_scanner._latest_scan = []
+                with contextlib.suppress(Exception):
+                    self.state.write_extreme_watchlist(ExtremeWatchlist())
+            return True
+
+        if name == "analytics" and not enabled:
+            with contextlib.suppress(Exception):
+                self.signal_gen.update_analytics(AnalyticsSnapshot())
+            return True
+
+        return True
+
     async def _on_news(self, item: NewsItem) -> None:
+        if not self.is_news_enabled():
+            return
         self._recent_news.append(item)
         if len(self._recent_news) > 200:
             self._recent_news = self._recent_news[-200:]
@@ -370,13 +443,13 @@ class MonitorService:
 
                 # TradingView: refresh active symbols
                 tv_interval = self.settings.tv_poll_interval * multipliers["tv"]
-                if now - self._last_tv_refresh >= tv_interval:
+                if self.is_intel_enabled() and now - self._last_tv_refresh >= tv_interval:
                     await self._refresh_tv(combined)
                     self._last_tv_refresh = now
 
                 # Scanner (CryptoBubbles + CMC + CoinGecko merge happens inside)
                 scanner_interval = 60 * multipliers["scanner"]
-                if now - self._last_scanner_refresh >= scanner_interval:
+                if self.is_scanner_enabled() and now - self._last_scanner_refresh >= scanner_interval:
                     self._refresh_scanner_symbols()
                     self._last_scanner_refresh = now
 
@@ -385,19 +458,21 @@ class MonitorService:
                 self.state.write_intel(snapshot)
 
                 # Build extreme watchlist from scanner data
-                try:
-                    self._build_extreme_watchlist()
-                except Exception as e:
-                    logger.warning("Extreme watchlist error: {}", e)
+                if self.is_scanner_enabled():
+                    try:
+                        self._build_extreme_watchlist()
+                    except Exception as e:
+                        logger.warning("Extreme watchlist error: {}", e)
 
                 # Inject extreme movers into the trade queue as CRITICAL proposals
-                try:
-                    self._queue_extreme_proposals()
-                except Exception as e:
-                    logger.warning("Extreme proposal injection error: {}", e)
+                if self.is_scanner_enabled():
+                    try:
+                        self._queue_extreme_proposals()
+                    except Exception as e:
+                        logger.warning("Extreme proposal injection error: {}", e)
 
                 # Feed analytics to signal generator (every 60s)
-                if now - self._last_analytics_refresh >= 60:
+                if self.is_analytics_enabled() and now - self._last_analytics_refresh >= 60:
                     try:
                         analytics_snap = self.state.read_analytics()
                         if analytics_snap.weights:
@@ -603,6 +678,8 @@ class MonitorService:
 
     async def _refresh_tv(self, bot_status: BotDeploymentStatus) -> None:
         """Refresh TradingView analysis, adapting to deployment state."""
+        if not self.is_intel_enabled():
+            return
         symbols_to_analyze = list(self._tv_symbols)
 
         if self._current_level == DeploymentLevel.HUNTING:
@@ -637,6 +714,8 @@ class MonitorService:
 
         Only includes symbols that exist on at least one connected exchange.
         """
+        if not self.is_intel_enabled():
+            return
         all_tradeable: set[str] = set()
         for syms in self._exchange_symbols.values():
             all_tradeable |= syms
@@ -658,175 +737,184 @@ class MonitorService:
 
     def _build_snapshot(self, multipliers: dict[str, float]) -> IntelSnapshot:
         snap = IntelSnapshot()
+        intel_enabled = self.is_intel_enabled()
+        scanner_enabled = self.is_scanner_enabled()
+        news_enabled = self.is_news_enabled()
 
-        # Fear & Greed
-        snap.fear_greed = self.fear_greed.value
-        snap.fear_greed_bias = self.fear_greed.trade_direction_bias()
+        if intel_enabled:
+            # Fear & Greed
+            snap.fear_greed = self.fear_greed.value
+            snap.fear_greed_bias = self.fear_greed.trade_direction_bias()
 
-        # Liquidations
-        liq = self.liquidations.latest
-        if liq:
-            snap.liquidation_24h = liq.total_24h
-            snap.liquidation_24h_text = liq.total_24h_text
-            snap.mass_liquidation = liq.is_mass_liquidation
-            snap.liquidation_bias = self.liquidations.reversal_bias()
+            # Liquidations
+            liq = self.liquidations.latest
+            if liq:
+                snap.liquidation_24h = liq.total_24h
+                snap.liquidation_24h_text = liq.total_24h_text
+                snap.mass_liquidation = liq.is_mass_liquidation
+                snap.liquidation_bias = self.liquidations.reversal_bias()
 
-        # Macro
-        snap.macro_event_imminent = self.macro.has_imminent_event()
-        snap.macro_exposure_mult = self.macro.exposure_multiplier()
-        snap.macro_spike_opportunity = self.macro.is_spike_opportunity()
-        snap.next_macro_event = self.macro.next_event_info() or ""
+            # Macro
+            snap.macro_event_imminent = self.macro.has_imminent_event()
+            snap.macro_exposure_mult = self.macro.exposure_multiplier()
+            snap.macro_spike_opportunity = self.macro.is_spike_opportunity()
+            snap.next_macro_event = self.macro.next_event_info() or ""
 
-        # Whale sentiment
-        snap.whale_bias = self.whales.contrarian_bias("BTC")
-        btc = self.whales.get("BTC")
-        if btc:
-            if btc.is_overleveraged_longs:
-                snap.overleveraged_side = "longs"
-            elif btc.is_overleveraged_shorts:
-                snap.overleveraged_side = "shorts"
+            # Whale sentiment
+            snap.whale_bias = self.whales.contrarian_bias("BTC")
+            btc = self.whales.get("BTC")
+            if btc:
+                if btc.is_overleveraged_longs:
+                    snap.overleveraged_side = "longs"
+                elif btc.is_overleveraged_shorts:
+                    snap.overleveraged_side = "shorts"
 
-        # TradingView
-        snap.tv_btc_consensus = self.tv.consensus("BTC/USDT")
-        snap.tv_eth_consensus = self.tv.consensus("ETH/USDT")
+            # TradingView
+            snap.tv_btc_consensus = self.tv.consensus("BTC/USDT")
+            snap.tv_eth_consensus = self.tv.consensus("ETH/USDT")
 
-        tv_snapshots = []
-        for sym, analyses in self.tv.get_all_cached().items():
-            for interval, analysis in analyses.items():
-                tv_snapshots.append(
-                    TVSymbolSnapshot(
-                        symbol=sym,
-                        interval=interval,
-                        rating=analysis.summary_rating.value,
-                        oscillators=analysis.oscillators_rating.value,
-                        moving_averages=analysis.moving_averages_rating.value,
-                        confidence=analysis.confidence,
-                        rsi_14=analysis.rsi_14,
-                        consensus=self.tv.consensus(sym),
-                        signal_boost_long=self.tv.signal_boost(sym, "long"),
-                        signal_boost_short=self.tv.signal_boost(sym, "short"),
-                        updated_at=analysis.fetched_at.isoformat(),
+            tv_snapshots = []
+            for sym, analyses in self.tv.get_all_cached().items():
+                for interval, analysis in analyses.items():
+                    tv_snapshots.append(
+                        TVSymbolSnapshot(
+                            symbol=sym,
+                            interval=interval,
+                            rating=analysis.summary_rating.value,
+                            oscillators=analysis.oscillators_rating.value,
+                            moving_averages=analysis.moving_averages_rating.value,
+                            confidence=analysis.confidence,
+                            rsi_14=analysis.rsi_14,
+                            consensus=self.tv.consensus(sym),
+                            signal_boost_long=self.tv.signal_boost(sym, "long"),
+                            signal_boost_short=self.tv.signal_boost(sym, "short"),
+                            updated_at=analysis.fetched_at.isoformat(),
+                        )
                     )
-                )
-        snap.tv_analyses = tv_snapshots
+            snap.tv_analyses = tv_snapshots
 
-        # Market regime
-        snap.should_reduce_exposure = (
-            snap.macro_event_imminent or self.fear_greed.is_extreme_greed or snap.overleveraged_side == "longs"
-        )
-        snap.regime = self._derive_regime(snap)
-        snap.position_size_multiplier = self._compute_size_mult(snap)
-        snap.preferred_direction = self._compute_direction(snap)
-        self._apply_openclaw(snapshot=snap)
+            # Market regime
+            snap.should_reduce_exposure = (
+                snap.macro_event_imminent or self.fear_greed.is_extreme_greed or snap.overleveraged_side == "longs"
+            )
+            snap.regime = self._derive_regime(snap)
+            snap.position_size_multiplier = self._compute_size_mult(snap)
+            snap.preferred_direction = self._compute_direction(snap)
+
+        if self.is_openclaw_enabled():
+            self._apply_openclaw(snapshot=snap)
 
         # Trending (CEX-first): Binance scanner is the base stream; legacy
         # scanner remains additive confidence/discovery.
         merged_hot: list[TrendingSnapshot] = []
         seen_hot: set[str] = set()
 
-        for c in self.binance_scanner.hot_movers:
-            key = self._symbol_key(c.symbol)
-            if key in seen_hot:
-                continue
-            seen_hot.add(key)
-            merged_hot.append(
-                TrendingSnapshot(
-                    symbol=self._pair_symbol(c.symbol),
-                    name=c.name,
-                    price=c.price,
-                    market_cap=c.market_cap,
-                    volume_24h=c.volume_24h,
-                    change_5m=c.change_5m,
-                    change_1h=c.change_1h,
-                    change_24h=c.change_24h,
-                    change_7d=c.change_7d,
-                    momentum_score=c.momentum_score,
-                    is_low_liquidity=c.is_low_liquidity,
-                    source="binance_scanner",
-                    cex_confidence=c.cex_confidence,
-                    cex_vol_accel=c.cex_vol_accel,
-                    cex_score=c.cex_score,
-                    cex_funding_rate=c.cex_funding_rate,
-                    cex_change_1m=c.cex_change_1m,
-                    cex_change_4h=c.cex_change_4h,
-                    cex_change_1d=c.cex_change_1d,
-                    cex_change_1w=c.cex_change_1w,
-                    cex_change_3w=c.cex_change_3w,
-                    cex_change_1mo=c.cex_change_1mo,
-                    cex_change_3mo=c.cex_change_3mo,
-                    cex_change_1y=c.cex_change_1y,
+        if scanner_enabled:
+            for c in self.binance_scanner.hot_movers:
+                key = self._symbol_key(c.symbol)
+                if key in seen_hot:
+                    continue
+                seen_hot.add(key)
+                merged_hot.append(
+                    TrendingSnapshot(
+                        symbol=self._pair_symbol(c.symbol),
+                        name=c.name,
+                        price=c.price,
+                        market_cap=c.market_cap,
+                        volume_24h=c.volume_24h,
+                        change_5m=c.change_5m,
+                        change_1h=c.change_1h,
+                        change_24h=c.change_24h,
+                        change_7d=c.change_7d,
+                        momentum_score=c.momentum_score,
+                        is_low_liquidity=c.is_low_liquidity,
+                        source="binance_scanner",
+                        cex_confidence=c.cex_confidence,
+                        cex_vol_accel=c.cex_vol_accel,
+                        cex_score=c.cex_score,
+                        cex_funding_rate=c.cex_funding_rate,
+                        cex_change_1m=c.cex_change_1m,
+                        cex_change_4h=c.cex_change_4h,
+                        cex_change_1d=c.cex_change_1d,
+                        cex_change_1w=c.cex_change_1w,
+                        cex_change_3w=c.cex_change_3w,
+                        cex_change_1mo=c.cex_change_1mo,
+                        cex_change_3mo=c.cex_change_3mo,
+                        cex_change_1y=c.cex_change_1y,
+                    )
                 )
-            )
 
-        for c in self.scanner.hot_movers:
-            key = self._symbol_key(c.symbol)
-            if key in seen_hot:
-                continue
-            seen_hot.add(key)
-            merged_hot.append(
-                TrendingSnapshot(
-                    symbol=self._pair_symbol(c.symbol),
-                    name=c.name,
-                    price=c.price,
-                    market_cap=c.market_cap,
-                    volume_24h=c.volume_24h,
-                    change_5m=c.change_5m,
-                    change_1h=c.change_1h,
-                    change_24h=c.change_24h,
-                    change_7d=c.change_7d,
-                    momentum_score=c.momentum_score,
-                    is_low_liquidity=c.is_low_liquidity,
-                    source="cryptobubbles",
+            for c in self.scanner.hot_movers:
+                key = self._symbol_key(c.symbol)
+                if key in seen_hot:
+                    continue
+                seen_hot.add(key)
+                merged_hot.append(
+                    TrendingSnapshot(
+                        symbol=self._pair_symbol(c.symbol),
+                        name=c.name,
+                        price=c.price,
+                        market_cap=c.market_cap,
+                        volume_24h=c.volume_24h,
+                        change_5m=c.change_5m,
+                        change_1h=c.change_1h,
+                        change_24h=c.change_24h,
+                        change_7d=c.change_7d,
+                        momentum_score=c.momentum_score,
+                        is_low_liquidity=c.is_low_liquidity,
+                        source="cryptobubbles",
+                    )
                 )
-            )
 
         snap.hot_movers = merged_hot
 
-        snap.cmc_trending = [
-            TrendingSnapshot(
-                symbol=c.symbol,
-                name=c.name,
-                price=c.price,
-                market_cap=c.market_cap,
-                volume_24h=c.volume_24h,
-                change_5m=float(getattr(c, "change_5m", 0.0) or 0.0),
-                change_1h=float(getattr(c, "change_1h", 0.0) or 0.0),
-                change_24h=float(getattr(c, "change_24h", 0.0) or 0.0),
-                change_7d=float(getattr(c, "change_7d", 0.0) or 0.0),
-                source="coinmarketcap",
-            )
-            for c in self.cmc.all_interesting[:15]
-        ]
+        if scanner_enabled and intel_enabled:
+            snap.cmc_trending = [
+                TrendingSnapshot(
+                    symbol=c.symbol,
+                    name=c.name,
+                    price=c.price,
+                    market_cap=c.market_cap,
+                    volume_24h=c.volume_24h,
+                    change_5m=float(getattr(c, "change_5m", 0.0) or 0.0),
+                    change_1h=float(getattr(c, "change_1h", 0.0) or 0.0),
+                    change_24h=float(getattr(c, "change_24h", 0.0) or 0.0),
+                    change_7d=float(getattr(c, "change_7d", 0.0) or 0.0),
+                    source="coinmarketcap",
+                )
+                for c in self.cmc.all_interesting[:15]
+            ]
 
-        snap.coingecko_trending = [
-            TrendingSnapshot(
-                symbol=c.symbol,
-                name=c.name,
-                price=c.price,
-                market_cap=c.market_cap,
-                volume_24h=c.volume_24h,
-                change_5m=float(getattr(c, "change_5m", 0.0) or 0.0),
-                change_1h=float(getattr(c, "change_1h", 0.0) or 0.0),
-                change_24h=float(getattr(c, "change_24h", 0.0) or 0.0),
-                change_7d=float(getattr(c, "change_7d", 0.0) or 0.0),
-                source="coingecko",
-            )
-            for c in self.gecko.all_interesting[:15]
-        ]
+            snap.coingecko_trending = [
+                TrendingSnapshot(
+                    symbol=c.symbol,
+                    name=c.name,
+                    price=c.price,
+                    market_cap=c.market_cap,
+                    volume_24h=c.volume_24h,
+                    change_5m=float(getattr(c, "change_5m", 0.0) or 0.0),
+                    change_1h=float(getattr(c, "change_1h", 0.0) or 0.0),
+                    change_24h=float(getattr(c, "change_24h", 0.0) or 0.0),
+                    change_7d=float(getattr(c, "change_7d", 0.0) or 0.0),
+                    source="coingecko",
+                )
+                for c in self.gecko.all_interesting[:15]
+            ]
 
         # News
-        snap.news_items = [
-            {
-                "headline": n.headline,
-                "source": n.source,
-                "url": n.url,
-                "published": n.published.isoformat() if n.published else "",
-                "matched_symbols": n.matched_symbols,
-                "sentiment": n.sentiment,
-                "sentiment_score": n.sentiment_score,
-            }
-            for n in self._recent_news[-50:]
-        ]
+        if news_enabled:
+            snap.news_items = [
+                {
+                    "headline": n.headline,
+                    "source": n.source,
+                    "url": n.url,
+                    "published": n.published.isoformat() if n.published else "",
+                    "matched_symbols": n.matched_symbols,
+                    "sentiment": n.sentiment,
+                    "sentiment_score": n.sentiment_score,
+                }
+                for n in self._recent_news[-50:]
+            ]
 
         # Metadata
         now_iso = datetime.now(UTC).isoformat()
@@ -834,35 +922,36 @@ class MonitorService:
         snap.poll_multiplier = multipliers["base"]
         sources = []
         ts: dict[str, str] = {}
-        if self.fear_greed.latest:
+        if intel_enabled and self.fear_greed.latest:
             sources.append("fear_greed")
             ts["fear_greed"] = now_iso
-        if self.liquidations.latest:
+        if intel_enabled and self.liquidations.latest:
             sources.append("liquidations")
             ts["liquidations"] = now_iso
-        sources.append("macro")
-        ts["macro"] = now_iso
-        sources.append("whales")
-        ts["whales"] = now_iso
-        if self.tv._cache:
+        if intel_enabled:
+            sources.append("macro")
+            ts["macro"] = now_iso
+            sources.append("whales")
+            ts["whales"] = now_iso
+        if intel_enabled and self.tv._cache:
             sources.append("tradingview")
             ts["tradingview"] = now_iso
-        if self.cmc.trending:
+        if scanner_enabled and intel_enabled and self.cmc.trending:
             sources.append("coinmarketcap")
             ts["coinmarketcap"] = now_iso
-        if self.gecko.trending:
+        if scanner_enabled and intel_enabled and self.gecko.trending:
             sources.append("coingecko")
             ts["coingecko"] = now_iso
-        if self.openclaw.latest:
+        if self.is_openclaw_enabled() and self.openclaw.latest:
             sources.append("openclaw")
             ts["openclaw"] = now_iso
-        if self.scanner.hot_movers:
+        if scanner_enabled and self.scanner.hot_movers:
             sources.append("scanner")
             ts["scanner"] = now_iso
-        if self.binance_scanner.hot_movers:
+        if scanner_enabled and self.binance_scanner.hot_movers:
             sources.append("binance_scanner")
             ts["binance_scanner"] = now_iso
-        if self._recent_news:
+        if news_enabled and self._recent_news:
             sources.append("news")
             ts["news"] = now_iso
         snap.sources_active = sources
@@ -875,6 +964,8 @@ class MonitorService:
 
     def _apply_openclaw(self, snapshot: IntelSnapshot) -> None:
         """Merge OpenClaw advisory outputs into the cached hub snapshot."""
+        if not self.is_openclaw_enabled():
+            return
         data = self.openclaw.latest
         if data is None:
             return

@@ -45,7 +45,6 @@ export function Modules() {
               <button
                 className={`toggle ${m.enabled ? "on" : "off"}`}
                 onClick={() => toggle(m.name)}
-                disabled={m.name !== "openclaw"}
                 title={m.description || (m.enabled ? "Disable this module" : "Enable this module")}
               />
             </div>
