@@ -46,6 +46,8 @@ class BinanceExchange(BaseExchange):
                 "enableRateLimit": True,
             }
         )
+        self._spot.options["warnOnFetchOpenOrdersWithoutSymbol"] = False
+        self._futures.options["warnOnFetchOpenOrdersWithoutSymbol"] = False
         if sandbox:
             self._spot.set_sandbox_mode(True)
             self._futures.set_sandbox_mode(True)
@@ -106,9 +108,16 @@ class BinanceExchange(BaseExchange):
         return OrderStatus.PENDING
 
     def _to_algo_order(self, raw: dict[str, Any], symbol_hint: str, market_type: MarketType) -> Order:
-        order_type = parse_order_type(str(raw.get("orderType", "")))
+        hinted_type = str(raw.get("orderType", "") or raw.get("type", ""))
+        if not hinted_type:
+            info = raw.get("info") or {}
+            hinted_type = str(info.get("orderType", "") or info.get("origType", "") or info.get("type", ""))
+        order_type = parse_order_type(hinted_type)
         symbol_raw = str(raw.get("symbol") or "")
-        symbol = self._symbol_from_futures_market_id(symbol_raw) if symbol_raw else symbol_hint
+        if symbol_raw:
+            symbol = symbol_raw.split(":")[0] if "/" in symbol_raw else self._symbol_from_futures_market_id(symbol_raw)
+        else:
+            symbol = symbol_hint.split(":")[0]
         side_raw = str(raw.get("side", "")).lower()
         qty = raw.get("quantity", 0) or raw.get("origQty", 0) or 0
         return Order(
@@ -123,6 +132,21 @@ class BinanceExchange(BaseExchange):
             average_price=float(raw.get("actualPrice", 0) or 0),
             market_type=market_type.value,
         )
+
+    @staticmethod
+    def _resolve_order_type(raw: dict[str, Any]) -> OrderType:
+        parsed = parse_order_type(str(raw.get("type", "")))
+        if parsed != OrderType.MARKET:
+            return parsed
+        info = raw.get("info") or {}
+        hinted = str(info.get("origType", "") or info.get("orderType", "") or info.get("type", ""))
+        if hinted:
+            hinted_parsed = parse_order_type(hinted)
+            if hinted_parsed != OrderType.MARKET:
+                return hinted_parsed
+        if parse_stop_price(raw) is not None:
+            return OrderType.STOP_LOSS
+        return parsed
 
     @staticmethod
     def _infer_position_leverage(raw_position: dict[str, Any]) -> int:
@@ -173,6 +197,52 @@ class BinanceExchange(BaseExchange):
             except (TypeError, ValueError):
                 continue
         return 0.0
+
+    def _normalize_amount(self, client: Any, symbol: str, amount: float) -> float:
+        try:
+            amount_to_precision = getattr(client, "amount_to_precision", None)
+            if callable(amount_to_precision):
+                normalized = amount_to_precision(symbol, amount)
+                if isinstance(normalized, str | int | float):
+                    return float(normalized)
+                logger.debug(
+                    "Ignoring non-numeric normalized amount for {} (amount={}, type={})",
+                    symbol,
+                    amount,
+                    type(normalized).__name__,
+                )
+        except Exception as exc:
+            logger.debug(
+                "Failed to normalize amount for {} (amount={}): {}",
+                symbol,
+                amount,
+                exc,
+            )
+        return amount
+
+    def _normalize_price(self, client: Any, symbol: str, value: float | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            price_to_precision = getattr(client, "price_to_precision", None)
+            if callable(price_to_precision):
+                normalized = price_to_precision(symbol, value)
+                if isinstance(normalized, str | int | float):
+                    return float(normalized)
+                logger.debug(
+                    "Ignoring non-numeric normalized price for {} (price={}, type={})",
+                    symbol,
+                    value,
+                    type(normalized).__name__,
+                )
+        except Exception as exc:
+            logger.debug(
+                "Failed to normalize price for {} (price={}): {}",
+                symbol,
+                value,
+                exc,
+            )
+        return value
 
     async def connect(self) -> None:
         logger.info("Connecting to Binance (sandbox={})", self.sandbox)
@@ -317,6 +387,9 @@ class BinanceExchange(BaseExchange):
         market_type: MarketType = MarketType.SPOT,
     ) -> Order:
         client = self._client(market_type)
+        normalized_amount = self._normalize_amount(client, symbol, amount)
+        normalized_price = self._normalize_price(client, symbol, price)
+        normalized_stop_price = self._normalize_price(client, symbol, stop_price)
         if order_type == OrderType.MARKET:
             ccxt_type = "market"
         elif order_type == OrderType.LIMIT:
@@ -328,8 +401,8 @@ class BinanceExchange(BaseExchange):
         else:
             ccxt_type = "limit"
         params: dict[str, Any] = {}
-        if stop_price is not None:
-            params["stopPrice"] = stop_price
+        if normalized_stop_price is not None:
+            params["stopPrice"] = normalized_stop_price
         is_protection_order = order_type in (OrderType.STOP_LOSS, OrderType.TAKE_PROFIT)
         if market_type == MarketType.FUTURES and is_protection_order:
             market_id = self._futures_market_id(symbol)
@@ -339,8 +412,8 @@ class BinanceExchange(BaseExchange):
                 "side": side.value.upper(),
                 "algoType": "CONDITIONAL",
                 "type": algo_type,
-                "quantity": amount,
-                "triggerPrice": stop_price,
+                "quantity": normalized_amount,
+                "triggerPrice": normalized_stop_price,
                 "timeInForce": "GTC",
                 "reduceOnly": "true",
                 "closePosition": "false",
@@ -352,9 +425,9 @@ class BinanceExchange(BaseExchange):
                 side.value,
                 ccxt_type,
                 symbol,
-                price or "market",
+                normalized_price or "market",
                 leverage,
-                stop_price if stop_price is not None else "none",
+                normalized_stop_price if normalized_stop_price is not None else "none",
                 payload,
             )
             data = await self._futures.fapiPrivatePostAlgoOrder(payload)
@@ -392,9 +465,9 @@ class BinanceExchange(BaseExchange):
             side.value,
             ccxt_type,
             symbol,
-            price or "market",
+            normalized_price or "market",
             leverage,
-            stop_price if stop_price is not None else "none",
+            normalized_stop_price if normalized_stop_price is not None else "none",
             params,
         )
 
@@ -402,8 +475,8 @@ class BinanceExchange(BaseExchange):
             symbol=symbol,
             type=ccxt_type,
             side=side.value,
-            amount=amount,
-            price=price,
+            amount=normalized_amount,
+            price=normalized_price,
             params=params,
         )
         logger.info(
@@ -420,9 +493,9 @@ class BinanceExchange(BaseExchange):
             symbol=symbol,
             side=side,
             order_type=order_type,
-            amount=amount,
-            price=price,
-            stop_price=stop_price,
+            amount=normalized_amount,
+            price=normalized_price,
+            stop_price=normalized_stop_price,
             status=parse_order_status(data.get("status", "open")),
             filled=float(data.get("filled", 0) or 0),
             average_price=float(data.get("average", 0) or 0),
@@ -461,7 +534,7 @@ class BinanceExchange(BaseExchange):
                     id=order_id,
                     symbol=symbol,
                     side=OrderSide.BUY if data.get("side") == "buy" else OrderSide.SELL,
-                    order_type=parse_order_type(str(data.get("type", ""))),
+                    order_type=self._resolve_order_type(data),
                     amount=float(data.get("amount", 0) or 0),
                     stop_price=parse_stop_price(data),
                     status=parse_order_status(str(data.get("status", "")).lower()),
@@ -499,9 +572,9 @@ class BinanceExchange(BaseExchange):
         orders = [
             Order(
                 id=str(d.get("id", "")),
-                symbol=d.get("symbol", ""),
+                symbol=str(d.get("symbol", "")).split(":")[0],
                 side=OrderSide.BUY if d.get("side") == "buy" else OrderSide.SELL,
-                order_type=parse_order_type(str(d.get("type", ""))),
+                order_type=self._resolve_order_type(d),
                 amount=float(d.get("amount", 0) or 0),
                 stop_price=parse_stop_price(d),
                 status=parse_order_status(str(d.get("status", "")).lower()),
@@ -520,9 +593,9 @@ class BinanceExchange(BaseExchange):
             orders.append(
                 Order(
                     id=str(entry.get("id", "")),
-                    symbol=entry.get("symbol", ""),
+                    symbol=str(entry.get("symbol", "")).split(":")[0],
                     side=OrderSide.BUY if entry.get("side") == "buy" else OrderSide.SELL,
-                    order_type=parse_order_type(str(entry.get("type", ""))),
+                    order_type=self._resolve_order_type(entry),
                     amount=float(entry.get("amount", 0) or 0),
                     stop_price=parse_stop_price(entry),
                     status=parse_order_status(str(entry.get("status", "")).lower()),
@@ -539,14 +612,25 @@ class BinanceExchange(BaseExchange):
             algo_raw = []
         for entry in algo_raw:
             orders.append(self._to_algo_order(entry, symbol or "", market_type))
-        deduped: list[Order] = []
-        seen_ids: set[str] = set()
+        deduped_by_id: dict[str, Order] = {}
         for order in orders:
-            if order.id in seen_ids:
+            order_id = str(order.id or "")
+            if not order_id:
+                # Keep id-less rows as-is; they are rare and cannot be deduped safely.
+                deduped_by_id[f"__idx__{len(deduped_by_id)}"] = order
                 continue
-            seen_ids.add(order.id)
-            deduped.append(order)
-        return deduped
+            existing = deduped_by_id.get(order_id)
+            if existing is None:
+                deduped_by_id[order_id] = order
+                continue
+            existing_is_market = existing.order_type == OrderType.MARKET
+            new_is_market = order.order_type == OrderType.MARKET
+            existing_has_stop = float(existing.stop_price or 0.0) > 0
+            new_has_stop = float(order.stop_price or 0.0) > 0
+            # Prefer the richer protection representation when IDs collide.
+            if (existing_is_market and not new_is_market) or (not existing_has_stop and new_has_stop):
+                deduped_by_id[order_id] = order
+        return list(deduped_by_id.values())
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
         try:

@@ -117,7 +117,12 @@ class TradingBot:
         self._pending_hub_acks: dict[str, dict[str, Any]] = {}
         self._strategy_stats: dict[str, dict[str, Any]] = {}
         self._last_queue_exec_reason: str = ""
+        self._last_known_cex_protection: dict[str, tuple[float, float]] = {}
+        self._last_quick_protection_sync: dict[str, float] = {}
+        self._quick_protection_sync_interval_secs: float = 10.0
         self._orphan_positions: dict[str, dict[str, Any]] = {}
+        self._quick_positions_idle_poll_seconds: float = 5.0
+        self._last_quick_positions_poll_ts: float = 0.0
         self._running = False
         self._tick_interval = self.settings.tick_interval_idle
         self._status_interval = 300
@@ -407,18 +412,41 @@ class TradingBot:
                 "exchange": self.settings.exchange.upper(),
                 "open_symbols": list(self._open_trades.keys()),
                 "ready": warmup_done and not self.target.manual_stop,
+                "orphan_positions": list(self._orphan_positions.values()),
             }
             # Keep dashboard PnL/price near-real-time between full ticks.
             # Without this, position rows can look stale and then "jump" on full tick.
-            owned_symbols = set(self._open_trades.keys()) | set(self.orders.scaler.active_positions.keys())
-            if owned_symbols:
+            managed_symbols = set(self._open_trades.keys())
+            now_ts = time.monotonic()
+            should_fetch_positions = bool(managed_symbols)
+            if not should_fetch_positions:
+                should_fetch_positions = (
+                    now_ts - self._last_quick_positions_poll_ts
+                ) >= self._quick_positions_idle_poll_seconds
+            if should_fetch_positions:
                 positions = await self.exchange.fetch_positions()
                 pos_list: list[dict[str, Any]] = []
+                live_symbols = {
+                    str(getattr(p, "symbol", "") or "")
+                    for p in positions
+                    if float(getattr(p, "amount", 0.0) or 0.0) > 0
+                }
                 for pos in positions:
-                    if pos.amount <= 0 or pos.symbol not in owned_symbols:
+                    if pos.amount <= 0:
                         continue
+                    if pos.symbol not in managed_symbols:
+                        self._record_orphan_position(pos, source="quick_hub_check")
+                        continue
+                    self._orphan_positions.pop(pos.symbol, None)
                     ts = self.orders.trailing.active_stops.get(pos.symbol)
                     sp = self.orders.scaler.get(pos.symbol)
+                    # Full-tick cadence can be too slow for SL propagation; run a
+                    # throttled quick sync pass so CEX follows trailing updates.
+                    last_sync = self._last_quick_protection_sync.get(pos.symbol, 0.0)
+                    if (now_ts - last_sync) >= self._quick_protection_sync_interval_secs:
+                        with contextlib.suppress(Exception):
+                            await self.orders._sync_symbol_protection(pos, ts)
+                        self._last_quick_protection_sync[pos.symbol] = now_ts
                     risk = self._build_position_risk_snapshot(pos, ts)
                     age_minutes = self._position_age_minutes(pos.symbol, getattr(pos, "opened_at", None))
                     pos_list.append(
@@ -443,8 +471,10 @@ class TradingBot:
                             **risk,
                         }
                     )
-                if pos_list:
-                    payload["positions"] = pos_list
+                self._prune_orphan_positions(live_symbols, source="quick_hub_check")
+                payload["positions"] = pos_list
+                self._last_quick_positions_poll_ts = now_ts
+                payload["orphan_positions"] = list(self._orphan_positions.values())
 
             url = f"{hub_url.rstrip('/')}/internal/report"
             async with self._hub_session.post(url, json=payload) as resp:
@@ -1514,6 +1544,20 @@ class TradingBot:
             if cex_tp > 0:
                 exchange_tp = cex_tp
 
+        # Keep last confirmed CEX protection values visible in dashboard payloads
+        # when Binance/CCXT returns intermittent empty snapshots.
+        cached_sl, cached_tp = self._last_known_cex_protection.get(symbol, (0.0, 0.0))
+        if exchange_sl > 0 or exchange_tp > 0:
+            self._last_known_cex_protection[symbol] = (
+                exchange_sl if exchange_sl > 0 else cached_sl,
+                exchange_tp if exchange_tp > 0 else cached_tp,
+            )
+        else:
+            if cached_sl > 0:
+                exchange_sl = cached_sl
+            if cached_tp > 0:
+                exchange_tp = cached_tp
+
         bot_sl = float(getattr(ts, "current_stop", 0.0) or 0.0) if ts else 0.0
         rec = self._open_trades.get(symbol)
         targets = self._position_targets.get(symbol, {})
@@ -1652,7 +1696,7 @@ class TradingBot:
         try:
             open_orders = await self.exchange.fetch_open_orders(market_type=MarketType.FUTURES)
             for order in open_orders:
-                symbol = str(getattr(order, "symbol", "") or "")
+                symbol = str(getattr(order, "symbol", "") or "").split(":")[0]
                 stop_price = float(getattr(order, "stop_price", 0.0) or 0.0)
                 if not symbol or stop_price <= 0:
                     continue
@@ -1666,7 +1710,9 @@ class TradingBot:
             logger.debug("Failed to fetch open orders for CEX SL/TP snapshot: {}", e)
 
         pos_list = []
+        active_symbols: set[str] = set()
         for pos in active_positions:
+            active_symbols.add(pos.symbol)
             ts = self.orders.trailing.active_stops.get(pos.symbol)
             sp = self.orders.scaler.get(pos.symbol)
             risk = self._build_position_risk_snapshot(pos, ts, cex_levels_by_symbol.get(pos.symbol))
@@ -1694,6 +1740,14 @@ class TradingBot:
                     **risk,
                 }
             )
+
+        # Drop stale cache entries once symbol is no longer active on this bot.
+        self._last_known_cex_protection = {
+            symbol: levels for symbol, levels in self._last_known_cex_protection.items() if symbol in active_symbols
+        }
+        self._last_quick_protection_sync = {
+            symbol: ts for symbol, ts in self._last_quick_protection_sync.items() if symbol in active_symbols
+        }
 
         wick_list = []
         for sym, ws in self.orders.wick_scalper.active_scalps.items():
@@ -1934,10 +1988,9 @@ class TradingBot:
             logger.warning("Could not fetch strategy stats from hub: {}", e)
 
     def _managed_symbols(self) -> set[str]:
-        symbols = set(self._open_trades.keys()) | set(self.orders.scaler.active_positions.keys())
-        for key in self.orders.trailing.active_stops:
-            symbols.add(key.split(":", 1)[0])
-        return symbols
+        # Ownership is authoritative only from hub-backed open trades.
+        # Runtime scaler/trailing state must not imply ownership.
+        return set(self._open_trades.keys())
 
     def _record_orphan_position(self, pos: Any, source: str) -> None:
         symbol = str(getattr(pos, "symbol", "") or "")
@@ -1956,6 +2009,22 @@ class TradingBot:
             "detected_at": datetime.now(UTC).isoformat(),
             "source": source,
         }
+
+    def _prune_orphan_positions(self, live_symbols: set[str], source: str) -> None:
+        """Drop orphan rows that are no longer live on exchange or now managed."""
+        managed = self._managed_symbols()
+        removed: list[str] = []
+        for symbol in list(self._orphan_positions.keys()):
+            if symbol in managed or symbol not in live_symbols:
+                self._orphan_positions.pop(symbol, None)
+                removed.append(symbol)
+        if removed:
+            logger.info(
+                "Orphan prune [{}]: removed {} stale/claimed orphan(s): {}",
+                source,
+                len(removed),
+                ", ".join(sorted(removed)[:8]),
+            )
 
     async def _reconcile_open_trades(self, hub_open: list[dict[str, Any]], hub_target: str, bot_id: str) -> None:
         """Check each hub-reported open trade against the exchange. Recovery-close dead ones."""
@@ -2021,13 +2090,12 @@ class TradingBot:
         if dead:
             logger.info("Marked {} dead trades as recovery_close (no longer on exchange)", dead)
 
-        if positions_fetch_ok and exchange_positions:
+        if positions_fetch_ok:
             managed = self._managed_symbols()
             unknown = [sym for sym in exchange_positions if sym not in managed]
             for sym in unknown:
                 self._record_orphan_position(exchange_positions[sym], source="startup_reconcile")
-            for sym in managed:
-                self._orphan_positions.pop(sym, None)
+            self._prune_orphan_positions(set(exchange_positions.keys()), source="startup_reconcile")
             if unknown:
                 logger.warning(
                     "Detected {} orphan live position(s) not owned by bot {}: {}",
@@ -2131,7 +2199,7 @@ class TradingBot:
         has_scaler = self.orders.scaler.get(symbol) is not None
         has_trailing = self.orders.trailing.get(symbol) is not None
         rec = self._open_trades.get(symbol)
-        is_managed = rec is not None or has_scaler or has_trailing
+        is_managed = rec is not None
         if not is_managed or (has_scaler and has_trailing):
             return
 
@@ -2224,6 +2292,7 @@ class TradingBot:
                 self._record_orphan_position(pos, source="runtime_reconcile")
 
         exchange_symbols = {p.symbol for p in positions if p.amount > 0}
+        self._prune_orphan_positions(exchange_symbols, source="runtime_reconcile")
         tracked_symbols = list(self._open_trades.keys())
         for sym in tracked_symbols:
             if sym in exchange_symbols:

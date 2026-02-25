@@ -200,8 +200,9 @@ class HubDB(TradeDB):
                 self._mark_confirmed(bot_id, request_key)
                 return int(existing["id"])
 
-        cursor = self._conn.execute(
-            """INSERT INTO trades (
+        try:
+            cursor = self._conn.execute(
+                """INSERT INTO trades (
                 bot_id, symbol, side, strategy, action, scale_mode,
                 entry_price, exit_price, amount, leverage,
                 pnl_usd, pnl_pct, is_winner, hold_minutes,
@@ -223,56 +224,71 @@ class HubDB(TradeDB):
                 ?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?
             )""",
-            (
-                bot_id,
-                trade.get("symbol", ""),
-                trade.get("side", ""),
-                trade.get("strategy", ""),
-                trade.get("action", ""),
-                trade.get("scale_mode", ""),
-                trade.get("entry_price", 0),
-                trade.get("exit_price", 0),
-                trade.get("amount", 0),
-                trade.get("leverage", 1),
-                trade.get("pnl_usd", 0),
-                trade.get("pnl_pct", 0),
-                int(trade.get("is_winner", False)),
-                trade.get("hold_minutes", 0),
-                int(trade.get("was_quick_trade", False)),
-                int(trade.get("was_low_liquidity", False)),
-                trade.get("dca_count", 0),
-                trade.get("max_drawdown_pct", 0),
-                trade.get("market_regime", ""),
-                trade.get("fear_greed", 50),
-                trade.get("daily_tier", ""),
-                trade.get("daily_pnl_at_entry", 0),
-                trade.get("signal_strength", 0),
-                trade.get("hour_utc", 0),
-                trade.get("day_of_week", 0),
-                trade.get("volatility_pct", 0),
-                trade.get("opened_at", ""),
-                trade.get("closed_at", ""),
-                trade.get("planned_stop_loss", 0),
-                trade.get("planned_tp1", 0),
-                trade.get("planned_tp2", 0),
-                trade.get("exchange_stop_loss", 0),
-                trade.get("exchange_take_profit", 0),
-                trade.get("bot_stop_loss", 0),
-                trade.get("bot_take_profit", 0),
-                trade.get("effective_stop_loss", 0),
-                trade.get("effective_take_profit", 0),
-                trade.get("stop_source", "none"),
-                trade.get("tp_source", "none"),
-                trade.get("close_source", ""),
-                trade.get("close_reason", ""),
-                trade.get("exchange_close_order_id", ""),
-                trade.get("exchange_close_trade_id", ""),
-                trade.get("close_detected_at", ""),
-                request_key,
-                int(trade.get("recovery_close", False)),
-            ),
-        )
-        self._conn.commit()
+                (
+                    bot_id,
+                    trade.get("symbol", ""),
+                    trade.get("side", ""),
+                    trade.get("strategy", ""),
+                    trade.get("action", ""),
+                    trade.get("scale_mode", ""),
+                    trade.get("entry_price", 0),
+                    trade.get("exit_price", 0),
+                    trade.get("amount", 0),
+                    trade.get("leverage", 1),
+                    trade.get("pnl_usd", 0),
+                    trade.get("pnl_pct", 0),
+                    int(trade.get("is_winner", False)),
+                    trade.get("hold_minutes", 0),
+                    int(trade.get("was_quick_trade", False)),
+                    int(trade.get("was_low_liquidity", False)),
+                    trade.get("dca_count", 0),
+                    trade.get("max_drawdown_pct", 0),
+                    trade.get("market_regime", ""),
+                    trade.get("fear_greed", 50),
+                    trade.get("daily_tier", ""),
+                    trade.get("daily_pnl_at_entry", 0),
+                    trade.get("signal_strength", 0),
+                    trade.get("hour_utc", 0),
+                    trade.get("day_of_week", 0),
+                    trade.get("volatility_pct", 0),
+                    trade.get("opened_at", ""),
+                    trade.get("closed_at", ""),
+                    trade.get("planned_stop_loss", 0),
+                    trade.get("planned_tp1", 0),
+                    trade.get("planned_tp2", 0),
+                    trade.get("exchange_stop_loss", 0),
+                    trade.get("exchange_take_profit", 0),
+                    trade.get("bot_stop_loss", 0),
+                    trade.get("bot_take_profit", 0),
+                    trade.get("effective_stop_loss", 0),
+                    trade.get("effective_take_profit", 0),
+                    trade.get("stop_source", "none"),
+                    trade.get("tp_source", "none"),
+                    trade.get("close_source", ""),
+                    trade.get("close_reason", ""),
+                    trade.get("exchange_close_order_id", ""),
+                    trade.get("exchange_close_trade_id", ""),
+                    trade.get("close_detected_at", ""),
+                    request_key,
+                    int(trade.get("recovery_close", False)),
+                ),
+            )
+            self._conn.commit()
+        except sqlite3.IntegrityError:
+            # Idempotent race: another request committed this key first.
+            if request_key:
+                existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
+                if existing:
+                    self._mark_confirmed(bot_id, request_key)
+                    return int(existing["id"])
+                logger.warning(
+                    "insert_trade dedup race unresolved for request_key={} (bot_id={}) — accepting as idempotent",
+                    request_key,
+                    bot_id,
+                )
+                self._mark_confirmed(bot_id, request_key)
+                return 0
+            raise
         row_id = cursor.lastrowid or 0
         if request_key:
             self._mark_confirmed(bot_id, request_key)
@@ -287,8 +303,9 @@ class HubDB(TradeDB):
                 self._mark_confirmed(bot_id, request_key)
                 return True
 
-        cursor = self._conn.execute(
-            """UPDATE trades SET
+        try:
+            cursor = self._conn.execute(
+                """UPDATE trades SET
                 action='close', exit_price=?, amount=?, leverage=?,
                 pnl_usd=?, pnl_pct=?, is_winner=?,
                 hold_minutes=?, dca_count=?, max_drawdown_pct=?,
@@ -300,33 +317,48 @@ class HubDB(TradeDB):
                 close_detected_at=?,
                 request_key=CASE WHEN ?='' THEN request_key ELSE ? END
             WHERE bot_id=? AND opened_at=? AND closed_at=''""",
-            (
-                data.get("exit_price", 0),
-                data.get("amount", 0),
-                data.get("leverage", 1),
-                data.get("pnl_usd", 0),
-                data.get("pnl_pct", 0),
-                int(data.get("is_winner", False)),
-                data.get("hold_minutes", 0),
-                data.get("dca_count", 0),
-                data.get("max_drawdown_pct", 0),
-                data.get("closed_at", ""),
-                data.get("effective_stop_loss", 0),
-                data.get("effective_take_profit", 0),
-                data.get("stop_source", "none"),
-                data.get("tp_source", "none"),
-                data.get("close_source", ""),
-                data.get("close_reason", ""),
-                data.get("exchange_close_order_id", ""),
-                data.get("exchange_close_trade_id", ""),
-                data.get("close_detected_at", ""),
-                request_key,
-                request_key,
-                bot_id,
-                opened_at,
-            ),
-        )
-        self._conn.commit()
+                (
+                    data.get("exit_price", 0),
+                    data.get("amount", 0),
+                    data.get("leverage", 1),
+                    data.get("pnl_usd", 0),
+                    data.get("pnl_pct", 0),
+                    int(data.get("is_winner", False)),
+                    data.get("hold_minutes", 0),
+                    data.get("dca_count", 0),
+                    data.get("max_drawdown_pct", 0),
+                    data.get("closed_at", ""),
+                    data.get("effective_stop_loss", 0),
+                    data.get("effective_take_profit", 0),
+                    data.get("stop_source", "none"),
+                    data.get("tp_source", "none"),
+                    data.get("close_source", ""),
+                    data.get("close_reason", ""),
+                    data.get("exchange_close_order_id", ""),
+                    data.get("exchange_close_trade_id", ""),
+                    data.get("close_detected_at", ""),
+                    request_key,
+                    request_key,
+                    bot_id,
+                    opened_at,
+                ),
+            )
+            self._conn.commit()
+        except sqlite3.IntegrityError:
+            if request_key:
+                existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
+                if existing:
+                    self._mark_confirmed(bot_id, request_key)
+                    return True
+                logger.warning(
+                    "update_trade_close dedup race unresolved for request_key={} (bot_id={}, opened_at={}) — accepting as idempotent",
+                    request_key,
+                    bot_id,
+                    opened_at,
+                )
+                self._mark_confirmed(bot_id, request_key)
+                return True
+            raise
         updated = cursor.rowcount > 0
         if updated and request_key:
             self._mark_confirmed(bot_id, request_key)
@@ -341,8 +373,9 @@ class HubDB(TradeDB):
                 self._mark_confirmed(bot_id, request_key)
                 return True
 
-        cursor = self._conn.execute(
-            """UPDATE trades SET
+        try:
+            cursor = self._conn.execute(
+                """UPDATE trades SET
                 planned_stop_loss=?,
                 planned_tp1=?,
                 planned_tp2=?,
@@ -356,25 +389,40 @@ class HubDB(TradeDB):
                 tp_source=?,
                 request_key=CASE WHEN ?='' THEN request_key ELSE ? END
             WHERE bot_id=? AND opened_at=? AND closed_at=''""",
-            (
-                data.get("planned_stop_loss", 0),
-                data.get("planned_tp1", 0),
-                data.get("planned_tp2", 0),
-                data.get("exchange_stop_loss", 0),
-                data.get("exchange_take_profit", 0),
-                data.get("bot_stop_loss", 0),
-                data.get("bot_take_profit", 0),
-                data.get("effective_stop_loss", 0),
-                data.get("effective_take_profit", 0),
-                data.get("stop_source", "none"),
-                data.get("tp_source", "none"),
-                request_key,
-                request_key,
-                bot_id,
-                opened_at,
-            ),
-        )
-        self._conn.commit()
+                (
+                    data.get("planned_stop_loss", 0),
+                    data.get("planned_tp1", 0),
+                    data.get("planned_tp2", 0),
+                    data.get("exchange_stop_loss", 0),
+                    data.get("exchange_take_profit", 0),
+                    data.get("bot_stop_loss", 0),
+                    data.get("bot_take_profit", 0),
+                    data.get("effective_stop_loss", 0),
+                    data.get("effective_take_profit", 0),
+                    data.get("stop_source", "none"),
+                    data.get("tp_source", "none"),
+                    request_key,
+                    request_key,
+                    bot_id,
+                    opened_at,
+                ),
+            )
+            self._conn.commit()
+        except sqlite3.IntegrityError:
+            if request_key:
+                existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
+                if existing:
+                    self._mark_confirmed(bot_id, request_key)
+                    return True
+                logger.warning(
+                    "update_trade_runtime dedup race unresolved for request_key={} (bot_id={}, opened_at={}) — accepting as idempotent",
+                    request_key,
+                    bot_id,
+                    opened_at,
+                )
+                self._mark_confirmed(bot_id, request_key)
+                return True
+            raise
         updated = cursor.rowcount > 0
         if updated and request_key:
             self._mark_confirmed(bot_id, request_key)
@@ -403,13 +451,26 @@ class HubDB(TradeDB):
         return {r["symbol"] for r in rows}
 
     def get_open_trades_for_bot(self, bot_id: str) -> list[TradeRecord]:
-        """Return all unclosed trades for a specific bot."""
+        """Return unclosed trades for a bot, deduped by symbol.
+
+        We keep the newest row per symbol because reserve/update flows can leave
+        multiple historical open rows with the same symbol/opened_at during
+        retries; bots must recover one live position per symbol.
+        """
         assert self._conn
         rows = self._conn.execute(
-            "SELECT * FROM trades WHERE bot_id=? AND closed_at='' ORDER BY id",
+            "SELECT * FROM trades WHERE bot_id=? AND closed_at='' ORDER BY id DESC",
             (bot_id,),
         ).fetchall()
-        return [self._row_to_trade(r) for r in rows]
+        deduped: list[TradeRecord] = []
+        seen_symbols: set[str] = set()
+        for row in rows:
+            symbol = str(row["symbol"] or "")
+            if symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+            deduped.append(self._row_to_trade(row))
+        return deduped
 
     def get_strategy_stats_for_bot(self, bot_id: str, strategy: str, symbol: str = "") -> dict[str, Any]:
         """Strategy stats scoped to a single bot (excludes recovery_close trades)."""

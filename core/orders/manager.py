@@ -69,6 +69,7 @@ class OrderManager:
         self._protection_retry_after: dict[str, datetime] = {}
         self._protection_replace_min_interval_secs = 10
         self._protection_place_min_interval_secs = 10
+        self._protection_alignment_tolerance_pct = 0.03
 
     # ------------------------------------------------------------------ #
     #  Signal execution
@@ -265,6 +266,28 @@ class OrderManager:
         with contextlib.suppress(Exception):
             await self.exchange.cancel_order(order_id, symbol, market_type=market_type)
 
+    async def _cancel_symbol_protection_orders(
+        self,
+        symbol: str,
+        market_type: MarketType,
+        orders: list[Order],
+    ) -> int:
+        cancelled = 0
+        seen_ids: set[str] = set()
+        for order in orders:
+            order_id = str(getattr(order, "id", "") or "")
+            if not order_id or order_id in seen_ids:
+                continue
+            seen_ids.add(order_id)
+            order_type = getattr(order, "order_type", None)
+            stop_price = float(getattr(order, "stop_price", 0.0) or 0.0)
+            is_protection = order_type in {OrderType.STOP_LOSS, OrderType.TAKE_PROFIT} or stop_price > 0
+            if not is_protection:
+                continue
+            await self._cancel_protection_order(order_id, symbol, market_type)
+            cancelled += 1
+        return cancelled
+
     async def _clear_symbol_protection(self, symbol: str, market_type: MarketType) -> None:
         state = self._protection_orders.pop(symbol, {})
         await self._cancel_protection_order(str(state.get("sl_order_id", "") or ""), symbol, market_type)
@@ -319,6 +342,7 @@ class OrderManager:
         state = self._protection_orders.setdefault(symbol, {})
         sl_order_id = str(state.get("sl_order_id", "") or "")
         sl_price = float(state.get("sl_price", 0.0) or 0.0)
+        sl_replaced_or_created = False
         logger.debug(
             "Protection sync {}: side={} amount={:.6f} bot_stop={:.6f} prev_sl_id={} prev_sl={:.6f}",
             symbol,
@@ -328,6 +352,41 @@ class OrderManager:
             sl_order_id or "none",
             sl_price,
         )
+
+        open_orders: list[Order] = []
+        with contextlib.suppress(Exception):
+            open_orders = await self.exchange.fetch_open_orders(symbol=symbol, market_type=market_type)
+        symbol_protection_orders = [
+            o
+            for o in open_orders
+            if getattr(o, "order_type", None) in {OrderType.STOP_LOSS, OrderType.TAKE_PROFIT}
+            or float(getattr(o, "stop_price", 0.0) or 0.0) > 0
+        ]
+        symbol_stop_orders = [
+            o for o in symbol_protection_orders if getattr(o, "order_type", None) == OrderType.STOP_LOSS
+        ]
+        symbol_tp_orders = [
+            o for o in symbol_protection_orders if getattr(o, "order_type", None) == OrderType.TAKE_PROFIT
+        ]
+
+        if len(symbol_stop_orders) > 1 or len(symbol_tp_orders) > 1:
+            cancelled = await self._cancel_symbol_protection_orders(symbol, market_type, symbol_protection_orders)
+            logger.warning(
+                "Protection sync {}: cancelled {} stacked protection orders before refresh (sl={}, tp={})",
+                symbol,
+                cancelled,
+                len(symbol_stop_orders),
+                len(symbol_tp_orders),
+            )
+            sl_order_id = ""
+            sl_price = 0.0
+            state.pop("sl_order_id", None)
+            state.pop("sl_price", None)
+            state.pop("tp_order_id", None)
+            state.pop("tp_price", None)
+            symbol_protection_orders = []
+            symbol_stop_orders = []
+            symbol_tp_orders = []
 
         if sl_order_id:
             try:
@@ -340,6 +399,10 @@ class OrderManager:
                         sl_order.status.value if hasattr(sl_order.status, "value") else str(sl_order.status),
                     )
                     sl_order_id = ""
+                else:
+                    fetched_stop = float(getattr(sl_order, "stop_price", 0.0) or 0.0)
+                    if fetched_stop > 0:
+                        sl_price = fetched_stop
             except Exception as e:
                 logger.debug(
                     "Protection sync {}: SL id-verify miss for {} ({}), attempting open-order fallback",
@@ -375,11 +438,15 @@ class OrderManager:
                         fallback_err,
                     )
 
-        min_change_pct = 0.5 if not self._is_extreme_bot else 0.15
         should_replace = bool(
-            sl_order_id and self._is_meaningful_price_change(sl_price, bot_stop, min_delta_pct=min_change_pct)
+            sl_order_id
+            and self._is_meaningful_price_change(
+                sl_price,
+                bot_stop,
+                min_delta_pct=self._protection_alignment_tolerance_pct,
+            )
         )
-        if should_replace and not self._is_extreme_bot:
+        if should_replace:
             last_replace_at = state.get("sl_last_replace_at")
             if isinstance(last_replace_at, datetime):
                 elapsed = (datetime.now(UTC) - last_replace_at).total_seconds()
@@ -400,22 +467,30 @@ class OrderManager:
                 sl_price,
                 bot_stop,
             )
-            await self._cancel_protection_order(sl_order_id, symbol, market_type)
+            await self._cancel_symbol_protection_orders(symbol, market_type, symbol_protection_orders or open_orders)
             sl_order_id = ""
 
         if not sl_order_id:
-            if not self._is_extreme_bot:
-                last_place_at = state.get("sl_last_place_at")
-                if isinstance(last_place_at, datetime):
-                    elapsed = (datetime.now(UTC) - last_place_at).total_seconds()
-                    if elapsed < self._protection_place_min_interval_secs:
-                        logger.debug(
-                            "Protection sync {}: skipping SL create due to {}s cadence gate (elapsed={:.2f}s)",
-                            symbol,
-                            self._protection_place_min_interval_secs,
-                            elapsed,
-                        )
-                        return
+            last_place_at = state.get("sl_last_place_at")
+            if isinstance(last_place_at, datetime):
+                elapsed = (datetime.now(UTC) - last_place_at).total_seconds()
+                if elapsed < self._protection_place_min_interval_secs:
+                    logger.debug(
+                        "Protection sync {}: skipping SL create due to {}s cadence gate (elapsed={:.2f}s)",
+                        symbol,
+                        self._protection_place_min_interval_secs,
+                        elapsed,
+                    )
+                    return
+            cancelled = await self._cancel_symbol_protection_orders(
+                symbol, market_type, symbol_protection_orders or open_orders
+            )
+            if cancelled > 0:
+                logger.warning(
+                    "Protection sync {}: cleared {} existing protection orders before placing fresh SL",
+                    symbol,
+                    cancelled,
+                )
             try:
                 sl_order = await self.exchange.place_order(
                     symbol=symbol,
@@ -442,9 +517,15 @@ class OrderManager:
             self._protection_retry_after.pop(symbol, None)
             state["sl_last_replace_at"] = datetime.now(UTC)
             state["sl_last_place_at"] = datetime.now(UTC)
+            sl_replaced_or_created = True
 
         state["sl_order_id"] = sl_order_id
-        state["sl_price"] = bot_stop
+        if sl_replaced_or_created:
+            state["sl_price"] = bot_stop
+        elif sl_price > 0:
+            # Keep the last confirmed exchange SL price when no replacement
+            # happened, so diff checks compare CEX vs bot target correctly.
+            state["sl_price"] = sl_price
 
         if not self._is_extreme_bot:
             tp_order_id = str(state.get("tp_order_id", "") or "")

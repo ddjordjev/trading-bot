@@ -2060,6 +2060,65 @@ class TestPostToHubAndIntelNews:
         assert len(bot._recent_news) == 0
 
 
+class TestQuickHubCheck:
+    @staticmethod
+    def _ok_hub_session() -> MagicMock:
+        resp = MagicMock()
+        resp.status = 200
+        resp.json = AsyncMock(return_value={"confirmed_keys": []})
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=None)
+        sess = MagicMock()
+        sess.post = MagicMock(return_value=resp)
+        return sess
+
+    @pytest.mark.asyncio
+    async def test_quick_hub_check_reports_orphans_and_empty_positions_when_unmanaged(self, bot, mock_exchange):
+        bot.settings.hub_url = "http://hub.example.com"
+        bot.settings.bot_id = "test-bot"
+        bot._multibot = True
+        bot._started_at = datetime.now(UTC) - timedelta(minutes=5)
+        bot._process_trade_queue = AsyncMock()
+        bot._hub_session = self._ok_hub_session()
+
+        orphan_pos = MagicMock()
+        orphan_pos.symbol = "ETH/USDT"
+        orphan_pos.side = OrderSide.BUY
+        orphan_pos.amount = 0.2
+        orphan_pos.entry_price = 3200.0
+        orphan_pos.current_price = 3250.0
+        orphan_pos.leverage = 5
+        orphan_pos.market_type = "futures"
+        mock_exchange.fetch_positions = AsyncMock(return_value=[orphan_pos])
+
+        await bot._quick_hub_check()
+
+        payload = bot._hub_session.post.call_args.kwargs["json"]
+        assert payload["positions"] == []
+        assert payload["orphan_positions"]
+        assert payload["orphan_positions"][0]["symbol"] == "ETH/USDT"
+        mock_exchange.fetch_positions.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_quick_hub_check_throttles_position_fetch_without_managed_symbols(self, bot, mock_exchange):
+        bot.settings.hub_url = "http://hub.example.com"
+        bot.settings.bot_id = "test-bot"
+        bot._multibot = True
+        bot._started_at = datetime.now(UTC) - timedelta(minutes=5)
+        bot._process_trade_queue = AsyncMock()
+        bot._hub_session = self._ok_hub_session()
+        bot._orphan_positions["XRP/USDT"] = {"symbol": "XRP/USDT", "side": "long"}
+        mock_exchange.fetch_positions = AsyncMock(return_value=[])
+
+        await bot._quick_hub_check()
+        await bot._quick_hub_check()
+
+        assert mock_exchange.fetch_positions.await_count == 1
+        payload = bot._hub_session.post.call_args_list[-1].kwargs["json"]
+        assert "orphan_positions" in payload
+        assert payload["orphan_positions"] == []
+
+
 # ── _execute_proposal / _handle_spike ───────────────────────────────────────
 
 

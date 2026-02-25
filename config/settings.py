@@ -56,10 +56,11 @@ class Settings(BaseSettings):
     min_signal_strength: float = 0.4  # ignore weak signals entirely
     consecutive_loss_cooldown: int = 3  # pause after N consecutive losses
 
-    # Paper-local risk overrides (only applied when TRADING_MODE=paper_local)
-    # Set PAPER_RISK_RELAXED=false to use prod risk in paper_local.
+    # Paper risk overrides for local simulation.
+    # Position size override can also apply in paper_live to increase testnet
+    # capital usage without relaxing all other guardrails.
     paper_risk_relaxed: bool = True
-    paper_max_position_size_pct: float = 50.0
+    paper_max_position_size_pct: float = 30.0
     paper_max_daily_loss_pct: float = 100.0
     paper_max_concurrent_positions: int = 15
     paper_min_signal_strength: float = 0.2
@@ -67,7 +68,7 @@ class Settings(BaseSettings):
 
     @property
     def effective_max_position_size_pct(self) -> float:
-        if self.is_paper_local() and self.paper_risk_relaxed:
+        if self.is_paper() and self.paper_risk_relaxed:
             return self.paper_max_position_size_pct
         return self.max_position_size_pct
 

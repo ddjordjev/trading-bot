@@ -1224,21 +1224,66 @@ def _build_merged_snapshot() -> dict[str, Any]:
             }
         )
 
+    def _position_identity_key(row: dict[str, Any]) -> tuple[str, str, str]:
+        exchange = str(row.get("exchange_name", row.get("exchange", "")) or "").strip().upper()
+        symbol = str(row.get("symbol", "") or "").strip().upper()
+        side_raw = str(row.get("side", "") or "").strip().lower()
+        if side_raw in {"buy", "long"}:
+            side = "long"
+        elif side_raw in {"sell", "short"}:
+            side = "short"
+        else:
+            side = side_raw or "unknown"
+        return exchange, symbol, side
+
+    # Keep one orphan row per exchange+symbol+side (latest report wins) so
+    # cross-exchange and long/short rows don't overwrite each other.
+    orphans_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for orphan in all_orphans:
+        orphan_key = _position_identity_key(orphan)
+        if not orphan_key[1]:
+            continue
+        existing = orphans_by_key.get(orphan_key)
+        if existing is None:
+            orphans_by_key[orphan_key] = orphan
+            continue
+        existing_ts = str(existing.get("detected_at", "") or "")
+        candidate_ts = str(orphan.get("detected_at", "") or "")
+        if candidate_ts >= existing_ts:
+            orphans_by_key[orphan_key] = orphan
+    all_orphans = list(orphans_by_key.values())
+    managed_keys = {_position_identity_key(p) for p in all_positions if isinstance(p, dict)}
+    all_orphans = [o for o in all_orphans if _position_identity_key(o) not in managed_keys]
+
     intel = _intel_snapshot()
 
     # When raw exchange balances are available, treat them as account-level
     # anchors and compute dashboard equity from available + used margin + uPnL.
+    # Include both managed and orphan positions so equity does not oscillate
+    # when a position temporarily moves between those groups.
     if exchange_available:
         exchange_margin_used: dict[str, float] = {}
         exchange_unrealized: dict[str, float] = {}
-        for p in all_positions:
+        all_live_rows = list(all_positions) + list(all_orphans)
+        for p in all_live_rows:
             ex = str(p.get("exchange_name", "") or "")
             if not ex:
                 continue
             lev = max(float(p.get("leverage", 1) or 1), 1.0)
             notional = float(p.get("notional_value", 0) or 0)
+            if notional <= 0:
+                amount = abs(float(p.get("amount", 0) or 0))
+                current_price = float(p.get("current_price", 0) or 0)
+                notional = amount * current_price
             exchange_margin_used[ex] = exchange_margin_used.get(ex, 0.0) + (notional / lev)
             upnl = float(p.get("pnl_usd", p.get("pnl", 0)) or 0)
+            if upnl == 0 and "entry_price" in p and "current_price" in p and "amount" in p:
+                entry = float(p.get("entry_price", 0) or 0)
+                current = float(p.get("current_price", 0) or 0)
+                amount = abs(float(p.get("amount", 0) or 0))
+                side = str(p.get("side", "") or "").lower()
+                if entry > 0 and amount > 0:
+                    upnl = (entry - current) * amount if side in {"sell", "short"} else (current - entry) * amount
             exchange_unrealized[ex] = exchange_unrealized.get(ex, 0.0) + upnl
 
         exchange_equity: dict[str, float] = {}

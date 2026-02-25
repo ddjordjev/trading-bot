@@ -55,6 +55,7 @@ export function App() {
         status: snapshot.status,
         positions: snapshot.positions.filter(exMatch),
         wick_scalps: snapshot.wick_scalps.filter(exMatch),
+        orphan_positions: (snapshot.orphan_positions || []).filter(exMatch),
         logs: snapshot.logs,
         intel: snapshot.intel,
         bots: snapshot.bots,
@@ -66,10 +67,14 @@ export function App() {
     const exName = bot.exchange || "";
     const taggedPositions = bot.data.positions.map((p) => ({ ...p, bot_id: selected, exchange_name: exName }));
     const taggedWicks = bot.data.wick_scalps.map((w) => ({ ...w, bot_id: selected, exchange_name: exName }));
+    const taggedOrphans = (snapshot.orphan_positions || [])
+      .filter((o: any) => String(o.detected_by_bot || "") === selected)
+      .filter(exMatch);
     return {
       status: bot.data.status,
       positions: taggedPositions.filter(exMatch),
       wick_scalps: taggedWicks.filter(exMatch),
+      orphan_positions: taggedOrphans,
       logs: bot.data.logs || [],
       intel: snapshot.intel,
       bots: snapshot.bots,
