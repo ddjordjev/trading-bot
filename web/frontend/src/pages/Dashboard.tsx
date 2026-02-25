@@ -329,12 +329,11 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
         </div>
       )}
 
-      <h3 style={{ color: "var(--heading)", margin: "1.5rem 0 0.5rem" }}>
-        Orphan Positions ({visibleOrphans.length})
-      </h3>
-      {visibleOrphans.length === 0 ? (
-        <div className="empty-state">No orphan positions detected</div>
-      ) : (
+      {visibleOrphans.length > 0 && (
+        <>
+          <h3 style={{ color: "var(--heading)", margin: "1.5rem 0 0.5rem" }}>
+            Orphan Positions ({visibleOrphans.length})
+          </h3>
         <div style={{ overflowX: "auto" }}>
           <table>
             <thead>
@@ -415,6 +414,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
             </tbody>
           </table>
         </div>
+        </>
       )}
 
       {wickScalps.length > 0 && (

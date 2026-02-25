@@ -67,6 +67,7 @@ class OrderManager:
         self._ORDER_COOLDOWN_SECS = 60
         self._protection_orders: dict[str, dict[str, Any]] = {}
         self._protection_retry_after: dict[str, datetime] = {}
+        self._protection_replace_min_interval_secs = 10
 
     # ------------------------------------------------------------------ #
     #  Signal execution
@@ -246,6 +247,17 @@ class OrderManager:
             return True
         return abs((new - old) / old) * 100.0 >= min_delta_pct
 
+    @staticmethod
+    def _pick_closest_stop_order(orders: list[Order], target_price: float) -> Order | None:
+        if not orders:
+            return None
+        valid = [o for o in orders if float(o.stop_price or 0.0) > 0]
+        if not valid:
+            return orders[0]
+        if target_price <= 0:
+            return valid[0]
+        return min(valid, key=lambda o: abs(float(o.stop_price or 0.0) - target_price))
+
     async def _cancel_protection_order(self, order_id: str, symbol: str, market_type: MarketType) -> None:
         if not order_id:
             return
@@ -328,11 +340,58 @@ class OrderManager:
                     )
                     sl_order_id = ""
             except Exception as e:
-                # Some exchanges don't expose conditional orders in open-order APIs
-                # consistently. Do not force-recreate on lookup errors.
-                logger.debug("Protection sync {}: cannot verify SL order state: {}", symbol, e)
+                logger.debug(
+                    "Protection sync {}: SL id-verify miss for {} ({}), attempting open-order fallback",
+                    symbol,
+                    sl_order_id,
+                    e,
+                )
+                try:
+                    open_orders = await self.exchange.fetch_open_orders(symbol=symbol, market_type=market_type)
+                    stop_orders = [o for o in open_orders if o.order_type == OrderType.STOP_LOSS]
+                    fallback = self._pick_closest_stop_order(stop_orders, bot_stop)
+                    if fallback:
+                        fallback_price = float(fallback.stop_price or 0.0)
+                        logger.warning(
+                            "Protection sync {}: adopted fallback SL order {} @ {:.6f} (was id={})",
+                            symbol,
+                            fallback.id,
+                            fallback_price,
+                            sl_order_id,
+                        )
+                        sl_order_id = fallback.id
+                        sl_price = fallback_price
+                    else:
+                        logger.warning(
+                            "Protection sync {}: no fallback SL order found after id-verify miss; will recreate",
+                            symbol,
+                        )
+                        sl_order_id = ""
+                except Exception as fallback_err:
+                    logger.debug(
+                        "Protection sync {}: fallback open-order lookup failed: {}",
+                        symbol,
+                        fallback_err,
+                    )
 
-        if sl_order_id and self._is_meaningful_price_change(sl_price, bot_stop):
+        min_change_pct = 0.5 if not self._is_extreme_bot else 0.15
+        should_replace = bool(
+            sl_order_id and self._is_meaningful_price_change(sl_price, bot_stop, min_delta_pct=min_change_pct)
+        )
+        if should_replace and not self._is_extreme_bot:
+            last_replace_at = state.get("sl_last_replace_at")
+            if isinstance(last_replace_at, datetime):
+                elapsed = (datetime.now(UTC) - last_replace_at).total_seconds()
+                if elapsed < self._protection_replace_min_interval_secs:
+                    logger.debug(
+                        "Protection sync {}: skipping SL replace due to {}s throttle (elapsed={:.2f}s)",
+                        symbol,
+                        self._protection_replace_min_interval_secs,
+                        elapsed,
+                    )
+                    should_replace = False
+
+        if should_replace:
             logger.debug(
                 "Protection sync {}: replacing SL order {} due to price change {:.6f} -> {:.6f}",
                 symbol,
@@ -368,6 +427,7 @@ class OrderManager:
             sl_order_id = sl_order.id
             logger.info("Protection SL synced on {} @ {:.6f}", symbol, bot_stop)
             self._protection_retry_after.pop(symbol, None)
+            state["sl_last_replace_at"] = datetime.now(UTC)
 
         state["sl_order_id"] = sl_order_id
         state["sl_price"] = bot_stop
