@@ -871,6 +871,80 @@ class TestInternalReport:
         assert snap["exchange_balances"]["BINANCE"] == pytest.approx(5150.0)
         _bot_reports.clear()
 
+    async def test_merged_snapshot_uses_latest_exchange_balance_not_high_watermark(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports.clear()
+        report_bot_snapshot(
+            {
+                "bot_id": "old_high",
+                "exchange": "BINANCE",
+                "exchange_balance": 9000.0,
+                "status": {
+                    "running": True,
+                    "balance": 0.0,
+                    "available_margin": 0.0,
+                    "daily_pnl": 0.0,
+                    "daily_pnl_pct": 0.0,
+                    "total_growth_usd": 0.0,
+                    "total_growth_pct": 0.0,
+                    "profit_buffer_pct": 0.0,
+                    "uptime_seconds": 10,
+                    "manual_stop_active": False,
+                    "strategies_count": 0,
+                    "dynamic_strategies_count": 0,
+                    "trading_mode": "paper_local",
+                    "exchange_name": "BINANCE",
+                    "exchange_url": "",
+                    "tier": "building",
+                    "tier_progress_pct": 0,
+                    "daily_target_pct": 10,
+                },
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+        report_bot_snapshot(
+            {
+                "bot_id": "new_low",
+                "exchange": "BINANCE",
+                "exchange_balance": 5000.0,
+                "status": {
+                    "running": True,
+                    "balance": 0.0,
+                    "available_margin": 0.0,
+                    "daily_pnl": 0.0,
+                    "daily_pnl_pct": 0.0,
+                    "total_growth_usd": 0.0,
+                    "total_growth_pct": 0.0,
+                    "profit_buffer_pct": 0.0,
+                    "uptime_seconds": 10,
+                    "manual_stop_active": False,
+                    "strategies_count": 0,
+                    "dynamic_strategies_count": 0,
+                    "trading_mode": "paper_local",
+                    "exchange_name": "BINANCE",
+                    "exchange_url": "",
+                    "tier": "building",
+                    "tier_progress_pct": 0,
+                    "daily_target_pct": 10,
+                },
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+
+        # Force deterministic order: old_high is stale, new_low is latest.
+        _bot_reports["old_high"]["_reported_at"] = 1.0
+        _bot_reports["new_low"]["_reported_at"] = 2.0
+        from web.server import _build_merged_snapshot
+
+        snap = _build_merged_snapshot()
+        assert snap["status"]["balance"] == pytest.approx(5000.0)
+        assert snap["exchange_balances"]["BINANCE"] == pytest.approx(5000.0)
+        _bot_reports.clear()
+
 
 # ── GET /api/modules, /api/daily-report, /api/analytics ─────────────────
 

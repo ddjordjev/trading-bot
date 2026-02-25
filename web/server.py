@@ -1059,11 +1059,13 @@ def report_bot_snapshot(data: dict[str, Any]) -> None:
     bot_id = data.get("bot_id", "")
     if not bot_id:
         return
+    stamped = dict(data)
+    stamped["_reported_at"] = time.time()
     existing = _bot_reports.get(bot_id)
     if existing is None:
-        _bot_reports[bot_id] = data
+        _bot_reports[bot_id] = stamped
     else:
-        for key, value in data.items():
+        for key, value in stamped.items():
             existing[key] = value
 
 
@@ -1131,6 +1133,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
     first_status: dict[str, Any] = {}
     exchange_balances: dict[str, float] = {}
     exchange_available: dict[str, float] = {}
+    exchange_report_ts: dict[str, float] = {}
 
     for rpt in reports:
         s = rpt.get("status", {})
@@ -1148,12 +1151,19 @@ def _build_merged_snapshot() -> dict[str, Any]:
         if not first_status:
             first_status = s
 
-        ex_bal = rpt.get("exchange_balance", 0)
-        if ex_name and ex_bal:
-            exchange_balances[ex_name] = max(exchange_balances.get(ex_name, 0), ex_bal)
-            # exchange_balance is the raw free USDT fetched from the exchange.
-            # Use it as account-level available margin anchor.
-            exchange_available[ex_name] = max(exchange_available.get(ex_name, 0.0), float(ex_bal))
+        ex_bal_raw = rpt.get("exchange_balance", 0)
+        ex_reported_at = float(rpt.get("_reported_at", 0.0) or 0.0)
+        try:
+            ex_bal = float(ex_bal_raw or 0.0)
+        except (TypeError, ValueError):
+            ex_bal = 0.0
+        if ex_name and ex_bal > 0:
+            prev_ts = exchange_report_ts.get(ex_name, -1.0)
+            if ex_reported_at >= prev_ts:
+                exchange_report_ts[ex_name] = ex_reported_at
+                # Use the newest bot snapshot for this exchange to avoid stale
+                # high-watermark values when one bot report is old.
+                exchange_available[ex_name] = ex_bal
 
         total_balance += float(s.get("balance", 0) or 0)
         total_available += float(s.get("available_margin", 0) or 0)
@@ -1218,7 +1228,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
     # When raw exchange balances are available, treat them as account-level
     # anchors and compute dashboard equity from available + used margin + uPnL.
-    if exchange_balances:
+    if exchange_available:
         exchange_margin_used: dict[str, float] = {}
         exchange_unrealized: dict[str, float] = {}
         for p in all_positions:
@@ -1232,7 +1242,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
             exchange_unrealized[ex] = exchange_unrealized.get(ex, 0.0) + upnl
 
         exchange_equity: dict[str, float] = {}
-        for ex in exchange_balances:
+        for ex in exchange_available:
             available = max(0.0, exchange_available.get(ex, 0.0))
             used = max(0.0, exchange_margin_used.get(ex, 0.0))
             upnl = exchange_unrealized.get(ex, 0.0)
