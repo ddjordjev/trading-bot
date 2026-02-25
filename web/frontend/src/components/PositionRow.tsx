@@ -41,6 +41,7 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
 
   const botId = (p as any).bot_id || "";
   const exchangeName = (p as any).exchange_name || "";
+  const strategy = (p.strategy || "").trim();
   const stopSource = (p.stop_source || "").toLowerCase();
   const isCexActive = stopSource === "exchange";
   const isBotActive = stopSource === "bot";
@@ -51,6 +52,26 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
   const hasStop = (value: number | null | undefined) => typeof value === "number" && Number.isFinite(value) && value > 0;
   const cexSl = hasStop(p.exchange_stop_loss) ? p.exchange_stop_loss : null;
   const botSl = hasStop(p.bot_stop_loss) ? p.bot_stop_loss : null;
+  const stopLabel = (sl: number | null): "PR" | "BE" | "LO" | null => {
+    if (!sl || p.entry_price <= 0) return null;
+    const e = p.entry_price;
+    const side = p.side.toLowerCase();
+    const isLong = side === "long" || side === "buy";
+    const tick =
+      e >= 10000 ? 10
+      : e >= 100 ? 1
+      : e >= 10 ? 0.1
+      : e >= 1 ? 0.001
+      : Math.max(e * 0.001, 1e-6);
+    const diff = isLong ? sl - e : e - sl;
+    if (diff > 2 * tick) return "PR";
+    if (diff > 0) return "BE";
+    return "LO";
+  };
+  const stopLabelStyle = (label: "PR" | "BE" | "LO") => ({
+    background: (label === "PR" ? "var(--green)" : label === "LO" ? "var(--red)" : "var(--yellow)") + "22",
+    color: label === "PR" ? "var(--green)" : label === "LO" ? "var(--red)" : "var(--yellow)",
+  });
 
   return (
     <tr>
@@ -96,13 +117,11 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
       )}
       {showBot && (
         <td>
-          <span style={{
-            fontSize: "0.75rem",
-            fontWeight: 600,
-            color: BOT_COLORS[botId] || "var(--text-muted)",
-            textTransform: "uppercase",
-          }}>
+          <span style={{ display: "block", fontSize: "0.75rem", fontWeight: 600, color: BOT_COLORS[botId] || "var(--text-muted)", textTransform: "uppercase" }}>
             {botId || "—"}
+          </span>
+          <span style={{ display: "block", fontSize: "0.7rem", fontWeight: 500, color: "var(--text-muted)", textTransform: "uppercase" }}>
+            {strategy || "—"}
           </span>
         </td>
       )}
@@ -121,17 +140,33 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
         <div>
           <span style={{ color: "var(--text-muted)", fontSize: "0.65rem" }}>CEX</span>{" "}
           {formatStop(cexSl)}
-          {cexSl && (
+          {(() => {
+            const label = stopLabel(cexSl);
+            if (!label) return null;
+            return (
+              <span
+                className="badge"
+                style={{
+                  marginLeft: 4,
+                  fontSize: "0.65rem",
+                  ...stopLabelStyle(label),
+                }}
+              >
+                {label}
+              </span>
+            );
+          })()}
+          {cexSl && isCexActive && p.breakeven_locked && (
             <span
               className="badge"
               style={{
                 marginLeft: 4,
                 fontSize: "0.65rem",
-                background: (isCexActive ? "var(--green)" : "var(--text-muted)") + "22",
-                color: isCexActive ? "var(--green)" : "var(--text-muted)",
+                background: "var(--green)22",
+                color: "var(--green)",
               }}
             >
-              {isCexActive ? "ACTIVE" : "STANDBY"}
+              BE ✓
             </span>
           )}
           {cexSl && isCexActive && p.close_pending && (
@@ -146,17 +181,33 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
         <div>
           <span style={{ color: "var(--text-muted)", fontSize: "0.65rem" }}>BOT</span>{" "}
           {formatStop(botSl)}
-          {botSl && (
+          {(() => {
+            const label = stopLabel(botSl);
+            if (!label) return null;
+            return (
+              <span
+                className="badge"
+                style={{
+                  marginLeft: 4,
+                  fontSize: "0.65rem",
+                  ...stopLabelStyle(label),
+                }}
+              >
+                {label}
+              </span>
+            );
+          })()}
+          {botSl && isBotActive && p.breakeven_locked && (
             <span
               className="badge"
               style={{
                 marginLeft: 4,
                 fontSize: "0.65rem",
-                background: (isBotActive ? "var(--green)" : "var(--text-muted)") + "22",
-                color: isBotActive ? "var(--green)" : "var(--text-muted)",
+                background: "var(--green)22",
+                color: "var(--green)",
               }}
             >
-              {isBotActive ? "ACTIVE" : "STANDBY"}
+              BE ✓
             </span>
           )}
           {botSl && isBotActive && p.close_pending && (

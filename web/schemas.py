@@ -301,6 +301,12 @@ class PositionCloseBody(BaseModel):
     bot_id: str = ""
 
 
+class PositionClaimBody(BaseModel):
+    symbol: str
+    bot_id: str
+    strategy: str = "manual_claim"
+
+
 class PositionTakeProfitBody(BaseModel):
     symbol: str
     pct: float = 50.0

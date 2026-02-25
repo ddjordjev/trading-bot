@@ -23,6 +23,46 @@ def parse_order_status(status: str) -> OrderStatus:
     return mapping.get(status, OrderStatus.PENDING)
 
 
+def parse_order_type(order_type: str) -> OrderType:
+    """Translate ccxt order type strings to our enum."""
+    raw = str(order_type or "").strip().lower()
+    if raw == "market":
+        return OrderType.MARKET
+    if raw == "limit":
+        return OrderType.LIMIT
+    if raw in {"stop", "stop_market", "stop-loss", "stop_loss", "stoploss"}:
+        return OrderType.STOP_LOSS
+    if raw in {"take_profit", "take-profit", "take_profit_market", "tp"}:
+        return OrderType.TAKE_PROFIT
+    if "stop" in raw and "limit" in raw:
+        return OrderType.STOP_LIMIT
+    if "stop" in raw:
+        return OrderType.STOP_LOSS
+    if "take" in raw and "profit" in raw:
+        return OrderType.TAKE_PROFIT
+    return OrderType.LIMIT
+
+
+def parse_stop_price(data: dict[str, Any]) -> float | None:
+    """Extract stop/trigger price from CCXT order payload."""
+    candidates = (
+        data.get("stopPrice"),
+        data.get("triggerPrice"),
+        (data.get("info", {}) or {}).get("stopPrice"),
+        (data.get("info", {}) or {}).get("triggerPrice"),
+    )
+    for value in candidates:
+        try:
+            if value is None:
+                continue
+            parsed = float(value)
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def ts_to_dt(ts: Any) -> datetime:
     """Convert a millisecond timestamp (from ccxt) to a timezone-aware datetime."""
     if ts is None:

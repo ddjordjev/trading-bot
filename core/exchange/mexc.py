@@ -7,7 +7,7 @@ from typing import Any
 import ccxt.async_support as ccxt
 from loguru import logger
 
-from core.exchange.base import BaseExchange, parse_order_status, ts_to_dt
+from core.exchange.base import BaseExchange, parse_order_status, parse_order_type, parse_stop_price, ts_to_dt
 from core.models import (
     Candle,
     MarketType,
@@ -217,8 +217,9 @@ class MexcExchange(BaseExchange):
             id=order_id,
             symbol=symbol,
             side=OrderSide.BUY if data.get("side") == "buy" else OrderSide.SELL,
-            order_type=OrderType.MARKET if data.get("type") == "market" else OrderType.LIMIT,
+            order_type=parse_order_type(str(data.get("type", ""))),
             amount=float(data.get("amount", 0) or 0),
+            stop_price=parse_stop_price(data),
             status=parse_order_status(data.get("status", "")),
             filled=float(data.get("filled", 0) or 0),
             average_price=float(data.get("average", 0) or 0),
@@ -236,8 +237,9 @@ class MexcExchange(BaseExchange):
                     id=str(data.get("id", "")),
                     symbol=data.get("symbol", ""),
                     side=OrderSide.BUY if data.get("side") == "buy" else OrderSide.SELL,
-                    order_type=OrderType.MARKET if data.get("type") == "market" else OrderType.LIMIT,
+                    order_type=parse_order_type(str(data.get("type", ""))),
                     amount=float(data.get("amount", 0) or 0),
+                    stop_price=parse_stop_price(data),
                     status=parse_order_status(data.get("status", "")),
                     filled=float(data.get("filled", 0) or 0),
                     market_type=market_type.value,

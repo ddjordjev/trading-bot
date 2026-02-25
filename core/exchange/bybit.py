@@ -7,7 +7,7 @@ from typing import Any
 import ccxt.async_support as ccxt
 from loguru import logger
 
-from core.exchange.base import BaseExchange, parse_order_status, ts_to_dt
+from core.exchange.base import BaseExchange, parse_order_status, parse_order_type, parse_stop_price, ts_to_dt
 from core.models import (
     Candle,
     MarketType,
@@ -249,19 +249,31 @@ class BybitExchange(BaseExchange):
         params: dict[str, Any] = {}
         if stop_price is not None:
             params["stopPrice"] = stop_price
-        if market_type == MarketType.FUTURES and order_type in (OrderType.STOP_LOSS, OrderType.TAKE_PROFIT):
+        is_protection_order = order_type in (OrderType.STOP_LOSS, OrderType.TAKE_PROFIT)
+        if market_type == MarketType.FUTURES and is_protection_order:
             params["reduceOnly"] = True
-        if market_type == MarketType.FUTURES and not await self.set_leverage(symbol, leverage):
-            raise RuntimeError(f"Leverage set failed for {symbol} ({leverage}x); aborting order placement")
+        if (
+            market_type == MarketType.FUTURES
+            and not is_protection_order
+            and not await self.set_leverage(symbol, leverage)
+        ):
+            logger.warning(
+                "Proceeding with {} on {} despite leverage set failure ({}x)",
+                order_type.value,
+                symbol,
+                leverage,
+            )
 
         logger.info(
-            "Placing {} {} {} {} @ {} (leverage={})",
+            "Placing {} {} {} {} @ {} (leverage={}, stop_price={}, params={})",
             market_type.value,
             side.value,
             ccxt_type,
             symbol,
             price or "market",
             leverage,
+            stop_price if stop_price is not None else "none",
+            params,
         )
 
         data = await client.create_order(
@@ -271,6 +283,15 @@ class BybitExchange(BaseExchange):
             amount=amount,
             price=price,
             params=params,
+        )
+        logger.info(
+            "Order accepted {} {} {} id={} status={} filled={}",
+            market_type.value,
+            ccxt_type,
+            symbol,
+            str(data.get("id", "")),
+            str(data.get("status", "")),
+            float(data.get("filled", 0) or 0),
         )
         return Order(
             id=str(data.get("id", "")),
@@ -307,8 +328,9 @@ class BybitExchange(BaseExchange):
             id=order_id,
             symbol=symbol,
             side=OrderSide.BUY if data.get("side") == "buy" else OrderSide.SELL,
-            order_type=OrderType.MARKET if data.get("type") == "market" else OrderType.LIMIT,
+            order_type=parse_order_type(str(data.get("type", ""))),
             amount=float(data.get("amount", 0) or 0),
+            stop_price=parse_stop_price(data),
             status=parse_order_status(data.get("status", "")),
             filled=float(data.get("filled", 0) or 0),
             average_price=float(data.get("average", 0) or 0),
@@ -325,8 +347,9 @@ class BybitExchange(BaseExchange):
                 id=str(d.get("id", "")),
                 symbol=d.get("symbol", ""),
                 side=OrderSide.BUY if d.get("side") == "buy" else OrderSide.SELL,
-                order_type=OrderType.MARKET if d.get("type") == "market" else OrderType.LIMIT,
+                order_type=parse_order_type(str(d.get("type", ""))),
                 amount=float(d.get("amount", 0) or 0),
+                stop_price=parse_stop_price(d),
                 status=parse_order_status(d.get("status", "")),
                 filled=float(d.get("filled", 0) or 0),
                 market_type=market_type.value,

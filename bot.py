@@ -17,7 +17,7 @@ from config.settings import Settings, get_settings
 from core.exchange import BaseExchange, create_exchange
 from core.extreme import ExtremeWatcher
 from core.market_schedule import get_market_schedule
-from core.models import Candle, MarketType, Signal, SignalAction
+from core.models import Candle, MarketType, OrderSide, OrderStatus, OrderType, Position, Signal, SignalAction
 from core.models.order import Order
 from core.models.signal import TickUrgency
 from core.orders import OrderManager
@@ -116,6 +116,8 @@ class TradingBot:
         self._runtime_missing_counts: dict[str, int] = {}
         self._pending_hub_acks: dict[str, dict[str, Any]] = {}
         self._strategy_stats: dict[str, dict[str, Any]] = {}
+        self._last_queue_exec_reason: str = ""
+        self._orphan_positions: dict[str, dict[str, Any]] = {}
         self._running = False
         self._tick_interval = self.settings.tick_interval_idle
         self._status_interval = 300
@@ -706,6 +708,18 @@ class TradingBot:
 
         await asyncio.sleep(0)  # yield to event loop (dashboard, etc.)
 
+        if self.target.manual_stop:
+            # HALT mode: keep only protective/close logic active. Never place new
+            # scale/hedge/wick/extreme entries while STOP is active.
+            self._hub_proposal = None
+            try:
+                await self._write_deployment_status()
+            except Exception as e:
+                logger.error("Failed to write deployment status: {}", e, exc_info=True)
+            await self._log_status()
+            await self._check_daily_reset()
+            return
+
         # 2. Scale into positions (both WINNERS adds and PYRAMID DCA-downs)
         scale_orders = await self.orders.try_scale_in()
         if scale_orders:
@@ -940,7 +954,15 @@ class TradingBot:
             await self._report_queue_outcome(proposal.id, "consumed")
             logger.info("Queue: executed {} [{}] via {}", proposal.symbol, proposal.priority.value, proposal.strategy)
         else:
-            await self._report_queue_outcome(proposal.id, "rejected", "execution failed")
+            outcome_reason = self._last_queue_exec_reason or "execution_failed"
+            await self._report_queue_outcome(proposal.id, "rejected", outcome_reason)
+            logger.warning(
+                "Queue: not executed {} [{}] via {} ({})",
+                proposal.symbol,
+                proposal.priority.value,
+                proposal.strategy,
+                outcome_reason,
+            )
 
     async def _report_queue_outcome(self, proposal_id: str, action: str, reason: str = "") -> None:
         """Immediately POST consume/reject to hub so the queue is updated right away."""
@@ -995,16 +1017,20 @@ class TradingBot:
 
     async def _execute_proposal(self, proposal: TradeProposal, aggression: float) -> bool:
         """Convert a queue proposal into a trading signal and execute it."""
+        self._last_queue_exec_reason = ""
         if not self._symbol_available(proposal.symbol):
             logger.debug("Queue skip {}: symbol not available locally", proposal.symbol)
+            self._last_queue_exec_reason = "symbol_unavailable"
             return False
         if proposal.symbol in self._open_trades:
             logger.info("Queue skip {}: already in local _open_trades", proposal.symbol)
+            self._last_queue_exec_reason = "already_open_local"
             return False
 
         result = await self._validate_proposal(proposal)
         if not result.valid:
             logger.info("Queue reject {}: validator says '{}' ({})", proposal.symbol, result.reason, proposal.strategy)
+            self._last_queue_exec_reason = f"validator:{result.reason}"
             return False
 
         market_type = MarketType.FUTURES if proposal.market_type == "futures" else MarketType.SPOT
@@ -1013,6 +1039,7 @@ class TradingBot:
             price = ticker.last
         except Exception as e:
             logger.error("Queue: can't fetch price for {}: {}", proposal.symbol, e)
+            self._last_queue_exec_reason = "price_fetch_failed"
             return False
 
         action = SignalAction.BUY if proposal.side == "long" else SignalAction.SELL
@@ -1046,10 +1073,13 @@ class TradingBot:
 
         use_pyramid = not proposal.quick_trade
         try:
-            await self._process_signal(sig, pyramid=use_pyramid)
-            return True
+            opened = bool(await self._process_signal(sig, pyramid=use_pyramid))
+            if not opened and not self._last_queue_exec_reason:
+                self._last_queue_exec_reason = "rejected_or_blocked"
+            return opened
         except Exception as e:
             logger.error("Queue execution error for {}: {}", proposal.symbol, e)
+            self._last_queue_exec_reason = f"failed_open:{str(e)[:120]}"
             return False
 
     async def _execute_swing_proposal(self, proposal: TradeProposal, aggression: float) -> bool:
@@ -1060,19 +1090,24 @@ class TradingBot:
         the initial entry and lets PYRAMID mode handle the rest.
         """
         my_exchange = self.settings.exchange.upper()
+        self._last_queue_exec_reason = ""
         if my_exchange not in proposal.supported_exchanges:
             logger.debug("Swing skip {}: not on {}", proposal.symbol, my_exchange)
+            self._last_queue_exec_reason = "exchange_not_supported"
             return False
         if not self._symbol_available(proposal.symbol):
             logger.debug("Swing skip {}: not on {}", proposal.symbol, my_exchange)
+            self._last_queue_exec_reason = "symbol_unavailable"
             return False
         if proposal.symbol in self._open_trades:
             logger.info("Swing skip {}: already have an open position", proposal.symbol)
+            self._last_queue_exec_reason = "already_open_local"
             return False
 
         result = await self._validate_proposal(proposal)
         if not result.valid:
             logger.info("Swing reject {}: validator says '{}' ({})", proposal.symbol, result.reason, proposal.strategy)
+            self._last_queue_exec_reason = f"validator:{result.reason}"
             return False
 
         plan = proposal.entry_plan
@@ -1084,6 +1119,7 @@ class TradingBot:
             price = ticker.last
         except Exception as e:
             logger.error("Queue: can't fetch price for {}: {}", proposal.symbol, e)
+            self._last_queue_exec_reason = "price_fetch_failed"
             return False
 
         action = SignalAction.BUY if proposal.side == "long" else SignalAction.SELL
@@ -1117,10 +1153,13 @@ class TradingBot:
         )
 
         try:
-            await self._process_signal(sig, pyramid=True)
-            return True
+            opened = bool(await self._process_signal(sig, pyramid=True))
+            if not opened and not self._last_queue_exec_reason:
+                self._last_queue_exec_reason = "rejected_or_blocked"
+            return opened
         except Exception as e:
             logger.error("Swing execution error for {}: {}", proposal.symbol, e)
+            self._last_queue_exec_reason = f"failed_open:{str(e)[:120]}"
             return False
 
     def _check_data_dir_size(self) -> None:
@@ -1135,7 +1174,14 @@ class TradingBot:
         else:
             logger.info("Data dir: {:.2f} MB", size_mb)
 
-    async def _log_opened_trade(self, signal: Signal, order: Order, *, low_liquidity: bool = False) -> None:
+    async def _log_opened_trade(
+        self,
+        signal: Signal,
+        order: Order,
+        *,
+        low_liquidity: bool = False,
+        opened_at_override: str = "",
+    ) -> None:
         """Record a trade open in memory and push to hub.
 
         The push is awaited so the trade exists in hub.db before the
@@ -1167,7 +1213,7 @@ class TradingBot:
                 signal_strength=signal.strength,
                 hour_utc=now.hour,
                 day_of_week=now.weekday(),
-                opened_at=now.isoformat(),
+                opened_at=opened_at_override or now.isoformat(),
                 planned_stop_loss=signal.suggested_stop_loss or 0.0,
                 planned_tp1=signal.suggested_take_profit or 0.0,
                 planned_tp2=signal.suggested_take_profit_2 or 0.0,
@@ -1188,6 +1234,66 @@ class TradingBot:
             await self._push_trade_to_hub(record)
         except Exception as e:
             logger.error("Failed to log opened trade: {}", e)
+
+    async def _reserve_open_trade_with_hub(self, sig: Signal) -> str:
+        """Create a pre-open ownership row in hub.db and return opened_at token."""
+        hub_url = self.settings.hub_url
+        if not hub_url:
+            return ""
+        if not self._hub_session:
+            self._hub_session = self._new_hub_session(timeout_seconds=5)
+
+        opened_at = datetime.now(UTC).isoformat()
+        request_key = uuid.uuid4().hex
+        side = "long" if sig.action == SignalAction.BUY else "short"
+        trade_stub = {
+            "symbol": sig.symbol,
+            "side": side,
+            "strategy": sig.strategy,
+            "action": "open",
+            "opened_at": opened_at,
+            "market_regime": self._hub_intel.regime if self._hub_intel else "",
+            "fear_greed": self._hub_intel.fear_greed if self._hub_intel else 50,
+            "daily_tier": self.target.tier.value,
+            "daily_pnl_at_entry": self.target.todays_pnl_pct,
+            "signal_strength": sig.strength,
+            "planned_stop_loss": sig.suggested_stop_loss or 0.0,
+            "planned_tp1": sig.suggested_take_profit or 0.0,
+            "planned_tp2": sig.suggested_take_profit_2 or 0.0,
+        }
+        payload = {
+            "bot_id": self.settings.bot_id or "default",
+            "request_key": request_key,
+            "trade": trade_stub,
+        }
+        try:
+            url = f"{hub_url.rstrip('/')}/internal/trade-reserve"
+            async with self._hub_session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    logger.error("Hub pre-open reserve failed: {}", resp.status)
+                    return ""
+                body = await resp.json()
+                return str(body.get("opened_at", "") or opened_at)
+        except Exception as e:
+            logger.error("Hub pre-open reserve error for {}: {}", sig.symbol, e)
+            return ""
+
+    async def _release_open_trade_reservation(self, sig: Signal, opened_at: str, reason: str) -> None:
+        """Close a reserved pre-open row when CEX open fails or is rejected."""
+        if not opened_at:
+            return
+        side = "long" if sig.action == SignalAction.BUY else "short"
+        rec = TradeRecord(
+            symbol=sig.symbol,
+            side=side,
+            strategy=sig.strategy,
+            action="close",
+            opened_at=opened_at,
+            closed_at=datetime.now(UTC).isoformat(),
+            close_source="reservation_cancel",
+            close_reason=reason,
+        )
+        await self._push_trade_to_hub(rec, action_override="close")
 
     def _calc_realized_pnl(self, order: Order) -> float:
         """Extract the realized PnL from a close order for deposit detection."""
@@ -1316,26 +1422,29 @@ class TradingBot:
 
     async def _close_all_positions(self, reason: str) -> None:
         """Emergency close all open positions."""
-        positions = await self.exchange.fetch_positions()
-        for pos in positions:
-            if pos.amount <= 0:
-                continue
-            signal = Signal(
-                symbol=pos.symbol,
-                action=SignalAction.CLOSE,
-                strategy="manual_override",
-                reason=reason,
-                market_type=pos.market_type,
-            )
-            try:
-                order = await self.orders.execute_signal(signal)
-                if order:
-                    realized_pnl = self._calc_realized_pnl(order)
-                    self._log_closed_trade(order, reason)
-                    self.target.record_trade(realized_pnl=realized_pnl)
-                logger.info("Closed {} ({})", pos.symbol, reason)
-            except Exception as e:
-                logger.error("Failed to close {}: {}", pos.symbol, e)
+        # Serialize emergency flattening against stop/protection checks so we don't
+        # place/replace protection orders while trying to close everything.
+        async with self._stop_check_lock:
+            positions = await self.exchange.fetch_positions()
+            for pos in positions:
+                if pos.amount <= 0:
+                    continue
+                signal = Signal(
+                    symbol=pos.symbol,
+                    action=SignalAction.CLOSE,
+                    strategy="manual_override",
+                    reason=reason,
+                    market_type=pos.market_type,
+                )
+                try:
+                    order = await self.orders.execute_signal(signal)
+                    if order:
+                        realized_pnl = self._calc_realized_pnl(order)
+                        self._log_closed_trade(order, reason)
+                        self.target.record_trade(realized_pnl=realized_pnl)
+                    logger.info("Closed {} ({})", pos.symbol, reason)
+                except Exception as e:
+                    logger.error("Failed to close {}: {}", pos.symbol, e)
 
     # -- Whale position alerts -- #
 
@@ -1379,7 +1488,12 @@ class TradingBot:
                 self._whale_alerted.add(sym)
                 logger.info("WHALE ALERT sent for {} -- ${:.0f} notional at +{:.1f}%", sym, notional, profit_pct)
 
-    def _build_position_risk_snapshot(self, pos: Any, ts: Any | None) -> dict[str, Any]:
+    def _build_position_risk_snapshot(
+        self,
+        pos: Any,
+        ts: Any | None,
+        cex_sl_tp: tuple[float, float] | None = None,
+    ) -> dict[str, Any]:
         """Build explicit SL/TP source fields and risk state for dashboard payloads."""
         symbol = str(getattr(pos, "symbol", "") or "")
         entry = float(getattr(pos, "entry_price", 0.0) or 0.0)
@@ -1393,6 +1507,12 @@ class TradingBot:
         exchange_tp_raw = getattr(pos, "take_profit", None)
         exchange_sl = float(exchange_sl_raw) if exchange_sl_raw else 0.0
         exchange_tp = float(exchange_tp_raw) if exchange_tp_raw else 0.0
+        if cex_sl_tp:
+            cex_sl, cex_tp = cex_sl_tp
+            if cex_sl > 0:
+                exchange_sl = cex_sl
+            if cex_tp > 0:
+                exchange_tp = cex_tp
 
         bot_sl = float(getattr(ts, "current_stop", 0.0) or 0.0) if ts else 0.0
         rec = self._open_trades.get(symbol)
@@ -1528,11 +1648,28 @@ class TradingBot:
 
     async def _report_dashboard_snapshot(self, active_positions: list[Any]) -> None:
         """Build and send dashboard snapshot to the central hub."""
+        cex_levels_by_symbol: dict[str, tuple[float, float]] = {}
+        try:
+            open_orders = await self.exchange.fetch_open_orders(market_type=MarketType.FUTURES)
+            for order in open_orders:
+                symbol = str(getattr(order, "symbol", "") or "")
+                stop_price = float(getattr(order, "stop_price", 0.0) or 0.0)
+                if not symbol or stop_price <= 0:
+                    continue
+                sl, tp = cex_levels_by_symbol.get(symbol, (0.0, 0.0))
+                if order.order_type == OrderType.STOP_LOSS:
+                    sl = stop_price
+                elif order.order_type == OrderType.TAKE_PROFIT:
+                    tp = stop_price
+                cex_levels_by_symbol[symbol] = (sl, tp)
+        except Exception as e:
+            logger.debug("Failed to fetch open orders for CEX SL/TP snapshot: {}", e)
+
         pos_list = []
         for pos in active_positions:
             ts = self.orders.trailing.active_stops.get(pos.symbol)
             sp = self.orders.scaler.get(pos.symbol)
-            risk = self._build_position_risk_snapshot(pos, ts)
+            risk = self._build_position_risk_snapshot(pos, ts, cex_levels_by_symbol.get(pos.symbol))
             await self._sync_runtime_trade_if_changed(pos.symbol)
             age_minutes = self._position_age_minutes(pos.symbol, getattr(pos, "opened_at", None))
             pos_list.append(
@@ -1632,8 +1769,10 @@ class TradingBot:
                 "strategies_count": len(self._strategies),
                 "profit_buffer_pct": self.target.profit_buffer_pct,
                 "manual_stop_active": self.target.manual_stop,
+                "orphan_positions_count": len(self._orphan_positions),
             },
             "positions": pos_list,
+            "orphan_positions": list(self._orphan_positions.values()),
             "wick_scalps": wick_list,
             "strategies": strat_list,
             "trade_log": self.orders._trade_log[-50:],
@@ -1794,11 +1933,34 @@ class TradingBot:
         except Exception as e:
             logger.warning("Could not fetch strategy stats from hub: {}", e)
 
+    def _managed_symbols(self) -> set[str]:
+        symbols = set(self._open_trades.keys()) | set(self.orders.scaler.active_positions.keys())
+        for key in self.orders.trailing.active_stops:
+            symbols.add(key.split(":", 1)[0])
+        return symbols
+
+    def _record_orphan_position(self, pos: Any, source: str) -> None:
+        symbol = str(getattr(pos, "symbol", "") or "")
+        if not symbol:
+            return
+        side_raw = getattr(pos, "side", "")
+        side_txt = side_raw.value if hasattr(side_raw, "value") else str(side_raw or "")
+        self._orphan_positions[symbol] = {
+            "symbol": symbol,
+            "side": side_txt.lower() or "unknown",
+            "amount": float(getattr(pos, "amount", 0.0) or 0.0),
+            "entry_price": float(getattr(pos, "entry_price", 0.0) or 0.0),
+            "current_price": float(getattr(pos, "current_price", 0.0) or 0.0),
+            "leverage": int(max(1, round(float(getattr(pos, "leverage", 1.0) or 1.0)))),
+            "market_type": str(getattr(pos, "market_type", "") or "futures"),
+            "detected_at": datetime.now(UTC).isoformat(),
+            "source": source,
+        }
+
     async def _reconcile_open_trades(self, hub_open: list[dict[str, Any]], hub_target: str, bot_id: str) -> None:
         """Check each hub-reported open trade against the exchange. Recovery-close dead ones."""
         if not hub_open:
             logger.info("Hub reports 0 open trades — clean start")
-            return
 
         exchange_positions: dict[str, Any] = {}
         positions_fetch_ok = self.settings.is_paper_local()
@@ -1813,6 +1975,7 @@ class TradingBot:
                 logger.warning("Could not fetch exchange positions for reconciliation: {}", e)
 
         recovered = 0
+        rehydrated = 0
         dead = 0
         for td in hub_open:
             symbol = td.get("symbol", "")
@@ -1826,6 +1989,9 @@ class TradingBot:
                     "tp1": float(rec.planned_tp1 or 0.0),
                     "tp2": float(rec.planned_tp2 or 0.0),
                 }
+                pos_obj = exchange_positions.get(symbol)
+                if pos_obj is not None and await self._rehydrate_recovered_position_state(symbol, rec, pos_obj):
+                    rehydrated += 1
                 recovered += 1
             else:
                 logger.warning(
@@ -1850,13 +2016,213 @@ class TradingBot:
 
         if recovered:
             logger.info("Recovered {} open trades from hub", recovered)
+        if rehydrated:
+            logger.info("Rehydrated trailing/scaler state for {} recovered positions", rehydrated)
         if dead:
             logger.info("Marked {} dead trades as recovery_close (no longer on exchange)", dead)
+
+        if positions_fetch_ok and exchange_positions:
+            managed = self._managed_symbols()
+            unknown = [sym for sym in exchange_positions if sym not in managed]
+            for sym in unknown:
+                self._record_orphan_position(exchange_positions[sym], source="startup_reconcile")
+            for sym in managed:
+                self._orphan_positions.pop(sym, None)
+            if unknown:
+                logger.warning(
+                    "Detected {} orphan live position(s) not owned by bot {}: {}",
+                    len(unknown),
+                    bot_id,
+                    ", ".join(sorted(unknown)[:8]),
+                )
+
+    async def _rehydrate_recovered_position_state(self, symbol: str, rec: TradeRecord, pos: Any) -> bool:
+        """Rebuild local scaler/trailing state for a recovered live exchange position."""
+        amount = float(getattr(pos, "amount", 0.0) or 0.0)
+        entry = float(getattr(pos, "entry_price", 0.0) or 0.0)
+        current = float(getattr(pos, "current_price", 0.0) or 0.0)
+        if amount <= 0 or entry <= 0:
+            logger.warning("Recovery rehydrate skip {}: invalid position amount/entry", symbol)
+            return False
+
+        side_raw = getattr(pos, "side", "")
+        side_txt = side_raw.value if hasattr(side_raw, "value") else str(side_raw or "")
+        side_l = side_txt.lower()
+        if side_l in ("buy", "long"):
+            order_side = OrderSide.BUY
+            scaler_side = "long"
+        elif side_l in ("sell", "short"):
+            order_side = OrderSide.SELL
+            scaler_side = "short"
+        else:
+            logger.warning("Recovery rehydrate skip {}: unknown side {!r}", symbol, side_txt)
+            return False
+
+        lev_raw = float(
+            getattr(pos, "leverage", 0.0) or getattr(rec, "leverage", 0.0) or self.settings.default_leverage
+        )
+        leverage = int(max(1, round(lev_raw)))
+        market_type = str(getattr(pos, "market_type", "") or "futures")
+        strategy = str(rec.strategy or self._resolve_position_strategy(pos) or "recovered")
+        mode = ScaleMode.PYRAMID if str(rec.scale_mode or "").lower() == "pyramid" else ScaleMode.WINNERS
+
+        self.orders.scaler.remove(symbol)
+        sp = self.orders.scaler.create(
+            symbol=symbol,
+            side=scaler_side,
+            strategy=strategy,
+            market_type=market_type,
+            leverage=leverage,
+            mode=mode,
+        )
+        sp.record_add(amount, entry)
+        sp.current_leverage = leverage
+        sp.target_leverage = max(sp.target_leverage, leverage)
+        sp.adds = int(getattr(rec, "dca_count", 0) or 0)
+
+        self.orders.trailing.remove(symbol)
+        position = Position(
+            symbol=symbol,
+            side=order_side,
+            amount=amount,
+            entry_price=entry,
+            current_price=current if current > 0 else entry,
+            leverage=leverage,
+            market_type=market_type,
+        )
+        ts = self.orders.trailing.register(
+            position,
+            initial_stop_pct=max(0.5, float(self.settings.stop_loss_pct)),
+        )
+
+        recovered_stop = float(rec.effective_stop_loss or rec.bot_stop_loss or 0.0)
+        if recovered_stop > 0:
+            ts.current_stop = recovered_stop
+            if order_side == OrderSide.BUY:
+                ts.breakeven_locked = recovered_stop >= entry
+            else:
+                ts.breakeven_locked = recovered_stop <= entry
+
+        try:
+            await self.orders._sync_symbol_protection(position, ts)  # type: ignore[attr-defined]
+        except Exception as e:
+            logger.warning("Recovery protection sync failed for {}: {}", symbol, e)
+
+        logger.info(
+            "Recovered runtime state for {}: mode={} stop={:.6f}",
+            symbol,
+            sp.mode.value,
+            float(ts.current_stop or 0.0),
+        )
+        return True
+
+    async def _ensure_managed_position_runtime_state(self, pos: Any) -> None:
+        """Ensure managed positions always have local scaler+trailing state.
+
+        This keeps SL/TP ownership deterministic even after restarts or partial
+        runtime desync: if the bot considers a symbol managed, it can immediately
+        take over protection management for that live exchange position.
+        """
+        symbol = str(getattr(pos, "symbol", "") or "")
+        amount = float(getattr(pos, "amount", 0.0) or 0.0)
+        if not symbol or amount <= 0:
+            return
+
+        has_scaler = self.orders.scaler.get(symbol) is not None
+        has_trailing = self.orders.trailing.get(symbol) is not None
+        rec = self._open_trades.get(symbol)
+        is_managed = rec is not None or has_scaler or has_trailing
+        if not is_managed or (has_scaler and has_trailing):
+            return
+
+        if rec is None:
+            side_raw = getattr(pos, "side", "")
+            side_txt = side_raw.value if hasattr(side_raw, "value") else str(side_raw or "")
+            side_l = side_txt.lower()
+            side = "long" if side_l in ("buy", "long") else "short"
+            strategy = self._resolve_position_strategy(pos) or "runtime_recovered"
+            rec = TradeRecord(
+                symbol=symbol,
+                side=side,
+                strategy=strategy,
+                action="open",
+                amount=float(getattr(pos, "amount", 0.0) or 0.0),
+                entry_price=float(getattr(pos, "entry_price", 0.0) or 0.0),
+                leverage=int(max(1, round(float(getattr(pos, "leverage", 1.0) or 1.0)))),
+                opened_at=datetime.now(UTC).isoformat(),
+            )
+            self._open_trades[symbol] = rec
+            self._position_targets.setdefault(symbol, {"planned_sl": 0.0, "tp1": 0.0, "tp2": 0.0})
+            logger.warning("Runtime adopted managed position {} from live exchange snapshot", symbol)
+
+        if await self._rehydrate_recovered_position_state(symbol, rec, pos):
+            logger.info("Runtime rehydrated missing protection state for {}", symbol)
+
+    async def _claim_orphan_position(self, symbol: str, strategy: str = "manual_claim") -> tuple[bool, str]:
+        """Adopt a live orphan position into managed state and persist ownership."""
+        symbol = str(symbol or "").strip().upper()
+        if not symbol:
+            return False, "Missing symbol"
+        if symbol in self._open_trades:
+            return False, f"{symbol} already managed"
+
+        positions = await self.exchange.fetch_positions(symbol)
+        pos = next((p for p in positions if p.symbol == symbol and float(p.amount or 0.0) > 0), None)
+        if not pos:
+            return False, f"No live position for {symbol}"
+
+        side_raw = getattr(pos, "side", "")
+        side_txt = side_raw.value if hasattr(side_raw, "value") else str(side_raw or "")
+        side_l = side_txt.lower()
+        side = "long" if side_l in ("buy", "long") else "short"
+
+        rec = TradeRecord(
+            symbol=symbol,
+            side=side,
+            strategy=strategy or "manual_claim",
+            action="open",
+            amount=float(getattr(pos, "amount", 0.0) or 0.0),
+            entry_price=float(getattr(pos, "entry_price", 0.0) or 0.0),
+            leverage=int(max(1, round(float(getattr(pos, "leverage", 1.0) or 1.0)))),
+            market_regime=self._hub_intel.regime if self._hub_intel else "",
+            fear_greed=self._hub_intel.fear_greed if self._hub_intel else 50,
+            daily_tier=self.target.tier.value,
+            daily_pnl_at_entry=self.target.todays_pnl_pct,
+            signal_strength=0.5,
+            opened_at=datetime.now(UTC).isoformat(),
+        )
+        self._open_trades[symbol] = rec
+        self._position_targets.setdefault(symbol, {"planned_sl": 0.0, "tp1": 0.0, "tp2": 0.0})
+
+        await self._push_trade_to_hub(rec)
+        ok = await self._rehydrate_recovered_position_state(symbol, rec, pos)
+        self._orphan_positions.pop(symbol, None)
+        if not ok:
+            return False, f"Claimed {symbol} but failed to rehydrate runtime protection state"
+        await self._sync_runtime_trade_if_changed(symbol)
+        return True, f"Claimed {symbol} and attached runtime protection"
 
     async def _reconcile_runtime_open_trades(self, positions: list[Any]) -> None:
         """Keep local open-trade state aligned with live exchange positions."""
         if self.settings.is_paper_local():
             return
+        for pos in positions:
+            if float(getattr(pos, "amount", 0.0) or 0.0) <= 0:
+                continue
+            await self._ensure_managed_position_runtime_state(pos)
+
+        managed_now = self._managed_symbols()
+        for pos in positions:
+            if float(getattr(pos, "amount", 0.0) or 0.0) <= 0:
+                continue
+            symbol = str(getattr(pos, "symbol", "") or "")
+            if not symbol:
+                continue
+            if symbol in managed_now:
+                self._orphan_positions.pop(symbol, None)
+            else:
+                self._record_orphan_position(pos, source="runtime_reconcile")
+
         exchange_symbols = {p.symbol for p in positions if p.amount > 0}
         tracked_symbols = list(self._open_trades.keys())
         for sym in tracked_symbols:
@@ -2102,7 +2468,7 @@ class TradingBot:
 
         return adjusted
 
-    async def _process_signal(self, sig: Signal, low_liquidity: bool = False, pyramid: bool = False) -> None:
+    async def _process_signal(self, sig: Signal, low_liquidity: bool = False, pyramid: bool = False) -> bool:
         mode_tag = "PYRAMID" if pyramid else ("GAMBLING" if low_liquidity else "WINNERS")
         logger.info(
             "Signal: {} {} {} (str={:.2f}, strat={}, reason={}, mode={})",
@@ -2117,25 +2483,57 @@ class TradingBot:
 
         if sig.strength < 0.2 and sig.action != SignalAction.CLOSE:
             logger.debug("Signal too weak ({:.2f}), skipping", sig.strength)
-            return
+            self._last_queue_exec_reason = "weak_signal"
+            return False
 
         is_close = sig.action == SignalAction.CLOSE
-        order = await self.orders.execute_signal(
-            sig,
-            low_liquidity=low_liquidity,
-            pyramid=pyramid,
-        )
+        reserved_opened_at = ""
+        if not is_close:
+            reserved_opened_at = await self._reserve_open_trade_with_hub(sig)
+            if self.settings.hub_url and not reserved_opened_at:
+                self._last_queue_exec_reason = "reserve_failed"
+                return False
+
+        try:
+            order = await self.orders.execute_signal(
+                sig,
+                low_liquidity=low_liquidity,
+                pyramid=pyramid,
+            )
+        except Exception:
+            if reserved_opened_at:
+                await self._release_open_trade_reservation(sig, reserved_opened_at, "open_exception")
+            raise
         if order:
+            status = getattr(order, "status", None)
+            if not is_close and isinstance(status, OrderStatus) and status != OrderStatus.FILLED:
+                status_txt = status.value
+                logger.warning("Signal open not filled for {} (status={})", sig.symbol, status_txt)
+                if reserved_opened_at:
+                    await self._release_open_trade_reservation(sig, reserved_opened_at, f"failed_fill:{status_txt}")
+                self._last_queue_exec_reason = f"failed_fill:{status_txt}"
+                return False
             realized_pnl = 0.0
             if is_close:
                 realized_pnl = self._calc_realized_pnl(order)
                 self._log_closed_trade(order, sig.strategy)
             else:
-                await self._log_opened_trade(sig, order, low_liquidity=low_liquidity)
+                await self._log_opened_trade(
+                    sig,
+                    order,
+                    low_liquidity=low_liquidity,
+                    opened_at_override=reserved_opened_at,
+                )
             self._active_signals.append(sig)
             self.target.record_trade(realized_pnl=realized_pnl)
             if len(self._active_signals) > 100:
                 self._active_signals = self._active_signals[-100:]
+            self._last_queue_exec_reason = "filled"
+            return True
+        if reserved_opened_at:
+            await self._release_open_trade_reservation(sig, reserved_opened_at, "risk_or_gate")
+        self._last_queue_exec_reason = "rejected:risk_or_gate"
+        return False
 
     async def _handle_spike(self, spike: SpikeEvent) -> None:
         await self.notifier.alert_spike(spike.symbol, spike.change_pct, spike.direction, spike.price)

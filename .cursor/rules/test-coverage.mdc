@@ -16,3 +16,7 @@ to bring it back up.
 3. When adding new modules or significant code, write tests in the same commit.
 4. If a CI run fails on coverage, the fix is always **more tests**, not a
    lower bar.
+5. When coverage falls below the threshold and needs recovery work, do extra
+   coverage work and aim to bring overall coverage to roughly **90%** (or as
+   high as realistically possible in the current round), not just barely above
+   `fail_under`. The goal is to rebuild buffer for upcoming changes.

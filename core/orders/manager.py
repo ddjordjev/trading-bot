@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from loguru import logger
@@ -66,6 +66,7 @@ class OrderManager:
         self._hedge_cooldowns: dict[str, datetime] = {}
         self._ORDER_COOLDOWN_SECS = 60
         self._protection_orders: dict[str, dict[str, Any]] = {}
+        self._protection_retry_after: dict[str, datetime] = {}
 
     # ------------------------------------------------------------------ #
     #  Signal execution
@@ -156,14 +157,24 @@ class OrderManager:
             self.scaler.remove(signal.symbol)
             return None
 
-        order = await self.exchange.place_order(
-            symbol=signal.symbol,
-            side=side,
-            order_type=OrderType.MARKET,
-            amount=amount,
-            leverage=actual_leverage,
-            market_type=market_type,
-        )
+        try:
+            order = await self.exchange.place_order(
+                symbol=signal.symbol,
+                side=side,
+                order_type=OrderType.MARKET,
+                amount=amount,
+                leverage=actual_leverage,
+                market_type=market_type,
+            )
+        except Exception:
+            # Ensure pre-created runtime state is not left behind on failed opens.
+            self.scaler.remove(signal.symbol)
+            self.trailing.remove(signal.symbol)
+            self.trailing.remove(f"{signal.symbol}:hedge")
+            self.trailing.remove(f"{signal.symbol}:wick")
+            self.hedger.remove(signal.symbol)
+            self.wick_scalper.close(signal.symbol)
+            raise
 
         if order.status != OrderStatus.FILLED:
             self.scaler.remove(signal.symbol)
@@ -287,6 +298,10 @@ class OrderManager:
             return
 
         symbol = pos.symbol
+        retry_after = self._protection_retry_after.get(symbol)
+        if retry_after and datetime.now(UTC) < retry_after:
+            logger.debug("Protection sync {} paused until {}", symbol, retry_after.isoformat())
+            return
         stop_side = OrderSide.SELL if pos.side == OrderSide.BUY else OrderSide.BUY
         state = self._protection_orders.setdefault(symbol, {})
         sl_order_id = str(state.get("sl_order_id", "") or "")
@@ -301,6 +316,22 @@ class OrderManager:
             sl_price,
         )
 
+        if sl_order_id:
+            try:
+                sl_order = await self.exchange.fetch_order(sl_order_id, symbol, market_type=market_type)
+                if sl_order.status not in {OrderStatus.OPEN, OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED}:
+                    logger.warning(
+                        "Protection sync {}: SL order {} status={} ; recreating",
+                        symbol,
+                        sl_order_id,
+                        sl_order.status.value if hasattr(sl_order.status, "value") else str(sl_order.status),
+                    )
+                    sl_order_id = ""
+            except Exception as e:
+                # Some exchanges don't expose conditional orders in open-order APIs
+                # consistently. Do not force-recreate on lookup errors.
+                logger.debug("Protection sync {}: cannot verify SL order state: {}", symbol, e)
+
         if sl_order_id and self._is_meaningful_price_change(sl_price, bot_stop):
             logger.debug(
                 "Protection sync {}: replacing SL order {} due to price change {:.6f} -> {:.6f}",
@@ -313,17 +344,30 @@ class OrderManager:
             sl_order_id = ""
 
         if not sl_order_id:
-            sl_order = await self.exchange.place_order(
-                symbol=symbol,
-                side=stop_side,
-                order_type=OrderType.STOP_LOSS,
-                amount=amount,
-                stop_price=bot_stop,
-                leverage=pos.leverage,
-                market_type=market_type,
-            )
+            try:
+                sl_order = await self.exchange.place_order(
+                    symbol=symbol,
+                    side=stop_side,
+                    order_type=OrderType.STOP_LOSS,
+                    amount=amount,
+                    stop_price=bot_stop,
+                    leverage=pos.leverage,
+                    market_type=market_type,
+                )
+            except Exception as e:
+                msg = str(e).lower()
+                if "-4045" in msg or "max stop order limit" in msg:
+                    self._protection_retry_after[symbol] = datetime.now(UTC) + timedelta(seconds=30)
+                    logger.warning(
+                        "Protection sync {} paused 30s due to stop-order limit: {}",
+                        symbol,
+                        e,
+                    )
+                    return
+                raise
             sl_order_id = sl_order.id
             logger.info("Protection SL synced on {} @ {:.6f}", symbol, bot_stop)
+            self._protection_retry_after.pop(symbol, None)
 
         state["sl_order_id"] = sl_order_id
         state["sl_price"] = bot_stop
@@ -343,6 +387,20 @@ class OrderManager:
             return
 
         tp_order_id = str(state.get("tp_order_id", "") or "")
+        if tp_order_id:
+            try:
+                tp_order = await self.exchange.fetch_order(tp_order_id, symbol, market_type=market_type)
+                if tp_order.status not in {OrderStatus.OPEN, OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED}:
+                    logger.warning(
+                        "Protection sync {}: TP order {} status={} ; recreating",
+                        symbol,
+                        tp_order_id,
+                        tp_order.status.value if hasattr(tp_order.status, "value") else str(tp_order.status),
+                    )
+                    tp_order_id = ""
+            except Exception as e:
+                logger.debug("Protection sync {}: cannot verify TP order state: {}", symbol, e)
+
         if tp_order_id and self._is_meaningful_price_change(current_tp, target_tp):
             logger.debug(
                 "Protection sync {}: replacing TP order {} due to target change {:.6f} -> {:.6f}",
@@ -355,17 +413,30 @@ class OrderManager:
             tp_order_id = ""
 
         if not tp_order_id:
-            tp_order = await self.exchange.place_order(
-                symbol=symbol,
-                side=stop_side,
-                order_type=OrderType.TAKE_PROFIT,
-                amount=amount,
-                stop_price=target_tp,
-                leverage=pos.leverage,
-                market_type=market_type,
-            )
+            try:
+                tp_order = await self.exchange.place_order(
+                    symbol=symbol,
+                    side=stop_side,
+                    order_type=OrderType.TAKE_PROFIT,
+                    amount=amount,
+                    stop_price=target_tp,
+                    leverage=pos.leverage,
+                    market_type=market_type,
+                )
+            except Exception as e:
+                msg = str(e).lower()
+                if "-4045" in msg or "max stop order limit" in msg:
+                    self._protection_retry_after[symbol] = datetime.now(UTC) + timedelta(seconds=30)
+                    logger.warning(
+                        "Protection TP sync {} paused 30s due to stop-order limit: {}",
+                        symbol,
+                        e,
+                    )
+                    return
+                raise
             tp_order_id = tp_order.id
             logger.info("Protection TP synced on {} @ {:.6f}", symbol, target_tp)
+            self._protection_retry_after.pop(symbol, None)
 
         state["tp_order_id"] = tp_order_id
         state["tp_price"] = target_tp
@@ -1018,8 +1089,10 @@ class OrderManager:
                 continue
             ts = self.trailing.get(pos.symbol)
             if ts:
-                with contextlib.suppress(Exception):
+                try:
                     await self._sync_symbol_protection(pos, ts)
+                except Exception as e:
+                    logger.warning("Protection sync failed for {}: {}", pos.symbol, e)
 
         for pos in positions:
             if pos.symbol in stopped_base_symbols:

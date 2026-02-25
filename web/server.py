@@ -30,6 +30,7 @@ from web.schemas import (
     ModuleStatus,
     NewsItemInfo,
     PatternInsightInfo,
+    PositionClaimBody,
     PositionCloseBody,
     PositionInfo,
     PositionTakeProfitBody,
@@ -740,6 +741,20 @@ async def close_position(body: PositionCloseBody, _: str = Depends(verify_token)
     return await _forward_to_bot(body.bot_id, "/api/position/close", {"symbol": body.symbol})
 
 
+@app.post("/api/orphan/assign", response_model=ActionResponse)
+async def assign_orphan(body: PositionClaimBody, _: str = Depends(verify_token)) -> ActionResponse:
+    return await _forward_to_bot(
+        body.bot_id,
+        "/api/position/claim",
+        {"symbol": body.symbol, "strategy": body.strategy},
+    )
+
+
+@app.post("/api/orphan/close", response_model=ActionResponse)
+async def close_orphan(body: PositionCloseBody, _: str = Depends(verify_token)) -> ActionResponse:
+    return await _forward_to_bot(body.bot_id, "/api/position/close", {"symbol": body.symbol})
+
+
 @app.post("/api/position/take-profit", response_model=ActionResponse)
 async def take_profit(body: PositionTakeProfitBody, _: str = Depends(verify_token)) -> ActionResponse:
     return await _forward_to_bot(body.bot_id, "/api/position/take-profit", {"symbol": body.symbol, "pct": body.pct})
@@ -1097,6 +1112,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
     all_positions: list[dict[str, Any]] = []
     all_wicks: list[dict[str, Any]] = []
+    all_orphans: list[dict[str, Any]] = []
     bot_snapshots: list[dict[str, Any]] = []
 
     total_balance = 0.0
@@ -1173,6 +1189,15 @@ def _build_merged_snapshot() -> dict[str, Any]:
             w["bot_id"] = bid
             w["exchange_name"] = ex_name
             all_wicks.append(w)
+        orphans = rpt.get("orphan_positions", [])
+        if not isinstance(orphans, list):
+            orphans = []
+        for o in orphans:
+            if not isinstance(o, dict):
+                continue
+            o["detected_by_bot"] = bid
+            o["exchange_name"] = ex_name
+            all_orphans.append(o)
 
         bot_snapshots.append(
             {
@@ -1246,6 +1271,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
         "status": merged_status,
         "positions": all_positions,
         "wick_scalps": all_wicks,
+        "orphan_positions": all_orphans,
         "intel": intel.model_dump() if intel else None,
         "logs": list(_log_buffer),
         "bots": bot_snapshots,
@@ -1400,6 +1426,40 @@ async def get_bot_intel(_: str = Depends(verify_token)) -> dict[str, Any]:
     else:
         result["intel_age"] = 999999.0
     return result
+
+
+@app.post("/internal/trade-reserve")
+async def reserve_trade_open(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
+    """Create a pre-open ownership row so restart recovery has deterministic bot ownership."""
+    data = await request.json()
+    bot_id = data.get("bot_id", "")
+    trade = data.get("trade", {}) or {}
+    request_key = data.get("request_key", "")
+    if not bot_id or not isinstance(trade, dict):
+        return {"status": "error", "detail": "missing bot_id or trade"}
+
+    opened_at = str(trade.get("opened_at", "") or "")
+    if not opened_at:
+        return {"status": "error", "detail": "missing opened_at in trade reservation"}
+
+    reserve_trade = {
+        "symbol": trade.get("symbol", ""),
+        "side": trade.get("side", ""),
+        "strategy": trade.get("strategy", ""),
+        "action": "open",
+        "opened_at": opened_at,
+        "market_regime": trade.get("market_regime", ""),
+        "fear_greed": trade.get("fear_greed", 50),
+        "daily_tier": trade.get("daily_tier", ""),
+        "daily_pnl_at_entry": trade.get("daily_pnl_at_entry", 0.0),
+        "signal_strength": trade.get("signal_strength", 0.0),
+        "planned_stop_loss": trade.get("planned_stop_loss", 0.0),
+        "planned_tp1": trade.get("planned_tp1", 0.0),
+        "planned_tp2": trade.get("planned_tp2", 0.0),
+    }
+    hub = _get_hub_db()
+    hub.insert_trade(bot_id, reserve_trade, request_key=request_key)
+    return {"status": "ok", "opened_at": opened_at, "request_key": request_key}
 
 
 @app.post("/internal/trade")

@@ -18,6 +18,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
   const [logsExpanded, setLogsExpanded] = useState(true);
   const [actionTarget, setActionTarget] = useState("all");
   const [bulkAction, setBulkAction] = useState("");
+  const [orphanAssignees, setOrphanAssignees] = useState<Record<string, string>>({});
   const [manualStopOverride, setManualStopOverride] = useState<boolean | null>(null);
   const hasData = !!data;
 
@@ -30,6 +31,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
   const bool = (v: unknown, fallback = false) => (typeof v === "boolean" ? v : fallback);
   const positions = Array.isArray(data?.positions) ? data.positions : [];
   const wickScalps = Array.isArray(data?.wick_scalps) ? data.wick_scalps : [];
+  const orphanPositions = Array.isArray((data as any)?.orphan_positions) ? ((data as any).orphan_positions as any[]) : [];
   const logs = Array.isArray(data?.logs) ? data.logs : [];
 
   const manualStopActive = manualStopOverride ?? s.manual_stop_active;
@@ -44,6 +46,16 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
   const visibleBots = exchangeFilter === "all"
     ? bots
     : bots.filter((b) => b.exchange.toUpperCase() === exchangeFilter);
+  const visibleOrphans = exchangeFilter === "all"
+    ? orphanPositions
+    : orphanPositions.filter((o) => String((o as any).exchange_name || "").toUpperCase() === exchangeFilter);
+
+  const defaultAssignee = (orphan: any): string => {
+    const ex = String(orphan.exchange_name || "").toUpperCase();
+    const sameExchange = bots.filter((b) => b.exchange.toUpperCase() === ex);
+    if (sameExchange.length > 0) return sameExchange[0].bot_id;
+    return bots[0]?.bot_id || "";
+  };
 
   const resolveTargets = (action: string): string[] | null => {
     if (actionTarget === "-") {
@@ -297,7 +309,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
               <tr>
                 <th>Symbol</th>
                 {showBotColumn && <th>Exchange</th>}
-                {showBotColumn && <th>Bot</th>}
+                {showBotColumn && <th>Bot/Strategy</th>}
                 <th>Entry</th>
                 <th>Current</th>
                 <th>Size</th>
@@ -312,6 +324,94 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
               {positions.map((p) => (
                 <PositionRow key={`${(p as any).bot_id || ""}:${p.symbol}`} position={p} onAction={() => {}} showBot={showBotColumn} bulkAction={bulkAction} />
               ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <h3 style={{ color: "var(--heading)", margin: "1.5rem 0 0.5rem" }}>
+        Orphan Positions ({visibleOrphans.length})
+      </h3>
+      {visibleOrphans.length === 0 ? (
+        <div className="empty-state">No orphan positions detected</div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Exchange</th>
+                <th>Side</th>
+                <th>Amount</th>
+                <th>Entry</th>
+                <th>Current</th>
+                <th>Detected By</th>
+                <th>Recommended Bot</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleOrphans.map((o) => {
+                const key = `${String(o.exchange_name || "")}:${o.symbol}`;
+                const suggested = defaultAssignee(o);
+                const chosenBot = orphanAssignees[key] || suggested;
+                return (
+                  <tr key={key}>
+                    <td>{o.symbol}</td>
+                    <td style={{ fontSize: "0.75rem", fontWeight: 500, textTransform: "uppercase", color: "var(--text-muted)" }}>{String(o.exchange_name || "—")}</td>
+                    <td style={{ color: String(o.side || "").toLowerCase() === "long" ? "var(--green)" : "var(--red)" }}>{String(o.side || "").toUpperCase()}</td>
+                    <td>{Number(o.amount || 0).toFixed(6)}</td>
+                    <td>{Number(o.entry_price || 0).toFixed(Number(o.entry_price || 0) < 1 ? 6 : 2)}</td>
+                    <td>{Number(o.current_price || 0).toFixed(Number(o.current_price || 0) < 1 ? 6 : 2)}</td>
+                    <td style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{String(o.detected_by_bot || "—")}</td>
+                    <td>
+                      <select
+                        value={chosenBot}
+                        onChange={(e) => setOrphanAssignees((prev) => ({ ...prev, [key]: e.target.value }))}
+                        style={{ minWidth: 120 }}
+                      >
+                        {bots.map((b) => (
+                          <option key={b.bot_id} value={b.bot_id}>
+                            {b.label} ({b.exchange})
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      <button
+                        className="btn-primary"
+                        style={{ marginRight: 6 }}
+                        disabled={!chosenBot}
+                        onClick={async () => {
+                          const res = await postBody("/api/orphan/assign", {
+                            symbol: o.symbol,
+                            bot_id: chosenBot,
+                            strategy: "manual_claim",
+                          });
+                          const ok = !!(res && typeof res === "object" && (res as any).success);
+                          setActionMsg(`Assign ${o.symbol}: ${ok ? "OK" : ((res as any)?.message || "failed")}`);
+                          setTimeout(() => setActionMsg(""), 4000);
+                        }}
+                      >
+                        Assign
+                      </button>
+                      <button
+                        className="btn-danger"
+                        disabled={!chosenBot}
+                        onClick={async () => {
+                          if (!confirm(`Close orphan ${o.symbol} now via ${chosenBot}?`)) return;
+                          const res = await postBody("/api/orphan/close", { symbol: o.symbol, bot_id: chosenBot });
+                          const ok = !!(res && typeof res === "object" && (res as any).success);
+                          setActionMsg(`Close ${o.symbol}: ${ok ? "OK" : ((res as any)?.message || "failed")}`);
+                          setTimeout(() => setActionMsg(""), 4000);
+                        }}
+                      >
+                        Close now
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

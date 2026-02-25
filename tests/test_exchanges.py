@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.exchange.base import parse_order_status, ts_to_dt
+from core.exchange.base import parse_order_status, parse_order_type, parse_stop_price, ts_to_dt
 from core.models import (
     Candle,
     MarketType,
@@ -73,6 +73,19 @@ class TestParseOrderStatus:
 
     def test_unknown_defaults_pending(self):
         assert parse_order_status("unknown") == OrderStatus.PENDING
+
+
+class TestParseOrderTypeAndStopPrice:
+    def test_parse_order_type_stop_variants(self):
+        assert parse_order_type("STOP_MARKET") == OrderType.STOP_LOSS
+        assert parse_order_type("TAKE_PROFIT_MARKET") == OrderType.TAKE_PROFIT
+        assert parse_order_type("stop_limit") == OrderType.STOP_LIMIT
+        assert parse_order_type("market") == OrderType.MARKET
+
+    def test_parse_stop_price_from_root_or_info(self):
+        assert parse_stop_price({"stopPrice": "123.45"}) == 123.45
+        assert parse_stop_price({"info": {"triggerPrice": "456.78"}}) == 456.78
+        assert parse_stop_price({"stopPrice": 0, "info": {}}) is None
 
 
 class TestTsToDt:
@@ -301,6 +314,58 @@ class TestBinanceExchange:
         binance._futures.create_order.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_place_order_futures_proceeds_when_set_leverage_fails(self, binance):
+        binance._futures.set_leverage = AsyncMock(side_effect=Exception("temporary exchange error"))
+        await binance.place_order(
+            "BTC/USDT",
+            OrderSide.BUY,
+            OrderType.MARKET,
+            0.1,
+            leverage=10,
+            market_type=MarketType.FUTURES,
+        )
+        binance._futures.create_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_place_order_stop_loss_skips_set_leverage(self, binance):
+        await binance.place_order(
+            "BTC/USDT",
+            OrderSide.SELL,
+            OrderType.STOP_LOSS,
+            0.1,
+            stop_price=90.0,
+            leverage=20,
+            market_type=MarketType.FUTURES,
+        )
+        binance._futures.set_leverage.assert_not_awaited()
+        kwargs = binance._futures.create_order.call_args.kwargs
+        assert kwargs["type"] == "STOP_MARKET"
+        assert kwargs["params"]["reduceOnly"] is True
+        assert kwargs["params"]["closePosition"] is False
+        assert kwargs["params"]["stopPrice"] == 90.0
+
+    @pytest.mark.asyncio
+    async def test_fetch_open_orders_parses_stop_types_and_stop_price(self, binance):
+        binance._futures.fetch_open_orders = AsyncMock(
+            return_value=[
+                {
+                    "id": "sl-1",
+                    "symbol": "BTC/USDT",
+                    "side": "sell",
+                    "type": "STOP_MARKET",
+                    "status": "open",
+                    "amount": 0.1,
+                    "filled": 0.0,
+                    "stopPrice": 91.23,
+                }
+            ]
+        )
+        orders = await binance.fetch_open_orders("BTC/USDT", market_type=MarketType.FUTURES)
+        assert len(orders) == 1
+        assert orders[0].order_type == OrderType.STOP_LOSS
+        assert orders[0].stop_price == 91.23
+
+    @pytest.mark.asyncio
     async def test_cancel_order(self, binance):
         order = await binance.cancel_order("ord-1", "BTC/USDT")
         assert order.id == "ord-1"
@@ -454,6 +519,36 @@ class TestBybitExchange:
         assert order.side == OrderSide.SELL
         assert order.order_type == OrderType.LIMIT
         assert order.status == OrderStatus.OPEN
+
+    @pytest.mark.asyncio
+    async def test_place_order_futures_proceeds_when_set_leverage_fails(self, bybit):
+        bybit._futures.set_leverage = AsyncMock(side_effect=Exception("temporary exchange error"))
+        await bybit.place_order(
+            "BTC/USDT",
+            OrderSide.BUY,
+            OrderType.MARKET,
+            0.2,
+            leverage=7,
+            market_type=MarketType.FUTURES,
+        )
+        bybit._futures.create_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_place_order_futures_stop_loss_skips_set_leverage(self, bybit):
+        await bybit.place_order(
+            "BTC/USDT",
+            OrderSide.SELL,
+            OrderType.STOP_LOSS,
+            0.2,
+            stop_price=49000.0,
+            leverage=7,
+            market_type=MarketType.FUTURES,
+        )
+        bybit._futures.set_leverage.assert_not_awaited()
+        kwargs = bybit._futures.create_order.call_args.kwargs
+        assert kwargs["type"] == "STOP_MARKET"
+        assert kwargs["params"]["reduceOnly"] is True
+        assert kwargs["params"]["stopPrice"] == 49000.0
 
 
 # ── MexcExchange ───────────────────────────────────────────────────────

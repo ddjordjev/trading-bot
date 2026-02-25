@@ -19,6 +19,7 @@ export interface FullSnapshot {
   positions: (PositionInfo & { bot_id?: string; exchange_name?: string })[];
   intel: IntelSnapshot | null;
   wick_scalps: (WickScalpInfo & { bot_id?: string; exchange_name?: string })[];
+  orphan_positions?: OrphanPositionInfo[];
   logs: LogEntry[];
   bots?: BotSnapshot[];
   exchange_balances?: Record<string, number>;
@@ -125,6 +126,20 @@ export interface WickScalpInfo {
   amount: number;
   age_minutes: number;
   max_hold_minutes: number;
+}
+
+export interface OrphanPositionInfo {
+  symbol: string;
+  side: string;
+  amount: number;
+  entry_price: number;
+  current_price: number;
+  leverage: number;
+  market_type: string;
+  detected_at: string;
+  source: string;
+  exchange_name?: string;
+  detected_by_bot?: string;
 }
 
 export interface LogEntry {

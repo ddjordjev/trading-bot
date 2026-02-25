@@ -90,6 +90,26 @@ async def close_position(request: web.Request) -> web.Response:
         return _json(False, str(e))
 
 
+async def claim_position(request: web.Request) -> web.Response:
+    if not _bot:
+        return _json(False, "Bot not initialized")
+    data = await request.json()
+    symbol = data.get("symbol", "")
+    strategy = data.get("strategy", "manual_claim")
+    if not symbol:
+        return _json(False, "Missing symbol")
+    try:
+        ok, msg = await _bot._claim_orphan_position(symbol, strategy=str(strategy or "manual_claim"))
+        import asyncio
+
+        task = asyncio.create_task(_nudge_hub(full_snapshot=True))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+        return _json(ok, msg)
+    except Exception as e:
+        return _json(False, str(e))
+
+
 async def take_profit(request: web.Request) -> web.Response:
     if not _bot:
         return _json(False, "Bot not initialized")
@@ -212,6 +232,7 @@ def create_app() -> web.Application:
     app.router.add_get("/health", health)
     app.router.add_get("/metrics", metrics)
     app.router.add_post("/api/position/close", close_position)
+    app.router.add_post("/api/position/claim", claim_position)
     app.router.add_post("/api/position/take-profit", take_profit)
     app.router.add_post("/api/position/tighten-stop", tighten_stop)
     app.router.add_post("/api/close-all", close_all)
