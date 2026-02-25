@@ -34,6 +34,7 @@ class CandleFetcher:
         if cls is None:
             cls = ccxt.binance
         default_type = "future" if market_type == "futures" else "spot"
+        self._market_type = market_type
         self._exchange: ccxt.Exchange = cls(
             {
                 "enableRateLimit": True,
@@ -43,6 +44,17 @@ class CandleFetcher:
         if sandbox:
             self._exchange.set_sandbox_mode(True)
         self._loaded = False
+        self._unavailable_symbols: set[str] = set()
+
+    @staticmethod
+    def _is_unavailable_symbol_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return (
+            "invalid symbol status" in msg
+            or "does not have market symbol" in msg
+            or "bad symbol" in msg
+            or "symbol not found" in msg
+        )
 
     async def _ensure_loaded(self) -> None:
         if not self._loaded:
@@ -58,7 +70,11 @@ class CandleFetcher:
         try:
             raw = await self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         except Exception as e:
-            logger.warning("CandleFetcher: failed to fetch {} {}: {}", symbol, timeframe, e)
+            if self._is_unavailable_symbol_error(e):
+                self._unavailable_symbols.add(symbol)
+                logger.debug("CandleFetcher: skipping unavailable symbol {}: {}", symbol, e)
+            else:
+                logger.warning("CandleFetcher: failed to fetch {} {}: {}", symbol, timeframe, e)
             return []
         candles = []
         for row in raw:
@@ -99,7 +115,11 @@ class CandleFetcher:
         try:
             raw = await self._exchange.fetch_ticker(symbol)
         except Exception as e:
-            logger.warning("CandleFetcher: failed to fetch ticker {}: {}", symbol, e)
+            if self._is_unavailable_symbol_error(e):
+                self._unavailable_symbols.add(symbol)
+                logger.debug("CandleFetcher: skipping unavailable ticker symbol {}: {}", symbol, e)
+            else:
+                logger.warning("CandleFetcher: failed to fetch ticker {}: {}", symbol, e)
             return None
         bid = _safe_float(raw.get("bid")) or 0.0
         ask = _safe_float(raw.get("ask")) or 0.0
@@ -117,7 +137,16 @@ class CandleFetcher:
     def has_symbol(self, symbol: str) -> bool:
         if not self._loaded:
             return True
-        return symbol in self._exchange.markets
+        if symbol in self._unavailable_symbols:
+            return False
+        market = self._exchange.markets.get(symbol)
+        if not isinstance(market, dict):
+            return False
+        if not bool(market.get("active", True)):
+            return False
+        if self._market_type == "futures":
+            return bool(market.get("future") or market.get("swap"))
+        return bool(market.get("spot"))
 
     async def close(self) -> None:
         await self._exchange.close()

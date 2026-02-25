@@ -253,6 +253,10 @@ class BinanceFuturesScanner:
         for symbol, state in self._states.items():
             if not symbol:
                 continue
+            # Guard against stale DB state: only surface symbols that are
+            # currently known on the active Binance market inventory.
+            if self._binance_symbols and symbol not in self._binance_symbols:
+                continue
             price = self._to_float(state.get("last_price", 0.0))
             quote_volume = self._to_float(state.get("last_quote_volume", 0.0))
             change_24h = self._to_float(state.get("last_change_24h", 0.0))

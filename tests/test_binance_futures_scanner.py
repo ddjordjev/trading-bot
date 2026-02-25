@@ -52,6 +52,46 @@ class TestBinanceFuturesScanner:
         assert movers[0].symbol == "BTC/USDT"
         assert movers[0].change_1h > movers[1].change_1h
 
+    def test_compute_hot_movers_ignores_stale_symbols_not_in_exchange_inventory(self, tmp_path):
+        scanner = BinanceFuturesScanner(
+            db_path=tmp_path / "hub.db",
+            min_quote_volume=1_000_000,
+            top_movers_count=10,
+            enabled=False,
+        )
+        scanner.set_exchange_symbols({"BTC/USDT"})
+        scanner._states["BTC/USDT"] = {
+            "symbol": "BTC/USDT",
+            "last_price": 100.0,
+            "last_quote_volume": 20_000_000.0,
+            "last_change_24h": 1.0,
+            "last_funding_rate": 0.0,
+            "chg_5m": 0.2,
+            "chg_1h": 0.6,
+            "chg_1w": 0.0,
+            "chg_1mo": 0.0,
+            "confidence": 1.0,
+            "score": 2.0,
+        }
+        scanner._states["ALPACA/USDT"] = {
+            "symbol": "ALPACA/USDT",
+            "last_price": 1.0,
+            "last_quote_volume": 100_000_000.0,
+            "last_change_24h": 300.0,
+            "last_funding_rate": 0.0,
+            "chg_5m": 1.0,
+            "chg_1h": 5.0,
+            "chg_1w": 0.0,
+            "chg_1mo": 0.0,
+            "confidence": 1.0,
+            "score": 99.0,
+        }
+
+        movers = scanner._compute_hot_movers()
+        symbols = {m.symbol for m in movers}
+        assert "BTC/USDT" in symbols
+        assert "ALPACA/USDT" not in symbols
+
     def test_evict_old_samples(self, tmp_path):
         scanner = BinanceFuturesScanner(
             db_path=tmp_path / "hub.db",
