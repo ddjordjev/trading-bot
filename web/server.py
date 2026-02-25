@@ -699,8 +699,25 @@ async def trigger_openclaw_daily_review(_: str = Depends(verify_token)) -> Actio
 @app.get("/api/closed-trades")
 async def get_closed_trades(limit: int = 100, _: str = Depends(verify_token)) -> list[dict[str, Any]]:
     hub = _get_hub_db()
-    rows = hub.get_all_trades(limit=limit)
-    return [r.model_dump() for r in rows if r.closed_at]
+    # Closed-trades UI should show only executed/realized closes.
+    # Reservation cancels, recovery placeholders, and zero-size stubs pollute
+    # win-rate and PnL cards with non-trade rows.
+    fetch_limit = max(100, min(limit * 6, 2000))
+    rows = hub.get_all_trades(limit=fetch_limit)
+    filtered: list[dict[str, Any]] = []
+    for r in rows:
+        if not r.closed_at or r.action != "close":
+            continue
+        if r.close_source in {"reservation_cancel", "recovery"}:
+            continue
+        if float(r.entry_price or 0) <= 0 or float(r.amount or 0) <= 0:
+            continue
+        if float(r.exit_price or 0) <= 0 and abs(float(r.pnl_usd or 0)) < 1e-12:
+            continue
+        filtered.append(r.model_dump())
+        if len(filtered) >= limit:
+            break
+    return filtered
 
 
 @app.post("/api/analytics/refresh", response_model=ActionResponse)

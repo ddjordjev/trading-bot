@@ -2061,6 +2061,74 @@ class TestClosedTrades:
         assert len(sol_trades) >= 1
         assert sol_trades[0]["pnl_usd"] == 10.0
 
+    async def test_closed_trades_filters_non_realized_rows(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        hub = _get_hub_db()
+        # Realized close — should be returned.
+        hub.insert_trade(
+            "test_ct",
+            {
+                "symbol": "BTC/USDT",
+                "side": "long",
+                "strategy": "momentum",
+                "action": "close",
+                "entry_price": 100.0,
+                "exit_price": 102.0,
+                "amount": 1.0,
+                "pnl_usd": 2.0,
+                "pnl_pct": 2.0,
+                "is_winner": True,
+                "opened_at": "2026-02-20T10:00:00",
+                "closed_at": "2026-02-20T11:00:00",
+                "close_source": "bot_stop",
+            },
+        )
+        # Reservation-cancel placeholder — should be filtered out.
+        hub.insert_trade(
+            "test_ct",
+            {
+                "symbol": "BTC/USDT",
+                "side": "long",
+                "strategy": "momentum",
+                "action": "close",
+                "entry_price": 0.0,
+                "exit_price": 0.0,
+                "amount": 0.0,
+                "pnl_usd": 0.0,
+                "pnl_pct": 0.0,
+                "is_winner": False,
+                "opened_at": "2026-02-20T12:00:00",
+                "closed_at": "2026-02-20T12:01:00",
+                "close_source": "reservation_cancel",
+            },
+        )
+        # Recovery placeholder — should be filtered out.
+        hub.insert_trade(
+            "test_ct",
+            {
+                "symbol": "ETH/USDT",
+                "side": "long",
+                "strategy": "momentum",
+                "action": "close",
+                "entry_price": 1500.0,
+                "exit_price": 0.0,
+                "amount": 1.0,
+                "pnl_usd": 0.0,
+                "pnl_pct": 0.0,
+                "is_winner": False,
+                "opened_at": "2026-02-20T13:00:00",
+                "closed_at": "2026-02-20T14:00:00",
+                "close_source": "recovery",
+            },
+        )
+
+        r = await client.get("/api/closed-trades?limit=500")
+        assert r.status_code == 200
+        data = r.json()
+        assert any(d["symbol"] == "BTC/USDT" and d["entry_price"] == 100.0 and d["pnl_usd"] == 2.0 for d in data)
+        assert not any(d["close_source"] == "reservation_cancel" for d in data)
+        assert not any(d["close_source"] == "recovery" for d in data)
+
 
 # ── Module Toggle in Multibot Mode ─────────────────────────────────────
 

@@ -1269,6 +1269,26 @@ class TestReportDashboardSnapshot:
         assert payload["positions"]
         assert payload["positions"][0]["age_minutes"] >= 35
 
+    @pytest.mark.asyncio
+    async def test_report_dashboard_snapshot_marks_unknown_strategy_as_dynamic(self, bot):
+        bot.settings.hub_url = "http://hub.example.com"
+        bot._post_to_hub = AsyncMock()
+        static = MagicMock()
+        static.name = "compound_momentum"
+        static.symbol = "BTC/USDT"
+        bot._strategies = [static]
+        bot._strategy_stats = {
+            "compound_momentum:BTC/USDT": {"total": 2, "winners": 1, "losers": 1},
+            "trending_momentum:SOL/USDT": {"total": 3, "winners": 2, "losers": 1},
+        }
+        await bot._report_dashboard_snapshot([])
+        payload = bot._post_to_hub.call_args[0][1]
+        rows = payload["strategies"]
+        by_name = {r["name"]: r for r in rows}
+        assert by_name["compound_momentum"]["is_dynamic"] is False
+        assert by_name["trending_momentum"]["is_dynamic"] is True
+        assert payload["status"]["dynamic_strategies_count"] == 1
+
     def test_position_age_minutes_prefers_open_trade_timestamp(self, bot):
         opened_at = (datetime.now(UTC) - timedelta(minutes=25)).isoformat()
         bot._open_trades["ETH/USDT"] = TradeRecord(

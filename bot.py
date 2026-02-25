@@ -1762,25 +1762,52 @@ class TradingBot:
                 }
             )
 
+        static_strategy_names: set[str] = set()
+        static_strategy_symbols: dict[str, set[str]] = {}
+        for strat in self._strategies:
+            try:
+                name = str(getattr(strat, "name", "") or "").strip()
+                symbol = str(getattr(strat, "symbol", "") or "").strip()
+            except Exception:
+                continue
+            if not name:
+                continue
+            static_strategy_names.add(name)
+            static_strategy_symbols.setdefault(name, set()).add(symbol)
+
+        if not static_strategy_names and self.settings.bot_id:
+            with contextlib.suppress(Exception):
+                from config.bot_profiles import PROFILES_BY_ID
+
+                profile = PROFILES_BY_ID.get(self.settings.bot_id)
+                if profile:
+                    static_strategy_names |= {str(s).strip() for s in profile.strategies if str(s).strip()}
+
         strat_list = []
         open_syms = set(self.orders.scaler.active_positions.keys())
         for key, stats in self._strategy_stats.items():
             parts = key.split(":", 1)
             sname = parts[0]
             ssym = parts[1] if len(parts) > 1 else ""
+            static_symbols = static_strategy_symbols.get(sname, set())
+            is_dynamic = bool(
+                (static_strategy_names and sname not in static_strategy_names)
+                or (static_symbols and ssym and ssym not in static_symbols)
+            )
             strat_list.append(
                 {
                     "name": sname,
                     "symbol": ssym,
                     "market_type": "futures",
                     "leverage": self.settings.default_leverage,
-                    "is_dynamic": False,
+                    "is_dynamic": is_dynamic,
                     "open_now": 1 if ssym in open_syms else 0,
                     "applied_count": stats.get("total") or 0,
                     "success_count": stats.get("winners") or 0,
                     "fail_count": stats.get("losers") or 0,
                 }
             )
+        dynamic_strategies_count = sum(1 for s in strat_list if bool(s.get("is_dynamic")))
         margin_used = 0.0
         for sp in self.orders.scaler.active_positions.values():
             margin_used += sp.avg_entry_price * sp.current_size / max(sp.current_leverage, 1)
@@ -1821,6 +1848,7 @@ class TradingBot:
                 "total_growth_usd": total_balance - self.target._initial_capital,
                 "uptime_seconds": time.time() - self._started_at.timestamp() if self._started_at else 0,
                 "strategies_count": len(self._strategies),
+                "dynamic_strategies_count": dynamic_strategies_count,
                 "profit_buffer_pct": self.target.profit_buffer_pct,
                 "manual_stop_active": self.target.manual_stop,
                 "orphan_positions_count": len(self._orphan_positions),
