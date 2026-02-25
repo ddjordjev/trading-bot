@@ -52,23 +52,33 @@ class PaperExchange(BaseExchange):
     # -- Market Data (pass-through to real exchange) --
 
     @timed("exchange.fetch_ticker")
-    async def fetch_ticker(self, symbol: str) -> Ticker:
+    async def fetch_ticker(self, symbol: str, market_type: MarketType = MarketType.SPOT) -> Ticker:
         cached = self._ticker_cache.get(symbol)
         if cached and (time.monotonic() - cached[0]) < _TICKER_CACHE_TTL:
             return cached[1]
-        ticker = await self._real.fetch_ticker(symbol)
+        ticker = await self._real.fetch_ticker(symbol, market_type=market_type)
         self._ticker_cache[symbol] = (time.monotonic(), ticker)
         return ticker
 
-    async def fetch_tickers(self, symbols: list[str] | None = None) -> list[Ticker]:
-        return await self._real.fetch_tickers(symbols)
+    async def fetch_tickers(
+        self, symbols: list[str] | None = None, market_type: MarketType = MarketType.SPOT
+    ) -> list[Ticker]:
+        return await self._real.fetch_tickers(symbols, market_type=market_type)
 
     @timed("exchange.fetch_candles")
-    async def fetch_candles(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list[Candle]:
-        return await self._real.fetch_candles(symbol, timeframe, limit)
+    async def fetch_candles(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        limit: int = 100,
+        market_type: MarketType = MarketType.SPOT,
+    ) -> list[Candle]:
+        return await self._real.fetch_candles(symbol, timeframe, limit, market_type=market_type)
 
-    async def fetch_order_book(self, symbol: str, limit: int = 20) -> OrderBook:
-        return await self._real.fetch_order_book(symbol, limit)
+    async def fetch_order_book(
+        self, symbol: str, limit: int = 20, market_type: MarketType = MarketType.SPOT
+    ) -> OrderBook:
+        return await self._real.fetch_order_book(symbol, limit, market_type=market_type)
 
     # -- Account --
 
@@ -78,7 +88,8 @@ class PaperExchange(BaseExchange):
         for pos in self._positions:
             margin = pos.entry_price * pos.amount / max(pos.leverage, 1)
             try:
-                ticker = await self.fetch_ticker(pos.symbol)
+                mt = MarketType.FUTURES if pos.market_type == "futures" else MarketType.SPOT
+                ticker = await self.fetch_ticker(pos.symbol, market_type=mt)
                 if pos.side == OrderSide.BUY:
                     pnl = (ticker.last - pos.entry_price) * pos.amount
                 else:
@@ -96,7 +107,8 @@ class PaperExchange(BaseExchange):
         targets = [p for p in self._positions if p.symbol == symbol] if symbol else list(self._positions)
         for pos in targets:
             try:
-                ticker = await self.fetch_ticker(pos.symbol)
+                mt = MarketType.FUTURES if pos.market_type == "futures" else MarketType.SPOT
+                ticker = await self.fetch_ticker(pos.symbol, market_type=mt)
                 pos.current_price = ticker.last
                 if pos.entry_price > 0:
                     if pos.side == OrderSide.BUY:

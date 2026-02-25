@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
@@ -499,6 +499,30 @@ class TestProcessSignalAndQueue:
         bot._execute_proposal.assert_called_once()
         bot._report_queue_outcome.assert_called_once()
         assert bot._hub_proposal is None
+
+    @pytest.mark.asyncio
+    async def test_validate_proposal_uses_proposal_market_type(self, bot, mock_exchange):
+        from core.models import MarketType
+        from shared.models import SignalPriority, TradeProposal
+        from validators import ValidationResult
+
+        mock_exchange.fetch_candles = AsyncMock(return_value=[])
+        mock_exchange.fetch_ticker = AsyncMock(return_value=MagicMock(last=50_000.0))
+        bot._validator.validate = MagicMock(return_value=ValidationResult(valid=True, reason="ok"))
+        proposal = TradeProposal(
+            priority=SignalPriority.CRITICAL,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="momentum",
+            reason="test",
+            strength=0.8,
+            market_type="futures",
+        )
+
+        result = await bot._validate_proposal(proposal)
+        assert result.valid is True
+        mock_exchange.fetch_candles.assert_called_once_with("BTC/USDT", "1m", limit=50, market_type=MarketType.FUTURES)
+        mock_exchange.fetch_ticker.assert_called_once_with("BTC/USDT", market_type=MarketType.FUTURES)
 
     @pytest.mark.asyncio
     async def test_execute_proposal_success(self, bot, mock_exchange):
@@ -1209,6 +1233,54 @@ class TestReportDashboardSnapshot:
         assert "payload" in str(call_args) or call_args[1]["status"]
         assert "bot_id" in call_args[1]
 
+    @pytest.mark.asyncio
+    async def test_report_dashboard_snapshot_uses_open_trade_timestamp_for_age(self, bot):
+        bot.settings.hub_url = "http://hub.example.com"
+        bot._post_to_hub = AsyncMock()
+        bot._sync_runtime_trade_if_changed = AsyncMock()
+
+        opened_at = (datetime.now(UTC) - timedelta(minutes=37)).isoformat()
+        bot._open_trades["BTC/USDT"] = TradeRecord(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="compound_momentum",
+            action="open",
+            opened_at=opened_at,
+        )
+
+        pos = MagicMock()
+        pos.symbol = "BTC/USDT"
+        pos.side = OrderSide.BUY
+        pos.amount = 0.02
+        pos.entry_price = 50000.0
+        pos.current_price = 50500.0
+        pos.pnl_pct = 2.0
+        pos.unrealized_pnl = 10.0
+        pos.leverage = 5
+        pos.market_type = "futures"
+        pos.strategy = "compound_momentum"
+        pos.notional_value = 1010.0
+        # Simulate exchange adapter behavior (fresh Position object each fetch).
+        pos.opened_at = datetime.now(UTC)
+
+        await bot._report_dashboard_snapshot([pos])
+
+        payload = bot._post_to_hub.call_args[0][1]
+        assert payload["positions"]
+        assert payload["positions"][0]["age_minutes"] >= 35
+
+    def test_position_age_minutes_prefers_open_trade_timestamp(self, bot):
+        opened_at = (datetime.now(UTC) - timedelta(minutes=25)).isoformat()
+        bot._open_trades["ETH/USDT"] = TradeRecord(
+            symbol="ETH/USDT",
+            side="long",
+            strategy="compound_momentum",
+            action="open",
+            opened_at=opened_at,
+        )
+        age = bot._position_age_minutes("ETH/USDT", datetime.now(UTC))
+        assert age >= 23
+
 
 # ── start / stop lifecycle ───────────────────────────────────────────────────
 
@@ -1580,8 +1652,10 @@ class TestTickStrategyLoop:
 
             await bot._tick()
 
-        mock_exchange.fetch_candles.assert_called_with("BTC/USDT", "1m", limit=200)
-        mock_exchange.fetch_ticker.assert_called_with("BTC/USDT")
+        from core.models import MarketType
+
+        mock_exchange.fetch_candles.assert_called_with("BTC/USDT", "1m", limit=200, market_type=MarketType.FUTURES)
+        mock_exchange.fetch_ticker.assert_called_with("BTC/USDT", market_type=MarketType.FUTURES)
 
     @pytest.mark.asyncio
     async def test_tick_no_positions_no_candle_fetch(self, bot, mock_exchange):

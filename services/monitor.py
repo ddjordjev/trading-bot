@@ -215,8 +215,9 @@ class MonitorService:
 
                 exchange_id = self.settings.exchange if hasattr(self.settings, "exchange") else "binance"
                 sandbox = self.settings.trading_mode in ("paper_live",)
-                self._candle_fetcher = CandleFetcher(exchange_id=exchange_id, sandbox=sandbox)
-                logger.info("Candle fetcher initialized: {} (sandbox={})", exchange_id, sandbox)
+                market_type = "futures" if self.settings.futures_allowed else "spot"
+                self._candle_fetcher = CandleFetcher(exchange_id=exchange_id, sandbox=sandbox, market_type=market_type)
+                logger.info("Candle fetcher initialized: {} {} (sandbox={})", exchange_id, market_type, sandbox)
             except Exception as e:
                 logger.warning("Candle fetcher init failed (TA disabled): {}", e)
 
@@ -380,6 +381,7 @@ class MonitorService:
         """Fetch symbol lists from all supported exchanges via CCXT."""
         import ccxt.async_support as ccxt
 
+        preferred_market = "futures" if self.settings.futures_allowed else "spot"
         fresh: dict[str, set[str]] = {}
         for exchange_id in self._SUPPORTED_EXCHANGES:
             cls = getattr(ccxt, exchange_id, None)
@@ -393,7 +395,20 @@ class MonitorService:
                     with contextlib.suppress(Exception):
                         ex.set_sandbox_mode(True)
                 await ex.load_markets()
-                symbols = {s.split(":")[0] for s in ex.markets}
+                symbols: set[str] = set()
+                for raw_symbol, market in ex.markets.items():
+                    if not isinstance(market, dict):
+                        continue
+                    if not bool(market.get("active", True)):
+                        continue
+                    if preferred_market == "futures":
+                        is_futures = bool(market.get("future") or market.get("swap"))
+                        if not is_futures:
+                            continue
+                    else:
+                        if not bool(market.get("spot")):
+                            continue
+                    symbols.add(raw_symbol.split(":")[0])
                 fresh[exchange_id.upper()] = symbols
                 if exchange_id == "binance" and self.settings.trading_mode == "paper_live":
                     logger.info("Fetched {} symbols from {} TESTNET", len(symbols), exchange_id.upper())

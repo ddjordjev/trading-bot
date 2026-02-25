@@ -417,6 +417,7 @@ class TradingBot:
                     ts = self.orders.trailing.active_stops.get(pos.symbol)
                     sp = self.orders.scaler.get(pos.symbol)
                     risk = self._build_position_risk_snapshot(pos, ts)
+                    age_minutes = self._position_age_minutes(pos.symbol, getattr(pos, "opened_at", None))
                     pos_list.append(
                         {
                             "symbol": pos.symbol,
@@ -430,7 +431,7 @@ class TradingBot:
                             "market_type": pos.market_type,
                             "strategy": pos.strategy,
                             "notional_value": pos.notional_value,
-                            "age_minutes": 0,
+                            "age_minutes": age_minutes,
                             "breakeven_locked": ts.breakeven_locked if ts else False,
                             "scale_mode": sp.mode.value if sp else "",
                             "scale_phase": sp.phase.value if sp else "",
@@ -810,10 +811,11 @@ class TradingBot:
         pos_by_symbol = {p.symbol: p for p in positions if p.amount > 0}
         for sym in held_symbols:
             try:
-                candles = await self.exchange.fetch_candles(sym, "1m", limit=200)
-                ticker = await self.exchange.fetch_ticker(sym)
-                candles_map[sym] = candles
                 pos = pos_by_symbol.get(sym)
+                mkt = MarketType.FUTURES if pos and pos.market_type == "futures" else MarketType.SPOT
+                candles = await self.exchange.fetch_candles(sym, "1m", limit=200, market_type=mkt)
+                ticker = await self.exchange.fetch_ticker(sym, market_type=mkt)
+                candles_map[sym] = candles
                 if pos:
                     guard_level = self._structure_guard_level(candles, ticker.last or pos.current_price, pos.side.value)
                     self.orders.set_structure_guard(sym, guard_level)
@@ -950,9 +952,10 @@ class TradingBot:
 
     async def _validate_proposal(self, proposal: TradeProposal) -> ValidationResult:
         """Run the bot-type-specific validator on a single proposal."""
+        market_type = MarketType.FUTURES if proposal.market_type == "futures" else MarketType.SPOT
         try:
-            candles = await self.exchange.fetch_candles(proposal.symbol, "1m", limit=50)
-            ticker = await self.exchange.fetch_ticker(proposal.symbol)
+            candles = await self.exchange.fetch_candles(proposal.symbol, "1m", limit=50, market_type=market_type)
+            ticker = await self.exchange.fetch_ticker(proposal.symbol, market_type=market_type)
         except Exception as e:
             return ValidationResult(valid=False, reason=f"data fetch failed: {e}")
 
@@ -983,8 +986,9 @@ class TradingBot:
             logger.info("Queue reject {}: validator says '{}' ({})", proposal.symbol, result.reason, proposal.strategy)
             return False
 
+        market_type = MarketType.FUTURES if proposal.market_type == "futures" else MarketType.SPOT
         try:
-            ticker = await self.exchange.fetch_ticker(proposal.symbol)
+            ticker = await self.exchange.fetch_ticker(proposal.symbol, market_type=market_type)
             price = ticker.last
         except Exception as e:
             logger.error("Queue: can't fetch price for {}: {}", proposal.symbol, e)
@@ -1053,8 +1057,9 @@ class TradingBot:
         plan = proposal.entry_plan
         strength = min(1.0, proposal.strength * aggression)
 
+        market_type = MarketType.FUTURES if proposal.market_type == "futures" else MarketType.SPOT
         try:
-            ticker = await self.exchange.fetch_ticker(proposal.symbol)
+            ticker = await self.exchange.fetch_ticker(proposal.symbol, market_type=market_type)
             price = ticker.last
         except Exception as e:
             logger.error("Queue: can't fetch price for {}: {}", proposal.symbol, e)
@@ -1483,14 +1488,13 @@ class TradingBot:
 
     async def _report_dashboard_snapshot(self, active_positions: list[Any]) -> None:
         """Build and send dashboard snapshot to the central hub."""
-        import time as _time
-
         pos_list = []
         for pos in active_positions:
             ts = self.orders.trailing.active_stops.get(pos.symbol)
             sp = self.orders.scaler.get(pos.symbol)
             risk = self._build_position_risk_snapshot(pos, ts)
             await self._sync_runtime_trade_if_changed(pos.symbol)
+            age_minutes = self._position_age_minutes(pos.symbol, getattr(pos, "opened_at", None))
             pos_list.append(
                 {
                     "symbol": pos.symbol,
@@ -1504,7 +1508,7 @@ class TradingBot:
                     "market_type": pos.market_type,
                     "strategy": pos.strategy,
                     "notional_value": pos.notional_value,
-                    "age_minutes": ((_time.time() - pos.opened_at.timestamp()) / 60 if pos.opened_at else 0),
+                    "age_minutes": age_minutes,
                     "breakeven_locked": ts.breakeven_locked if ts else False,
                     "scale_mode": sp.mode.value if sp else "",
                     "scale_phase": sp.phase.value if sp else "",
@@ -1701,6 +1705,21 @@ class TradingBot:
             return
         self._last_runtime_sync[symbol] = signature
         await self._push_trade_to_hub(rec, action_override="update")
+
+    def _position_age_minutes(self, symbol: str, pos_opened_at: datetime | None) -> float:
+        """Compute position age preferring hub-synced opened_at from open trades."""
+        age_minutes = 0.0
+        rec = self._open_trades.get(symbol)
+        if rec and rec.opened_at:
+            with contextlib.suppress(Exception):
+                opened_dt = datetime.fromisoformat(rec.opened_at)
+                if opened_dt.tzinfo is None:
+                    opened_dt = opened_dt.replace(tzinfo=UTC)
+                age_minutes = max(0.0, (datetime.now(UTC) - opened_dt.astimezone(UTC)).total_seconds() / 60)
+        if age_minutes <= 0 and pos_opened_at:
+            with contextlib.suppress(Exception):
+                age_minutes = max(0.0, (time.time() - pos_opened_at.timestamp()) / 60)
+        return age_minutes
 
     # ---- Hub state recovery & in-memory stats ----
 

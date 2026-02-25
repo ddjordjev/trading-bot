@@ -885,7 +885,9 @@ class SignalGenerator:
         strategies get progressively weaker signals.
         """
         if not self._symbol_tradeable(proposal.symbol):
-            logger.warning("Skipping {}: not on any known exchange", proposal.symbol)
+            # Keep this at debug while we stabilize symbol hygiene end-to-end.
+            # If filtering stays clean, we can remove this log entirely.
+            logger.debug("Skipping {}: not on any known exchange", proposal.symbol)
             return
 
         if self._rejection_cooldown_active(proposal.symbol, proposal.strategy):

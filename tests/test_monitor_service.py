@@ -507,6 +507,75 @@ class TestRouteToBotsMonitor:
         call_queue = hub_state.write_trade_queue.call_args[0][0]
         assert call_queue.pending_count >= 1
 
+    def test_route_to_bots_filters_untradeable_symbols(self, monitor):
+        from shared.models import SignalPriority, TradeProposal
+
+        hub_state = HubState()
+        monitor.state = hub_state
+        monitor._exchange_symbols = {"BINANCE": {"BTC/USDT"}}
+
+        staging = TradeQueue()
+        staging.add(
+            TradeProposal(
+                priority=SignalPriority.DAILY,
+                symbol="FAKE/USDT",
+                side="long",
+                strength=0.6,
+                supported_exchanges=["BINANCE"],
+            )
+        )
+        staging.add(
+            TradeProposal(
+                priority=SignalPriority.DAILY,
+                symbol="BTC/USDT",
+                side="long",
+                strength=0.7,
+                supported_exchanges=["BINANCE"],
+            )
+        )
+
+        with patch("db.hub_store.HubDB") as mock_db_cls:
+            mock_db = MagicMock()
+            mock_db.connect = MagicMock()
+            mock_db.close = MagicMock()
+            mock_db.get_open_trade_symbols = MagicMock(return_value=set())
+            mock_db_cls.return_value = mock_db
+            monitor._route_to_bots(staging, [])
+
+        queued = hub_state.read_trade_queue().proposals
+        assert len(queued) == 1
+        assert queued[0].symbol == "BTC/USDT"
+
+
+class TestExchangeSymbolFiltering:
+    @pytest.mark.asyncio
+    async def test_fetch_exchange_symbols_filters_by_market_type_and_active(self, monitor):
+        class FakeExchange:
+            def __init__(self, *_args, **_kwargs):
+                self.markets = {}
+
+            def set_sandbox_mode(self, *_args, **_kwargs):
+                return None
+
+            async def load_markets(self):
+                self.markets = {
+                    "BTC/USDT": {"spot": True, "future": False, "swap": False, "active": True},
+                    "ETH/USDT:USDT": {"spot": False, "future": False, "swap": True, "active": True},
+                    "BAD/USDT:USDT": {"spot": False, "future": False, "swap": True, "active": False},
+                }
+
+            async def close(self):
+                return None
+
+        monitor._SUPPORTED_EXCHANGES = ("binance",)
+        monitor.settings.futures_allowed = True
+        monitor.settings.trading_mode = "paper_live"
+
+        with patch("ccxt.async_support.binance", FakeExchange):
+            await monitor._fetch_exchange_symbols()
+
+        assert monitor._exchange_symbols["BINANCE"] == {"ETH/USDT"}
+
 
 # ── _on_news ─────────────────────────────────────────────────────────
 

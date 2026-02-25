@@ -66,16 +66,26 @@ class BaseExchange(ABC):
     # -- Market Data --
 
     @abstractmethod
-    async def fetch_ticker(self, symbol: str) -> Ticker: ...
+    async def fetch_ticker(self, symbol: str, market_type: MarketType = MarketType.SPOT) -> Ticker: ...
 
     @abstractmethod
-    async def fetch_tickers(self, symbols: list[str] | None = None) -> list[Ticker]: ...
+    async def fetch_tickers(
+        self, symbols: list[str] | None = None, market_type: MarketType = MarketType.SPOT
+    ) -> list[Ticker]: ...
 
     @abstractmethod
-    async def fetch_candles(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list[Candle]: ...
+    async def fetch_candles(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        limit: int = 100,
+        market_type: MarketType = MarketType.SPOT,
+    ) -> list[Candle]: ...
 
     @abstractmethod
-    async def fetch_order_book(self, symbol: str, limit: int = 20) -> OrderBook: ...
+    async def fetch_order_book(
+        self, symbol: str, limit: int = 20, market_type: MarketType = MarketType.SPOT
+    ) -> OrderBook: ...
 
     # -- Account --
 

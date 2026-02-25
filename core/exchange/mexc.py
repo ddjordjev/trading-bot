@@ -63,7 +63,8 @@ class MexcExchange(BaseExchange):
 
     # -- Market Data --
 
-    async def fetch_ticker(self, symbol: str) -> Ticker:
+    async def fetch_ticker(self, symbol: str, market_type: MarketType = MarketType.SPOT) -> Ticker:
+        _ = market_type
         data = await self._spot.fetch_ticker(symbol)
         return Ticker(
             symbol=symbol,
@@ -75,7 +76,10 @@ class MexcExchange(BaseExchange):
             timestamp=ts_to_dt(data.get("timestamp")),
         )
 
-    async def fetch_tickers(self, symbols: list[str] | None = None) -> list[Ticker]:
+    async def fetch_tickers(
+        self, symbols: list[str] | None = None, market_type: MarketType = MarketType.SPOT
+    ) -> list[Ticker]:
+        _ = market_type
         raw = await self._spot.fetch_tickers(symbols)
         tickers = []
         for sym, data in raw.items():
@@ -92,7 +96,14 @@ class MexcExchange(BaseExchange):
             )
         return tickers
 
-    async def fetch_candles(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list[Candle]:
+    async def fetch_candles(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        limit: int = 100,
+        market_type: MarketType = MarketType.SPOT,
+    ) -> list[Candle]:
+        _ = market_type
         data = await self._spot.fetch_ohlcv(symbol, timeframe, limit=limit)
         return [
             Candle(
@@ -106,7 +117,10 @@ class MexcExchange(BaseExchange):
             for c in data
         ]
 
-    async def fetch_order_book(self, symbol: str, limit: int = 20) -> OrderBook:
+    async def fetch_order_book(
+        self, symbol: str, limit: int = 20, market_type: MarketType = MarketType.SPOT
+    ) -> OrderBook:
+        _ = market_type
         data = await self._spot.fetch_order_book(symbol, limit)
         return OrderBook(
             symbol=symbol,

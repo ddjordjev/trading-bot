@@ -29,14 +29,15 @@ def _safe_float(x: object) -> float | None:
 class CandleFetcher:
     """Async candle/ticker fetcher backed by a ccxt exchange instance."""
 
-    def __init__(self, exchange_id: str = "binance", sandbox: bool = False) -> None:
+    def __init__(self, exchange_id: str = "binance", sandbox: bool = False, market_type: str = "futures") -> None:
         cls = getattr(ccxt, exchange_id.lower(), None)
         if cls is None:
             cls = ccxt.binance
+        default_type = "future" if market_type == "futures" else "spot"
         self._exchange: ccxt.Exchange = cls(
             {
                 "enableRateLimit": True,
-                "options": {"defaultType": "future"},
+                "options": {"defaultType": default_type},
             }
         )
         if sandbox:

@@ -129,8 +129,8 @@ class BinanceExchange(BaseExchange):
         logger.info("Binance disconnected")
 
     @timed("exchange.fetch_ticker")
-    async def fetch_ticker(self, symbol: str) -> Ticker:
-        data = await self._spot.fetch_ticker(symbol)
+    async def fetch_ticker(self, symbol: str, market_type: MarketType = MarketType.SPOT) -> Ticker:
+        data = await self._client(market_type).fetch_ticker(symbol)
         return Ticker(
             symbol=symbol,
             bid=data.get("bid", 0) or 0,
@@ -141,8 +141,10 @@ class BinanceExchange(BaseExchange):
             timestamp=ts_to_dt(data.get("timestamp")),
         )
 
-    async def fetch_tickers(self, symbols: list[str] | None = None) -> list[Ticker]:
-        raw = await self._spot.fetch_tickers(symbols)
+    async def fetch_tickers(
+        self, symbols: list[str] | None = None, market_type: MarketType = MarketType.SPOT
+    ) -> list[Ticker]:
+        raw = await self._client(market_type).fetch_tickers(symbols)
         return [
             Ticker(
                 symbol=sym,
@@ -157,12 +159,20 @@ class BinanceExchange(BaseExchange):
         ]
 
     @timed("exchange.fetch_candles")
-    async def fetch_candles(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list[Candle]:
-        data = await self._spot.fetch_ohlcv(symbol, timeframe, limit=limit)
+    async def fetch_candles(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        limit: int = 100,
+        market_type: MarketType = MarketType.SPOT,
+    ) -> list[Candle]:
+        data = await self._client(market_type).fetch_ohlcv(symbol, timeframe, limit=limit)
         return [Candle(timestamp=ts_to_dt(c[0]), open=c[1], high=c[2], low=c[3], close=c[4], volume=c[5]) for c in data]
 
-    async def fetch_order_book(self, symbol: str, limit: int = 20) -> OrderBook:
-        data = await self._spot.fetch_order_book(symbol, limit)
+    async def fetch_order_book(
+        self, symbol: str, limit: int = 20, market_type: MarketType = MarketType.SPOT
+    ) -> OrderBook:
+        data = await self._client(market_type).fetch_order_book(symbol, limit)
         return OrderBook(
             symbol=symbol,
             bids=[(b[0], b[1]) for b in data.get("bids", [])],
