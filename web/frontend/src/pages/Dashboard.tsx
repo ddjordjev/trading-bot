@@ -297,14 +297,13 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
               <tr>
                 <th>Symbol</th>
                 {showBotColumn && <th>Exchange</th>}
-                {showBotColumn && <th>Bot strategy</th>}
+                {showBotColumn && <th>Bot</th>}
                 <th>Entry</th>
                 <th>Current</th>
                 <th>Size</th>
                 <th>Margin</th>
                 <th>PnL</th>
-                <th>SL / TP</th>
-                <th>Strategy</th>
+                <th>CEX SL / BOT SL</th>
                 <th>Age</th>
                 <th>Actions</th>
               </tr>

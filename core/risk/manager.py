@@ -17,6 +17,7 @@ class RiskManager:
     """
 
     def __init__(self, settings: Settings):
+        self._settings = settings
         self.max_position_pct = settings.effective_max_position_size_pct
         self._base_max_daily_loss_pct = settings.effective_max_daily_loss_pct
         self.max_daily_loss_pct = self._base_max_daily_loss_pct
@@ -25,6 +26,9 @@ class RiskManager:
         self.max_concurrent = settings.effective_max_concurrent_positions
         self.min_strength = settings.effective_min_signal_strength
         self.loss_cooldown_threshold = settings.effective_consecutive_loss_cooldown
+        # Paper-live research mode needs more room to deploy multiple ideas.
+        # Keep live trading conservative at the historical 1.5x cap.
+        self.max_total_exposure_mult = 5.0 if settings.is_paper_live() else 1.5
 
         self._daily_pnl: float = 0.0
         self._day_start_balance: float = 0.0
@@ -155,9 +159,13 @@ class RiskManager:
                 logger.warning("Risk REJECT {}: size ${:.0f} > max ${:.0f}", signal.symbol, position_value, max_allowed)
                 return False
 
-        if total_exposure > balance * 1.5:
+        if total_exposure > balance * self.max_total_exposure_mult:
             logger.warning(
-                "Risk REJECT {}: exposure ${:.0f} > 1.5x balance ${:.0f}", signal.symbol, total_exposure, balance
+                "Risk REJECT {}: exposure ${:.0f} > {:.1f}x balance ${:.0f}",
+                signal.symbol,
+                total_exposure,
+                self.max_total_exposure_mult,
+                balance,
             )
             return False
 

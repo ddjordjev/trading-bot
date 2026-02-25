@@ -113,6 +113,7 @@ class TradingBot:
         self._open_trades: dict[str, TradeRecord] = {}
         self._position_targets: dict[str, dict[str, float]] = {}
         self._last_runtime_sync: dict[str, tuple[float, float, str, str]] = {}
+        self._runtime_missing_counts: dict[str, int] = {}
         self._pending_hub_acks: dict[str, dict[str, Any]] = {}
         self._strategy_stats: dict[str, dict[str, Any]] = {}
         self._running = False
@@ -429,7 +430,7 @@ class TradingBot:
                             "pnl_usd": pos.unrealized_pnl,
                             "leverage": pos.leverage,
                             "market_type": pos.market_type,
-                            "strategy": pos.strategy,
+                            "strategy": self._resolve_position_strategy(pos),
                             "notional_value": pos.notional_value,
                             "age_minutes": age_minutes,
                             "breakeven_locked": ts.breakeven_locked if ts else False,
@@ -464,6 +465,24 @@ class TradingBot:
         elif self.target.manual_stop:
             # Drop any stale proposal while halted.
             self._hub_proposal = None
+
+    def _resolve_position_strategy(self, pos: Any) -> str:
+        """Resolve strategy label for a live position from available runtime state."""
+        direct = str(getattr(pos, "strategy", "") or "").strip()
+        if direct:
+            return direct
+        symbol = str(getattr(pos, "symbol", "") or "").strip()
+        if not symbol:
+            return "—"
+        sp = self.orders.scaler.get(symbol)
+        scaler_strategy = str(getattr(sp, "strategy", "") or "").strip() if sp else ""
+        if scaler_strategy:
+            return scaler_strategy
+        rec = self._open_trades.get(symbol)
+        trade_strategy = str(getattr(rec, "strategy", "") or "").strip() if rec else ""
+        if trade_strategy:
+            return trade_strategy
+        return "—"
 
     def _check_enabled(self) -> bool:
         """Check hub-controlled enable flag (received via /internal/report response)."""
@@ -812,7 +831,9 @@ class TradingBot:
         for sym in held_symbols:
             try:
                 pos = pos_by_symbol.get(sym)
-                mkt = MarketType.FUTURES if pos and pos.market_type == "futures" else MarketType.SPOT
+                raw_market_type = getattr(pos, "market_type", None) if pos else None
+                pos_market_type = raw_market_type.lower() if isinstance(raw_market_type, str) else "futures"
+                mkt = MarketType.SPOT if pos_market_type == "spot" else MarketType.FUTURES
                 candles = await self.exchange.fetch_candles(sym, "1m", limit=200, market_type=mkt)
                 ticker = await self.exchange.fetch_ticker(sym, market_type=mkt)
                 candles_map[sym] = candles
@@ -1320,6 +1341,7 @@ class TradingBot:
 
     WHALE_NOTIONAL_THRESHOLD = 100_000.0
     WHALE_PROFIT_PCT_THRESHOLD = 20.0
+    _RUNTIME_STALE_MISS_THRESHOLD = 3
 
     async def _check_whale_positions(self) -> None:
         """Alert once per position when it hits $100K+ notional AND 20%+ profit."""
@@ -1383,6 +1405,24 @@ class TradingBot:
         effective_tp = exchange_tp if exchange_tp > 0 else bot_tp
         stop_source = "exchange" if exchange_sl > 0 else ("bot" if bot_sl > 0 else "none")
         tp_source = "exchange" if exchange_tp > 0 else ("bot" if bot_tp > 0 else "none")
+
+        logger.debug(
+            "SL snapshot {} side={} entry={:.6f} current={:.6f} ex_sl={:.6f} bot_sl={:.6f} eff_sl={:.6f} stop_src={} ex_tp={:.6f} bot_tp={:.6f} eff_tp={:.6f} tp_src={} has_trail={} has_open_rec={}",
+            symbol,
+            side_l or "unknown",
+            entry,
+            current,
+            exchange_sl,
+            bot_sl,
+            effective_sl,
+            stop_source,
+            exchange_tp,
+            bot_tp,
+            effective_tp,
+            tp_source,
+            bool(ts),
+            bool(rec),
+        )
 
         risk_state = "none"
         close_pending = False
@@ -1506,7 +1546,7 @@ class TradingBot:
                     "pnl_usd": pos.unrealized_pnl,
                     "leverage": pos.leverage,
                     "market_type": pos.market_type,
-                    "strategy": pos.strategy,
+                    "strategy": self._resolve_position_strategy(pos),
                     "notional_value": pos.notional_value,
                     "age_minutes": age_minutes,
                     "breakeven_locked": ts.breakeven_locked if ts else False,
@@ -1788,6 +1828,12 @@ class TradingBot:
                 }
                 recovered += 1
             else:
+                logger.warning(
+                    "Startup reconcile mismatch [{}]: hub open {} not found on exchange snapshot (live_positions={})",
+                    bot_id,
+                    symbol,
+                    len(exchange_positions),
+                )
                 opened_at = td.get("opened_at", "")
                 if opened_at:
                     try:
@@ -1812,7 +1858,27 @@ class TradingBot:
         if self.settings.is_paper_local():
             return
         exchange_symbols = {p.symbol for p in positions if p.amount > 0}
-        stale_symbols = [sym for sym in list(self._open_trades.keys()) if sym not in exchange_symbols]
+        tracked_symbols = list(self._open_trades.keys())
+        for sym in tracked_symbols:
+            if sym in exchange_symbols:
+                self._runtime_missing_counts.pop(sym, None)
+                continue
+            misses = self._runtime_missing_counts.get(sym, 0) + 1
+            self._runtime_missing_counts[sym] = misses
+            logger.warning(
+                "Runtime reconcile miss {} for {} (exchange_positions={}, tracked_open={})",
+                misses,
+                sym,
+                len(exchange_symbols),
+                len(tracked_symbols),
+            )
+
+        stale_symbols = [
+            sym
+            for sym in tracked_symbols
+            if sym not in exchange_symbols
+            and self._runtime_missing_counts.get(sym, 0) >= self._RUNTIME_STALE_MISS_THRESHOLD
+        ]
         if not stale_symbols:
             return
 
@@ -1822,6 +1888,7 @@ class TradingBot:
             rec = self._open_trades.pop(sym, None)
             self._position_targets.pop(sym, None)
             self._last_runtime_sync.pop(sym, None)
+            self._runtime_missing_counts.pop(sym, None)
             self.orders.scaler.remove(sym)
             self.orders.trailing.remove(sym)
             self.orders.trailing.remove(f"{sym}:hedge")

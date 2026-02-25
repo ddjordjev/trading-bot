@@ -41,6 +41,16 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
 
   const botId = (p as any).bot_id || "";
   const exchangeName = (p as any).exchange_name || "";
+  const stopSource = (p.stop_source || "").toLowerCase();
+  const isCexActive = stopSource === "exchange";
+  const isBotActive = stopSource === "bot";
+  const formatStop = (value: number | null | undefined) => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "—";
+    return value.toFixed(value < 1 ? 6 : 2);
+  };
+  const hasStop = (value: number | null | undefined) => typeof value === "number" && Number.isFinite(value) && value > 0;
+  const cexSl = hasStop(p.exchange_stop_loss) ? p.exchange_stop_loss : null;
+  const botSl = hasStop(p.bot_stop_loss) ? p.bot_stop_loss : null;
 
   return (
     <tr>
@@ -107,59 +117,57 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
         <br />
         {p.pnl_pct >= 0 ? "+" : ""}{p.pnl_pct.toFixed(2)}%
       </td>
-      <td>
-        {(() => {
-          const sl = p.effective_stop_loss ?? p.stop_loss;
-          const tp = p.effective_take_profit ?? p.take_profit;
-          const e = p.entry_price;
-          const s = p.side.toLowerCase();
-          const isLong = s === "long" || s === "buy";
-          const tick =
-            e >= 10000 ? 10
-            : e >= 100 ? 1
-            : e >= 10 ? 0.1
-            : e >= 1 ? 0.001
-            : Math.max(e * 0.001, 1e-6);
-
-          let label: "PR" | "BE" | "LO" = "LO";
-          if (sl && e > 0) {
-            const diff = isLong ? sl - e : e - sl;
-            label = diff > 2 * tick ? "PR" : diff > 0 ? "BE" : "LO";
-          }
-          const color = label === "PR" ? "var(--green)" : label === "LO" ? "var(--red)" : "var(--yellow)";
-          return (
-            <>
-              <div>
-                <span style={{ color: "var(--text-muted)", fontSize: "0.65rem" }}>SL</span>{" "}
-                {sl ? sl.toFixed(sl < 1 ? 6 : 2) : "—"}
-                <span className="badge" style={{ background: color + "22", color, marginLeft: 4, fontSize: "0.65rem" }}>
-                  {label}{p.breakeven_locked ? " ✓" : ""}
-                </span>
-                {p.close_pending && (
-                  <span
-                    className="badge"
-                    style={{ background: "var(--red)22", color: "var(--red)", marginLeft: 4, fontSize: "0.65rem" }}
-                  >
-                    BREACHED
-                  </span>
-                )}
-              </div>
-              <div>
-                <span style={{ color: "var(--text-muted)", fontSize: "0.65rem" }}>TP</span>{" "}
-                {tp ? tp.toFixed(tp < 1 ? 6 : 2) : "—"}
-              </div>
-            </>
-          );
-        })()}
-      </td>
-      <td>
-        <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
-          {p.strategy}
-        </span>
-        <br />
-        <span style={{ fontSize: "0.7rem" }}>
-          {p.scale_mode && `${p.scale_mode.toUpperCase()} · ${p.dca_count} adds`}
-        </span>
+      <td title="Raw stop values by source (no effective SL fallback).">
+        <div>
+          <span style={{ color: "var(--text-muted)", fontSize: "0.65rem" }}>CEX</span>{" "}
+          {formatStop(cexSl)}
+          {cexSl && (
+            <span
+              className="badge"
+              style={{
+                marginLeft: 4,
+                fontSize: "0.65rem",
+                background: (isCexActive ? "var(--green)" : "var(--text-muted)") + "22",
+                color: isCexActive ? "var(--green)" : "var(--text-muted)",
+              }}
+            >
+              {isCexActive ? "ACTIVE" : "STANDBY"}
+            </span>
+          )}
+          {cexSl && isCexActive && p.close_pending && (
+            <span
+              className="badge"
+              style={{ background: "var(--red)22", color: "var(--red)", marginLeft: 4, fontSize: "0.65rem" }}
+            >
+              BREACHED
+            </span>
+          )}
+        </div>
+        <div>
+          <span style={{ color: "var(--text-muted)", fontSize: "0.65rem" }}>BOT</span>{" "}
+          {formatStop(botSl)}
+          {botSl && (
+            <span
+              className="badge"
+              style={{
+                marginLeft: 4,
+                fontSize: "0.65rem",
+                background: (isBotActive ? "var(--green)" : "var(--text-muted)") + "22",
+                color: isBotActive ? "var(--green)" : "var(--text-muted)",
+              }}
+            >
+              {isBotActive ? "ACTIVE" : "STANDBY"}
+            </span>
+          )}
+          {botSl && isBotActive && p.close_pending && (
+            <span
+              className="badge"
+              style={{ background: "var(--red)22", color: "var(--red)", marginLeft: 4, fontSize: "0.65rem" }}
+            >
+              BREACHED
+            </span>
+          )}
+        </div>
       </td>
       <td style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
         {p.age_minutes < 60

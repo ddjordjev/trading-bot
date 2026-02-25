@@ -274,13 +274,16 @@ class OrderManager:
         except Exception:
             market_type = MarketType.FUTURES
         if market_type != MarketType.FUTURES:
+            logger.debug("Protection sync skip {}: market_type={}", pos.symbol, market_type.value)
             return
 
         amount = float(pos.amount or 0.0)
         if amount <= 0:
+            logger.debug("Protection sync skip {}: amount <= 0", pos.symbol)
             return
         bot_stop = float(getattr(ts, "current_stop", 0.0) or 0.0) if ts else 0.0
         if bot_stop <= 0:
+            logger.debug("Protection sync skip {}: bot_stop <= 0 (has_trail={})", pos.symbol, bool(ts))
             return
 
         symbol = pos.symbol
@@ -288,8 +291,24 @@ class OrderManager:
         state = self._protection_orders.setdefault(symbol, {})
         sl_order_id = str(state.get("sl_order_id", "") or "")
         sl_price = float(state.get("sl_price", 0.0) or 0.0)
+        logger.debug(
+            "Protection sync {}: side={} amount={:.6f} bot_stop={:.6f} prev_sl_id={} prev_sl={:.6f}",
+            symbol,
+            "long" if pos.side == OrderSide.BUY else "short",
+            amount,
+            bot_stop,
+            sl_order_id or "none",
+            sl_price,
+        )
 
         if sl_order_id and self._is_meaningful_price_change(sl_price, bot_stop):
+            logger.debug(
+                "Protection sync {}: replacing SL order {} due to price change {:.6f} -> {:.6f}",
+                symbol,
+                sl_order_id,
+                sl_price,
+                bot_stop,
+            )
             await self._cancel_protection_order(sl_order_id, symbol, market_type)
             sl_order_id = ""
 
@@ -312,6 +331,7 @@ class OrderManager:
         if not self._is_extreme_bot:
             tp_order_id = str(state.get("tp_order_id", "") or "")
             if tp_order_id:
+                logger.debug("Protection sync {}: removing stale TP order {} (non-extreme bot)", symbol, tp_order_id)
                 await self._cancel_protection_order(tp_order_id, symbol, market_type)
             state.pop("tp_order_id", None)
             state.pop("tp_price", None)
@@ -324,6 +344,13 @@ class OrderManager:
 
         tp_order_id = str(state.get("tp_order_id", "") or "")
         if tp_order_id and self._is_meaningful_price_change(current_tp, target_tp):
+            logger.debug(
+                "Protection sync {}: replacing TP order {} due to target change {:.6f} -> {:.6f}",
+                symbol,
+                tp_order_id,
+                current_tp,
+                target_tp,
+            )
             await self._cancel_protection_order(tp_order_id, symbol, market_type)
             tp_order_id = ""
 
