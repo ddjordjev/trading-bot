@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import math
 from datetime import UTC, datetime
 from typing import Any
@@ -64,6 +65,7 @@ class OrderManager:
         self._partial_take_cooldowns: dict[str, datetime] = {}
         self._hedge_cooldowns: dict[str, datetime] = {}
         self._ORDER_COOLDOWN_SECS = 60
+        self._protection_orders: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------ #
     #  Signal execution
@@ -218,8 +220,128 @@ class OrderManager:
                 wick_tighten_enabled=wick_tighten_enabled,
             )
 
+        # Best-effort mirror of bot-owned protections to the exchange.
+        await self._sync_symbol_protection(pos, self.trailing.get(signal.symbol))
         self._active_orders.append(order)
         return order
+
+    @property
+    def _is_extreme_bot(self) -> bool:
+        return str(getattr(self.settings, "bot_id", "") or "").strip().lower() == "extreme"
+
+    @staticmethod
+    def _is_meaningful_price_change(old: float, new: float, min_delta_pct: float = 0.15) -> bool:
+        if old <= 0 or new <= 0:
+            return True
+        return abs((new - old) / old) * 100.0 >= min_delta_pct
+
+    async def _cancel_protection_order(self, order_id: str, symbol: str, market_type: MarketType) -> None:
+        if not order_id:
+            return
+        with contextlib.suppress(Exception):
+            await self.exchange.cancel_order(order_id, symbol, market_type=market_type)
+
+    async def _clear_symbol_protection(self, symbol: str, market_type: MarketType) -> None:
+        state = self._protection_orders.pop(symbol, {})
+        await self._cancel_protection_order(str(state.get("sl_order_id", "") or ""), symbol, market_type)
+        await self._cancel_protection_order(str(state.get("tp_order_id", "") or ""), symbol, market_type)
+
+    def _derive_extreme_tp(self, entry_price: float, side: OrderSide) -> float:
+        tp_pct = max(0.5, float(self.settings.take_profit_pct))
+        if entry_price <= 0:
+            return 0.0
+        if side == OrderSide.BUY:
+            return entry_price * (1 + tp_pct / 100.0)
+        return entry_price * (1 - tp_pct / 100.0)
+
+    def _ratchet_extreme_tp(self, pos: Position, current_tp: float, bot_stop: float) -> float:
+        if pos.current_price <= 0:
+            return current_tp
+        base_pct = max(0.5, float(self.settings.take_profit_pct) * 0.6)
+        if pos.side == OrderSide.BUY:
+            candidate = pos.current_price * (1 + base_pct / 100.0)
+            return max(current_tp, candidate, self._derive_extreme_tp(pos.entry_price, pos.side))
+
+        candidate = pos.current_price * (1 - base_pct / 100.0)
+        floor = self._derive_extreme_tp(pos.entry_price, pos.side)
+        if current_tp > 0:
+            floor = min(floor, current_tp)
+        return min(floor, candidate, bot_stop * 0.999 if bot_stop > 0 else candidate)
+
+    async def _sync_symbol_protection(self, pos: Position, ts: Any | None) -> None:
+        try:
+            market_type = MarketType(pos.market_type) if pos.market_type else MarketType.FUTURES
+        except Exception:
+            market_type = MarketType.FUTURES
+        if market_type != MarketType.FUTURES:
+            return
+
+        amount = float(pos.amount or 0.0)
+        if amount <= 0:
+            return
+        bot_stop = float(getattr(ts, "current_stop", 0.0) or 0.0) if ts else 0.0
+        if bot_stop <= 0:
+            return
+
+        symbol = pos.symbol
+        stop_side = OrderSide.SELL if pos.side == OrderSide.BUY else OrderSide.BUY
+        state = self._protection_orders.setdefault(symbol, {})
+        sl_order_id = str(state.get("sl_order_id", "") or "")
+        sl_price = float(state.get("sl_price", 0.0) or 0.0)
+
+        if sl_order_id and self._is_meaningful_price_change(sl_price, bot_stop):
+            await self._cancel_protection_order(sl_order_id, symbol, market_type)
+            sl_order_id = ""
+
+        if not sl_order_id:
+            sl_order = await self.exchange.place_order(
+                symbol=symbol,
+                side=stop_side,
+                order_type=OrderType.STOP_LOSS,
+                amount=amount,
+                stop_price=bot_stop,
+                leverage=pos.leverage,
+                market_type=market_type,
+            )
+            sl_order_id = sl_order.id
+            logger.info("Protection SL synced on {} @ {:.6f}", symbol, bot_stop)
+
+        state["sl_order_id"] = sl_order_id
+        state["sl_price"] = bot_stop
+
+        if not self._is_extreme_bot:
+            tp_order_id = str(state.get("tp_order_id", "") or "")
+            if tp_order_id:
+                await self._cancel_protection_order(tp_order_id, symbol, market_type)
+            state.pop("tp_order_id", None)
+            state.pop("tp_price", None)
+            return
+
+        current_tp = float(state.get("tp_price", 0.0) or 0.0)
+        target_tp = self._ratchet_extreme_tp(pos, current_tp, bot_stop)
+        if target_tp <= 0:
+            return
+
+        tp_order_id = str(state.get("tp_order_id", "") or "")
+        if tp_order_id and self._is_meaningful_price_change(current_tp, target_tp):
+            await self._cancel_protection_order(tp_order_id, symbol, market_type)
+            tp_order_id = ""
+
+        if not tp_order_id:
+            tp_order = await self.exchange.place_order(
+                symbol=symbol,
+                side=stop_side,
+                order_type=OrderType.TAKE_PROFIT,
+                amount=amount,
+                stop_price=target_tp,
+                leverage=pos.leverage,
+                market_type=market_type,
+            )
+            tp_order_id = tp_order.id
+            logger.info("Protection TP synced on {} @ {:.6f}", symbol, target_tp)
+
+        state["tp_order_id"] = tp_order_id
+        state["tp_price"] = target_tp
 
     # ------------------------------------------------------------------ #
     #  Scaling: add to positions (both WINNERS and PYRAMID)
@@ -795,6 +917,8 @@ class OrderManager:
             self._scale_in_cooldowns.pop(signal.symbol, None)
             self._partial_take_cooldowns.pop(signal.symbol, None)
             self._hedge_cooldowns.pop(signal.symbol, None)
+            market_type = MarketType(signal.market_type) if signal.market_type else MarketType.FUTURES
+            await self._clear_symbol_protection(signal.symbol, market_type)
 
         return last_order
 
@@ -854,6 +978,21 @@ class OrderManager:
                 closed.append(order)
                 self.trailing.remove(key)
                 stopped_base_symbols.add(symbol)
+
+        active_symbols = {p.symbol for p in positions if p.amount > 0}
+        for symbol, _state in list(self._protection_orders.items()):
+            if symbol in active_symbols:
+                continue
+            await self._clear_symbol_protection(symbol, MarketType.FUTURES)
+            self._protection_orders.pop(symbol, None)
+
+        for pos in positions:
+            if pos.symbol in stopped_base_symbols:
+                continue
+            ts = self.trailing.get(pos.symbol)
+            if ts:
+                with contextlib.suppress(Exception):
+                    await self._sync_symbol_protection(pos, ts)
 
         for pos in positions:
             if pos.symbol in stopped_base_symbols:

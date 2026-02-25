@@ -112,6 +112,7 @@ class TradingBot:
         self._whale_alerted: set[str] = set()
         self._open_trades: dict[str, TradeRecord] = {}
         self._position_targets: dict[str, dict[str, float]] = {}
+        self._last_runtime_sync: dict[str, tuple[float, float, str, str]] = {}
         self._pending_hub_acks: dict[str, dict[str, Any]] = {}
         self._strategy_stats: dict[str, dict[str, Any]] = {}
         self._running = False
@@ -957,6 +958,17 @@ class TradingBot:
 
         return self._validator.validate(candles, ticker, proposal.side, proposal.strategy)
 
+    def _is_extreme_profile(self) -> bool:
+        return str(self.settings.bot_id or "").strip().lower() == "extreme"
+
+    def _derive_extreme_take_profit(self, side: str, price: float) -> float:
+        if price <= 0:
+            return 0.0
+        tp_pct = max(0.5, float(self.settings.take_profit_pct))
+        if str(side).lower() == "long":
+            return price * (1 + tp_pct / 100.0)
+        return price * (1 - tp_pct / 100.0)
+
     async def _execute_proposal(self, proposal: TradeProposal, aggression: float) -> bool:
         """Convert a queue proposal into a trading signal and execute it."""
         if not self._symbol_available(proposal.symbol):
@@ -994,6 +1006,8 @@ class TradingBot:
             if proposal.tick_urgency in {e.value for e in TickUrgency}
             else TickUrgency.ACTIVE,
         )
+        if self._is_extreme_profile() and not sig.suggested_take_profit:
+            sig.suggested_take_profit = self._derive_extreme_take_profit(proposal.side, price)
 
         logger.info(
             "Queue exec [{}/{}]: {} {} {} (str={:.2f})",
@@ -1105,7 +1119,10 @@ class TradingBot:
         try:
             now = datetime.now(UTC)
             sp = self.orders.scaler.get(signal.symbol)
+            ts = self.orders.trailing.get(signal.symbol)
             hub_intel = self._hub_intel
+            bot_sl = float(getattr(ts, "current_stop", 0.0) or 0.0) if ts else 0.0
+            bot_tp = signal.suggested_take_profit or 0.0
 
             record = TradeRecord(
                 symbol=signal.symbol,
@@ -1128,12 +1145,12 @@ class TradingBot:
                 planned_stop_loss=signal.suggested_stop_loss or 0.0,
                 planned_tp1=signal.suggested_take_profit or 0.0,
                 planned_tp2=signal.suggested_take_profit_2 or 0.0,
-                bot_stop_loss=signal.suggested_stop_loss or 0.0,
-                bot_take_profit=signal.suggested_take_profit or 0.0,
-                effective_stop_loss=signal.suggested_stop_loss or 0.0,
-                effective_take_profit=signal.suggested_take_profit or 0.0,
-                stop_source="bot" if signal.suggested_stop_loss else "none",
-                tp_source="bot" if signal.suggested_take_profit else "none",
+                bot_stop_loss=bot_sl,
+                bot_take_profit=bot_tp,
+                effective_stop_loss=bot_sl,
+                effective_take_profit=bot_tp,
+                stop_source="bot" if bot_sl > 0 else "none",
+                tp_source="bot" if bot_tp > 0 else "none",
             )
             self._open_trades[signal.symbol] = record
             self._position_targets[signal.symbol] = {
@@ -1195,6 +1212,7 @@ class TradingBot:
 
             open_rec = self._open_trades.pop(order.symbol, None)
             target_rec = self._position_targets.pop(order.symbol, {})
+            self._last_runtime_sync.pop(order.symbol, None)
             opened_at = open_rec.opened_at if open_rec else ""
             hold_minutes = 0.0
             if opened_at:
@@ -1350,8 +1368,11 @@ class TradingBot:
         exchange_tp = float(exchange_tp_raw) if exchange_tp_raw else 0.0
 
         bot_sl = float(getattr(ts, "current_stop", 0.0) or 0.0) if ts else 0.0
+        rec = self._open_trades.get(symbol)
         targets = self._position_targets.get(symbol, {})
-        bot_tp = float(targets.get("tp1", 0.0) or 0.0)
+        target_tp = float(targets.get("tp1", 0.0) or 0.0)
+        record_tp = float(rec.bot_take_profit or 0.0) if rec else 0.0
+        bot_tp = target_tp if target_tp > 0 else record_tp
 
         effective_sl = exchange_sl if exchange_sl > 0 else bot_sl
         effective_tp = exchange_tp if exchange_tp > 0 else bot_tp
@@ -1400,7 +1421,6 @@ class TradingBot:
             "close_pending": close_pending,
             "close_reason_pending": close_reason_pending,
         }
-        rec = self._open_trades.get(symbol)
         if rec:
             rec.exchange_stop_loss = exchange_sl
             rec.exchange_take_profit = exchange_tp
@@ -1470,6 +1490,7 @@ class TradingBot:
             ts = self.orders.trailing.active_stops.get(pos.symbol)
             sp = self.orders.scaler.get(pos.symbol)
             risk = self._build_position_risk_snapshot(pos, ts)
+            await self._sync_runtime_trade_if_changed(pos.symbol)
             pos_list.append(
                 {
                     "symbol": pos.symbol,
@@ -1636,7 +1657,12 @@ class TradingBot:
         except Exception as e:
             logger.error("Intel fetch error: {}", e)
 
-    async def _push_trade_to_hub(self, record: TradeRecord, request_key: str = "") -> None:
+    async def _push_trade_to_hub(
+        self,
+        record: TradeRecord,
+        request_key: str = "",
+        action_override: str | None = None,
+    ) -> None:
         """Push a trade open/close event to the hub's DB via HTTP with idempotency key."""
         hub_url = self.settings.hub_url
         if not hub_url:
@@ -1648,7 +1674,7 @@ class TradingBot:
             self._hub_session = self._new_hub_session(timeout_seconds=5)
         payload = {
             "bot_id": self.settings.bot_id or "default",
-            "action": record.action,
+            "action": action_override or record.action,
             "trade": record.model_dump(),
             "request_key": request_key,
         }
@@ -1660,6 +1686,21 @@ class TradingBot:
                     logger.error("Hub trade push failed: {} (key={})", resp.status, request_key[:8])
         except Exception as e:
             logger.error("Hub trade push error: {} (key={}, will retry)", e, request_key[:8])
+
+    async def _sync_runtime_trade_if_changed(self, symbol: str) -> None:
+        rec = self._open_trades.get(symbol)
+        if not rec or not rec.opened_at:
+            return
+        signature = (
+            round(float(rec.effective_stop_loss or 0.0), 10),
+            round(float(rec.effective_take_profit or 0.0), 10),
+            str(rec.stop_source or "none"),
+            str(rec.tp_source or "none"),
+        )
+        if self._last_runtime_sync.get(symbol) == signature:
+            return
+        self._last_runtime_sync[symbol] = signature
+        await self._push_trade_to_hub(rec, action_override="update")
 
     # ---- Hub state recovery & in-memory stats ----
 
@@ -1761,6 +1802,7 @@ class TradingBot:
         for sym in stale_symbols:
             rec = self._open_trades.pop(sym, None)
             self._position_targets.pop(sym, None)
+            self._last_runtime_sync.pop(sym, None)
             self.orders.scaler.remove(sym)
             self.orders.trailing.remove(sym)
             self.orders.trailing.remove(f"{sym}:hedge")

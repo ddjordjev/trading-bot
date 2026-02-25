@@ -1020,6 +1020,8 @@ def report_bot_snapshot(data: dict[str, Any]) -> None:
     We merge into the existing report so lightweight polls don't erase
     the last full snapshot.
     """
+    if not isinstance(data, dict):
+        return
     bot_id = data.get("bot_id", "")
     if not bot_id:
         return
@@ -1070,7 +1072,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
     """
     from config.bot_profiles import PROFILES_BY_ID
 
-    reports = list(_bot_reports.values())
+    reports = [r for r in _bot_reports.values() if isinstance(r, dict)]
     hub = _get_hub_db()
     enabled_map = hub.get_all_bot_enabled()
 
@@ -1097,6 +1099,8 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
     for rpt in reports:
         s = rpt.get("status", {})
+        if not isinstance(s, dict):
+            s = {}
         bid = rpt.get("bot_id", "")
         ex_name = rpt.get("exchange", "")
 
@@ -1116,27 +1120,37 @@ def _build_merged_snapshot() -> dict[str, Any]:
             # Use it as account-level available margin anchor.
             exchange_available[ex_name] = max(exchange_available.get(ex_name, 0.0), float(ex_bal))
 
-        total_balance += s.get("balance", 0)
-        total_available += s.get("available_margin", 0)
-        total_daily_pnl += s.get("daily_pnl", 0)
-        total_daily_pnl_pct += s.get("daily_pnl_pct", 0)
-        total_growth_usd += s.get("total_growth_usd", 0)
-        total_growth_pct += s.get("total_growth_pct", 0)
-        total_profit_buffer += s.get("profit_buffer_pct", 0)
-        total_uptime = max(total_uptime, s.get("uptime_seconds", 0))
+        total_balance += float(s.get("balance", 0) or 0)
+        total_available += float(s.get("available_margin", 0) or 0)
+        total_daily_pnl += float(s.get("daily_pnl", 0) or 0)
+        total_daily_pnl_pct += float(s.get("daily_pnl_pct", 0) or 0)
+        total_growth_usd += float(s.get("total_growth_usd", 0) or 0)
+        total_growth_pct += float(s.get("total_growth_pct", 0) or 0)
+        total_profit_buffer += float(s.get("profit_buffer_pct", 0) or 0)
+        total_uptime = max(total_uptime, float(s.get("uptime_seconds", 0) or 0))
         if s.get("running"):
             any_running = True
         if s.get("manual_stop_active"):
             any_halted = True
-        strategies_count += s.get("strategies_count", 0)
-        dynamic_count += s.get("dynamic_strategies_count", 0)
+        strategies_count += int(s.get("strategies_count", 0) or 0)
+        dynamic_count += int(s.get("dynamic_strategies_count", 0) or 0)
         bot_count += 1
 
-        for p in rpt.get("positions", []):
+        positions = rpt.get("positions", [])
+        if not isinstance(positions, list):
+            positions = []
+        for p in positions:
+            if not isinstance(p, dict):
+                continue
             p["bot_id"] = bid
             p["exchange_name"] = ex_name
             all_positions.append(p)
-        for w in rpt.get("wick_scalps", []):
+        wicks = rpt.get("wick_scalps", [])
+        if not isinstance(wicks, list):
+            wicks = []
+        for w in wicks:
+            if not isinstance(w, dict):
+                continue
             w["bot_id"] = bid
             w["exchange_name"] = ex_name
             all_wicks.append(w)
@@ -1148,8 +1162,8 @@ def _build_merged_snapshot() -> dict[str, Any]:
                 "connected": True,
                 "data": {
                     "status": s,
-                    "positions": rpt.get("positions", []),
-                    "wick_scalps": rpt.get("wick_scalps", []),
+                    "positions": positions,
+                    "wick_scalps": wicks,
                     "intel": None,
                     "logs": [],
                 },
@@ -1229,8 +1243,13 @@ async def receive_bot_report(request: Request, _: str = Depends(verify_token)) -
     - Writes bot_status on their behalf
     - Returns enabled flag, confirmed ack keys, and trade proposal
     """
-    data = await request.json()
-    bot_id = data.get("bot_id", "")
+    try:
+        data = await request.json()
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    bot_id = str(data.get("bot_id", "") or "").strip()
     if bot_id:
         url = f"http://bot-{bot_id}:9035"
         if _bot_urls.get(bot_id) != url:
@@ -1238,32 +1257,35 @@ async def receive_bot_report(request: Request, _: str = Depends(verify_token)) -
             _save_bot_registry()
 
     if bot_id and _hub_state_ref is not None:
-        from shared.models import BotDeploymentStatus
+        try:
+            from shared.models import BotDeploymentStatus
 
-        bot_status_data = data.get("bot_status")
-        if bot_status_data:
-            try:
-                _hub_state_ref.write_bot_status(BotDeploymentStatus(**bot_status_data))
-            except Exception:
-                logger.warning("Ignoring malformed bot_status from {}", bot_id)
+            bot_status_data = data.get("bot_status")
+            if bot_status_data:
+                try:
+                    _hub_state_ref.write_bot_status(BotDeploymentStatus(**bot_status_data))
+                except Exception:
+                    logger.warning("Ignoring malformed bot_status from {}", bot_id)
 
-        exchange = data.get("exchange", "")
+            exchange = str(data.get("exchange", "") or "").strip()
 
-        combined_symbols: set[str] = set()
-        open_symbols = data.get("open_symbols")
-        if open_symbols is not None:
-            combined_symbols |= set(open_symbols)
-        if "positions" in data:
-            positions = data["positions"] or []
-            combined_symbols |= {
-                str(p.get("symbol", "")).strip()
-                for p in positions
-                if isinstance(p, dict) and str(p.get("symbol", "")).strip()
-            }
-        if exchange and combined_symbols:
-            _hub_state_ref.update_bot_positions(bot_id, exchange, combined_symbols)
-        elif exchange and open_symbols is not None:
-            _hub_state_ref.update_bot_positions(bot_id, exchange, set())
+            combined_symbols: set[str] = set()
+            open_symbols = data.get("open_symbols")
+            if isinstance(open_symbols, list):
+                combined_symbols |= {str(sym).strip() for sym in open_symbols if str(sym).strip()}
+            if "positions" in data:
+                positions = data["positions"] if isinstance(data["positions"], list) else []
+                combined_symbols |= {
+                    str(p.get("symbol", "")).strip()
+                    for p in positions
+                    if isinstance(p, dict) and str(p.get("symbol", "")).strip()
+                }
+            if exchange and combined_symbols:
+                _hub_state_ref.update_bot_positions(bot_id, exchange, combined_symbols)
+            elif exchange and isinstance(open_symbols, list):
+                _hub_state_ref.update_bot_positions(bot_id, exchange, set())
+        except Exception as e:
+            logger.warning("Failed to process bot report metadata for {}: {}", bot_id, e)
 
     report_bot_snapshot(data)
     hub = _get_hub_db()
@@ -1378,6 +1400,10 @@ async def receive_trade(request: Request, _: str = Depends(verify_token)) -> dic
     hub = _get_hub_db()
     if action == "close" and trade.get("opened_at"):
         updated = hub.update_trade_close(bot_id, trade["opened_at"], trade, request_key=request_key)
+        if not updated:
+            hub.insert_trade(bot_id, trade, request_key=request_key)
+    elif action == "update" and trade.get("opened_at"):
+        updated = hub.update_trade_runtime(bot_id, trade["opened_at"], trade, request_key=request_key)
         if not updated:
             hub.insert_trade(bot_id, trade, request_key=request_key)
     else:

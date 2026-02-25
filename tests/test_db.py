@@ -402,6 +402,39 @@ class TestHubDB:
         updated = hub.update_trade_close("ghost", "2026-01-01T00:00:00", {"closed_at": "now"})
         assert updated is False
 
+    def test_update_trade_runtime(self, hub: HubDB):
+        hub.insert_trade(
+            "momentum",
+            {
+                "symbol": "BTC/USDT",
+                "side": "long",
+                "strategy": "rsi",
+                "action": "open",
+                "entry_price": 50000,
+                "amount": 0.01,
+                "opened_at": "2026-02-20T10:00:00",
+            },
+        )
+        updated = hub.update_trade_runtime(
+            "momentum",
+            "2026-02-20T10:00:00",
+            {
+                "planned_stop_loss": 49000,
+                "planned_tp1": 52000,
+                "exchange_stop_loss": 49100,
+                "bot_stop_loss": 49200,
+                "effective_stop_loss": 49100,
+                "effective_take_profit": 52000,
+                "stop_source": "exchange",
+                "tp_source": "bot",
+            },
+        )
+        assert updated is True
+        trade = hub.get_all_trades()[0]
+        assert trade.exchange_stop_loss == 49100
+        assert trade.effective_stop_loss == 49100
+        assert trade.stop_source == "exchange"
+
     def test_strategy_stats(self, hub: HubDB):
         for i in range(3):
             hub.insert_trade(

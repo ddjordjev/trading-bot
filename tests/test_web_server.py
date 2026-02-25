@@ -2219,6 +2219,44 @@ class TestHubPushEndpoints:
         assert r.status_code == 200
         assert r.json()["action"] == "close"
 
+    async def test_push_trade_update_updates_runtime_fields(self, client):
+        await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "momentum",
+                "action": "open",
+                "trade": {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "open",
+                    "entry_price": 50000,
+                    "amount": 0.01,
+                    "opened_at": "2026-02-20T10:00:00",
+                },
+            },
+        )
+        r = await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "momentum",
+                "action": "update",
+                "trade": {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "open",
+                    "opened_at": "2026-02-20T10:00:00",
+                    "effective_stop_loss": 49100,
+                    "effective_take_profit": 52000,
+                    "stop_source": "exchange",
+                    "tp_source": "bot",
+                },
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["action"] == "update"
+
     async def test_push_trade_missing_bot_id(self, client):
         r = await client.post(
             "/internal/trade",

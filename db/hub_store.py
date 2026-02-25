@@ -332,6 +332,54 @@ class HubDB(TradeDB):
             self._mark_confirmed(bot_id, request_key)
         return updated
 
+    def update_trade_runtime(self, bot_id: str, opened_at: str, data: dict[str, Any], request_key: str = "") -> bool:
+        """Update runtime SL/TP fields for an open trade row."""
+        assert self._conn
+        if request_key:
+            existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
+            if existing:
+                self._mark_confirmed(bot_id, request_key)
+                return True
+
+        cursor = self._conn.execute(
+            """UPDATE trades SET
+                planned_stop_loss=?,
+                planned_tp1=?,
+                planned_tp2=?,
+                exchange_stop_loss=?,
+                exchange_take_profit=?,
+                bot_stop_loss=?,
+                bot_take_profit=?,
+                effective_stop_loss=?,
+                effective_take_profit=?,
+                stop_source=?,
+                tp_source=?,
+                request_key=CASE WHEN ?='' THEN request_key ELSE ? END
+            WHERE bot_id=? AND opened_at=? AND closed_at=''""",
+            (
+                data.get("planned_stop_loss", 0),
+                data.get("planned_tp1", 0),
+                data.get("planned_tp2", 0),
+                data.get("exchange_stop_loss", 0),
+                data.get("exchange_take_profit", 0),
+                data.get("bot_stop_loss", 0),
+                data.get("bot_take_profit", 0),
+                data.get("effective_stop_loss", 0),
+                data.get("effective_take_profit", 0),
+                data.get("stop_source", "none"),
+                data.get("tp_source", "none"),
+                request_key,
+                request_key,
+                bot_id,
+                opened_at,
+            ),
+        )
+        self._conn.commit()
+        updated = cursor.rowcount > 0
+        if updated and request_key:
+            self._mark_confirmed(bot_id, request_key)
+        return updated
+
     def mark_recovery_close(self, bot_id: str, opened_at: str) -> bool:
         """Mark an open trade as closed due to bot recovery (no exit stats)."""
         assert self._conn

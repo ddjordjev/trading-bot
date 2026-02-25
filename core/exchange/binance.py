@@ -248,10 +248,23 @@ class BinanceExchange(BaseExchange):
         market_type: MarketType = MarketType.SPOT,
     ) -> Order:
         client = self._client(market_type)
-        ccxt_type = "market" if order_type == OrderType.MARKET else "limit"
+        if order_type == OrderType.MARKET:
+            ccxt_type = "market"
+        elif order_type == OrderType.LIMIT:
+            ccxt_type = "limit"
+        elif order_type == OrderType.STOP_LOSS:
+            ccxt_type = "STOP_MARKET"
+        elif order_type == OrderType.TAKE_PROFIT:
+            ccxt_type = "TAKE_PROFIT_MARKET"
+        else:
+            ccxt_type = "limit"
         params: dict[str, Any] = {}
         if stop_price is not None:
             params["stopPrice"] = stop_price
+        if market_type == MarketType.FUTURES and order_type in (OrderType.STOP_LOSS, OrderType.TAKE_PROFIT):
+            params["reduceOnly"] = True
+            # Avoid over-closing when account mode supports one-way futures.
+            params["closePosition"] = False
         if market_type == MarketType.FUTURES and not await self.set_leverage(symbol, leverage):
             raise RuntimeError(f"Leverage set failed for {symbol} ({leverage}x); aborting order placement")
 
