@@ -223,8 +223,8 @@ def main() -> None:
     settings = get_settings()
 
     logger.remove()
-    logger.add(sys.stderr, level=settings.log_level)
-    logger.add("logs/hub_{time}.log", rotation="1 day", retention="14 days", level="DEBUG")
+    logger.add(sys.stderr, level=settings.log_level, diagnose=False)
+    logger.add("logs/hub_{time}.log", rotation="1 day", retention="14 days", level="DEBUG", diagnose=False)
 
     logger.info("=" * 60)
     logger.info("TRADE BORG HUB — Central Brain")

@@ -7,9 +7,21 @@ on:
     branches: [master, develop]
 
 jobs:
+  example-env-secret-check:
+    name: Example Env Secret Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate example env placeholders
+        run: python scripts/check_example_env_secrets.py
+
   lint-and-type-check:
     name: Lint & Type Check
     runs-on: ubuntu-latest
+    needs: [example-env-secret-check]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,6 +42,7 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
+    needs: [example-env-secret-check]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,6 +55,7 @@ jobs:
   frontend-build:
     name: Frontend Build
     runs-on: ubuntu-latest
+    needs: [example-env-secret-check]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

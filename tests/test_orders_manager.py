@@ -1885,6 +1885,52 @@ class TestOrderManagerTryWickScalpsEdgeCases:
         opened = await order_manager.try_wick_scalps()
         assert isinstance(opened, list)
 
+    @pytest.mark.asyncio
+    async def test_try_wick_scalps_caps_amount_below_main_position_size(self, order_manager, mock_exchange):
+        sp = order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+        )
+        sp.avg_entry_price = 100.0
+        sp.current_size = 1.0
+
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=1.0,
+            entry_price=100.0,
+            current_price=95.0,
+            leverage=10,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions.return_value = [pos]
+        mock_exchange.place_order = AsyncMock(
+            return_value=Order(
+                id="wick-cap",
+                symbol="BTC/USDT",
+                side=OrderSide.SELL,
+                order_type=OrderType.MARKET,
+                amount=0.45,
+                status=OrderStatus.FILLED,
+                filled=0.45,
+                average_price=95.0,
+            )
+        )
+
+        order_manager.wick_scalper.feed_price("BTC/USDT", 100.0)
+        order_manager.wick_scalper.feed_price("BTC/USDT", 99.0)
+        order_manager.wick_scalper.feed_price("BTC/USDT", 97.0)
+        order_manager.wick_scalper.feed_price("BTC/USDT", 95.0)
+
+        opened = await order_manager.try_wick_scalps()
+
+        assert len(opened) == 1
+        placed_amount = float(mock_exchange.place_order.await_args.kwargs["amount"])
+        assert placed_amount == pytest.approx(0.45)
+
 
 class TestOrderManagerCloseSubPositionEdgeCases:
     """_close_sub_position: hedge_amount <= 0, order not FILLED. _close_sub_position_wick: no sp, order not FILLED."""
@@ -2487,3 +2533,161 @@ class TestOrderManagerTradeHistory:
         order_manager._trade_log.clear()
         assert len(order_manager.trade_history) == 0
         assert len(history) == 1
+
+
+class TestOrderManagerProtectionSync:
+    @pytest.mark.asyncio
+    async def test_sync_adopts_side_matched_stop_without_cancelling(self, order_manager, mock_exchange):
+        pos = Position(
+            symbol="AVAX/USDT",
+            side=OrderSide.BUY,
+            amount=1.0,
+            entry_price=40.0,
+            current_price=39.5,
+            leverage=10,
+            market_type="futures",
+        )
+        ts = MagicMock()
+        ts.current_stop = 38.0
+        mock_exchange.cancel_order = AsyncMock()
+
+        mock_exchange.fetch_open_orders.return_value = [
+            Order(
+                id="sl-sell",
+                symbol="AVAX/USDT",
+                side=OrderSide.SELL,
+                order_type=OrderType.STOP_LOSS,
+                amount=1.0,
+                stop_price=38.0,
+            ),
+            Order(
+                id="sl-buy",
+                symbol="AVAX/USDT",
+                side=OrderSide.BUY,
+                order_type=OrderType.STOP_LOSS,
+                amount=1.0,
+                stop_price=42.0,
+            ),
+        ]
+
+        await order_manager._sync_symbol_protection(pos, ts)
+
+        assert order_manager._protection_orders["AVAX/USDT"]["sl_order_id"] == "sl-sell"
+        mock_exchange.place_order.assert_not_called()
+        mock_exchange.cancel_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_replaces_only_managed_stop_order(self, order_manager, mock_exchange):
+        pos = Position(
+            symbol="AVAX/USDT",
+            side=OrderSide.BUY,
+            amount=1.0,
+            entry_price=40.0,
+            current_price=39.5,
+            leverage=10,
+            market_type="futures",
+        )
+        ts = MagicMock()
+        ts.current_stop = 37.0
+        mock_exchange.cancel_order = AsyncMock()
+
+        mock_exchange.fetch_open_orders.return_value = [
+            Order(
+                id="sl-sell",
+                symbol="AVAX/USDT",
+                side=OrderSide.SELL,
+                order_type=OrderType.STOP_LOSS,
+                amount=1.0,
+                stop_price=38.0,
+            ),
+            Order(
+                id="sl-other-bot",
+                symbol="AVAX/USDT",
+                side=OrderSide.BUY,
+                order_type=OrderType.STOP_LOSS,
+                amount=1.0,
+                stop_price=41.0,
+            ),
+        ]
+        mock_exchange.place_order.return_value = Order(
+            id="sl-new",
+            symbol="AVAX/USDT",
+            side=OrderSide.SELL,
+            order_type=OrderType.STOP_LOSS,
+            amount=1.0,
+            stop_price=37.0,
+            status=OrderStatus.OPEN,
+        )
+
+        await order_manager._sync_symbol_protection(pos, ts)
+
+        cancelled_ids = [call.args[0] for call in mock_exchange.cancel_order.await_args_list]
+        assert cancelled_ids == ["sl-sell"]
+        assert order_manager._protection_orders["AVAX/USDT"]["sl_order_id"] == "sl-new"
+
+
+class TestOrphanProtectionCleanup:
+    @pytest.mark.asyncio
+    async def test_cleanup_cancels_stale_protection_orders_only(self, order_manager, mock_exchange):
+        live_positions = [
+            Position(
+                symbol="ADA/USDT",
+                side=OrderSide.BUY,
+                amount=10.0,
+                entry_price=0.3,
+                current_price=0.31,
+                leverage=2,
+                market_type="futures",
+            )
+        ]
+        mock_exchange.fetch_open_orders = AsyncMock(
+            return_value=[
+                Order(
+                    id="sol-sl",
+                    symbol="SOL/USDT",
+                    side=OrderSide.SELL,
+                    order_type=OrderType.STOP_LOSS,
+                    amount=1.0,
+                    stop_price=83.0,
+                    status=OrderStatus.OPEN,
+                    market_type="futures",
+                ),
+                Order(
+                    id="sol-tp",
+                    symbol="SOL/USDT",
+                    side=OrderSide.SELL,
+                    order_type=OrderType.TAKE_PROFIT,
+                    amount=1.0,
+                    stop_price=90.0,
+                    status=OrderStatus.OPEN,
+                    market_type="futures",
+                ),
+                Order(
+                    id="ada-sl",
+                    symbol="ADA/USDT",
+                    side=OrderSide.SELL,
+                    order_type=OrderType.STOP_LOSS,
+                    amount=10.0,
+                    stop_price=0.28,
+                    status=OrderStatus.OPEN,
+                    market_type="futures",
+                ),
+                Order(
+                    id="stale-market",
+                    symbol="XRP/USDT",
+                    side=OrderSide.SELL,
+                    order_type=OrderType.MARKET,
+                    amount=2.0,
+                    stop_price=0.0,
+                    status=OrderStatus.OPEN,
+                    market_type="futures",
+                ),
+            ]
+        )
+        mock_exchange.cancel_order = AsyncMock()
+
+        cancelled = await order_manager.cleanup_orphan_protection_orders(live_positions, force=True)
+
+        assert cancelled == 2
+        cancelled_ids = {call.args[0] for call in mock_exchange.cancel_order.await_args_list}
+        assert cancelled_ids == {"sol-sl", "sol-tp"}

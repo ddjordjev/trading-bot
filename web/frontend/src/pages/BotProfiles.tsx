@@ -13,6 +13,7 @@ interface BotProfile {
   container_status: string;
   balance: number | null;
   daily_pnl: number | null;
+  lifetime_pnl: number;
   wins: number;
   losses: number;
   open_positions: number;
@@ -194,11 +195,12 @@ export function BotProfiles() {
                       <span style={{ color: "var(--text-muted)" }}>balance</span>
                       <span style={{ color: "var(--heading)" }}>
                         ${p.balance.toFixed(2)}
-                        {p.daily_pnl != null && (
-                          <span style={{ color: p.daily_pnl >= 0 ? "var(--green)" : "var(--red)", marginLeft: 6, fontSize: "0.75rem" }}>
-                            {p.daily_pnl >= 0 ? "+" : ""}{p.daily_pnl.toFixed(2)}
-                          </span>
-                        )}
+                        <span
+                          title="All-time realized PnL"
+                          style={{ color: p.lifetime_pnl >= 0 ? "var(--green)" : "var(--red)", marginLeft: 6, fontSize: "0.75rem" }}
+                        >
+                          {p.lifetime_pnl >= 0 ? "+" : ""}{p.lifetime_pnl.toFixed(2)}
+                        </span>
                       </span>
                     </div>
                     <div style={{ display: "flex", justifyContent: "space-between", padding: "0.15rem 0" }}>

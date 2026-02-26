@@ -70,6 +70,11 @@ class OrderManager:
         self._protection_replace_min_interval_secs = 10
         self._protection_place_min_interval_secs = 10
         self._protection_alignment_tolerance_pct = 0.03
+        self._orphan_protection_cleanup_interval_secs = 60
+        self._last_orphan_protection_cleanup_at: datetime | None = None
+        # Keep wick scalp strictly smaller than main exposure so it cannot flip
+        # net direction and look like a "double trade" against the main idea.
+        self._wick_scalp_max_main_fraction = 0.45
 
     # ------------------------------------------------------------------ #
     #  Signal execution
@@ -293,6 +298,73 @@ class OrderManager:
         await self._cancel_protection_order(str(state.get("sl_order_id", "") or ""), symbol, market_type)
         await self._cancel_protection_order(str(state.get("tp_order_id", "") or ""), symbol, market_type)
 
+    async def cleanup_orphan_protection_orders(self, positions: list[Position], force: bool = False) -> int:
+        """Cancel stale futures SL/TP orders for symbols with no live position.
+
+        These orders can survive bot restarts or runtime desync and then
+        accumulate as "orphan SLs". Cleanup is throttled by default.
+        """
+        now = datetime.now(UTC)
+        if not force and self._last_orphan_protection_cleanup_at is not None:
+            elapsed = (now - self._last_orphan_protection_cleanup_at).total_seconds()
+            if elapsed < self._orphan_protection_cleanup_interval_secs:
+                return 0
+        self._last_orphan_protection_cleanup_at = now
+
+        live_symbols = {
+            str(p.symbol or "")
+            for p in positions
+            if float(getattr(p, "amount", 0.0) or 0.0) > 0
+            and str(getattr(p, "market_type", "") or "futures").lower() == "futures"
+        }
+        try:
+            open_orders = await self.exchange.fetch_open_orders(market_type=MarketType.FUTURES)
+        except Exception as e:
+            logger.warning("Orphan SL cleanup: could not fetch open futures orders: {}", e)
+            return 0
+
+        cancelled = 0
+        seen_ids: set[str] = set()
+        for order in open_orders:
+            symbol = str(getattr(order, "symbol", "") or "")
+            if not symbol or symbol in live_symbols:
+                continue
+            order_id = str(getattr(order, "id", "") or "")
+            if not order_id or order_id in seen_ids:
+                continue
+            seen_ids.add(order_id)
+
+            order_type = getattr(order, "order_type", None)
+            stop_price = float(getattr(order, "stop_price", 0.0) or 0.0)
+            is_protection = order_type in {OrderType.STOP_LOSS, OrderType.TAKE_PROFIT} or stop_price > 0
+            if not is_protection:
+                continue
+
+            try:
+                await self.exchange.cancel_order(order_id, symbol, market_type=MarketType.FUTURES)
+            except Exception as e:
+                logger.debug("Orphan SL cleanup: cancel failed for {} {}: {}", symbol, order_id, e)
+                continue
+            cancelled += 1
+
+            state = self._protection_orders.get(symbol)
+            if isinstance(state, dict):
+                if str(state.get("sl_order_id", "") or "") == order_id:
+                    state.pop("sl_order_id", None)
+                    state.pop("sl_price", None)
+                if str(state.get("tp_order_id", "") or "") == order_id:
+                    state.pop("tp_order_id", None)
+                    state.pop("tp_price", None)
+                if not state.get("sl_order_id") and not state.get("tp_order_id"):
+                    self._protection_orders.pop(symbol, None)
+
+        if cancelled:
+            logger.info(
+                "Orphan SL cleanup: cancelled {} stale protection order(s) for symbols with no live position",
+                cancelled,
+            )
+        return cancelled
+
     def _derive_extreme_tp(self, entry_price: float, side: OrderSide) -> float:
         tp_pct = max(0.5, float(self.settings.take_profit_pct))
         if entry_price <= 0:
@@ -365,28 +437,7 @@ class OrderManager:
         symbol_stop_orders = [
             o for o in symbol_protection_orders if getattr(o, "order_type", None) == OrderType.STOP_LOSS
         ]
-        symbol_tp_orders = [
-            o for o in symbol_protection_orders if getattr(o, "order_type", None) == OrderType.TAKE_PROFIT
-        ]
-
-        if len(symbol_stop_orders) > 1 or len(symbol_tp_orders) > 1:
-            cancelled = await self._cancel_symbol_protection_orders(symbol, market_type, symbol_protection_orders)
-            logger.warning(
-                "Protection sync {}: cancelled {} stacked protection orders before refresh (sl={}, tp={})",
-                symbol,
-                cancelled,
-                len(symbol_stop_orders),
-                len(symbol_tp_orders),
-            )
-            sl_order_id = ""
-            sl_price = 0.0
-            state.pop("sl_order_id", None)
-            state.pop("sl_price", None)
-            state.pop("tp_order_id", None)
-            state.pop("tp_price", None)
-            symbol_protection_orders = []
-            symbol_stop_orders = []
-            symbol_tp_orders = []
+        side_matched_stop_orders = [o for o in symbol_stop_orders if getattr(o, "side", None) == stop_side]
 
         if sl_order_id:
             try:
@@ -437,6 +488,17 @@ class OrderManager:
                         symbol,
                         fallback_err,
                     )
+        elif side_matched_stop_orders:
+            adopted = self._pick_closest_stop_order(side_matched_stop_orders, bot_stop)
+            if adopted:
+                sl_order_id = str(adopted.id or "")
+                sl_price = float(adopted.stop_price or 0.0)
+                logger.debug(
+                    "Protection sync {}: adopted existing side-matched SL order {} @ {:.6f}",
+                    symbol,
+                    sl_order_id or "unknown",
+                    sl_price,
+                )
 
         should_replace = bool(
             sl_order_id
@@ -467,7 +529,7 @@ class OrderManager:
                 sl_price,
                 bot_stop,
             )
-            await self._cancel_symbol_protection_orders(symbol, market_type, symbol_protection_orders or open_orders)
+            await self._cancel_protection_order(sl_order_id, symbol, market_type)
             sl_order_id = ""
 
         if not sl_order_id:
@@ -482,15 +544,6 @@ class OrderManager:
                         elapsed,
                     )
                     return
-            cancelled = await self._cancel_symbol_protection_orders(
-                symbol, market_type, symbol_protection_orders or open_orders
-            )
-            if cancelled > 0:
-                logger.warning(
-                    "Protection sync {}: cleared {} existing protection orders before placing fresh SL",
-                    symbol,
-                    cancelled,
-                )
             try:
                 sl_order = await self.exchange.place_order(
                     symbol=symbol,
@@ -1021,7 +1074,20 @@ class OrderManager:
             scalp_leverage = sp.target_leverage
             if pos.current_price <= 0:
                 continue
-            scalp_amount = (scalp_dollars * scalp_leverage) / pos.current_price
+            raw_scalp_amount = (scalp_dollars * scalp_leverage) / pos.current_price
+            main_amount = float(pos.amount or 0.0)
+            max_scalp_amount = max(0.0, main_amount * self._wick_scalp_max_main_fraction)
+            scalp_amount = min(raw_scalp_amount, max_scalp_amount) if max_scalp_amount > 0 else 0.0
+            if scalp_amount <= 0:
+                continue
+            if scalp_amount < raw_scalp_amount:
+                logger.info(
+                    "WICK SCALP cap on {}: raw={:.6f} -> capped={:.6f} (max {:.0f}% of main size)",
+                    pos.symbol,
+                    raw_scalp_amount,
+                    scalp_amount,
+                    self._wick_scalp_max_main_fraction * 100.0,
+                )
 
             logger.info(
                 "WICK SCALP on {} | main={} pyramid | scalp={} ${:.0f} @ {}x",

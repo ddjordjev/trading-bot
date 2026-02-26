@@ -949,6 +949,7 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
                 container_status=container_status,
                 balance=balance_now,
                 daily_pnl=s.get("daily_pnl") if s else None,
+                lifetime_pnl=float(summary.get("total_pnl", 0.0) or 0.0),
                 wins=summary.get("wins", 0),
                 losses=summary.get("losses", 0),
                 open_positions=len(positions),
@@ -1270,7 +1271,33 @@ def _build_merged_snapshot() -> dict[str, Any]:
             orphans_by_key[orphan_key] = orphan
     all_orphans = list(orphans_by_key.values())
     managed_keys = {_position_identity_key(p) for p in all_positions if isinstance(p, dict)}
-    all_orphans = [o for o in all_orphans if _position_identity_key(o) not in managed_keys]
+    # Wick scalps are bot-managed temporary positions; suppress matching orphan
+    # rows so a symbol/side cannot appear as both managed and orphan.
+    for wick in all_wicks:
+        if not isinstance(wick, dict):
+            continue
+        managed_keys.add(
+            _position_identity_key(
+                {
+                    "exchange_name": wick.get("exchange_name", wick.get("exchange", "")),
+                    "symbol": wick.get("symbol", ""),
+                    "side": wick.get("scalp_side", wick.get("side", "")),
+                }
+            )
+        )
+    managed_symbol_keys = {(ex, sym) for ex, sym, _ in managed_keys if sym}
+    filtered_orphans: list[dict[str, Any]] = []
+    for orphan in all_orphans:
+        orphan_key = _position_identity_key(orphan)
+        if orphan_key in managed_keys:
+            continue
+        ex, sym, side = orphan_key
+        if sym and side == "unknown" and (ex, sym) in managed_symbol_keys:
+            continue
+        if sym and (ex, sym, "unknown") in managed_keys:
+            continue
+        filtered_orphans.append(orphan)
+    all_orphans = filtered_orphans
 
     intel = _intel_snapshot()
 

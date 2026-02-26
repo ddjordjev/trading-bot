@@ -342,6 +342,51 @@ class TestBinanceExchange:
         binance._futures.create_order.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_place_order_futures_caps_amount_to_exchange_max(self, binance):
+        binance._futures.amount_to_precision = MagicMock(side_effect=lambda _symbol, raw: str(raw))
+        binance._futures.market = MagicMock(return_value={"id": "BTCUSDT", "limits": {"amount": {"max": 5.0}}})
+        await binance.place_order(
+            "BTC/USDT",
+            OrderSide.BUY,
+            OrderType.MARKET,
+            50.0,
+            leverage=10,
+            market_type=MarketType.FUTURES,
+        )
+        kwargs = binance._futures.create_order.call_args.kwargs
+        assert kwargs["amount"] == 5.0
+
+    @pytest.mark.asyncio
+    async def test_place_order_futures_retries_with_reduced_amount_on_max_qty_error(self, binance):
+        too_large = Exception('binance {"code":-4005,"msg":"Quantity greater than max quantity."}')
+        binance._futures.create_order = AsyncMock(
+            side_effect=[
+                too_large,
+                {
+                    "id": "ord-2",
+                    "symbol": "BTC/USDT",
+                    "side": "sell",
+                    "type": "market",
+                    "status": "closed",
+                    "filled": 25.0,
+                    "average": 100.0,
+                    "amount": 25.0,
+                },
+            ]
+        )
+        await binance.place_order(
+            "BTC/USDT",
+            OrderSide.SELL,
+            OrderType.MARKET,
+            50.0,
+            leverage=10,
+            market_type=MarketType.FUTURES,
+        )
+        assert binance._futures.create_order.await_count == 2
+        second_call_kwargs = binance._futures.create_order.await_args_list[1].kwargs
+        assert second_call_kwargs["amount"] == 25.0
+
+    @pytest.mark.asyncio
     async def test_place_order_futures_proceeds_when_set_leverage_fails(self, binance):
         binance._futures.set_leverage = AsyncMock(side_effect=Exception("temporary exchange error"))
         await binance.place_order(
@@ -356,11 +401,13 @@ class TestBinanceExchange:
 
     @pytest.mark.asyncio
     async def test_place_order_stop_loss_skips_set_leverage(self, binance):
+        binance._futures.amount_to_precision = MagicMock(side_effect=lambda _symbol, raw: str(raw))
+        binance._futures.market = MagicMock(return_value={"id": "BTCUSDT", "limits": {"amount": {"max": 0.5}}})
         await binance.place_order(
             "BTC/USDT",
             OrderSide.SELL,
             OrderType.STOP_LOSS,
-            0.1,
+            2.0,
             stop_price=90.0,
             leverage=20,
             market_type=MarketType.FUTURES,
@@ -370,8 +417,40 @@ class TestBinanceExchange:
         kwargs = binance._futures.fapiPrivatePostAlgoOrder.call_args.args[0]
         assert kwargs["algoType"] == "CONDITIONAL"
         assert kwargs["type"] == "STOP_MARKET"
+        assert kwargs["quantity"] == 0.5
         assert kwargs["triggerPrice"] == 90.0
         assert kwargs["reduceOnly"] == "true"
+
+    @pytest.mark.asyncio
+    async def test_place_order_stop_loss_retries_with_reduced_amount_on_max_qty_error(self, binance):
+        too_large = Exception('binance {"code":-4005,"msg":"Quantity greater than max quantity."}')
+        binance._futures.fapiPrivatePostAlgoOrder = AsyncMock(
+            side_effect=[
+                too_large,
+                {
+                    "algoId": "algo-2",
+                    "symbol": "BTCUSDT",
+                    "side": "SELL",
+                    "orderType": "STOP_MARKET",
+                    "quantity": "1.0",
+                    "triggerPrice": "90.0",
+                    "algoStatus": "NEW",
+                    "actualPrice": "0.0",
+                },
+            ]
+        )
+        await binance.place_order(
+            "BTC/USDT",
+            OrderSide.SELL,
+            OrderType.STOP_LOSS,
+            2.0,
+            stop_price=90.0,
+            leverage=20,
+            market_type=MarketType.FUTURES,
+        )
+        assert binance._futures.fapiPrivatePostAlgoOrder.await_count == 2
+        second_payload = binance._futures.fapiPrivatePostAlgoOrder.await_args_list[1].args[0]
+        assert second_payload["quantity"] == 1.0
 
     @pytest.mark.asyncio
     async def test_fetch_open_orders_parses_stop_types_and_stop_price(self, binance):

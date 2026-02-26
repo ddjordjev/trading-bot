@@ -425,6 +425,8 @@ class TradingBot:
                 ) >= self._quick_positions_idle_poll_seconds
             if should_fetch_positions:
                 positions = await self.exchange.fetch_positions()
+                with contextlib.suppress(Exception):
+                    await self.orders.cleanup_orphan_protection_orders(positions)
                 pos_list: list[dict[str, Any]] = []
                 live_symbols = {
                     str(getattr(p, "symbol", "") or "")
@@ -2298,6 +2300,26 @@ class TradingBot:
         await self._sync_runtime_trade_if_changed(symbol)
         return True, f"Claimed {symbol} and attached runtime protection"
 
+    async def _confirm_symbol_missing_on_exchange(self, symbol: str) -> bool:
+        """Confirm a symbol is truly absent before dropping local ownership.
+
+        Runtime `fetch_positions()` can occasionally return partial snapshots.
+        We run a targeted re-check to avoid false orphaning/ownership loss.
+        """
+        try:
+            positions = await self.exchange.fetch_positions(symbol)
+        except Exception as e:
+            logger.warning("Runtime reconcile: targeted confirm failed for {}: {}", symbol, e)
+            # Fail-safe: keep ownership when confirmation path is unavailable.
+            return False
+
+        for pos in positions:
+            pos_symbol = str(getattr(pos, "symbol", "") or "")
+            amount = float(getattr(pos, "amount", 0.0) or 0.0)
+            if pos_symbol == symbol and amount > 0:
+                return False
+        return True
+
     async def _reconcile_runtime_open_trades(self, positions: list[Any]) -> None:
         """Keep local open-trade state aligned with live exchange positions."""
         if self.settings.is_paper_local():
@@ -2345,9 +2367,20 @@ class TradingBot:
         if not stale_symbols:
             return
 
+        confirmed_stale: list[str] = []
+        for sym in stale_symbols:
+            if await self._confirm_symbol_missing_on_exchange(sym):
+                confirmed_stale.append(sym)
+                continue
+            self._runtime_missing_counts.pop(sym, None)
+            logger.warning("Runtime reconcile: miss reset for {} after targeted confirm found live position", sym)
+
+        if not confirmed_stale:
+            return
+
         hub_url = self.settings.hub_url
         bot_id = self.settings.bot_id or "default"
-        for sym in stale_symbols:
+        for sym in confirmed_stale:
             rec = self._open_trades.pop(sym, None)
             self._position_targets.pop(sym, None)
             self._last_runtime_sync.pop(sym, None)
@@ -2838,8 +2871,8 @@ def main() -> None:
     settings = get_settings()
 
     logger.remove()
-    logger.add(sys.stderr, level=settings.log_level)
-    logger.add("logs/bot_{time}.log", rotation="1 day", retention="30 days", level="DEBUG")
+    logger.add(sys.stderr, level=settings.log_level, diagnose=False)
+    logger.add("logs/bot_{time}.log", rotation="1 day", retention="30 days", level="DEBUG", diagnose=False)
 
     bot = TradingBot(settings, daily_target_pct=5.0)
 

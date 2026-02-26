@@ -2340,3 +2340,49 @@ class TestIdleMode:
             await bot._run_loop()
 
         bot._wind_down.assert_awaited_once()
+
+
+class TestRuntimeReconcileStaleConfirmation:
+    @pytest.mark.asyncio
+    async def test_reconcile_keeps_trade_when_targeted_confirm_finds_live_position(self, bot, mock_exchange):
+        rec = TradeRecord(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            action="open",
+            opened_at="2026-02-20T10:00:00+00:00",
+        )
+        bot._open_trades["BTC/USDT"] = rec
+        bot._runtime_missing_counts["BTC/USDT"] = bot._RUNTIME_STALE_MISS_THRESHOLD - 1
+
+        live_btc = MagicMock()
+        live_btc.symbol = "BTC/USDT"
+        live_btc.amount = 0.01
+        mock_exchange.fetch_positions = AsyncMock(return_value=[live_btc])
+
+        other = MagicMock()
+        other.symbol = "ETH/USDT"
+        other.amount = 0.1
+        with patch.object(type(bot.settings), "is_paper_local", MagicMock(return_value=False)):
+            await bot._reconcile_runtime_open_trades([other])
+
+        assert "BTC/USDT" in bot._open_trades
+        assert "BTC/USDT" not in bot._runtime_missing_counts
+
+    @pytest.mark.asyncio
+    async def test_reconcile_removes_trade_when_targeted_confirm_is_still_missing(self, bot, mock_exchange):
+        rec = TradeRecord(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            action="open",
+            opened_at="2026-02-20T10:00:00+00:00",
+        )
+        bot._open_trades["BTC/USDT"] = rec
+        bot._runtime_missing_counts["BTC/USDT"] = bot._RUNTIME_STALE_MISS_THRESHOLD - 1
+        mock_exchange.fetch_positions = AsyncMock(return_value=[])
+
+        with patch.object(type(bot.settings), "is_paper_local", MagicMock(return_value=False)):
+            await bot._reconcile_runtime_open_trades([])
+
+        assert "BTC/USDT" not in bot._open_trades

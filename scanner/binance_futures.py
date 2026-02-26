@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sqlite3
 from collections import defaultdict, deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -171,10 +172,41 @@ class BinanceFuturesScanner:
         if rows:
             self._latest_scan = self._rows_to_coins(rows)
             self._hot_movers = self._compute_hot_movers()
-            self._persist_rows(rows)
-            self._persist_symbol_states(state_rows)
+            await self._persist_tick(rows, state_rows, now)
             self._evict_old_samples(now - timedelta(hours=self.history_hours))
-            self._maybe_cleanup_old_db_rows(now)
+
+    @staticmethod
+    def _is_retryable_db_error(exc: Exception) -> bool:
+        if not isinstance(exc, sqlite3.OperationalError):
+            return False
+        msg = str(exc).lower()
+        return "database is locked" in msg or "disk i/o error" in msg
+
+    async def _persist_tick(self, rows: list[dict[str, Any]], state_rows: list[dict[str, Any]], now: datetime) -> None:
+        """Persist one scanner tick with short retries on transient SQLite contention."""
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            db = HubDB(path=self._db_path)
+            try:
+                db.connect()
+                db.save_binance_snapshots(rows)
+                db.save_binance_symbol_states(state_rows)
+                if (now - self._last_cleanup) >= timedelta(hours=1):
+                    cutoff = (now - timedelta(days=self.retention_days)).isoformat()
+                    removed = db.cleanup_binance_snapshots_before(cutoff)
+                    if removed:
+                        logger.info("Binance futures scanner cleanup removed {} old rows", removed)
+                    self._last_cleanup = now
+                return
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_retryable_db_error(exc) or attempt == 2:
+                    raise
+                await asyncio.sleep(0.25 * (attempt + 1))
+            finally:
+                db.close()
+        if last_exc:
+            raise last_exc
 
     async def _load_recent_history(self) -> None:
         since = (datetime.now(UTC) - timedelta(hours=self.history_hours)).isoformat()

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import sqlite3
 from collections import deque
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from scanner.binance_futures import BinanceFuturesScanner
 
@@ -134,3 +138,22 @@ class TestBinanceFuturesScanner:
         assert st["sample_count"] == 2
         assert st["chg_1m"] >= 0.0
         assert "anchor_1h_ts" in st
+
+    @pytest.mark.asyncio
+    async def test_persist_tick_retries_on_database_locked(self, tmp_path):
+        scanner = BinanceFuturesScanner(db_path=tmp_path / "hub.db", enabled=False)
+        now = datetime.now(UTC)
+        rows = [{"symbol": "BTC/USDT", "price": 1.0}]
+        states = [{"symbol": "BTC/USDT", "last_price": 1.0}]
+
+        db = MagicMock()
+        db.save_binance_snapshots.side_effect = [sqlite3.OperationalError("database is locked"), None]
+        db.save_binance_symbol_states.return_value = None
+        db.cleanup_binance_snapshots_before.return_value = 0
+
+        with patch("scanner.binance_futures.HubDB", return_value=db):
+            await scanner._persist_tick(rows, states, now)
+
+        assert db.connect.call_count == 2
+        assert db.save_binance_snapshots.call_count == 2
+        assert db.save_binance_symbol_states.call_count == 1

@@ -356,6 +356,32 @@ def _normalize_daily_review(payload: dict[str, Any], fallback_summary: str = "")
     return out
 
 
+def _fallback_daily_review_suggestions(context: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
+    """Map hub analytics suggestions into OpenClaw daily-review schema."""
+    raw = context.get("analytics_suggestions", []) if isinstance(context, dict) else []
+    if not isinstance(raw, list):
+        return []
+    mapped: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        mapped.append(
+            {
+                "suggestion_type": str(item.get("suggestion_type", "process") or "process")[:40],
+                "title": str(item.get("title", "") or "")[:180],
+                "description": str(item.get("description", "") or "")[:280],
+                "strategy": str(item.get("strategy", "") or "")[:80],
+                "symbol": str(item.get("symbol", "") or "")[:40],
+                "confidence": max(0.0, min(1.0, _to_float(item.get("confidence", 0.0), 0.0))),
+                "current_value": str(item.get("current_value", "") or "")[:120],
+                "suggested_value": str(item.get("suggested_value", "") or "")[:120],
+                "expected_improvement": str(item.get("expected_improvement", "") or "")[:120],
+                "based_on_trades": max(0, _to_int(item.get("based_on_trades", 0), 0)),
+            }
+        )
+    return mapped[: max(1, limit)]
+
+
 class BudgetController:
     HAIKU_IN = 1.0 / 1_000_000
     HAIKU_OUT = 5.0 / 1_000_000
@@ -830,6 +856,16 @@ async def daily_review(request: Request) -> dict[str, Any]:
                 paid_payload = None
 
     final_norm = _normalize_daily_review(paid_payload or local_norm, fallback_summary=fallback_summary)
+    if not final_norm.get("suggestions"):
+        fallback_suggestions = _fallback_daily_review_suggestions(context, limit=8)
+        if fallback_suggestions:
+            final_norm["suggestions"] = fallback_suggestions
+            summary = str(final_norm.get("summary", "") or "")
+            if summary:
+                summary += " "
+            final_norm["summary"] = (
+                summary + "No model-specific suggestions generated; using analytics-derived fallback recommendations."
+            )[:420]
     return {
         **final_norm,
         "meta": {

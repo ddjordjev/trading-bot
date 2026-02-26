@@ -220,6 +220,54 @@ class BinanceExchange(BaseExchange):
             )
         return amount
 
+    def _cap_amount_to_market_limits(self, client: Any, symbol: str, amount: float) -> float:
+        try:
+            market_fn = getattr(client, "market", None)
+            if not callable(market_fn):
+                return amount
+            market = market_fn(symbol) or {}
+            limits = market.get("limits") or {}
+            amount_limits = limits.get("amount") or {}
+            max_amount = amount_limits.get("max")
+            if max_amount is None:
+                return amount
+            max_amount_f = float(max_amount)
+            if max_amount_f <= 0:
+                return amount
+            if amount > max_amount_f:
+                logger.warning(
+                    "Capping {} order amount for {} from {:.6f} to exchange max {:.6f}",
+                    self.name,
+                    symbol,
+                    amount,
+                    max_amount_f,
+                )
+                return max_amount_f
+        except Exception as exc:
+            logger.debug("Failed to apply market amount cap for {}: {}", symbol, exc)
+        return amount
+
+    @staticmethod
+    def _is_max_quantity_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return 'code":-4005' in msg or ("max quantity" in msg and "quantity" in msg)
+
+    def _reduced_amount_attempts(self, client: Any, symbol: str, initial_amount: float) -> list[float]:
+        attempts: list[float] = []
+        amount = float(initial_amount)
+        for _ in range(6):
+            amount *= 0.5
+            if amount <= 0:
+                break
+            reduced = self._normalize_amount(client, symbol, amount)
+            reduced = self._cap_amount_to_market_limits(client, symbol, reduced)
+            if reduced <= 0:
+                continue
+            if attempts and abs(attempts[-1] - reduced) < 1e-12:
+                continue
+            attempts.append(reduced)
+        return attempts
+
     def _normalize_price(self, client: Any, symbol: str, value: float | None) -> float | None:
         if value is None:
             return None
@@ -388,6 +436,7 @@ class BinanceExchange(BaseExchange):
     ) -> Order:
         client = self._client(market_type)
         normalized_amount = self._normalize_amount(client, symbol, amount)
+        normalized_amount = self._cap_amount_to_market_limits(client, symbol, normalized_amount)
         normalized_price = self._normalize_price(client, symbol, price)
         normalized_stop_price = self._normalize_price(client, symbol, stop_price)
         if order_type == OrderType.MARKET:
@@ -430,7 +479,29 @@ class BinanceExchange(BaseExchange):
                 normalized_stop_price if normalized_stop_price is not None else "none",
                 payload,
             )
-            data = await self._futures.fapiPrivatePostAlgoOrder(payload)
+            try:
+                data = await self._futures.fapiPrivatePostAlgoOrder(payload)
+            except Exception as exc:
+                if not self._is_max_quantity_error(exc):
+                    raise
+                last_exc = exc
+                for retry_amount in self._reduced_amount_attempts(self._futures, symbol, normalized_amount):
+                    logger.warning(
+                        "Retrying {} protection order on {} with reduced quantity {:.6f} after max-quantity rejection",
+                        order_type.value,
+                        symbol,
+                        retry_amount,
+                    )
+                    retry_payload = dict(payload)
+                    retry_payload["quantity"] = retry_amount
+                    try:
+                        data = await self._futures.fapiPrivatePostAlgoOrder(retry_payload)
+                        normalized_amount = retry_amount
+                        break
+                    except Exception as retry_exc:
+                        last_exc = retry_exc
+                else:
+                    raise last_exc
             order = self._to_algo_order(data, symbol, market_type)
             logger.info(
                 "Order accepted {} {} {} id={} status={} trigger={}",
@@ -471,14 +542,41 @@ class BinanceExchange(BaseExchange):
             params,
         )
 
-        data = await client.create_order(
-            symbol=symbol,
-            type=ccxt_type,
-            side=side.value,
-            amount=normalized_amount,
-            price=normalized_price,
-            params=params,
-        )
+        try:
+            data = await client.create_order(
+                symbol=symbol,
+                type=ccxt_type,
+                side=side.value,
+                amount=normalized_amount,
+                price=normalized_price,
+                params=params,
+            )
+        except Exception as exc:
+            if not (market_type == MarketType.FUTURES and self._is_max_quantity_error(exc)):
+                raise
+            last_exc = exc
+            for retry_amount in self._reduced_amount_attempts(client, symbol, normalized_amount):
+                logger.warning(
+                    "Retrying {} order on {} with reduced quantity {:.6f} after max-quantity rejection",
+                    ccxt_type,
+                    symbol,
+                    retry_amount,
+                )
+                try:
+                    data = await client.create_order(
+                        symbol=symbol,
+                        type=ccxt_type,
+                        side=side.value,
+                        amount=retry_amount,
+                        price=normalized_price,
+                        params=params,
+                    )
+                    normalized_amount = retry_amount
+                    break
+                except Exception as retry_exc:
+                    last_exc = retry_exc
+            else:
+                raise last_exc
         logger.info(
             "Order accepted {} {} {} id={} status={} filled={}",
             market_type.value,

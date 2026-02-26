@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,44 @@ class OpenClawAdvisorService:
                 logger.warning("OpenClaw advisor loop error: {}", e)
                 await asyncio.sleep(30)
 
+    @staticmethod
+    def _is_retryable_sqlite_error(exc: Exception) -> bool:
+        if not isinstance(exc, sqlite3.OperationalError):
+            return False
+        msg = str(exc).lower()
+        return "database is locked" in msg or "disk i/o error" in msg
+
+    async def _insert_report_with_retry(self, **kwargs: Any) -> int:
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            try:
+                return self.db.insert_openclaw_daily_report(**kwargs)
+            except Exception as exc:  # defensive: sqlite + transient FS errors
+                last_exc = exc
+                if not self._is_retryable_sqlite_error(exc) or attempt == 3:
+                    raise
+                await asyncio.sleep(0.6 * (attempt + 1))
+        if last_exc:
+            raise last_exc
+        return 0
+
+    async def _upsert_suggestions_with_retry(self, suggestions: list[dict[str, Any]], report_id: int) -> None:
+        for sug in suggestions[:80]:
+            if not isinstance(sug, dict):
+                continue
+            last_exc: Exception | None = None
+            for attempt in range(4):
+                try:
+                    self.db.upsert_openclaw_suggestion(sug, report_id=report_id)
+                    break
+                except Exception as exc:  # defensive: sqlite + transient FS errors
+                    last_exc = exc
+                    if not self._is_retryable_sqlite_error(exc) or attempt == 3:
+                        raise
+                    await asyncio.sleep(0.4 * (attempt + 1))
+            if last_exc and not self._is_retryable_sqlite_error(last_exc):
+                raise last_exc
+
     async def _run_if_due(self, run_kind: str) -> None:
         last_iso = self.db.get_latest_openclaw_report_completed_at()
         now = datetime.now(UTC)
@@ -165,24 +204,35 @@ class OpenClawAdvisorService:
                 error_text = repr(e)
 
         completed_at = datetime.now(UTC).isoformat()
-        report_id = self.db.insert_openclaw_daily_report(
-            report_day=report_day,
-            run_kind=run_kind,
-            requested_at=requested_at,
-            completed_at=completed_at,
-            lane_used=lane_used,
-            source_url=url,
-            context_payload=context_payload,
-            response_payload=response_payload,
-            status=status,
-            error_text=error_text,
-        )
+        try:
+            report_id = await self._insert_report_with_retry(
+                report_day=report_day,
+                run_kind=run_kind,
+                requested_at=requested_at,
+                completed_at=completed_at,
+                lane_used=lane_used,
+                source_url=url,
+                context_payload=context_payload,
+                response_payload=response_payload,
+                status=status,
+                error_text=error_text,
+            )
+        except Exception as e:
+            logger.warning("OpenClaw daily review persistence failed: {}", e)
+            return {
+                "ok": False,
+                "report_id": 0,
+                "status": "error",
+                "lane_used": lane_used,
+                "error": f"persist_failed:{e!r}",
+            }
 
         suggestions = response_payload.get("suggestions", []) if isinstance(response_payload, dict) else []
         if isinstance(suggestions, list):
-            for sug in suggestions[:80]:
-                if isinstance(sug, dict):
-                    self.db.upsert_openclaw_suggestion(sug, report_id=report_id)
+            try:
+                await self._upsert_suggestions_with_retry(suggestions, report_id)
+            except Exception as e:
+                logger.warning("OpenClaw suggestion upsert failed (report_id={}): {}", report_id, e)
 
         if status == "ok":
             logger.info(

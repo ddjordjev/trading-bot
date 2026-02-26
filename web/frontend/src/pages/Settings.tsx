@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { BotProfiles } from "./BotProfiles";
 import { Modules } from "./Modules";
 import { Summary } from "./Summary";
@@ -83,11 +83,18 @@ function AuthSection() {
 function AboutSection() {
   const VERSION = "0.7.0";
   const BUILD_DATE = "2026-02-20";
+  const REPO_URL = "https://github.com/ddjordjev/trading-bot";
 
-  const rows: [string, string][] = [
+  const rows: [string, string | ReactNode][] = [
     ["Name", "Trade Borg"],
     ["Version", `v${VERSION}`],
     ["Build Date", BUILD_DATE],
+    [
+      "GitHub",
+      <a key="repo-link" href={REPO_URL} target="_blank" rel="noopener noreferrer">
+        {REPO_URL}
+      </a>,
+    ],
     ["Exchanges", "MEXC\nBinance\nBybit"],
     ["License", "Proprietary"],
   ];
@@ -119,7 +126,11 @@ function AboutSection() {
             <tr key={label}>
               <td style={{ color: "var(--text-muted)", fontWeight: 500, width: 140 }}>{label}</td>
               <td style={{ color: "var(--heading)" }}>
-                {value.includes("\n") ? value.split("\n").map((line, i) => <div key={i}>{line}</div>) : value}
+                {typeof value === "string"
+                  ? value.includes("\n")
+                    ? value.split("\n").map((line, i) => <div key={i}>{line}</div>)
+                    : value
+                  : value}
               </td>
             </tr>
           ))}

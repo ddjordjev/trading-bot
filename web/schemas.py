@@ -335,6 +335,7 @@ class BotProfileInfo(BaseModel):
     container_status: str = "idle"  # "running" | "idle" | "winding_down"
     balance: float | None = None
     daily_pnl: float | None = None
+    lifetime_pnl: float = 0.0
     wins: int = 0
     losses: int = 0
     open_positions: int = 0

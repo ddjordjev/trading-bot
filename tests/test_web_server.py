@@ -1031,6 +1031,123 @@ class TestInternalReport:
         assert ("MEXC", "BTC/USDT", "long") in orphan_keys
         _bot_reports.clear()
 
+    async def test_merged_snapshot_filters_orphan_when_wick_scalp_manages_side(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports.clear()
+
+        base_status = {
+            "running": True,
+            "balance": 100.0,
+            "available_margin": 80.0,
+            "daily_pnl": 0.0,
+            "daily_pnl_pct": 0.0,
+            "total_growth_usd": 0.0,
+            "total_growth_pct": 0.0,
+            "profit_buffer_pct": 0.0,
+            "uptime_seconds": 10,
+            "manual_stop_active": False,
+            "strategies_count": 0,
+            "dynamic_strategies_count": 0,
+            "trading_mode": "paper_local",
+            "exchange_name": "BINANCE",
+            "exchange_url": "",
+            "tier": "building",
+            "tier_progress_pct": 0,
+            "daily_target_pct": 10,
+        }
+
+        report_bot_snapshot(
+            {
+                "bot_id": "managed-wick-short",
+                "exchange": "BINANCE",
+                "status": dict(base_status),
+                "positions": [{"symbol": "SOL/USDT", "side": "long"}],
+                "wick_scalps": [{"symbol": "SOL/USDT", "scalp_side": "short"}],
+                "orphan_positions": [],
+                "strategies": [],
+            }
+        )
+        report_bot_snapshot(
+            {
+                "bot_id": "orphan-short",
+                "exchange": "BINANCE",
+                "status": dict(base_status),
+                "positions": [],
+                "wick_scalps": [],
+                "orphan_positions": [{"symbol": "SOL/USDT", "side": "short", "detected_at": "2026-02-01T00:00:00Z"}],
+                "strategies": [],
+            }
+        )
+
+        from web.server import _build_merged_snapshot
+
+        snap = _build_merged_snapshot()
+        orphan_keys = {
+            (
+                str(o.get("exchange_name", "")).upper(),
+                str(o.get("symbol", "")).upper(),
+                str(o.get("side", "")).lower(),
+            )
+            for o in snap["orphan_positions"]
+        }
+        assert ("BINANCE", "SOL/USDT", "short") not in orphan_keys
+        _bot_reports.clear()
+
+    async def test_merged_snapshot_filters_unknown_side_orphan_when_symbol_is_managed(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports.clear()
+
+        base_status = {
+            "running": True,
+            "balance": 100.0,
+            "available_margin": 80.0,
+            "daily_pnl": 0.0,
+            "daily_pnl_pct": 0.0,
+            "total_growth_usd": 0.0,
+            "total_growth_pct": 0.0,
+            "profit_buffer_pct": 0.0,
+            "uptime_seconds": 10,
+            "manual_stop_active": False,
+            "strategies_count": 0,
+            "dynamic_strategies_count": 0,
+            "trading_mode": "paper_local",
+            "exchange_name": "BINANCE",
+            "exchange_url": "",
+            "tier": "building",
+            "tier_progress_pct": 0,
+            "daily_target_pct": 10,
+        }
+
+        report_bot_snapshot(
+            {
+                "bot_id": "managed-sol",
+                "exchange": "BINANCE",
+                "status": dict(base_status),
+                "positions": [{"symbol": "SOL/USDT", "side": "long"}],
+                "wick_scalps": [],
+                "orphan_positions": [],
+                "strategies": [],
+            }
+        )
+        report_bot_snapshot(
+            {
+                "bot_id": "orphan-unknown-side",
+                "exchange": "BINANCE",
+                "status": dict(base_status),
+                "positions": [],
+                "wick_scalps": [],
+                "orphan_positions": [{"symbol": "SOL/USDT", "side": "", "detected_at": "2026-02-01T00:00:00Z"}],
+                "strategies": [],
+            }
+        )
+
+        from web.server import _build_merged_snapshot
+
+        snap = _build_merged_snapshot()
+        orphan_symbols = {str(o.get("symbol", "")).upper() for o in snap["orphan_positions"]}
+        assert "SOL/USDT" not in orphan_symbols
+        _bot_reports.clear()
+
 
 # ── GET /api/modules, /api/daily-report, /api/analytics ─────────────────
 
@@ -2543,6 +2660,7 @@ class TestBotProfiles:
             assert "is_hub" in p
             assert "enabled" in p
             assert "container_status" in p
+            assert "lifetime_pnl" in p
 
     async def test_hub_excluded_from_profiles(self, client, mock_bot):
         set_bot(mock_bot)
@@ -2615,6 +2733,7 @@ class TestBotProfiles:
             # balance_now = available + used_margin + unrealized
             # 450 + (100/5 + 60/3) + (10+20) = 520
             assert profile["balance"] == pytest.approx(520.0)
+            assert isinstance(profile["lifetime_pnl"], (int, float))
         finally:
             _bot_reports.clear()
 
