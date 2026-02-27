@@ -41,6 +41,13 @@ PAID_MODEL_SONNET = os.getenv("OPENCLAW_BRIDGE_PAID_MODEL_SONNET", "claude-sonne
 PAID_TIMEOUT = float(os.getenv("OPENCLAW_BRIDGE_PAID_TIMEOUT_SECONDS", "20"))
 PAID_MAX_TOKENS = max(128, int(os.getenv("OPENCLAW_BRIDGE_PAID_MAX_TOKENS", "900")))
 PAID_TEMPERATURE = float(os.getenv("OPENCLAW_BRIDGE_PAID_TEMPERATURE", "0.2"))
+PAID_PROMPT_CACHE_ENABLED = os.getenv("OPENCLAW_BRIDGE_PAID_PROMPT_CACHE_ENABLED", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+PAID_PROMPT_CACHE_TTL = os.getenv("OPENCLAW_BRIDGE_PAID_PROMPT_CACHE_TTL", "5m").strip().lower()
 
 ENABLE_SONNET_ESCALATION = os.getenv("OPENCLAW_BRIDGE_ENABLE_SONNET_ESCALATION", "false").strip().lower() in {
     "1",
@@ -507,6 +514,14 @@ class AnthropicAdvisoryClient:
         self.max_tokens = max(128, max_tokens)
         self.temperature = max(0.0, min(1.0, temperature))
 
+    @staticmethod
+    def _cache_control_payload() -> dict[str, Any]:
+        if not PAID_PROMPT_CACHE_ENABLED:
+            return {}
+        if PAID_PROMPT_CACHE_TTL == "1h":
+            return {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
+        return {"cache_control": {"type": "ephemeral"}}
+
     async def run(
         self, context: dict[str, Any], local_draft: dict[str, Any] | None, use_sonnet: bool
     ) -> tuple[dict[str, Any] | None, int, int, str]:
@@ -524,7 +539,25 @@ class AnthropicAdvisoryClient:
             "model": model,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
-            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "You are OpenClaw Advisory for Trade Borg. Output JSON only.\n"
+                                "Advisory-only. Never output execution commands.\n"
+                                "Keep concise, max 3 idea_briefs, confidence [0,1], "
+                                "sentiment_score int [0,100]."
+                            ),
+                            **self._cache_control_payload(),
+                        },
+                        {"type": "text", "text": f"Local draft: {json.dumps(local_draft or {}, ensure_ascii=True)}"},
+                        {"type": "text", "text": f"Context: {json.dumps(context, ensure_ascii=True)}"},
+                    ],
+                }
+            ],
         }
         headers = {
             "x-api-key": self.api_key,
@@ -825,7 +858,31 @@ async def daily_review(request: Request) -> dict[str, Any]:
                 "model": _anthropic_client.haiku_model,
                 "max_tokens": _anthropic_client.max_tokens,
                 "temperature": _anthropic_client.temperature,
-                "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "You are OpenClaw strategy optimizer for Trade Borg.\n"
+                                    "Return JSON only with exact keys: as_of, summary, suggestions.\n"
+                                    "suggestions is a list (max 12) of compact actionable recommendations.\n"
+                                    "Each suggestion object keys: suggestion_type, title, description, strategy, "
+                                    "symbol, confidence, current_value, suggested_value, expected_improvement, "
+                                    "based_on_trades.\n"
+                                    "advisory-only, no raw dumps, no chain-of-thought.\n"
+                                    "Keep description under 280 chars and expected_improvement under 120 chars.\n"
+                                    "Use suggestion_type one of: disable, reduce_weight, change_param, time_filter, "
+                                    "regime_filter, process."
+                                ),
+                                **_anthropic_client._cache_control_payload(),
+                            },
+                            {"type": "text", "text": f"Recent examples: {json.dumps(examples, ensure_ascii=True)}"},
+                            {"type": "text", "text": f"Context: {json.dumps(context, ensure_ascii=True)}"},
+                        ],
+                    }
+                ],
             }
             headers = {
                 "x-api-key": _anthropic_client.api_key,

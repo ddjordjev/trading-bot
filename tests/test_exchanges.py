@@ -587,7 +587,7 @@ class TestBybitExchange:
                 fetch_open_orders=AsyncMock(return_value=[]),
                 set_margin_mode=AsyncMock(),
                 set_leverage=AsyncMock(),
-                markets={"BTC/USDT": {}, "ETH/USDT": {}},
+                markets={"BTC/USDT": {}, "ETH/USDT": {}, "ICP/USDT:USDT": {}},
             )
             from core.exchange.bybit import BybitExchange
 
@@ -613,6 +613,11 @@ class TestBybitExchange:
         ticker = await bybit.fetch_ticker("BTC/USDT")
         assert ticker.symbol == "BTC/USDT"
         assert ticker.last == 100.0
+
+    @pytest.mark.asyncio
+    async def test_fetch_candles_futures_resolves_linear_symbol(self, bybit):
+        await bybit.fetch_candles("ICP/USDT", "1m", limit=10, market_type=MarketType.FUTURES)
+        bybit._futures.fetch_ohlcv.assert_awaited_once_with("ICP/USDT:USDT", "1m", limit=10)
 
     @pytest.mark.asyncio
     async def test_fetch_balance_does_not_double_count_spot_and_futures(self, bybit):
@@ -697,6 +702,21 @@ class TestBybitExchange:
         )
         bybit._futures.set_margin_mode.assert_awaited_once_with("isolated", "BTC/USDT")
         bybit._futures.create_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_place_order_futures_resolves_linear_symbol(self, bybit):
+        await bybit.place_order(
+            "ICP/USDT",
+            OrderSide.BUY,
+            OrderType.MARKET,
+            0.2,
+            leverage=7,
+            market_type=MarketType.FUTURES,
+        )
+        bybit._futures.set_margin_mode.assert_awaited_once_with("isolated", "ICP/USDT:USDT")
+        bybit._futures.set_leverage.assert_awaited_once_with(7, "ICP/USDT:USDT")
+        kwargs = bybit._futures.create_order.call_args.kwargs
+        assert kwargs["symbol"] == "ICP/USDT:USDT"
 
     @pytest.mark.asyncio
     async def test_place_order_futures_proceeds_when_margin_mode_set_fails(self, bybit):

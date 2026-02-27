@@ -58,6 +58,22 @@ class BybitExchange(BaseExchange):
     def _client(self, market_type: MarketType = MarketType.SPOT) -> ccxt.bybit:
         return self._futures if market_type == MarketType.FUTURES else self._spot
 
+    def _resolve_symbol(self, symbol: str, market_type: MarketType) -> str:
+        """Resolve canonical ccxt market symbol for the selected market type.
+
+        Hub proposals use normalized pair symbols like ``ICP/USDT``.
+        Bybit linear futures often require ``ICP/USDT:USDT`` for API calls.
+        """
+        client = self._client(market_type)
+        markets = getattr(client, "markets", {}) or {}
+        if symbol in markets:
+            return symbol
+        if market_type == MarketType.FUTURES and ":" not in symbol:
+            futures_variant = f"{symbol}:USDT"
+            if futures_variant in markets:
+                return futures_variant
+        return symbol
+
     @staticmethod
     def _infer_position_leverage(raw_position: dict[str, Any]) -> int:
         """Infer leverage when exchange payload omits explicit value."""
@@ -121,7 +137,8 @@ class BybitExchange(BaseExchange):
         logger.info("Bybit disconnected")
 
     async def fetch_ticker(self, symbol: str, market_type: MarketType = MarketType.SPOT) -> Ticker:
-        data = await self._client(market_type).fetch_ticker(symbol)
+        resolved_symbol = self._resolve_symbol(symbol, market_type)
+        data = await self._client(market_type).fetch_ticker(resolved_symbol)
         return Ticker(
             symbol=symbol,
             bid=data.get("bid", 0) or 0,
@@ -135,7 +152,8 @@ class BybitExchange(BaseExchange):
     async def fetch_tickers(
         self, symbols: list[str] | None = None, market_type: MarketType = MarketType.SPOT
     ) -> list[Ticker]:
-        raw = await self._client(market_type).fetch_tickers(symbols)
+        resolved_symbols = None if symbols is None else [self._resolve_symbol(s, market_type) for s in symbols]
+        raw = await self._client(market_type).fetch_tickers(resolved_symbols)
         return [
             Ticker(
                 symbol=sym,
@@ -156,13 +174,15 @@ class BybitExchange(BaseExchange):
         limit: int = 100,
         market_type: MarketType = MarketType.SPOT,
     ) -> list[Candle]:
-        data = await self._client(market_type).fetch_ohlcv(symbol, timeframe, limit=limit)
+        resolved_symbol = self._resolve_symbol(symbol, market_type)
+        data = await self._client(market_type).fetch_ohlcv(resolved_symbol, timeframe, limit=limit)
         return [Candle(timestamp=ts_to_dt(c[0]), open=c[1], high=c[2], low=c[3], close=c[4], volume=c[5]) for c in data]
 
     async def fetch_order_book(
         self, symbol: str, limit: int = 20, market_type: MarketType = MarketType.SPOT
     ) -> OrderBook:
-        data = await self._client(market_type).fetch_order_book(symbol, limit)
+        resolved_symbol = self._resolve_symbol(symbol, market_type)
+        data = await self._client(market_type).fetch_order_book(resolved_symbol, limit)
         return OrderBook(
             symbol=symbol,
             bids=[(b[0], b[1]) for b in data.get("bids", [])],
@@ -189,7 +209,8 @@ class BybitExchange(BaseExchange):
 
     async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
         try:
-            raw = await self._futures.fetch_positions(symbols=[symbol] if symbol else None)
+            resolved_symbol = self._resolve_symbol(symbol, MarketType.FUTURES) if symbol else None
+            raw = await self._futures.fetch_positions(symbols=[resolved_symbol] if resolved_symbol else None)
         except Exception as e:
             logger.warning("Bybit fetch_positions failed: {}", e)
             return []
@@ -238,6 +259,7 @@ class BybitExchange(BaseExchange):
         market_type: MarketType = MarketType.SPOT,
     ) -> Order:
         client = self._client(market_type)
+        resolved_symbol = self._resolve_symbol(symbol, market_type)
         if order_type == OrderType.MARKET:
             ccxt_type = "market"
         elif order_type == OrderType.LIMIT:
@@ -281,7 +303,7 @@ class BybitExchange(BaseExchange):
         )
 
         data = await client.create_order(
-            symbol=symbol,
+            symbol=resolved_symbol,
             type=ccxt_type,
             side=side.value,
             amount=amount,
@@ -314,7 +336,8 @@ class BybitExchange(BaseExchange):
 
     async def cancel_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
         client = self._client(market_type)
-        data = await client.cancel_order(order_id, symbol)
+        resolved_symbol = self._resolve_symbol(symbol, market_type)
+        data = await client.cancel_order(order_id, resolved_symbol)
         return Order(
             id=order_id,
             symbol=symbol,
@@ -327,7 +350,8 @@ class BybitExchange(BaseExchange):
 
     async def fetch_order(self, order_id: str, symbol: str, market_type: MarketType = MarketType.SPOT) -> Order:
         client = self._client(market_type)
-        data = await client.fetch_order(order_id, symbol)
+        resolved_symbol = self._resolve_symbol(symbol, market_type)
+        data = await client.fetch_order(order_id, resolved_symbol)
         return Order(
             id=order_id,
             symbol=symbol,
@@ -345,7 +369,8 @@ class BybitExchange(BaseExchange):
         self, symbol: str | None = None, market_type: MarketType = MarketType.SPOT
     ) -> list[Order]:
         client = self._client(market_type)
-        raw = await client.fetch_open_orders(symbol)
+        resolved_symbol = self._resolve_symbol(symbol, market_type) if symbol else None
+        raw = await client.fetch_open_orders(resolved_symbol)
         return [
             Order(
                 id=str(d.get("id", "")),
@@ -363,7 +388,8 @@ class BybitExchange(BaseExchange):
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
         try:
-            await self._futures.set_leverage(leverage, symbol)
+            resolved_symbol = self._resolve_symbol(symbol, MarketType.FUTURES)
+            await self._futures.set_leverage(leverage, resolved_symbol)
             logger.debug("Leverage set to {}x for {}", leverage, symbol)
             return True
         except Exception as e:
@@ -372,7 +398,8 @@ class BybitExchange(BaseExchange):
 
     async def set_margin_mode(self, symbol: str, margin_mode: str) -> bool:
         try:
-            await self._futures.set_margin_mode(margin_mode, symbol)
+            resolved_symbol = self._resolve_symbol(symbol, MarketType.FUTURES)
+            await self._futures.set_margin_mode(margin_mode, resolved_symbol)
             logger.debug("Margin mode set to {} for {}", margin_mode, symbol)
             return True
         except Exception as e:

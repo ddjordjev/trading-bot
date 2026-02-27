@@ -430,13 +430,20 @@ class MonitorService:
             cls = getattr(ccxt, exchange_id, None)
             if cls is None:
                 continue
-            ex = cls({"enableRateLimit": True})
+            params: dict[str, object] = {"enableRateLimit": True}
+            if exchange_id == "bybit":
+                # Keep hub market discovery aligned with bot Bybit adapter:
+                # spot client for spot, linear client for futures.
+                params["options"] = {"defaultType": "linear" if preferred_market == "futures" else "spot"}
+            ex = cls(params)
             try:
                 # In paper_live, use exchange testnet markets where available so
                 # symbol availability reflects executable demo venues.
                 if paper_live_mode:
-                    with contextlib.suppress(Exception):
+                    try:
                         ex.set_sandbox_mode(True)
+                    except Exception as e:
+                        logger.warning("Failed to enable sandbox mode for {}: {}", exchange_id.upper(), e)
                 await ex.load_markets()
                 symbols: set[str] = set()
                 for raw_symbol, market in ex.markets.items():
