@@ -167,6 +167,7 @@ class TestBinanceExchange:
                     }
                 ),
                 fapiPrivateDeleteAlgoOrder=AsyncMock(return_value={"algoId": "algo-1"}),
+                set_margin_mode=AsyncMock(),
                 set_leverage=AsyncMock(),
                 markets={"BTC/USDT": {}, "ETH/USDT": {}},
                 market=MagicMock(return_value={"id": "BTCUSDT"}),
@@ -242,7 +243,7 @@ class TestBinanceExchange:
     async def test_fetch_balance(self, binance):
         bal = await binance.fetch_balance()
         assert "USDT" in bal
-        assert bal["USDT"] == 20_000.0
+        assert bal["USDT"] == 10_000.0
 
     @pytest.mark.asyncio
     async def test_fetch_positions_empty(self, binance):
@@ -338,7 +339,21 @@ class TestBinanceExchange:
             leverage=10,
             market_type=MarketType.FUTURES,
         )
+        binance._futures.set_margin_mode.assert_awaited_once_with("isolated", "BTC/USDT")
         binance._futures.set_leverage.assert_awaited_once_with(10, "BTC/USDT")
+        binance._futures.create_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_place_order_futures_proceeds_when_margin_mode_set_fails(self, binance):
+        binance._futures.set_margin_mode = AsyncMock(side_effect=Exception("permission denied"))
+        await binance.place_order(
+            "BTC/USDT",
+            OrderSide.BUY,
+            OrderType.MARKET,
+            0.1,
+            leverage=10,
+            market_type=MarketType.FUTURES,
+        )
         binance._futures.create_order.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -570,6 +585,7 @@ class TestBybitExchange:
                     }
                 ),
                 fetch_open_orders=AsyncMock(return_value=[]),
+                set_margin_mode=AsyncMock(),
                 set_leverage=AsyncMock(),
                 markets={"BTC/USDT": {}, "ETH/USDT": {}},
             )
@@ -597,6 +613,12 @@ class TestBybitExchange:
         ticker = await bybit.fetch_ticker("BTC/USDT")
         assert ticker.symbol == "BTC/USDT"
         assert ticker.last == 100.0
+
+    @pytest.mark.asyncio
+    async def test_fetch_balance_does_not_double_count_spot_and_futures(self, bybit):
+        bal = await bybit.fetch_balance()
+        assert "USDT" in bal
+        assert bal["USDT"] == 5_000.0
 
     @pytest.mark.asyncio
     async def test_fetch_positions_short_side(self, bybit):
@@ -665,6 +687,20 @@ class TestBybitExchange:
     @pytest.mark.asyncio
     async def test_place_order_futures_proceeds_when_set_leverage_fails(self, bybit):
         bybit._futures.set_leverage = AsyncMock(side_effect=Exception("temporary exchange error"))
+        await bybit.place_order(
+            "BTC/USDT",
+            OrderSide.BUY,
+            OrderType.MARKET,
+            0.2,
+            leverage=7,
+            market_type=MarketType.FUTURES,
+        )
+        bybit._futures.set_margin_mode.assert_awaited_once_with("isolated", "BTC/USDT")
+        bybit._futures.create_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_place_order_futures_proceeds_when_margin_mode_set_fails(self, bybit):
+        bybit._futures.set_margin_mode = AsyncMock(side_effect=Exception("permission denied"))
         await bybit.place_order(
             "BTC/USDT",
             OrderSide.BUY,

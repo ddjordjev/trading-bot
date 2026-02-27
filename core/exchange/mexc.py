@@ -252,6 +252,11 @@ class MexcExchange(BaseExchange):
         _ = leverage
         return True
 
+    async def set_margin_mode(self, symbol: str, margin_mode: str) -> bool:
+        _ = symbol
+        _ = margin_mode
+        return True
+
     # -- Symbols --
 
     async def get_available_symbols(self, market_type: MarketType = MarketType.SPOT) -> list[str]:

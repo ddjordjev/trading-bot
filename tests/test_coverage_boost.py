@@ -349,11 +349,11 @@ class TestSettingsUrls:
         assert s.binance_api_key == "test_key"
         assert s.binance_api_secret == "test_secret"
 
-    def test_binance_api_keys_paper_local_uses_prod(self, settings):
-        settings.binance_prod_api_key = "prod_key"
-        settings.binance_prod_api_secret = "prod_secret"
-        assert settings.binance_api_key == "prod_key"
-        assert settings.binance_api_secret == "prod_secret"
+    def test_binance_api_keys_paper_local_uses_test(self, settings):
+        settings.binance_test_api_key = "test_key"
+        settings.binance_test_api_secret = "test_secret"
+        assert settings.binance_api_key == "test_key"
+        assert settings.binance_api_secret == "test_secret"
 
     def test_bot_id_default_empty(self, settings):
         assert settings.bot_id == ""
@@ -385,14 +385,14 @@ class TestSettingsUrls:
         assert s.bybit_api_key == "bkey"
         assert s.bybit_api_secret == "bsecret"
 
-    def test_bybit_api_keys_paper_local_uses_prod(self, monkeypatch):
+    def test_bybit_api_keys_paper_local_uses_test(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "bybit")
         s = Settings(_env_file=None)
-        s.bybit_prod_api_key = "bprod"
-        s.bybit_prod_api_secret = "bprod_secret"
-        assert s.bybit_api_key == "bprod"
-        assert s.bybit_api_secret == "bprod_secret"
+        s.bybit_test_api_key = "btest"
+        s.bybit_test_api_secret = "btest_secret"
+        assert s.bybit_api_key == "btest"
+        assert s.bybit_api_secret == "btest_secret"
 
 
 # ── Analytics Service ────────────────────────────────────────────────────────

@@ -924,6 +924,7 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
             else:
                 container_status = "idle"
         summary = hub.get_bot_summary(p.id)
+        exchange_name = str(rpt.get("exchange", "") or p.env_overrides.get("EXCHANGE", "") or "").strip().upper()
         balance_now: float | None
         if s:
             available = float(s.get("available_margin", 0.0) or 0.0)
@@ -947,6 +948,7 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
                 is_hub=p.is_hub,
                 enabled=enabled,
                 container_status=container_status,
+                exchange=exchange_name,
                 balance=balance_now,
                 daily_pnl=s.get("daily_pnl") if s else None,
                 lifetime_pnl=float(summary.get("total_pnl", 0.0) or 0.0),

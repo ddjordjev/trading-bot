@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sqlite3
 import time
 from datetime import UTC, datetime
 
@@ -186,6 +187,38 @@ class MonitorService:
         return max(min_value, parsed)
 
     @staticmethod
+    def _is_retryable_db_error(exc: Exception) -> bool:
+        if not isinstance(exc, sqlite3.OperationalError):
+            return False
+        msg = str(exc).lower()
+        return "database is locked" in msg or "disk i/o error" in msg
+
+    async def _persist_exchange_symbols_with_retry(self, fresh: dict[str, set[str]]) -> None:
+        """Persist exchange symbols with short retries on transient SQLite contention."""
+        last_exc: Exception | None = None
+        for attempt in range(6):
+            db = None
+            try:
+                from db.hub_store import HubDB
+
+                db = HubDB()
+                db.connect()
+                for ex_name, syms in fresh.items():
+                    db.save_exchange_symbols(ex_name, syms)
+                return
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_retryable_db_error(exc) or attempt == 5:
+                    raise
+                await asyncio.sleep(min(0.25 * (2**attempt), 2.0))
+            finally:
+                with contextlib.suppress(Exception):
+                    if db is not None:
+                        db.close()
+        if last_exc:
+            raise last_exc
+
+    @staticmethod
     def _pair_symbol(symbol: str) -> str:
         raw = (symbol or "").upper().split(":")[0]
         if "/" in raw:
@@ -354,6 +387,15 @@ class MonitorService:
 
     _SUPPORTED_EXCHANGES = ("binance", "mexc", "bybit")
 
+    @staticmethod
+    def _fleet_exchanges(bot_statuses: list[BotDeploymentStatus]) -> set[str]:
+        """Exchanges currently represented by known bots (upper-case)."""
+        return {
+            str(getattr(s, "exchange", "") or "").strip().upper()
+            for s in bot_statuses
+            if str(getattr(s, "exchange", "") or "").strip()
+        }
+
     async def _seed_exchange_symbols(self) -> None:
         """On startup: load from DB, then refresh from exchanges."""
         try:
@@ -382,6 +424,7 @@ class MonitorService:
         import ccxt.async_support as ccxt
 
         preferred_market = "futures" if self.settings.futures_allowed else "spot"
+        paper_live_mode = str(getattr(self.settings, "trading_mode", "") or "").lower() == "paper_live"
         fresh: dict[str, set[str]] = {}
         for exchange_id in self._SUPPORTED_EXCHANGES:
             cls = getattr(ccxt, exchange_id, None)
@@ -389,9 +432,9 @@ class MonitorService:
                 continue
             ex = cls({"enableRateLimit": True})
             try:
-                # In paper_live with Binance, gate symbols by testnet availability
-                # so bots/scanner do not surface pairs not tradable on demo futures.
-                if exchange_id == "binance" and self.settings.trading_mode == "paper_live":
+                # In paper_live, use exchange testnet markets where available so
+                # symbol availability reflects executable demo venues.
+                if paper_live_mode:
                     with contextlib.suppress(Exception):
                         ex.set_sandbox_mode(True)
                 await ex.load_markets()
@@ -410,7 +453,7 @@ class MonitorService:
                             continue
                     symbols.add(raw_symbol.split(":")[0])
                 fresh[exchange_id.upper()] = symbols
-                if exchange_id == "binance" and self.settings.trading_mode == "paper_live":
+                if paper_live_mode:
                     logger.info("Fetched {} symbols from {} TESTNET", len(symbols), exchange_id.upper())
                 else:
                     logger.info("Fetched {} symbols from {}", len(symbols), exchange_id.upper())
@@ -430,15 +473,9 @@ class MonitorService:
             self._last_symbols_refresh = time.monotonic()
 
             try:
-                from db.hub_store import HubDB
-
-                db = HubDB()
-                db.connect()
-                for ex_name, syms in fresh.items():
-                    db.save_exchange_symbols(ex_name, syms)
-                db.close()
+                await self._persist_exchange_symbols_with_retry(fresh)
             except Exception as e:
-                logger.warning("Failed to persist exchange symbols to DB: {}", e)
+                logger.warning("Failed to persist exchange symbols to DB after retries: {}", e)
 
     async def _run_loop(self) -> None:
         tick_count = 0
@@ -618,8 +655,7 @@ class MonitorService:
         all_tradeable: set[str] = set()
         for syms in self._exchange_symbols.values():
             all_tradeable |= syms
-        paper_live_mode = str(getattr(self.settings, "trading_mode", "") or "").lower() == "paper_live"
-        binance_demo_symbols = self._exchange_symbols.get("BINANCE", set()) if paper_live_mode else set()
+        fleet_exchanges = self._fleet_exchanges(bot_statuses)
 
         open_db_symbols: set[str] = set()
         hub = None
@@ -651,10 +687,6 @@ class MonitorService:
             if all_tradeable and proposal.symbol not in all_tradeable:
                 skipped += 1
                 continue
-            if paper_live_mode and binance_demo_symbols and proposal.symbol not in binance_demo_symbols:
-                # In paper_live we only queue symbols tradable on Binance demo/testnet.
-                skipped += 1
-                continue
             if existing.has_symbol(proposal.symbol):
                 deduped += 1
                 continue
@@ -664,11 +696,8 @@ class MonitorService:
             available = [
                 ex for ex in proposal.supported_exchanges if proposal.symbol not in self.state.get_active_symbols(ex)
             ]
-            if paper_live_mode and binance_demo_symbols:
-                if proposal.symbol in self.state.get_active_symbols("BINANCE"):
-                    deduped += 1
-                    continue
-                available = ["BINANCE"]
+            if fleet_exchanges:
+                available = [ex for ex in available if ex in fleet_exchanges]
             if proposal.supported_exchanges and not available:
                 deduped += 1
                 continue

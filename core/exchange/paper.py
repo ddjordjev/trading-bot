@@ -385,6 +385,12 @@ class PaperExchange(BaseExchange):
         logger.debug("[PAPER] Leverage set to {}x for {}", leverage, symbol)
         return True
 
+    async def set_margin_mode(self, symbol: str, margin_mode: str) -> bool:
+        _ = symbol
+        _ = margin_mode
+        # Paper-local does not model margin mode, but keep interface parity.
+        return True
+
     async def get_available_symbols(self, market_type: MarketType = MarketType.SPOT) -> list[str]:
         return await self._real.get_available_symbols(market_type)
 

@@ -374,7 +374,10 @@ class BinanceExchange(BaseExchange):
             futures_data = await self._futures.fetch_balance()
             for asset, info in futures_data.items():
                 if isinstance(info, dict) and info.get("free", 0) > 0:
-                    result[asset] = result.get(asset, 0) + float(info["free"])
+                    # Do not add spot+futures free balances together for the same
+                    # asset; they are separate wallets and summing inflates equity.
+                    # Keep the larger free bucket as a conservative account anchor.
+                    result[asset] = max(result.get(asset, 0.0), float(info["free"]))
         except Exception:
             if self.sandbox:
                 logger.debug("Futures balance fetch failed in sandbox mode — skipping")
@@ -518,17 +521,19 @@ class BinanceExchange(BaseExchange):
             # Avoid over-closing when account mode supports one-way futures.
             params["closePosition"] = False
         # Protection orders should never be blocked by leverage endpoint issues.
-        if (
-            market_type == MarketType.FUTURES
-            and not is_protection_order
-            and not await self.set_leverage(symbol, leverage)
-        ):
-            logger.warning(
-                "Proceeding with {} on {} despite leverage set failure ({}x)",
-                order_type.value,
-                symbol,
-                leverage,
-            )
+        if market_type == MarketType.FUTURES and not is_protection_order:
+            # Enforce isolated margin for all futures entries.
+            if not await self.set_margin_mode(symbol, "isolated"):
+                logger.warning(
+                    "Proceeding with {} on {} despite isolated margin-mode set failure", order_type.value, symbol
+                )
+            if not await self.set_leverage(symbol, leverage):
+                logger.warning(
+                    "Proceeding with {} on {} despite leverage set failure ({}x)",
+                    order_type.value,
+                    symbol,
+                    leverage,
+                )
 
         logger.info(
             "Placing {} {} {} {} @ {} (leverage={}, stop_price={}, params={})",
@@ -737,6 +742,19 @@ class BinanceExchange(BaseExchange):
             return True
         except Exception as e:
             logger.warning("Could not set leverage for {}: {}", symbol, e)
+            return False
+
+    async def set_margin_mode(self, symbol: str, margin_mode: str) -> bool:
+        try:
+            await self._futures.set_margin_mode(margin_mode, symbol)
+            logger.debug("Margin mode set to {} for {}", margin_mode, symbol)
+            return True
+        except Exception as e:
+            msg = str(e).lower()
+            # Binance returns "No need to change margin type." when already set.
+            if "no need to change margin type" in msg:
+                return True
+            logger.warning("Could not set margin mode={} for {}: {}", margin_mode, symbol, e)
             return False
 
     async def get_available_symbols(self, market_type: MarketType = MarketType.SPOT) -> list[str]:

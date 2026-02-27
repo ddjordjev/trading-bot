@@ -180,7 +180,9 @@ class BybitExchange(BaseExchange):
             futures_data = await self._futures.fetch_balance()
             for asset, info in futures_data.items():
                 if isinstance(info, dict) and info.get("free", 0) > 0:
-                    result[asset] = result.get(asset, 0) + float(info["free"])
+                    # Spot and derivatives are distinct wallets. Summing both free
+                    # amounts for the same asset overstates available equity.
+                    result[asset] = max(result.get(asset, 0.0), float(info["free"]))
         except Exception:
             pass
         return {k: v for k, v in result.items() if v > 0}
@@ -252,17 +254,19 @@ class BybitExchange(BaseExchange):
         is_protection_order = order_type in (OrderType.STOP_LOSS, OrderType.TAKE_PROFIT)
         if market_type == MarketType.FUTURES and is_protection_order:
             params["reduceOnly"] = True
-        if (
-            market_type == MarketType.FUTURES
-            and not is_protection_order
-            and not await self.set_leverage(symbol, leverage)
-        ):
-            logger.warning(
-                "Proceeding with {} on {} despite leverage set failure ({}x)",
-                order_type.value,
-                symbol,
-                leverage,
-            )
+        if market_type == MarketType.FUTURES and not is_protection_order:
+            # Enforce isolated margin for all futures entries.
+            if not await self.set_margin_mode(symbol, "isolated"):
+                logger.warning(
+                    "Proceeding with {} on {} despite isolated margin-mode set failure", order_type.value, symbol
+                )
+            if not await self.set_leverage(symbol, leverage):
+                logger.warning(
+                    "Proceeding with {} on {} despite leverage set failure ({}x)",
+                    order_type.value,
+                    symbol,
+                    leverage,
+                )
 
         logger.info(
             "Placing {} {} {} {} @ {} (leverage={}, stop_price={}, params={})",
@@ -364,6 +368,18 @@ class BybitExchange(BaseExchange):
             return True
         except Exception as e:
             logger.warning("Could not set leverage for {}: {}", symbol, e)
+            return False
+
+    async def set_margin_mode(self, symbol: str, margin_mode: str) -> bool:
+        try:
+            await self._futures.set_margin_mode(margin_mode, symbol)
+            logger.debug("Margin mode set to {} for {}", margin_mode, symbol)
+            return True
+        except Exception as e:
+            msg = str(e).lower()
+            if "no need to change margin type" in msg:
+                return True
+            logger.warning("Could not set margin mode={} for {}: {}", margin_mode, symbol, e)
             return False
 
     async def get_available_symbols(self, market_type: MarketType = MarketType.SPOT) -> list[str]:

@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     session_budget: float = 100.0
 
     default_leverage: int = 10
+    # Cross mode is intentionally disabled for now; all futures trades use isolated.
+    futures_margin_mode: Literal["isolated"] = "isolated"
 
     # Risk -- capital preservation first
     max_position_size_pct: float = 5.0
@@ -347,19 +349,70 @@ class Settings(BaseSettings):
 
     @property
     def binance_api_key(self) -> str:
-        return self.binance_test_api_key if self.is_paper_live() else self.binance_prod_api_key
+        return self.binance_test_api_key if self.is_paper() else self.binance_prod_api_key
 
     @property
     def binance_api_secret(self) -> str:
-        return self.binance_test_api_secret if self.is_paper_live() else self.binance_prod_api_secret
+        return self.binance_test_api_secret if self.is_paper() else self.binance_prod_api_secret
 
     @property
     def bybit_api_key(self) -> str:
-        return self.bybit_test_api_key if self.is_paper_live() else self.bybit_prod_api_key
+        return self.bybit_test_api_key if self.is_paper() else self.bybit_prod_api_key
 
     @property
     def bybit_api_secret(self) -> str:
-        return self.bybit_test_api_secret if self.is_paper_live() else self.bybit_prod_api_secret
+        return self.bybit_test_api_secret if self.is_paper() else self.bybit_prod_api_secret
+
+    @staticmethod
+    def _url_looks_testnet(url: str) -> bool:
+        u = (url or "").strip().lower()
+        return any(
+            hint in u
+            for hint in (
+                "testnet",
+                "demo.binance.com",
+                "demo-fapi.binance.com",
+            )
+        )
+
+    @staticmethod
+    def _url_looks_production(url: str) -> bool:
+        u = (url or "").strip().lower()
+        return any(
+            hint in u
+            for hint in (
+                "www.binance.com",
+                "www.bybit.com",
+            )
+        )
+
+    def validate_startup_mode_guard(self) -> None:
+        """Centralized startup guard preventing test/prod mode mixing."""
+        mode = str(self.trading_mode or "").strip().lower()
+        exchange = str(self.exchange or "").strip().lower()
+
+        # Safety policy: test trading must use paper_live, not paper_local.
+        if mode == "paper_local":
+            raise ValueError("TRADING_MODE=paper_local is disabled by safety policy. Use TRADING_MODE=paper_live.")
+
+        if exchange in {"binance", "bybit"}:
+            if mode == "live":
+                if exchange == "binance" and (not self.binance_prod_api_key or not self.binance_prod_api_secret):
+                    raise ValueError("Live Binance requires BINANCE_PROD_API_KEY and BINANCE_PROD_API_SECRET.")
+                if exchange == "bybit" and (not self.bybit_prod_api_key or not self.bybit_prod_api_secret):
+                    raise ValueError("Live Bybit requires BYBIT_PROD_API_KEY and BYBIT_PROD_API_SECRET.")
+            else:
+                if exchange == "binance" and (not self.binance_test_api_key or not self.binance_test_api_secret):
+                    raise ValueError("Paper-live Binance requires BINANCE_TEST_API_KEY and BINANCE_TEST_API_SECRET.")
+                if exchange == "bybit" and (not self.bybit_test_api_key or not self.bybit_test_api_secret):
+                    raise ValueError("Paper-live Bybit requires BYBIT_TEST_API_KEY and BYBIT_TEST_API_SECRET.")
+
+        custom_url = str(self.exchange_platform_url or "").strip()
+        if custom_url:
+            if mode == "live" and self._url_looks_testnet(custom_url):
+                raise ValueError("Live mode cannot use testnet/demo EXCHANGE_PLATFORM_URL.")
+            if mode != "live" and self._url_looks_production(custom_url):
+                raise ValueError("Paper mode cannot use production EXCHANGE_PLATFORM_URL.")
 
 
 @lru_cache

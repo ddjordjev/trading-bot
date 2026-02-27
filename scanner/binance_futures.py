@@ -185,7 +185,7 @@ class BinanceFuturesScanner:
     async def _persist_tick(self, rows: list[dict[str, Any]], state_rows: list[dict[str, Any]], now: datetime) -> None:
         """Persist one scanner tick with short retries on transient SQLite contention."""
         last_exc: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(6):
             db = HubDB(path=self._db_path)
             try:
                 db.connect()
@@ -200,9 +200,9 @@ class BinanceFuturesScanner:
                 return
             except Exception as exc:
                 last_exc = exc
-                if not self._is_retryable_db_error(exc) or attempt == 2:
+                if not self._is_retryable_db_error(exc) or attempt == 5:
                     raise
-                await asyncio.sleep(0.25 * (attempt + 1))
+                await asyncio.sleep(min(0.25 * (2**attempt), 2.0))
             finally:
                 db.close()
         if last_exc:

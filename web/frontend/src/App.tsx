@@ -101,16 +101,16 @@ export function App() {
             gap: "0.5rem",
           }}>
             <img
-              src="/trade-borg-icon.png"
+              src="/trade-borg-icon-zoom.png"
               alt=""
               style={{
-                width: 36,
-                height: 36,
+                width: 46,
+                height: 46,
                 borderRadius: 8,
-                objectFit: "cover",
+                objectFit: "contain",
                 flexShrink: 0,
-                filter: "brightness(0.9) contrast(1.2)",
-                mixBlendMode: "lighten",
+                display: "block",
+                filter: "brightness(1.25) contrast(1.25) saturate(1.2)",
               }}
             />
             <h1 style={{ color: "var(--heading)", fontSize: "1.3rem", fontWeight: 600 }}>

@@ -2660,6 +2660,7 @@ class TestBotProfiles:
             assert "is_hub" in p
             assert "enabled" in p
             assert "container_status" in p
+            assert "exchange" in p
             assert "lifetime_pnl" in p
 
     async def test_hub_excluded_from_profiles(self, client, mock_bot):

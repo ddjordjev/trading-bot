@@ -168,6 +168,9 @@ class BaseExchange(ABC):
     @abstractmethod
     async def set_leverage(self, symbol: str, leverage: int) -> bool: ...
 
+    @abstractmethod
+    async def set_margin_mode(self, symbol: str, margin_mode: str) -> bool: ...
+
     # -- Symbols --
 
     @abstractmethod

@@ -333,6 +333,7 @@ class BotProfileInfo(BaseModel):
     is_hub: bool = False
     enabled: bool = False
     container_status: str = "idle"  # "running" | "idle" | "winding_down"
+    exchange: str = ""
     balance: float | None = None
     daily_pnl: float | None = None
     lifetime_pnl: float = 0.0

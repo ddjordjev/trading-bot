@@ -21,6 +21,9 @@ def create_exchange(settings: Settings) -> BaseExchange:
     Both paper modes use testnet API keys. Live uses production keys.
     """
 
+    # Centralized startup guard to prevent mixing test/prod credentials/URLs.
+    settings.validate_startup_mode_guard()
+
     exchange_map: dict[str, tuple[type[BaseExchange], dict[str, str]]] = {
         "mexc": (
             MexcExchange,

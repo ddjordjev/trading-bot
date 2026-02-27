@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -546,6 +547,71 @@ class TestRouteToBotsMonitor:
         assert len(queued) == 1
         assert queued[0].symbol == "BTC/USDT"
 
+    def test_route_to_bots_keeps_only_fleet_supported_exchanges(self, monitor):
+        from shared.models import SignalPriority, TradeProposal
+
+        hub_state = HubState()
+        monitor.state = hub_state
+        monitor._exchange_symbols = {"BINANCE": {"BTC/USDT"}, "BYBIT": {"BTC/USDT"}}
+
+        staging = TradeQueue()
+        staging.add(
+            TradeProposal(
+                priority=SignalPriority.DAILY,
+                symbol="BTC/USDT",
+                side="long",
+                strength=0.7,
+                supported_exchanges=["BINANCE", "BYBIT"],
+            )
+        )
+        statuses = [
+            BotDeploymentStatus(bot_id="bot-a", bot_style="momentum", exchange="BYBIT", should_trade=True),
+        ]
+
+        with patch("db.hub_store.HubDB") as mock_db_cls:
+            mock_db = MagicMock()
+            mock_db.connect = MagicMock()
+            mock_db.close = MagicMock()
+            mock_db.get_open_trade_symbols = MagicMock(return_value=set())
+            mock_db_cls.return_value = mock_db
+            monitor._route_to_bots(staging, statuses)
+
+        queued = hub_state.read_trade_queue().proposals
+        assert len(queued) == 1
+        assert queued[0].supported_exchanges == ["BYBIT"]
+
+    def test_route_to_bots_skips_symbol_when_fleet_has_no_supported_exchange(self, monitor):
+        from shared.models import SignalPriority, TradeProposal
+
+        hub_state = HubState()
+        monitor.state = hub_state
+        monitor._exchange_symbols = {"BINANCE": {"BTC/USDT"}, "BYBIT": {"BTC/USDT"}}
+
+        staging = TradeQueue()
+        staging.add(
+            TradeProposal(
+                priority=SignalPriority.DAILY,
+                symbol="BTC/USDT",
+                side="long",
+                strength=0.7,
+                supported_exchanges=["BINANCE"],
+            )
+        )
+        statuses = [
+            BotDeploymentStatus(bot_id="bot-a", bot_style="momentum", exchange="BYBIT", should_trade=True),
+        ]
+
+        with patch("db.hub_store.HubDB") as mock_db_cls:
+            mock_db = MagicMock()
+            mock_db.connect = MagicMock()
+            mock_db.close = MagicMock()
+            mock_db.get_open_trade_symbols = MagicMock(return_value=set())
+            mock_db_cls.return_value = mock_db
+            monitor._route_to_bots(staging, statuses)
+
+        queued = hub_state.read_trade_queue().proposals
+        assert len(queued) == 0
+
 
 class TestExchangeSymbolFiltering:
     @pytest.mark.asyncio
@@ -629,3 +695,18 @@ class TestRunLoopIteration:
 
         monitor.state.write_intel.assert_called_once()
         monitor.signal_gen.generate.assert_called_once()
+
+
+class TestMonitorDbRetry:
+    @pytest.mark.asyncio
+    async def test_persist_exchange_symbols_retries_on_database_locked(self, monitor):
+        db = MagicMock()
+        db.connect = MagicMock()
+        db.close = MagicMock()
+        db.save_exchange_symbols.side_effect = [sqlite3.OperationalError("database is locked"), None]
+
+        with patch("db.hub_store.HubDB", return_value=db):
+            await monitor._persist_exchange_symbols_with_retry({"BINANCE": {"BTC/USDT"}})
+
+        assert db.connect.call_count == 2
+        assert db.save_exchange_symbols.call_count == 2

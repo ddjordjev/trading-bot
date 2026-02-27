@@ -236,8 +236,8 @@ class TestMonitorService:
         monitor._route_to_bots(staging, [bot_status])
         hub_state.write_trade_queue.assert_called_once()
 
-    def test_route_to_bots_paper_live_excludes_non_binance_demo_symbols(self, monitor):
-        """paper_live mode drops symbols unavailable on Binance demo/testnet."""
+    def test_route_to_bots_paper_live_excludes_non_selected_testnet_symbols(self, monitor):
+        """paper_live mode drops proposals unsupported by the active bot fleet."""
         from shared.models import SignalPriority, TradeProposal, TradeQueue
 
         with patch("db.hub_store.HubDB") as mock_db:
@@ -246,10 +246,11 @@ class TestMonitorService:
             mock_db.return_value.get_open_trade_symbols = MagicMock(return_value=set())
 
             monitor.settings.trading_mode = "paper_live"
+            monitor.settings.exchange = "bybit"
             monitor.state = HubState()
             monitor._exchange_symbols = {
-                "BINANCE": {"BTC/USDT"},
-                "MEXC": {"BTC/USDT", "PEPE/USDT"},
+                "BYBIT": {"BTC/USDT"},
+                "BINANCE": {"BTC/USDT", "PEPE/USDT"},
             }
 
             staging = TradeQueue()
@@ -263,11 +264,21 @@ class TestMonitorService:
                 )
             )
 
-            monitor._route_to_bots(staging, [])
+            statuses = [
+                BotDeploymentStatus(
+                    bot_id="bot-bybit",
+                    bot_style="momentum",
+                    exchange="BYBIT",
+                    should_trade=True,
+                    open_positions=0,
+                    max_positions=3,
+                )
+            ]
+            monitor._route_to_bots(staging, statuses)
             assert monitor.state.read_trade_queue().pending_count == 0
 
-    def test_route_to_bots_paper_live_forces_binance_supported_exchange(self, monitor):
-        """paper_live mode keeps queue proposals executable on Binance demo."""
+    def test_route_to_bots_paper_live_forces_selected_exchange(self, monitor):
+        """paper_live mode keeps proposals executable on active bot exchanges."""
         from shared.models import SignalPriority, TradeProposal, TradeQueue
 
         with patch("db.hub_store.HubDB") as mock_db:
@@ -276,10 +287,11 @@ class TestMonitorService:
             mock_db.return_value.get_open_trade_symbols = MagicMock(return_value=set())
 
             monitor.settings.trading_mode = "paper_live"
+            monitor.settings.exchange = "bybit"
             monitor.state = HubState()
             monitor._exchange_symbols = {
+                "BYBIT": {"BTC/USDT"},
                 "BINANCE": {"BTC/USDT"},
-                "MEXC": {"BTC/USDT"},
             }
 
             staging = TradeQueue()
@@ -289,14 +301,24 @@ class TestMonitorService:
                     symbol="BTC/USDT",
                     side="long",
                     strategy="test",
-                    supported_exchanges=["MEXC"],
+                    supported_exchanges=["MEXC", "BYBIT", "BINANCE"],
                 )
             )
 
-            monitor._route_to_bots(staging, [])
+            statuses = [
+                BotDeploymentStatus(
+                    bot_id="bot-bybit",
+                    bot_style="momentum",
+                    exchange="BYBIT",
+                    should_trade=True,
+                    open_positions=0,
+                    max_positions=3,
+                )
+            ]
+            monitor._route_to_bots(staging, statuses)
             queued = monitor.state.read_trade_queue().proposals
             assert len(queued) == 1
-            assert queued[0].supported_exchanges == ["BINANCE"]
+            assert queued[0].supported_exchanges == ["BYBIT"]
 
 
 # ── AnalyticsService ────────────────────────────────────────────────

@@ -11,6 +11,7 @@ interface BotProfile {
   is_hub: boolean;
   enabled: boolean;
   container_status: string;
+  exchange: string;
   balance: number | null;
   daily_pnl: number | null;
   lifetime_pnl: number;
@@ -162,6 +163,18 @@ export function BotProfiles() {
                         ? "Disabling..."
                         : "Enabling..."
                       : st.label}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    padding: "0.15rem 0",
+                  }}
+                >
+                  <span style={{ color: "var(--text-muted)" }}>exchange</span>
+                  <span style={{ color: "var(--heading)", fontWeight: 600 }}>
+                    {(p.exchange || "N/A").toUpperCase()}
                   </span>
                 </div>
                 <div

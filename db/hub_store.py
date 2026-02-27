@@ -35,7 +35,7 @@ class HubDB(TradeDB):
         self._conn = sqlite3.connect(str(self._path))
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA busy_timeout=15000")
         self._create_tables()
         self._ensure_trade_columns()
         self._create_hub_tables()
