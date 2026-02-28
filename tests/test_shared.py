@@ -324,12 +324,12 @@ class TestHubDBExchangeSymbols:
 
     def test_multiple_exchanges(self, hub):
         hub.save_exchange_symbols("BINANCE", {"BTC/USDT"})
-        hub.save_exchange_symbols("MEXC", {"BTC/USDT", "PEPE/USDT"})
+        hub.save_exchange_symbols("BYBIT", {"BTC/USDT", "PEPE/USDT"})
         result = hub.load_all_exchange_symbols()
         assert "BINANCE" in result
-        assert "MEXC" in result
+        assert "BYBIT" in result
         assert "PEPE/USDT" not in result["BINANCE"]
-        assert "PEPE/USDT" in result["MEXC"]
+        assert "PEPE/USDT" in result["BYBIT"]
 
     def test_load_empty_returns_empty(self, hub):
         result = hub.load_all_exchange_symbols()

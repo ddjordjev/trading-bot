@@ -35,7 +35,7 @@ class HubDB(TradeDB):
         self._conn = sqlite3.connect(str(self._path))
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=15000")
+        self._conn.execute("PRAGMA busy_timeout=30000")
         self._create_tables()
         self._ensure_trade_columns()
         self._create_hub_tables()
@@ -449,6 +449,14 @@ class HubDB(TradeDB):
         assert self._conn
         rows = self._conn.execute("SELECT DISTINCT symbol FROM trades WHERE closed_at=''").fetchall()
         return {r["symbol"] for r in rows}
+
+    def get_open_trade_owner_rows(self) -> list[dict[str, Any]]:
+        """Return newest open-trade ownership rows for hub-side classifiers."""
+        assert self._conn
+        rows = self._conn.execute(
+            "SELECT id, bot_id, symbol FROM trades WHERE closed_at='' ORDER BY id DESC"
+        ).fetchall()
+        return [{"id": int(r["id"]), "bot_id": str(r["bot_id"] or ""), "symbol": str(r["symbol"] or "")} for r in rows]
 
     def get_open_trades_for_bot(self, bot_id: str) -> list[TradeRecord]:
         """Return unclosed trades for a bot, deduped by symbol.

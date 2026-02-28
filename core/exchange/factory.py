@@ -6,7 +6,6 @@ from config.settings import Settings
 from core.exchange.base import BaseExchange
 from core.exchange.binance import BinanceExchange
 from core.exchange.bybit import BybitExchange
-from core.exchange.mexc import MexcExchange
 from core.exchange.paper import PaperExchange
 
 
@@ -25,13 +24,6 @@ def create_exchange(settings: Settings) -> BaseExchange:
     settings.validate_startup_mode_guard()
 
     exchange_map: dict[str, tuple[type[BaseExchange], dict[str, str]]] = {
-        "mexc": (
-            MexcExchange,
-            {
-                "api_key": settings.mexc_api_key,
-                "api_secret": settings.mexc_api_secret,
-            },
-        ),
         "binance": (
             BinanceExchange,
             {

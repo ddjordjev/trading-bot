@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -58,6 +59,95 @@ _BOT_REGISTRY = Path("data/bot_registry.json")
 _bot_urls: dict[str, str] = {}  # bot_id -> base URL (e.g. "http://bot-meanrev:9035")
 _HUB_DB_PATH = Path("data/hub.db")
 _hub_db: HubDB | None = None
+
+
+@dataclass(slots=True)
+class _EndpointCacheEntry:
+    payload: Any
+    expires_at: float
+    state_token: tuple[Any, ...]
+
+
+_endpoint_cache: dict[str, _EndpointCacheEntry] = {}
+_TRENDING_CACHE_TTL_SECS = 2.0
+_STRATEGIES_CACHE_TTL_SECS = 1.5
+
+
+def _cache_get(name: str, state_token: tuple[Any, ...]) -> Any | None:
+    entry = _endpoint_cache.get(name)
+    if entry is None:
+        return None
+    if time.monotonic() >= entry.expires_at:
+        return None
+    if entry.state_token != state_token:
+        return None
+    return entry.payload
+
+
+def _cache_set(name: str, state_token: tuple[Any, ...], payload: Any, ttl_secs: float) -> None:
+    _endpoint_cache[name] = _EndpointCacheEntry(
+        payload=payload,
+        expires_at=time.monotonic() + max(0.1, ttl_secs),
+        state_token=state_token,
+    )
+
+
+def _trending_state_token() -> tuple[Any, ...]:
+    if _hub_state_ref is None:
+        return ("none",)
+    snap = _hub_state_ref.read_intel()
+    movers = list(getattr(snap, "hot_movers", []) or [])
+    first_symbol = str(getattr(movers[0], "symbol", "")) if movers else ""
+    first_ts = str(getattr(movers[0], "timestamp", "")) if movers else ""
+    return (id(_hub_state_ref), str(getattr(snap, "updated_at", "")), len(movers), first_symbol, first_ts)
+
+
+def _strategies_state_token() -> tuple[Any, ...]:
+    report_sig_rows: list[tuple[Any, ...]] = []
+    for bid, rpt in _bot_reports.items():
+        positions = list(rpt.get("positions", []) or [])
+        strategies = list(rpt.get("strategies", []) or [])
+        strategy_sig = tuple(
+            sorted(
+                (
+                    str(s.get("name", "") or ""),
+                    bool(s.get("is_dynamic", False)),
+                    int(s.get("applied_count", 0) or 0),
+                    int(s.get("success_count", 0) or 0),
+                    int(s.get("fail_count", 0) or 0),
+                    str(s.get("symbol", "") or ""),
+                )
+                for s in strategies
+                if isinstance(s, dict)
+            )
+        )
+        position_strategy_sig = tuple(
+            sorted(
+                str(p.get("strategy", "") or "").strip()
+                for p in positions
+                if isinstance(p, dict) and str(p.get("strategy", "") or "").strip()
+            )
+        )
+        report_sig_rows.append(
+            (
+                str(bid),
+                str(rpt.get("updated_at", "") or ""),
+                len(positions),
+                len(strategies),
+                strategy_sig,
+                position_strategy_sig,
+            )
+        )
+    report_sig = tuple(sorted(report_sig_rows))
+    if _hub_state_ref is None:
+        return ("none", report_sig)
+    analytics = _hub_state_ref.read_analytics()
+    return (
+        id(_hub_state_ref),
+        report_sig,
+        str(getattr(analytics, "updated_at", "")),
+        len(getattr(analytics, "weights", []) or []),
+    )
 
 
 def _get_hub_db() -> HubDB:
@@ -361,8 +451,12 @@ async def get_trade_queue(_: str = Depends(verify_token)) -> list[TradeQueueItem
 async def get_trending(_: str = Depends(verify_token)) -> list[TrendingCoinInfo]:
     if _hub_state_ref is None:
         return []
+    state_token = _trending_state_token()
+    cached = _cache_get("trending", state_token)
+    if cached is not None:
+        return list(cached)
     snap = _hub_state_ref.read_intel()
-    return [
+    rows = [
         TrendingCoinInfo(
             symbol=m.symbol,
             name=m.name,
@@ -378,10 +472,16 @@ async def get_trending(_: str = Depends(verify_token)) -> list[TrendingCoinInfo]
         )
         for m in snap.hot_movers
     ]
+    _cache_set("trending", state_token, rows, _TRENDING_CACHE_TTL_SECS)
+    return list(rows)
 
 
 @app.get("/api/strategies", response_model=list[StrategyInfo])
 async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
+    state_token = _strategies_state_token()
+    cached = _cache_get("strategies", state_token)
+    if cached is not None:
+        return list(cached)
     grouped: dict[tuple[str, bool], StrategyInfo] = {}
     open_counts_by_strategy: dict[str, int] = {}
 
@@ -452,7 +552,9 @@ async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
     for g in grouped.values():
         g.open_now = open_counts_by_strategy.get(g.name, 0)
 
-    return list(grouped.values())
+    rows = list(grouped.values())
+    _cache_set("strategies", state_token, rows, _STRATEGIES_CACHE_TTL_SECS)
+    return list(rows)
 
 
 @app.get("/api/modules", response_model=list[ModuleStatus])
@@ -540,15 +642,19 @@ async def get_daily_report(_: str = Depends(verify_token)) -> DailyReportData:
     total_winning = 0
     total_losing = 0
     total_target_hit = 0
+    reports_seen = 0
     all_pnl_pcts: list[float] = []
     best_day: dict[str, Any] | None = None
     worst_day: dict[str, Any] | None = None
     all_history: list[dict[str, Any]] = []
+    projected_totals: dict[str, float] = {"1_week": 0.0, "1_month": 0.0, "3_months": 0.0}
+    compound_sections: list[str] = []
 
-    for rpt in _bot_reports.values():
+    for bot_id, rpt in _bot_reports.items():
         daily = rpt.get("daily_report", {})
         if not daily:
             continue
+        reports_seen += 1
         total_winning += daily.get("winning_days", 0)
         total_losing += daily.get("losing_days", 0)
         total_target_hit += daily.get("target_hit_days", 0)
@@ -563,19 +669,32 @@ async def get_daily_report(_: str = Depends(verify_token)) -> DailyReportData:
         wd = daily.get("worst_day")
         if wd and (not worst_day or wd.get("pnl_pct", 0) < worst_day.get("pnl_pct", 0)):
             worst_day = wd
-    if not all_pnl_pcts:
+        projected = daily.get("projected", {})
+        if isinstance(projected, dict):
+            for key in projected_totals:
+                try:
+                    projected_totals[key] += float(projected.get(key, 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+        comp = str(daily.get("compound_report", "") or "").strip()
+        if comp:
+            compound_sections.append(f"[{bot_id}]\n{comp}")
+
+    if reports_seen == 0:
         return DailyReportData()
 
+    compound_report = "\n\n".join(compound_sections)
+    projected_out = {k: v for k, v in projected_totals.items() if v > 0}
     return DailyReportData(
-        compound_report="",
+        compound_report=compound_report,
         history=all_history,
         winning_days=total_winning,
         losing_days=total_losing,
         target_hit_days=total_target_hit,
-        avg_daily_pnl_pct=sum(all_pnl_pcts) / len(all_pnl_pcts) if all_pnl_pcts else 0,
+        avg_daily_pnl_pct=sum(all_pnl_pcts) / len(all_pnl_pcts) if all_pnl_pcts else 0.0,
         best_day=best_day,
         worst_day=worst_day,
-        projected={},
+        projected=projected_out,
     )
 
 
@@ -1126,7 +1245,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
     Only includes enabled trading bots (skips hub and disabled/idle bots).
     """
-    from config.bot_profiles import PROFILES_BY_ID
+    from config.bot_profiles import ALL_PROFILES, PROFILES_BY_ID
 
     reports = [r for r in _bot_reports.values() if isinstance(r, dict)]
     hub = _get_hub_db()
@@ -1134,7 +1253,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
     all_positions: list[dict[str, Any]] = []
     all_wicks: list[dict[str, Any]] = []
-    all_orphans: list[dict[str, Any]] = []
+    foreign_observations: list[dict[str, Any]] = []
     bot_snapshots: list[dict[str, Any]] = []
 
     total_balance = 0.0
@@ -1154,13 +1273,25 @@ def _build_merged_snapshot() -> dict[str, Any]:
     exchange_balances: dict[str, float] = {}
     exchange_available: dict[str, float] = {}
     exchange_report_ts: dict[str, float] = {}
+    bot_running: dict[str, bool] = {}
+    bot_exchange: dict[str, str] = {}
+
+    for p in ALL_PROFILES:
+        if p.is_hub:
+            continue
+        bot_exchange[p.id] = str(p.env_overrides.get("EXCHANGE", "") or "").strip().upper()
+        bot_running[p.id] = False
 
     for rpt in reports:
         s = rpt.get("status", {})
         if not isinstance(s, dict):
             s = {}
         bid = rpt.get("bot_id", "")
-        ex_name = rpt.get("exchange", "")
+        ex_name = str(rpt.get("exchange", "") or "").strip().upper()
+        if bid and bid != "hub":
+            if ex_name:
+                bot_exchange[bid] = ex_name
+            bot_running[bid] = bool(s.get("running"))
 
         if bid == "hub":
             continue
@@ -1219,15 +1350,15 @@ def _build_merged_snapshot() -> dict[str, Any]:
             w["bot_id"] = bid
             w["exchange_name"] = ex_name
             all_wicks.append(w)
-        orphans = rpt.get("orphan_positions", [])
-        if not isinstance(orphans, list):
-            orphans = []
-        for o in orphans:
+        observations = rpt.get("foreign_positions", rpt.get("orphan_positions", []))
+        if not isinstance(observations, list):
+            observations = []
+        for o in observations:
             if not isinstance(o, dict):
                 continue
             o["detected_by_bot"] = bid
             o["exchange_name"] = ex_name
-            all_orphans.append(o)
+            foreign_observations.append(o)
 
         bot_snapshots.append(
             {
@@ -1244,62 +1375,71 @@ def _build_merged_snapshot() -> dict[str, Any]:
             }
         )
 
-    def _position_identity_key(row: dict[str, Any]) -> tuple[str, str, str]:
-        exchange = str(row.get("exchange_name", row.get("exchange", "")) or "").strip().upper()
-        symbol = str(row.get("symbol", "") or "").strip().upper()
-        side_raw = str(row.get("side", "") or "").strip().lower()
-        if side_raw in {"buy", "long"}:
-            side = "long"
-        elif side_raw in {"sell", "short"}:
-            side = "short"
-        else:
-            side = side_raw or "unknown"
-        return exchange, symbol, side
-
-    # Keep one orphan row per exchange+symbol+side (latest report wins) so
-    # cross-exchange and long/short rows don't overwrite each other.
-    orphans_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for orphan in all_orphans:
-        orphan_key = _position_identity_key(orphan)
-        if not orphan_key[1]:
-            continue
-        existing = orphans_by_key.get(orphan_key)
-        if existing is None:
-            orphans_by_key[orphan_key] = orphan
-            continue
-        existing_ts = str(existing.get("detected_at", "") or "")
-        candidate_ts = str(orphan.get("detected_at", "") or "")
-        if candidate_ts >= existing_ts:
-            orphans_by_key[orphan_key] = orphan
-    all_orphans = list(orphans_by_key.values())
-    managed_keys = {_position_identity_key(p) for p in all_positions if isinstance(p, dict)}
-    # Wick scalps are bot-managed temporary positions; suppress matching orphan
-    # rows so a symbol/side cannot appear as both managed and orphan.
+    managed_symbol_keys = {
+        (
+            str(p.get("exchange_name", p.get("exchange", "")) or "").strip().upper(),
+            str(p.get("symbol", "") or "").strip().upper(),
+        )
+        for p in all_positions
+        if isinstance(p, dict) and str(p.get("symbol", "") or "").strip()
+    }
     for wick in all_wicks:
         if not isinstance(wick, dict):
             continue
-        managed_keys.add(
-            _position_identity_key(
-                {
-                    "exchange_name": wick.get("exchange_name", wick.get("exchange", "")),
-                    "symbol": wick.get("symbol", ""),
-                    "side": wick.get("scalp_side", wick.get("side", "")),
-                }
+        managed_symbol_keys.add(
+            (
+                str(wick.get("exchange_name", wick.get("exchange", "")) or "").strip().upper(),
+                str(wick.get("symbol", "") or "").strip().upper(),
             )
         )
-    managed_symbol_keys = {(ex, sym) for ex, sym, _ in managed_keys if sym}
-    filtered_orphans: list[dict[str, Any]] = []
-    for orphan in all_orphans:
-        orphan_key = _position_identity_key(orphan)
-        if orphan_key in managed_keys:
+
+    ownership_by_key: dict[tuple[str, str], str] = {}
+    for row in hub.get_open_trade_owner_rows():
+        owner_bot = str(row.get("bot_id", "") or "").strip()
+        symbol = str(row.get("symbol", "") or "").strip().upper()
+        if not owner_bot or not symbol:
             continue
-        ex, sym, side = orphan_key
-        if sym and side == "unknown" and (ex, sym) in managed_symbol_keys:
+        exchange = bot_exchange.get(owner_bot, "").strip().upper()
+        if not exchange:
             continue
-        if sym and (ex, sym, "unknown") in managed_keys:
+        key = (exchange, symbol)
+        if key not in ownership_by_key:
+            ownership_by_key[key] = owner_bot
+
+    latest_foreign_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for obs in foreign_observations:
+        if not isinstance(obs, dict):
             continue
-        filtered_orphans.append(orphan)
-    all_orphans = filtered_orphans
+        exchange = str(obs.get("exchange_name", obs.get("exchange", "")) or "").strip().upper()
+        symbol = str(obs.get("symbol", "") or "").strip().upper()
+        if not exchange or not symbol:
+            continue
+        key = (exchange, symbol)
+        if key in managed_symbol_keys:
+            continue
+        existing = latest_foreign_by_key.get(key)
+        if existing is None:
+            latest_foreign_by_key[key] = obs
+            continue
+        if str(obs.get("detected_at", "") or "") >= str(existing.get("detected_at", "") or ""):
+            latest_foreign_by_key[key] = obs
+
+    all_orphans: list[dict[str, Any]] = []
+    for (exchange, symbol), obs in latest_foreign_by_key.items():
+        owner_bot = ownership_by_key.get((exchange, symbol), "")
+        owner_is_running = bool(owner_bot and bot_running.get(owner_bot, False))
+        if owner_bot and owner_is_running:
+            continue
+        all_orphans.append(
+            {
+                **obs,
+                "exchange_name": exchange,
+                "symbol": symbol,
+                "originally_opened_by": owner_bot,
+                "owner_running": owner_is_running,
+                "orphan_reason": "owner_not_running" if owner_bot else "no_owner_record",
+            }
+        )
 
     intel = _intel_snapshot()
 

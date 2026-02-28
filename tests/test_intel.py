@@ -140,10 +140,10 @@ class TestWhaleSentiment:
 class TestTradingViewClient:
     @pytest.fixture()
     def client(self):
-        return TradingViewClient(exchange="MEXC", intervals=["1h", "4h"])
+        return TradingViewClient(exchange="BYBIT", intervals=["1h", "4h"])
 
     def test_initial_state(self, client):
-        assert client.exchange == "MEXC"
+        assert client.exchange == "BYBIT"
         assert client.intervals == ["1h", "4h"]
 
     def test_signal_boost_no_data(self, client):

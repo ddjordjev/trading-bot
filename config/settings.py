@@ -20,11 +20,7 @@ class Settings(BaseSettings):
     bot_style: str = "momentum"  # momentum / meanrev / swing — determines queue routing
     hub_only: bool = False  # True = dashboard/coordination only, no trading
 
-    exchange: str = "mexc"
-
-    # MEXC (no testnet — same keys for paper & live)
-    mexc_api_key: str = ""
-    mexc_api_secret: str = ""
+    exchange: str = "binance"
 
     # Binance — separate prod and testnet keys
     binance_prod_api_key: str = ""
@@ -39,7 +35,7 @@ class Settings(BaseSettings):
     bybit_test_api_secret: str = ""
 
     # What market types the user wants to use. The factory auto-restricts
-    # to what the exchange actually supports (e.g. MEXC = spot only).
+    # to what the exchange actually supports.
     allowed_market_types: str = "spot,futures"
 
     # 0 = no cap (use full exchange balance)
@@ -106,6 +102,7 @@ class Settings(BaseSettings):
 
     # Liquidity-aware scaling
     breakeven_lock_pct: float = 5.0  # move stop to entry once at this profit %
+    pullback_trail_buffer_pct: float = 4.0  # non-aggressive trailing buffer below/above price (3-5% zone)
     initial_risk_amount: float = 50.0  # fixed $ amount for the first entry
     max_notional_position: float = 100_000.0  # stop adding once leveraged position hits this
     min_profit_to_add_pct: float = 1.0  # must be +1% before adding to position
@@ -182,7 +179,7 @@ class Settings(BaseSettings):
     mass_liquidation_threshold: float = 1_000_000_000  # $1B = mass liq event
 
     # TradingView
-    tv_exchange: str = "MEXC"  # exchange name for TradingView scanner
+    tv_exchange: str = "BINANCE"  # exchange name for TradingView scanner
     tv_intervals: str = "1h,4h,1D"  # timeframes to analyze
     tv_poll_interval: int = 120  # seconds between TV refreshes
 
@@ -310,12 +307,6 @@ class Settings(BaseSettings):
             "live_futures": "https://www.bybit.com/trade/usdt",
             "live_spot": "https://www.bybit.com/trade/spot",
         },
-        "mexc": {
-            "paper_spot": "https://www.mexc.com/exchange",
-            "paper_futures": "https://www.mexc.com/exchange",
-            "live_spot": "https://www.mexc.com/exchange",
-            "live_futures": "https://www.mexc.com/exchange",
-        },
     }
 
     @property
@@ -341,8 +332,6 @@ class Settings(BaseSettings):
             return f"{base}/{clean.replace('USDT', '_USDT')}"
         if self.exchange == "bybit":
             return f"{base}/{clean}"
-        if self.exchange == "mexc":
-            return f"{base}/{clean.replace('USDT', '_USDT')}"
         return base
 
     # ---- API key resolution (prod vs test) ----

@@ -50,7 +50,6 @@ async def run_checks() -> bool:
 
     # 2. API keys present
     key_map = {
-        "mexc": (settings.mexc_api_key, settings.mexc_api_secret),
         "binance": (settings.binance_api_key, settings.binance_api_secret),
         "bybit": (settings.bybit_api_key, settings.bybit_api_secret),
     }

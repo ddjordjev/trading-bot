@@ -1,10 +1,10 @@
 # Trading Bot
 
-Modular crypto trading bot with volatility exploitation, supporting MEXC (extensible to other exchanges).
+Modular crypto trading bot with volatility exploitation, supporting BYBIT (extensible to other exchanges).
 
 ## Features
 
-- **Multi-exchange support** via abstract exchange layer (MEXC implemented, add more by subclassing `BaseExchange`)
+- **Multi-exchange support** via abstract exchange layer (BYBIT implemented, add more by subclassing `BaseExchange`)
 - **Spot & Futures** trading with configurable leverage (default 10x)
 - **Paper trading** mode using real market data with simulated orders
 - **Built-in strategies**: RSI, MACD, Bollinger Bands, Mean Reversion, Grid, Market Open Volatility
@@ -25,7 +25,7 @@ cd trading-bot
 chmod +x scripts/run-local.sh
 ./scripts/run-local.sh
 
-# 3. Edit .env with your MEXC API keys
+# 3. Edit .env with your BYBIT API keys
 # 4. Run again
 ./scripts/run-local.sh
 ```
@@ -48,7 +48,7 @@ All config is via `.env` file (copy from `.env.example`). Key settings:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TRADING_MODE` | `paper` | `paper` or `live` |
-| `EXCHANGE` | `mexc` | Exchange to use |
+| `EXCHANGE` | `bybit` | Exchange to use |
 | `DEFAULT_LEVERAGE` | `10` | Default futures leverage |
 | `MAX_POSITION_SIZE_PCT` | `10` | Max % of balance per position |
 | `MAX_DAILY_LOSS_PCT` | `5` | Stop trading after this daily loss |
@@ -96,7 +96,7 @@ trading-bot/
 ├── bot.py                  # Main entry point
 ├── config/                 # Settings and .env loading
 ├── core/
-│   ├── exchange/           # Exchange abstraction + MEXC impl
+│   ├── exchange/           # Exchange abstraction + BYBIT impl
 │   ├── models/             # Candle, Order, Position, Signal
 │   ├── orders/             # Order execution and management
 │   └── risk/               # Risk management

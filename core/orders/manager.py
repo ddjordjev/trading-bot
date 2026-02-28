@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import math
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from loguru import logger
@@ -75,6 +76,15 @@ class OrderManager:
         # Keep wick scalp strictly smaller than main exposure so it cannot flip
         # net direction and look like a "double trade" against the main idea.
         self._wick_scalp_max_main_fraction = 0.45
+
+    def _is_fast_trailing_signal(self, signal: Signal) -> bool:
+        strategy = str(getattr(signal, "strategy", "") or "").strip().lower()
+        bot_id = str(getattr(self.settings, "bot_id", "") or "").strip().lower()
+        if bot_id in {"extreme", "aggressive", "scalper"}:
+            return True
+        if bool(getattr(signal, "quick_trade", False)):
+            return True
+        return strategy.startswith("extreme_") or "wick" in strategy or strategy == "wick_scalp"
 
     # ------------------------------------------------------------------ #
     #  Signal execution
@@ -218,12 +228,15 @@ class OrderManager:
         if pyramid:
             is_major = signal.symbol in self.settings.major_symbol_list
             pyramid_stop = max(sp.dca_interval_pct * 3, 5.0) if is_major else max(sp.dca_interval_pct * 8, 15.0)
+            fast_trailing = self._is_fast_trailing_signal(signal)
             self.trailing.register(
                 pos,
                 initial_stop_pct=pyramid_stop,
                 low_liquidity=low_liquidity,
                 tightened_stop=tightened,
                 wick_tighten_enabled=wick_tighten_enabled,
+                trailing_mode="fast" if fast_trailing else "pullback",
+                pullback_buffer_pct=float(getattr(self.settings, "pullback_trail_buffer_pct", 4.0) or 4.0),
             )
             logger.info(
                 "PYRAMID stop for {}: {:.1f}% ({})",
@@ -232,11 +245,14 @@ class OrderManager:
                 "major — tighter" if is_major else "alt — wide DCA zone",
             )
         else:
+            fast_trailing = self._is_fast_trailing_signal(signal)
             self.trailing.register(
                 pos,
                 low_liquidity=low_liquidity,
                 tightened_stop=tightened,
                 wick_tighten_enabled=wick_tighten_enabled,
+                trailing_mode="fast" if fast_trailing else "pullback",
+                pullback_buffer_pct=float(getattr(self.settings, "pullback_trail_buffer_pct", 4.0) or 4.0),
             )
 
         # Best-effort mirror of bot-owned protections to the exchange.
@@ -365,6 +381,39 @@ class OrderManager:
             )
         return cancelled
 
+    async def ensure_orphan_position_protection(self, pos: Position) -> bool:
+        """Best-effort emergency SL sync for a live position not managed by this bot."""
+        try:
+            market_type = MarketType(pos.market_type) if pos.market_type else MarketType.FUTURES
+        except Exception:
+            market_type = MarketType.FUTURES
+        if market_type != MarketType.FUTURES:
+            return False
+        if float(getattr(pos, "amount", 0.0) or 0.0) <= 0:
+            return False
+
+        entry = float(getattr(pos, "entry_price", 0.0) or 0.0)
+        current = float(getattr(pos, "current_price", 0.0) or 0.0)
+        if entry <= 0 and current <= 0:
+            return False
+
+        ref_price = entry if entry > 0 else current
+        stop_pct = max(0.8, float(self.settings.stop_loss_pct))
+        if pos.side == OrderSide.BUY:
+            emergency_stop = ref_price * (1 - stop_pct / 100.0)
+            if current > 0:
+                emergency_stop = min(emergency_stop, current * 0.995)
+        else:
+            emergency_stop = ref_price * (1 + stop_pct / 100.0)
+            if current > 0:
+                emergency_stop = max(emergency_stop, current * 1.005)
+        if emergency_stop <= 0 or not math.isfinite(emergency_stop):
+            return False
+
+        synthetic_ts = SimpleNamespace(current_stop=emergency_stop)
+        await self._sync_symbol_protection(pos, synthetic_ts)
+        return True
+
     def _derive_extreme_tp(self, entry_price: float, side: OrderSide) -> float:
         tp_pct = max(0.5, float(self.settings.take_profit_pct))
         if entry_price <= 0:
@@ -438,6 +487,7 @@ class OrderManager:
             o for o in symbol_protection_orders if getattr(o, "order_type", None) == OrderType.STOP_LOSS
         ]
         side_matched_stop_orders = [o for o in symbol_stop_orders if getattr(o, "side", None) == stop_side]
+        adopted_order_id = ""
 
         if sl_order_id:
             try:
@@ -492,6 +542,7 @@ class OrderManager:
             adopted = self._pick_closest_stop_order(side_matched_stop_orders, bot_stop)
             if adopted:
                 sl_order_id = str(adopted.id or "")
+                adopted_order_id = sl_order_id
                 sl_price = float(adopted.stop_price or 0.0)
                 logger.debug(
                     "Protection sync {}: adopted existing side-matched SL order {} @ {:.6f}",
@@ -499,6 +550,23 @@ class OrderManager:
                     sl_order_id or "unknown",
                     sl_price,
                 )
+
+        # Keep exactly one stop-loss per symbol+side. If the exchange already has
+        # multiple same-side SL orders, cancel extras proactively to prevent drift.
+        if side_matched_stop_orders:
+            keep_id = sl_order_id or adopted_order_id
+            duplicate_ids = [
+                str(o.id or "") for o in side_matched_stop_orders if str(o.id or "") and str(o.id or "") != keep_id
+            ]
+            if duplicate_ids:
+                logger.warning(
+                    "Protection sync {}: found {} duplicate same-side SL order(s); cancelling extras {}",
+                    symbol,
+                    len(duplicate_ids),
+                    ", ".join(sorted(duplicate_ids)),
+                )
+                for duplicate_id in duplicate_ids:
+                    await self._cancel_protection_order(duplicate_id, symbol, market_type)
 
         should_replace = bool(
             sl_order_id

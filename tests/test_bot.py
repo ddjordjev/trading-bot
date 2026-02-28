@@ -482,7 +482,7 @@ class TestProcessSignalAndQueue:
             reason="t1",
             strength=0.9,
             market_type="futures",
-            supported_exchanges=["MEXC"],
+            supported_exchanges=["BYBIT"],
         )
         bot._hub_proposal = p
 
@@ -540,7 +540,7 @@ class TestProcessSignalAndQueue:
             reason="test",
             strength=0.8,
             market_type="futures",
-            supported_exchanges=["MEXC"],
+            supported_exchanges=["BYBIT"],
         )
         ok = await bot._execute_proposal(proposal, aggression=0.8)
         assert ok is True
@@ -599,7 +599,7 @@ class TestProcessSignalAndQueue:
             reason="swing setup",
             strength=0.6,
             market_type="futures",
-            supported_exchanges=["MEXC"],
+            supported_exchanges=["BYBIT"],
             entry_plan=EntryPlan(stop_loss=2000.0, take_profit_targets=[2500.0]),
         )
         ok = await bot._execute_swing_proposal(proposal, aggression=0.7)
@@ -622,7 +622,7 @@ class TestProcessSignalAndQueue:
             reason="",
             strength=0.5,
             market_type="futures",
-            supported_exchanges=["MEXC"],
+            supported_exchanges=["BYBIT"],
             entry_plan=None,
         )
         ok = await bot._execute_swing_proposal(proposal, aggression=1.0)
@@ -893,7 +893,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
                 reason="r",
                 strength=0.9,
                 market_type="futures",
-                supported_exchanges=["MEXC"],
+                supported_exchanges=["BYBIT"],
             )
             bot._hub_proposal = p
             bot._report_queue_outcome = AsyncMock()
@@ -928,7 +928,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
                 reason="r",
                 strength=0.9,
                 market_type="futures",
-                supported_exchanges=["MEXC"],
+                supported_exchanges=["BYBIT"],
             )
             bot._hub_proposal = p
             bot._report_queue_outcome = AsyncMock()
@@ -967,7 +967,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
             reason="r",
             strength=0.9,
             market_type="futures",
-            supported_exchanges=["MEXC"],
+            supported_exchanges=["BYBIT"],
         )
         bot._hub_proposal = p
         bot._report_queue_outcome = AsyncMock()
@@ -999,7 +999,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
             reason="r",
             strength=0.9,
             market_type="futures",
-            supported_exchanges=["MEXC"],
+            supported_exchanges=["BYBIT"],
         )
         bot._hub_proposal = p
         bot._report_queue_outcome = AsyncMock()
@@ -1032,7 +1032,7 @@ class TestProcessTradeQueueRejectsAndUpdates:
             reason="ok",
             strength=0.9,
             market_type="futures",
-            supported_exchanges=["MEXC"],
+            supported_exchanges=["BYBIT"],
         )
         bot._hub_proposal = p_ok
         bot._report_queue_outcome = AsyncMock()
@@ -2115,8 +2115,8 @@ class TestQuickHubCheck:
 
         payload = bot._hub_session.post.call_args.kwargs["json"]
         assert payload["positions"] == []
-        assert payload["orphan_positions"]
-        assert payload["orphan_positions"][0]["symbol"] == "ETH/USDT"
+        assert payload["foreign_positions"]
+        assert payload["foreign_positions"][0]["symbol"] == "ETH/USDT"
         mock_exchange.fetch_positions.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -2127,7 +2127,6 @@ class TestQuickHubCheck:
         bot._started_at = datetime.now(UTC) - timedelta(minutes=5)
         bot._process_trade_queue = AsyncMock()
         bot._hub_session = self._ok_hub_session()
-        bot._orphan_positions["XRP/USDT"] = {"symbol": "XRP/USDT", "side": "long"}
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
 
         await bot._quick_hub_check()
@@ -2135,8 +2134,8 @@ class TestQuickHubCheck:
 
         assert mock_exchange.fetch_positions.await_count == 1
         payload = bot._hub_session.post.call_args_list[-1].kwargs["json"]
-        assert "orphan_positions" in payload
-        assert payload["orphan_positions"] == []
+        assert "foreign_positions" in payload
+        assert payload["foreign_positions"] == []
 
 
 # ── _execute_proposal / _handle_spike ───────────────────────────────────────
@@ -2241,7 +2240,7 @@ class TestProcessTradeQueueStrengthReject:
             reason="r",
             strength=0.2,
             market_type="futures",
-            supported_exchanges=["MEXC"],
+            supported_exchanges=["BYBIT"],
         )
         bot._hub_proposal = p
         bot._report_queue_outcome = AsyncMock()

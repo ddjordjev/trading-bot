@@ -10,9 +10,9 @@ class TestSettings:
     @pytest.fixture()
     def settings(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper_local")
-        monkeypatch.setenv("EXCHANGE", "mexc")
-        monkeypatch.setenv("MEXC_API_KEY", "test-key")
-        monkeypatch.setenv("MEXC_API_SECRET", "test-secret")
+        monkeypatch.setenv("EXCHANGE", "bybit")
+        monkeypatch.setenv("BYBIT_API_KEY", "test-key")
+        monkeypatch.setenv("BYBIT_API_SECRET", "test-secret")
         monkeypatch.setenv("NOTIFICATIONS_ENABLED", "liquidation,stop_loss,daily_summary")
         monkeypatch.setenv("INTEL_SYMBOLS", "BTC,ETH,SOL")
         monkeypatch.setenv("NEWS_SOURCES", "coindesk,cointelegraph")
@@ -63,7 +63,7 @@ class TestSettings:
 
     def test_is_live(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "live")
-        monkeypatch.setenv("EXCHANGE", "mexc")
+        monkeypatch.setenv("EXCHANGE", "bybit")
         from config.settings import Settings
 
         s = Settings()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import bisect
 import contextlib
 import sqlite3
 from collections import defaultdict, deque
@@ -47,6 +48,7 @@ class BinanceFuturesScanner:
         retention_days: int = 7,
         db_path: Path = Path("data/hub.db"),
         enabled: bool = True,
+        db_write_lock: asyncio.Lock | None = None,
     ) -> None:
         self.poll_interval = max(30, poll_interval)
         self.min_quote_volume = max(0.0, min_quote_volume)
@@ -55,6 +57,7 @@ class BinanceFuturesScanner:
         self.retention_days = max(1, retention_days)
         self.enabled = enabled
         self._db_path = db_path
+        self._db_write_lock = db_write_lock
 
         self._running = False
         self._task: asyncio.Task[None] | None = None
@@ -186,16 +189,15 @@ class BinanceFuturesScanner:
         """Persist one scanner tick with short retries on transient SQLite contention."""
         last_exc: Exception | None = None
         for attempt in range(6):
-            db = HubDB(path=self._db_path)
             try:
-                db.connect()
-                db.save_binance_snapshots(rows)
-                db.save_binance_symbol_states(state_rows)
+                if self._db_write_lock is not None:
+                    async with self._db_write_lock:
+                        removed = await asyncio.to_thread(self._persist_tick_blocking, rows, state_rows, now)
+                else:
+                    removed = await asyncio.to_thread(self._persist_tick_blocking, rows, state_rows, now)
+                if removed:
+                    logger.info("Binance futures scanner cleanup removed {} old rows", removed)
                 if (now - self._last_cleanup) >= timedelta(hours=1):
-                    cutoff = (now - timedelta(days=self.retention_days)).isoformat()
-                    removed = db.cleanup_binance_snapshots_before(cutoff)
-                    if removed:
-                        logger.info("Binance futures scanner cleanup removed {} old rows", removed)
                     self._last_cleanup = now
                 return
             except Exception as exc:
@@ -203,19 +205,27 @@ class BinanceFuturesScanner:
                 if not self._is_retryable_db_error(exc) or attempt == 5:
                     raise
                 await asyncio.sleep(min(0.25 * (2**attempt), 2.0))
-            finally:
-                db.close()
         if last_exc:
             raise last_exc
 
-    async def _load_recent_history(self) -> None:
-        since = (datetime.now(UTC) - timedelta(hours=self.history_hours)).isoformat()
+    def _persist_tick_blocking(
+        self, rows: list[dict[str, Any]], state_rows: list[dict[str, Any]], now: datetime
+    ) -> int:
         db = HubDB(path=self._db_path)
         try:
             db.connect()
-            rows = db.load_binance_snapshots_since(since)
+            db.save_binance_snapshots(rows)
+            db.save_binance_symbol_states(state_rows)
+            if (now - self._last_cleanup) >= timedelta(hours=1):
+                cutoff = (now - timedelta(days=self.retention_days)).isoformat()
+                return db.cleanup_binance_snapshots_before(cutoff)
+            return 0
         finally:
             db.close()
+
+    async def _load_recent_history(self) -> None:
+        since = (datetime.now(UTC) - timedelta(hours=self.history_hours)).isoformat()
+        rows = await asyncio.to_thread(self._load_recent_history_blocking, since)
 
         for row in rows:
             ts = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
@@ -234,12 +244,7 @@ class BinanceFuturesScanner:
             self._hot_movers = self._compute_hot_movers()
 
     async def _load_symbol_states(self) -> None:
-        db = HubDB(path=self._db_path)
-        try:
-            db.connect()
-            rows = db.load_binance_symbol_states()
-        finally:
-            db.close()
+        rows = await asyncio.to_thread(self._load_symbol_states_blocking)
 
         for row in rows:
             d = dict(row)
@@ -250,6 +255,22 @@ class BinanceFuturesScanner:
 
         if rows:
             logger.info("Binance futures scanner restored {} symbol states", len(rows))
+
+    def _load_recent_history_blocking(self, since: str) -> list[sqlite3.Row]:
+        db = HubDB(path=self._db_path)
+        try:
+            db.connect()
+            return db.load_binance_snapshots_since(since)
+        finally:
+            db.close()
+
+    def _load_symbol_states_blocking(self) -> list[sqlite3.Row]:
+        db = HubDB(path=self._db_path)
+        try:
+            db.connect()
+            return db.load_binance_symbol_states()
+        finally:
+            db.close()
 
     @staticmethod
     async def _fetch_json(sess: aiohttp.ClientSession, url: str) -> Any:
@@ -429,6 +450,7 @@ class BinanceFuturesScanner:
         vol_accel = quote_volume / max(1.0, avg_quote_volume)
         confidence = self._confidence(sample_count)
         samples = self._samples.get(symbol, deque())
+        sample_times, sample_prices = self._build_sample_series(samples)
 
         for key, window in self.HORIZONS:
             anchor_ts_key = f"anchor_{key}_ts"
@@ -438,7 +460,7 @@ class BinanceFuturesScanner:
             anchor_ts = ts
             anchor_price = price
             if (ts - first_seen) >= window and samples:
-                anchor_ts, anchor_price = self._sample_at_or_before(samples, ts - window)
+                anchor_ts, anchor_price = self._sample_at_or_before(sample_times, sample_prices, ts - window)
                 state[change_key] = self._pct(price, anchor_price) if anchor_price > 0 else 0.0
             else:
                 state[change_key] = 0.0
@@ -471,14 +493,25 @@ class BinanceFuturesScanner:
         return state
 
     @staticmethod
+    def _build_sample_series(
+        samples: deque[tuple[datetime, float, float, float, float]],
+    ) -> tuple[list[datetime], list[float]]:
+        """Build time/price arrays once to avoid O(n*horizons) scans per symbol."""
+        times: list[datetime] = []
+        prices: list[float] = []
+        for ts, price, *_ in samples:
+            times.append(ts)
+            prices.append(price)
+        return times, prices
+
+    @staticmethod
     def _sample_at_or_before(
-        samples: deque[tuple[datetime, float, float, float, float]], cutoff: datetime
+        sample_times: list[datetime], sample_prices: list[float], cutoff: datetime
     ) -> tuple[datetime, float]:
-        for ts, price, *_ in reversed(samples):
-            if ts <= cutoff:
-                return ts, price
-        first_ts, first_price, *_ = samples[0]
-        return first_ts, first_price
+        idx = bisect.bisect_right(sample_times, cutoff) - 1
+        if idx < 0:
+            return sample_times[0], sample_prices[0]
+        return sample_times[idx], sample_prices[idx]
 
     @staticmethod
     def _parse_iso(value: str, *, fallback: datetime) -> datetime:

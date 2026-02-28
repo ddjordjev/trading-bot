@@ -142,7 +142,7 @@ class TestHubStateTradeQueue:
             strength=0.8,
             market_type="futures",
             target_bot="momentum",
-            supported_exchanges=["BINANCE", "MEXC"],
+            supported_exchanges=["BINANCE", "BYBIT"],
         )
         q = TradeQueue()
         q.add(p)

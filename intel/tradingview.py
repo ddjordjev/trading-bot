@@ -22,7 +22,7 @@ class TVAnalysis(BaseModel):
     """TradingView technical analysis summary for a symbol."""
 
     symbol: str
-    exchange: str = "MEXC"
+    exchange: str = "BINANCE"
     interval: str = "1h"
 
     summary_rating: TVRating = TVRating.NEUTRAL
@@ -122,7 +122,7 @@ class TradingViewClient:
         "1M": "|1M",
     }
 
-    def __init__(self, exchange: str = "MEXC", intervals: list[str] | None = None, poll_interval: int = 120):
+    def __init__(self, exchange: str = "BINANCE", intervals: list[str] | None = None, poll_interval: int = 120):
         self.exchange = exchange.upper()
         self.intervals = intervals or ["1h", "4h", "1D"]
         self.poll_interval = poll_interval

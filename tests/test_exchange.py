@@ -35,7 +35,7 @@ def _make_ticker(last: float = 100.0) -> Ticker:
 
 def _mock_real_exchange(ticker_last: float = 100.0) -> AsyncMock:
     real = AsyncMock(spec=BaseExchange)
-    real.name = "mexc"
+    real.name = "binance"
     real.connect = AsyncMock()
     real.disconnect = AsyncMock()
     real.fetch_ticker = AsyncMock(return_value=_make_ticker(ticker_last))
@@ -60,7 +60,7 @@ class TestPaperExchange:
 
     @pytest.mark.asyncio
     async def test_name(self, paper):
-        assert paper.name == "paper_mexc"
+        assert paper.name == "paper_binance"
 
     @pytest.mark.asyncio
     async def test_connect(self, paper):
@@ -443,14 +443,26 @@ class TestPaperExchange:
 class TestExchangeFactory:
     def test_paper_mode(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper_live")
-        monkeypatch.setenv("EXCHANGE", "mexc")
-        monkeypatch.setenv("MEXC_API_KEY", "k")
-        monkeypatch.setenv("MEXC_API_SECRET", "s")
+        monkeypatch.setenv("EXCHANGE", "binance")
+        monkeypatch.setenv("BINANCE_TEST_API_KEY", "k")
+        monkeypatch.setenv("BINANCE_TEST_API_SECRET", "s")
         from config.settings import Settings
+        from core.exchange.binance import BinanceExchange
         from core.exchange.factory import create_exchange
 
         exchange = create_exchange(Settings())
-        assert isinstance(exchange, PaperExchange)
+        assert isinstance(exchange, BinanceExchange)
+
+    def test_paper_local_mode_rejected(self, monkeypatch):
+        monkeypatch.setenv("TRADING_MODE", "paper_local")
+        monkeypatch.setenv("EXCHANGE", "binance")
+        monkeypatch.setenv("BINANCE_API_KEY", "k")
+        monkeypatch.setenv("BINANCE_API_SECRET", "s")
+        from config.settings import Settings
+        from core.exchange.factory import create_exchange
+
+        with pytest.raises(ValueError, match="paper_local"):
+            create_exchange(Settings())
 
     def test_unsupported_exchange(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper_live")

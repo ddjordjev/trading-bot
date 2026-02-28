@@ -65,6 +65,7 @@ class MonitorService:
     def __init__(self, settings: Settings | None = None, state: HubState | None = None):
         self.settings = settings or get_settings()
         self.state: HubState = state or HubState()
+        self._db_write_lock = asyncio.Lock()
 
         # Clients
         self.fear_greed = FearGreedClient(poll_interval=3600)
@@ -121,6 +122,7 @@ class MonitorService:
             top_movers_count=binance_top,
             history_hours=binance_hist,
             retention_days=binance_retention,
+            db_write_lock=self._db_write_lock,
         )
         self.news = NewsMonitor(self.settings)
         self._recent_news: list[NewsItem] = []
@@ -197,26 +199,29 @@ class MonitorService:
         """Persist exchange symbols with short retries on transient SQLite contention."""
         last_exc: Exception | None = None
         for attempt in range(6):
-            db = None
             try:
-                from db.hub_store import HubDB
-
-                db = HubDB()
-                db.connect()
-                for ex_name, syms in fresh.items():
-                    db.save_exchange_symbols(ex_name, syms)
+                async with self._db_write_lock:
+                    await asyncio.to_thread(self._persist_exchange_symbols_blocking, fresh)
                 return
             except Exception as exc:
                 last_exc = exc
                 if not self._is_retryable_db_error(exc) or attempt == 5:
                     raise
                 await asyncio.sleep(min(0.25 * (2**attempt), 2.0))
-            finally:
-                with contextlib.suppress(Exception):
-                    if db is not None:
-                        db.close()
         if last_exc:
             raise last_exc
+
+    @staticmethod
+    def _persist_exchange_symbols_blocking(fresh: dict[str, set[str]]) -> None:
+        from db.hub_store import HubDB
+
+        db = HubDB()
+        try:
+            db.connect()
+            for ex_name, syms in fresh.items():
+                db.save_exchange_symbols(ex_name, syms)
+        finally:
+            db.close()
 
     @staticmethod
     def _pair_symbol(symbol: str) -> str:
@@ -385,15 +390,16 @@ class MonitorService:
 
     # ---- Exchange symbol management (hub fetches directly) ----
 
-    _SUPPORTED_EXCHANGES = ("binance", "mexc", "bybit")
+    _SUPPORTED_EXCHANGES = ("binance", "bybit")
 
     @staticmethod
     def _fleet_exchanges(bot_statuses: list[BotDeploymentStatus]) -> set[str]:
         """Exchanges currently represented by known bots (upper-case)."""
+        allowed = {"BINANCE", "BYBIT"}
         return {
             str(getattr(s, "exchange", "") or "").strip().upper()
             for s in bot_statuses
-            if str(getattr(s, "exchange", "") or "").strip()
+            if str(getattr(s, "exchange", "") or "").strip().upper() in allowed
         }
 
     async def _seed_exchange_symbols(self) -> None:
@@ -700,9 +706,21 @@ class MonitorService:
             if proposal.symbol in open_db_symbols:
                 deduped += 1
                 continue
-            available = [
-                ex for ex in proposal.supported_exchanges if proposal.symbol not in self.state.get_active_symbols(ex)
-            ]
+            # Keep only exchanges that both advertise the symbol and don't already
+            # hold it on that exchange account. Also de-duplicate while preserving order.
+            seen_exchanges: set[str] = set()
+            available: list[str] = []
+            for ex in proposal.supported_exchanges:
+                ex_name = str(ex or "").strip().upper()
+                if not ex_name or ex_name in seen_exchanges:
+                    continue
+                seen_exchanges.add(ex_name)
+                exchange_symbols = self._exchange_symbols.get(ex_name, set())
+                if exchange_symbols and proposal.symbol not in exchange_symbols:
+                    continue
+                if proposal.symbol in self.state.get_active_symbols(ex_name):
+                    continue
+                available.append(ex_name)
             if fleet_exchanges:
                 available = [ex for ex in available if ex in fleet_exchanges]
             if proposal.supported_exchanges and not available:

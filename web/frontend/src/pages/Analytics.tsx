@@ -404,14 +404,18 @@ export function Analytics() {
   };
 
   useEffect(() => {
-    refresh(false);
+    const loadingGuard = window.setTimeout(() => setLoading(false), 10000);
+    void refresh(false).finally(() => window.clearTimeout(loadingGuard));
     const iv = setInterval(() => {
       // Keep DB explorer stable while user inspects rows.
       if (tab !== "db") {
         refresh(true);
       }
     }, 10000);
-    return () => clearInterval(iv);
+    return () => {
+      window.clearTimeout(loadingGuard);
+      clearInterval(iv);
+    };
   }, [tab]);
 
   if (loading && !analytics) return <div className="empty-state">Loading analytics...</div>;

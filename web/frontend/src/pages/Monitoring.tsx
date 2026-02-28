@@ -140,8 +140,7 @@ export function Monitoring() {
   const [error, setError] = useState<string | null>(null);
 
   const fetchMetrics = useCallback(() => {
-    fetch("/api/system-metrics")
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    get<MetricsData>("/api/system-metrics")
       .then(setData)
       .catch(e => setError(e.message));
   }, []);
@@ -153,8 +152,7 @@ export function Monitoring() {
   }, [fetchMetrics]);
 
   useEffect(() => {
-    fetch("/api/grafana-url")
-      .then(r => r.json())
+    get<GrafanaConfig>("/api/grafana-url")
       .then(cfg => {
         setGrafana(cfg);
         const img = new Image();

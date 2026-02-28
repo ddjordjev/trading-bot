@@ -18,6 +18,7 @@ from pathlib import Path
 from loguru import logger
 
 from analytics.engine import AnalyticsEngine
+from db.hub_store import HubDB
 from db.store import TradeDB
 from hub.state import HubState
 from shared.models import AnalyticsSnapshot, StrategyWeightEntry
@@ -41,6 +42,7 @@ class AnalyticsService:
         self.refresh_interval = refresh_interval
         self.state: HubState = state or HubState()
         self.db = TradeDB(path=HUB_DB)
+        self.hub_db = HubDB(path=HUB_DB)
         self.engine: AnalyticsEngine | None = None
         self._running = False
         self._last_trade_count = 0
@@ -53,6 +55,7 @@ class AnalyticsService:
         logger.info("=" * 50)
 
         self.db.connect()
+        self.hub_db.connect()
         self.engine = AnalyticsEngine(self.db)
         self._last_trade_count = self.db.trade_count()
         self._running = True
@@ -78,7 +81,48 @@ class AnalyticsService:
     async def stop(self) -> None:
         self._running = False
         self.db.close()
+        self.hub_db.close()
         logger.info("Analytics service stopped")
+
+    def _merge_openclaw_suggestions(self, base: list[dict]) -> list[dict]:
+        """Append actionable OpenClaw suggestions and mark them implemented."""
+        actionable = {"disable", "reduce_weight", "increase_weight", "weight_override", "time_filter", "regime_filter"}
+        merged = list(base)
+        try:
+            rows = self.hub_db.list_openclaw_suggestions(include_removed=False, limit=200)
+        except Exception as e:
+            logger.warning("OpenClaw suggestion merge skipped: {}", e)
+            return merged
+
+        auto_marked = 0
+        for row in rows:
+            status = str(row.get("status", "new") or "new").strip().lower()
+            stype = str(row.get("suggestion_type", "") or "").strip().lower()
+            strategy = str(row.get("strategy", "") or "").strip()
+            if status not in {"new", "accepted"} or stype not in actionable or not strategy:
+                continue
+            merged.append(
+                {
+                    "source": "openclaw",
+                    "strategy": strategy,
+                    "symbol": str(row.get("symbol", "") or ""),
+                    "suggestion_type": stype,
+                    "title": str(row.get("title", "") or ""),
+                    "description": str(row.get("description", "") or ""),
+                    "suggested_value": str(row.get("suggested_value", "") or ""),
+                }
+            )
+            suggestion_id = int(row.get("id", 0) or 0)
+            if suggestion_id > 0 and self.hub_db.mark_openclaw_suggestion_status(
+                suggestion_id,
+                "implemented",
+                notes="auto_applied_by_signal_generator",
+            ):
+                auto_marked += 1
+
+        if auto_marked > 0:
+            logger.info("OpenClaw suggestions auto-marked implemented: {}", auto_marked)
+        return merged
 
     async def _run_loop(self) -> None:
         while self._running:
@@ -122,7 +166,7 @@ class AnalyticsService:
             )
 
         patterns = [p.model_dump() for p in self.engine.patterns]
-        suggestions = [s.model_dump() for s in self.engine.suggestions]
+        suggestions = self._merge_openclaw_suggestions([s.model_dump() for s in self.engine.suggestions])
 
         snapshot = AnalyticsSnapshot(
             weights=weights,

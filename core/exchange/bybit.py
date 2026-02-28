@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 from typing import Any
 
 import ccxt.async_support as ccxt
 from loguru import logger
 
-from core.exchange.base import BaseExchange, parse_order_status, parse_order_type, parse_stop_price, ts_to_dt
+from core.exchange.base import (
+    BaseExchange,
+    extract_position_level,
+    infer_position_leverage,
+    parse_order_status,
+    parse_order_type,
+    parse_stop_price,
+    ts_to_dt,
+)
 from core.models import (
     Candle,
     MarketType,
@@ -50,6 +59,9 @@ class BybitExchange(BaseExchange):
             self._futures.set_sandbox_mode(True)
 
         self._watchers: list[asyncio.Task[None]] = []
+        self._positions_cache: tuple[float, list[Position]] | None = None
+        self._positions_cache_ttl_secs = 1.5
+        self._positions_cache_lock = asyncio.Lock()
 
     @property
     def name(self) -> str:
@@ -75,53 +87,60 @@ class BybitExchange(BaseExchange):
         return symbol
 
     @staticmethod
+    def _extract_order_id(payload: dict[str, Any]) -> str:
+        direct = str(payload.get("id", "") or "").strip()
+        if direct:
+            return direct
+        info = payload.get("info")
+        if isinstance(info, dict):
+            for key in ("orderId", "order_id", "stopOrderId", "triggerOrderId"):
+                value = str(info.get(key, "") or "").strip()
+                if value:
+                    return value
+        return ""
+
+    @staticmethod
+    def _infer_bybit_order_type(payload: dict[str, Any]) -> OrderType:
+        """Infer Bybit conditional order type when ccxt reports generic market type."""
+        parsed = parse_order_type(str(payload.get("type", "")))
+        if parsed in {OrderType.STOP_LOSS, OrderType.TAKE_PROFIT, OrderType.STOP_LIMIT}:
+            return parsed
+
+        info = payload.get("info")
+        if isinstance(info, dict):
+            stop_order_type = str(info.get("stopOrderType", "") or info.get("stop_order_type", "")).strip().lower()
+            if "stop" in stop_order_type and "loss" in stop_order_type:
+                return OrderType.STOP_LOSS
+            if "take" in stop_order_type and "profit" in stop_order_type:
+                return OrderType.TAKE_PROFIT
+
+            stop_price = parse_stop_price(payload)
+            trigger_direction_raw = info.get("triggerDirection", info.get("trigger_direction"))
+            reduce_only_raw = info.get("reduceOnly", info.get("reduce_only"))
+            side_txt = str(payload.get("side", "") or "").strip().lower()
+            is_buy = side_txt == "buy"
+            is_sell = side_txt == "sell"
+            is_reduce_only = str(reduce_only_raw).strip().lower() in {"true", "1"} or reduce_only_raw is True
+            try:
+                trigger_direction = int(float(trigger_direction_raw)) if trigger_direction_raw is not None else None
+            except (TypeError, ValueError):
+                trigger_direction = None
+
+            if stop_price and is_reduce_only and trigger_direction in {1, 2} and (is_buy or is_sell):
+                if (is_sell and trigger_direction == 2) or (is_buy and trigger_direction == 1):
+                    return OrderType.STOP_LOSS
+                if (is_sell and trigger_direction == 1) or (is_buy and trigger_direction == 2):
+                    return OrderType.TAKE_PROFIT
+
+        return parsed
+
+    @staticmethod
     def _infer_position_leverage(raw_position: dict[str, Any]) -> int:
-        """Infer leverage when exchange payload omits explicit value."""
-        raw_leverage = raw_position.get("leverage")
-        try:
-            if raw_leverage is not None:
-                parsed = round(float(raw_leverage))
-                if parsed > 0:
-                    return parsed
-        except (TypeError, ValueError):
-            pass
-
-        try:
-            margin_pct = float(raw_position.get("initialMarginPercentage", 0) or 0)
-            if margin_pct > 0:
-                inferred = round(1.0 / margin_pct)
-                if inferred > 0:
-                    return inferred
-        except (TypeError, ValueError, ZeroDivisionError):
-            pass
-
-        info = raw_position.get("info") or {}
-        try:
-            initial_margin = float(raw_position.get("initialMargin") or info.get("positionInitialMargin") or 0)
-            notional = abs(float(raw_position.get("notional") or info.get("notional") or 0))
-            if initial_margin > 0 and notional > 0:
-                inferred = round(notional / initial_margin)
-                if inferred > 0:
-                    return inferred
-        except (TypeError, ValueError):
-            pass
-
-        return 1
+        return infer_position_leverage(raw_position)
 
     @staticmethod
     def _extract_position_level(raw_position: dict[str, Any], keys: tuple[str, ...]) -> float:
-        info = raw_position.get("info") or {}
-        for key in keys:
-            val = raw_position.get(key)
-            if val is None:
-                val = info.get(key)
-            try:
-                f = float(val or 0)
-                if f > 0:
-                    return f
-            except (TypeError, ValueError):
-                continue
-        return 0.0
+        return extract_position_level(raw_position, keys)
 
     async def connect(self) -> None:
         logger.info("Connecting to Bybit (sandbox={})", self.sandbox)
@@ -208,43 +227,68 @@ class BybitExchange(BaseExchange):
         return {k: v for k, v in result.items() if v > 0}
 
     async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
+        now = time.monotonic()
+        cached = self._positions_cache
+        if cached and (now - cached[0]) < self._positions_cache_ttl_secs:
+            positions = cached[1]
+            if symbol:
+                resolved_symbol = self._resolve_symbol(symbol, MarketType.FUTURES)
+                normalized = symbol.split(":")[0] if ":" in symbol else symbol
+                return [p for p in positions if p.symbol in {symbol, normalized, resolved_symbol}]
+            return positions
+
         try:
-            resolved_symbol = self._resolve_symbol(symbol, MarketType.FUTURES) if symbol else None
-            raw = await self._futures.fetch_positions(symbols=[resolved_symbol] if resolved_symbol else None)
+            async with self._positions_cache_lock:
+                now = time.monotonic()
+                cached = self._positions_cache
+                if cached and (now - cached[0]) < self._positions_cache_ttl_secs:
+                    positions = cached[1]
+                else:
+                    resolved_symbol_opt = self._resolve_symbol(symbol, MarketType.FUTURES) if symbol else None
+                    raw = await self._futures.fetch_positions(
+                        symbols=[resolved_symbol_opt] if resolved_symbol_opt else None
+                    )
+                    positions = []
+                    for p in raw:
+                        amt = abs(float(p.get("contracts", 0) or 0))
+                        if amt == 0:
+                            continue
+                        side_str = p.get("side", "long")
+                        raw_sym = p.get("symbol", symbol or "")
+                        norm_sym = raw_sym.split(":")[0] if ":" in raw_sym else raw_sym
+                        positions.append(
+                            Position(
+                                symbol=norm_sym or (symbol or ""),
+                                side=OrderSide.BUY if side_str == "long" else OrderSide.SELL,
+                                amount=amt,
+                                entry_price=float(p.get("entryPrice", 0) or 0),
+                                current_price=float(p.get("markPrice", 0) or 0),
+                                leverage=self._infer_position_leverage(p),
+                                market_type="futures",
+                                stop_loss=self._extract_position_level(
+                                    p,
+                                    ("stopLossPrice", "stopPrice", "sl", "slPrice"),
+                                )
+                                or None,
+                                take_profit=self._extract_position_level(
+                                    p,
+                                    ("takeProfitPrice", "tp", "tpPrice"),
+                                )
+                                or None,
+                                unrealized_pnl=float(p.get("unrealizedPnl", 0) or 0),
+                            )
+                        )
+                    self._positions_cache = (time.monotonic(), positions)
         except Exception as e:
             logger.warning("Bybit fetch_positions failed: {}", e)
-            return []
-
-        positions = []
-        for p in raw:
-            amt = abs(float(p.get("contracts", 0) or 0))
-            if amt == 0:
-                continue
-            side_str = p.get("side", "long")
-            raw_sym = p.get("symbol", symbol or "")
-            norm_sym = raw_sym.split(":")[0] if ":" in raw_sym else raw_sym
-            positions.append(
-                Position(
-                    symbol=norm_sym or (symbol or ""),
-                    side=OrderSide.BUY if side_str == "long" else OrderSide.SELL,
-                    amount=amt,
-                    entry_price=float(p.get("entryPrice", 0) or 0),
-                    current_price=float(p.get("markPrice", 0) or 0),
-                    leverage=self._infer_position_leverage(p),
-                    market_type="futures",
-                    stop_loss=self._extract_position_level(
-                        p,
-                        ("stopLossPrice", "stopPrice", "sl", "slPrice"),
-                    )
-                    or None,
-                    take_profit=self._extract_position_level(
-                        p,
-                        ("takeProfitPrice", "tp", "tpPrice"),
-                    )
-                    or None,
-                    unrealized_pnl=float(p.get("unrealizedPnl", 0) or 0),
-                )
-            )
+            if cached:
+                positions = cached[1]
+            else:
+                return []
+        if symbol:
+            resolved_symbol = self._resolve_symbol(symbol, MarketType.FUTURES)
+            normalized = symbol.split(":")[0] if ":" in symbol else symbol
+            return [p for p in positions if p.symbol in {symbol, normalized, resolved_symbol}]
         return positions
 
     async def place_order(
@@ -264,10 +308,8 @@ class BybitExchange(BaseExchange):
             ccxt_type = "market"
         elif order_type == OrderType.LIMIT:
             ccxt_type = "limit"
-        elif order_type == OrderType.STOP_LOSS:
-            ccxt_type = "STOP_MARKET"
-        elif order_type == OrderType.TAKE_PROFIT:
-            ccxt_type = "TAKE_PROFIT_MARKET"
+        elif order_type in (OrderType.STOP_LOSS, OrderType.TAKE_PROFIT):
+            ccxt_type = "market"
         else:
             ccxt_type = "limit"
         params: dict[str, Any] = {}
@@ -276,6 +318,12 @@ class BybitExchange(BaseExchange):
         is_protection_order = order_type in (OrderType.STOP_LOSS, OrderType.TAKE_PROFIT)
         if market_type == MarketType.FUTURES and is_protection_order:
             params["reduceOnly"] = True
+            if stop_price is not None:
+                params["triggerPrice"] = stop_price
+            if order_type == OrderType.STOP_LOSS:
+                params["triggerDirection"] = 1 if side == OrderSide.BUY else 2
+            elif order_type == OrderType.TAKE_PROFIT:
+                params["triggerDirection"] = 2 if side == OrderSide.BUY else 1
         if market_type == MarketType.FUTURES and not is_protection_order:
             # Enforce isolated margin for all futures entries.
             if not await self.set_margin_mode(symbol, "isolated"):
@@ -302,25 +350,36 @@ class BybitExchange(BaseExchange):
             params,
         )
 
-        data = await client.create_order(
-            symbol=resolved_symbol,
-            type=ccxt_type,
-            side=side.value,
-            amount=amount,
-            price=price,
-            params=params,
-        )
+        create_order_kwargs: dict[str, Any] = {
+            "symbol": resolved_symbol,
+            "type": ccxt_type,
+            "side": side.value,
+            "amount": amount,
+            "params": params,
+        }
+        # Avoid sending price=None/0 on market orders; Bybit may reject with
+        # retCode 30209 ("price lower than minimum selling price").
+        if ccxt_type == "limit":
+            if price is None or float(price) <= 0:
+                raise ValueError(f"Invalid limit price for {symbol}: {price!r}")
+            create_order_kwargs["price"] = float(price)
+        elif price is not None and float(price) > 0:
+            # Some adapters pass a price hint on market orders; keep it only if valid.
+            create_order_kwargs["price"] = float(price)
+
+        data = await client.create_order(**create_order_kwargs)
+        order_id = self._extract_order_id(data)
         logger.info(
             "Order accepted {} {} {} id={} status={} filled={}",
             market_type.value,
             ccxt_type,
             symbol,
-            str(data.get("id", "")),
+            order_id,
             str(data.get("status", "")),
             float(data.get("filled", 0) or 0),
         )
         return Order(
-            id=str(data.get("id", "")),
+            id=order_id,
             symbol=symbol,
             side=side,
             order_type=order_type,
@@ -352,11 +411,12 @@ class BybitExchange(BaseExchange):
         client = self._client(market_type)
         resolved_symbol = self._resolve_symbol(symbol, market_type)
         data = await client.fetch_order(order_id, resolved_symbol)
+        side_txt = str(data.get("side", "") or "").strip().lower()
         return Order(
             id=order_id,
             symbol=symbol,
-            side=OrderSide.BUY if data.get("side") == "buy" else OrderSide.SELL,
-            order_type=parse_order_type(str(data.get("type", ""))),
+            side=OrderSide.BUY if side_txt == "buy" else OrderSide.SELL,
+            order_type=self._infer_bybit_order_type(data),
             amount=float(data.get("amount", 0) or 0),
             stop_price=parse_stop_price(data),
             status=parse_order_status(data.get("status", "")),
@@ -371,20 +431,25 @@ class BybitExchange(BaseExchange):
         client = self._client(market_type)
         resolved_symbol = self._resolve_symbol(symbol, market_type) if symbol else None
         raw = await client.fetch_open_orders(resolved_symbol)
-        return [
-            Order(
-                id=str(d.get("id", "")),
-                symbol=d.get("symbol", ""),
-                side=OrderSide.BUY if d.get("side") == "buy" else OrderSide.SELL,
-                order_type=parse_order_type(str(d.get("type", ""))),
-                amount=float(d.get("amount", 0) or 0),
-                stop_price=parse_stop_price(d),
-                status=parse_order_status(d.get("status", "")),
-                filled=float(d.get("filled", 0) or 0),
-                market_type=market_type.value,
+        orders: list[Order] = []
+        for d in raw:
+            side_txt = str(d.get("side", "") or "").strip().lower()
+            raw_symbol = str(d.get("symbol", "") or "")
+            norm_symbol = raw_symbol.split(":")[0] if ":" in raw_symbol else raw_symbol
+            orders.append(
+                Order(
+                    id=self._extract_order_id(d),
+                    symbol=norm_symbol,
+                    side=OrderSide.BUY if side_txt == "buy" else OrderSide.SELL,
+                    order_type=self._infer_bybit_order_type(d),
+                    amount=float(d.get("amount", 0) or 0),
+                    stop_price=parse_stop_price(d),
+                    status=parse_order_status(d.get("status", "")),
+                    filled=float(d.get("filled", 0) or 0),
+                    market_type=market_type.value,
+                )
             )
-            for d in raw
-        ]
+        return orders
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
         try:
@@ -415,13 +480,19 @@ class BybitExchange(BaseExchange):
 
     async def watch_ticker(self, symbol: str, callback: Callable[..., Any]) -> None:
         async def _loop() -> None:
-            supports_ws = hasattr(self._spot, "watch_ticker")
+            futures_symbol = self._resolve_symbol(symbol, MarketType.FUTURES)
+            futures_markets = getattr(self._futures, "markets", {}) or {}
+            spot_markets = getattr(self._spot, "markets", {}) or {}
+            use_futures = futures_symbol in futures_markets and symbol not in spot_markets
+            client = self._futures if use_futures else self._spot
+            watch_symbol = futures_symbol if use_futures else symbol
+            supports_ws = hasattr(client, "watch_ticker")
             while True:
                 try:
                     if supports_ws:
-                        data = await self._spot.watch_ticker(symbol)
+                        data = await client.watch_ticker(watch_symbol)
                     else:
-                        data = await self._spot.fetch_ticker(symbol)
+                        data = await client.fetch_ticker(watch_symbol)
                     ticker = Ticker(
                         symbol=symbol,
                         bid=data.get("bid", 0) or 0,
@@ -437,6 +508,12 @@ class BybitExchange(BaseExchange):
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
+                    msg = str(e).lower()
+                    if supports_ws and "not supported yet" in msg:
+                        supports_ws = False
+                        logger.warning("Bybit WS ticker unsupported for {}, falling back to polling", symbol)
+                        await asyncio.sleep(1)
+                        continue
                     logger.error("Ticker watch error for {}: {}", symbol, e)
                     await asyncio.sleep(5)
 
@@ -445,13 +522,19 @@ class BybitExchange(BaseExchange):
 
     async def watch_candles(self, symbol: str, timeframe: str, callback: Callable[..., Any]) -> None:
         async def _loop() -> None:
-            supports_ws = hasattr(self._spot, "watch_ohlcv")
+            futures_symbol = self._resolve_symbol(symbol, MarketType.FUTURES)
+            futures_markets = getattr(self._futures, "markets", {}) or {}
+            spot_markets = getattr(self._spot, "markets", {}) or {}
+            use_futures = futures_symbol in futures_markets and symbol not in spot_markets
+            client = self._futures if use_futures else self._spot
+            watch_symbol = futures_symbol if use_futures else symbol
+            supports_ws = hasattr(client, "watch_ohlcv")
             while True:
                 try:
                     if supports_ws:
-                        data = await self._spot.watch_ohlcv(symbol, timeframe)
+                        data = await client.watch_ohlcv(watch_symbol, timeframe)
                     else:
-                        data = await self._spot.fetch_ohlcv(symbol, timeframe, limit=2)
+                        data = await client.fetch_ohlcv(watch_symbol, timeframe, limit=2)
                     candles = data if supports_ws else data[-1:]
                     for c in candles:
                         candle = Candle(
@@ -468,6 +551,12 @@ class BybitExchange(BaseExchange):
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
+                    msg = str(e).lower()
+                    if supports_ws and "not supported yet" in msg:
+                        supports_ws = False
+                        logger.warning("Bybit WS candles unsupported for {}, falling back to polling", symbol)
+                        await asyncio.sleep(1)
+                        continue
                     logger.error("Candle watch error for {}: {}", symbol, e)
                     await asyncio.sleep(5)
 

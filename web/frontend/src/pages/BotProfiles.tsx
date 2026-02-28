@@ -45,9 +45,13 @@ export function BotProfiles() {
   };
 
   useEffect(() => {
+    const loadingGuard = window.setTimeout(() => setLoading(false), 8000);
     refresh();
     const interval = setInterval(refresh, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      window.clearTimeout(loadingGuard);
+      clearInterval(interval);
+    };
   }, []);
 
   const toggle = async (id: string) => {

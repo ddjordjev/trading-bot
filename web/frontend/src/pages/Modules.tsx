@@ -19,7 +19,9 @@ export function Modules() {
   };
 
   useEffect(() => {
+    const loadingGuard = window.setTimeout(() => setLoading(false), 8000);
     refresh();
+    return () => window.clearTimeout(loadingGuard);
   }, []);
 
   const toggle = async (name: string) => {

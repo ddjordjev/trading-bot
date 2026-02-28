@@ -7,7 +7,15 @@ from typing import Any
 import ccxt.async_support as ccxt
 from loguru import logger
 
-from core.exchange.base import BaseExchange, parse_order_status, parse_order_type, parse_stop_price, ts_to_dt
+from core.exchange.base import (
+    BaseExchange,
+    extract_position_level,
+    infer_position_leverage,
+    parse_order_status,
+    parse_order_type,
+    parse_stop_price,
+    ts_to_dt,
+)
 from core.models import (
     Candle,
     MarketType,
@@ -150,53 +158,11 @@ class BinanceExchange(BaseExchange):
 
     @staticmethod
     def _infer_position_leverage(raw_position: dict[str, Any]) -> int:
-        """Infer leverage when the exchange payload omits explicit value."""
-        raw_leverage = raw_position.get("leverage")
-        try:
-            if raw_leverage is not None:
-                parsed = round(float(raw_leverage))
-                if parsed > 0:
-                    return parsed
-        except (TypeError, ValueError):
-            pass
-
-        # Binance demo payload can include initialMarginPercentage (e.g. 0.3333 for 3x).
-        try:
-            margin_pct = float(raw_position.get("initialMarginPercentage", 0) or 0)
-            if margin_pct > 0:
-                inferred = round(1.0 / margin_pct)
-                if inferred > 0:
-                    return inferred
-        except (TypeError, ValueError, ZeroDivisionError):
-            pass
-
-        info = raw_position.get("info") or {}
-        try:
-            initial_margin = float(raw_position.get("initialMargin") or info.get("positionInitialMargin") or 0)
-            notional = abs(float(raw_position.get("notional") or info.get("notional") or 0))
-            if initial_margin > 0 and notional > 0:
-                inferred = round(notional / initial_margin)
-                if inferred > 0:
-                    return inferred
-        except (TypeError, ValueError):
-            pass
-
-        return 1
+        return infer_position_leverage(raw_position)
 
     @staticmethod
     def _extract_position_level(raw_position: dict[str, Any], keys: tuple[str, ...]) -> float:
-        info = raw_position.get("info") or {}
-        for key in keys:
-            val = raw_position.get(key)
-            if val is None:
-                val = info.get(key)
-            try:
-                f = float(val or 0)
-                if f > 0:
-                    return f
-            except (TypeError, ValueError):
-                continue
-        return 0.0
+        return extract_position_level(raw_position, keys)
 
     def _normalize_amount(self, client: Any, symbol: str, amount: float) -> float:
         try:

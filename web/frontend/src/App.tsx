@@ -9,7 +9,8 @@ import { Analytics } from "./pages/Analytics";
 import { Monitoring } from "./pages/Monitoring";
 import { Settings } from "./pages/Settings";
 
-const FALLBACK_EXCHANGES = ["MEXC", "BINANCE", "BYBIT"];
+const FALLBACK_EXCHANGES = ["BINANCE", "BYBIT"];
+const ALLOWED_EXCHANGES = new Set(FALLBACK_EXCHANGES);
 
 const TABS = [
   "Dashboard", "Intel", "Scanner", "Strategies", "Analytics", "Monitoring", "Settings",
@@ -34,12 +35,17 @@ export function App() {
     return snapshot.bots.map((b) => ({
       bot_id: b.bot_id,
       label: LABEL_MAP[b.bot_id] || b.bot_id.charAt(0).toUpperCase() + b.bot_id.slice(1),
-      exchange: b.exchange || "",
+      exchange: (() => {
+        const normalized = String(b.exchange || "").trim().toUpperCase();
+        return ALLOWED_EXCHANGES.has(normalized) ? normalized : "";
+      })(),
     }));
   }, [snapshot?.bots]);
 
   const exchanges = useMemo(() => {
-    const fromBots = bots.map((b) => b.exchange.toUpperCase()).filter(Boolean);
+    const fromBots = bots
+      .map((b) => b.exchange.toUpperCase())
+      .filter((ex) => ALLOWED_EXCHANGES.has(ex));
     return [...new Set([...FALLBACK_EXCHANGES, ...fromBots])].sort();
   }, [bots]);
 
@@ -68,7 +74,11 @@ export function App() {
     const taggedPositions = bot.data.positions.map((p) => ({ ...p, bot_id: selected, exchange_name: exName }));
     const taggedWicks = bot.data.wick_scalps.map((w) => ({ ...w, bot_id: selected, exchange_name: exName }));
     const taggedOrphans = (snapshot.orphan_positions || [])
-      .filter((o: any) => String(o.detected_by_bot || "") === selected)
+      .filter((o: any) => {
+        const detectedBy = String(o.detected_by_bot || "");
+        const owner = String(o.originally_opened_by || "");
+        return detectedBy === selected || owner === selected;
+      })
       .filter(exMatch);
     return {
       status: bot.data.status,

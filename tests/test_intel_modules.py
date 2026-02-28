@@ -504,10 +504,10 @@ class TestTVAnalysis:
 class TestTradingViewClient:
     @pytest.fixture
     def client(self):
-        return TradingViewClient(exchange="MEXC", intervals=["1h", "4h"])
+        return TradingViewClient(exchange="BYBIT", intervals=["1h", "4h"])
 
     def test_initial_state(self, client):
-        assert client.exchange == "MEXC"
+        assert client.exchange == "BYBIT"
         assert client.intervals == ["1h", "4h"]
         assert client.consensus("BTC/USDT") == "no_data"
         assert client.signal_boost("BTC/USDT", "long") == 1.0
@@ -1566,7 +1566,7 @@ class TestSantimentFetchSymbol:
 class TestTradingViewAnalyzeMulti:
     @pytest.mark.asyncio
     async def test_analyze_multi_returns_results(self):
-        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        client = TradingViewClient(exchange="BYBIT", intervals=["1h"])
         a1 = TVAnalysis(symbol="BTC/USDT", summary_rating=TVRating.BUY)
         a2 = TVAnalysis(symbol="ETH/USDT", summary_rating=TVRating.SELL)
         with patch.object(client, "analyze", new_callable=AsyncMock, side_effect=[a1, a2]):
@@ -1577,7 +1577,7 @@ class TestTradingViewAnalyzeMulti:
 
     @pytest.mark.asyncio
     async def test_analyze_multi_skips_exceptions(self):
-        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        client = TradingViewClient(exchange="BYBIT", intervals=["1h"])
         a1 = TVAnalysis(symbol="BTC/USDT")
         with patch.object(client, "analyze", new_callable=AsyncMock, side_effect=[a1, RuntimeError("fail")]):
             results = await client.analyze_multi(["BTC/USDT", "ETH/USDT"], "1h")
@@ -1588,7 +1588,7 @@ class TestTradingViewAnalyzeMulti:
 class TestTradingViewFullAnalysis:
     @pytest.mark.asyncio
     async def test_full_analysis_all_intervals(self):
-        client = TradingViewClient(exchange="MEXC", intervals=["1h", "4h"])
+        client = TradingViewClient(exchange="BYBIT", intervals=["1h", "4h"])
         a1 = TVAnalysis(symbol="BTC", summary_rating=TVRating.BUY)
         a4 = TVAnalysis(symbol="BTC", summary_rating=TVRating.SELL)
         with patch.object(client, "analyze", new_callable=AsyncMock, side_effect=[a1, a4]):
@@ -1598,7 +1598,7 @@ class TestTradingViewFullAnalysis:
 
     @pytest.mark.asyncio
     async def test_full_analysis_skips_none(self):
-        client = TradingViewClient(exchange="MEXC", intervals=["1h", "4h"])
+        client = TradingViewClient(exchange="BYBIT", intervals=["1h", "4h"])
         a1 = TVAnalysis(symbol="BTC")
         with patch.object(client, "analyze", new_callable=AsyncMock, side_effect=[a1, None]):
             results = await client.full_analysis("BTC")
@@ -1609,7 +1609,7 @@ class TestTradingViewFullAnalysis:
 class TestTradingViewStartStop:
     @pytest.mark.asyncio
     async def test_start_creates_poll_task(self):
-        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        client = TradingViewClient(exchange="BYBIT", intervals=["1h"])
         with patch.object(client, "_poll_loop", new_callable=AsyncMock):
             await client.start()
             assert client._running is True
@@ -1623,7 +1623,7 @@ class TestTradingViewStartStop:
 
     @pytest.mark.asyncio
     async def test_stop_when_not_started(self):
-        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        client = TradingViewClient(exchange="BYBIT", intervals=["1h"])
         await client.stop()
         assert client._running is False
 
@@ -1631,7 +1631,7 @@ class TestTradingViewStartStop:
 class TestTradingViewPollLoop:
     @pytest.mark.asyncio
     async def test_poll_loop_iterates_symbols(self):
-        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        client = TradingViewClient(exchange="BYBIT", intervals=["1h"])
         client._running = True
         client._poll_symbols = ["BTC/USDT", "ETH/USDT"]
 
@@ -1651,7 +1651,7 @@ class TestTradingViewPollLoop:
 
     @pytest.mark.asyncio
     async def test_analyze_non_200(self):
-        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        client = TradingViewClient(exchange="BYBIT", intervals=["1h"])
         mock_resp = AsyncMock()
         mock_resp.status = 500
         mock_cm = MagicMock()
@@ -1669,7 +1669,7 @@ class TestTradingViewPollLoop:
 
     @pytest.mark.asyncio
     async def test_analyze_non_dict_response(self):
-        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        client = TradingViewClient(exchange="BYBIT", intervals=["1h"])
         mock_resp = AsyncMock()
         mock_resp.status = 200
         mock_resp.json = AsyncMock(return_value="not a dict")
@@ -1688,7 +1688,7 @@ class TestTradingViewPollLoop:
 
     @pytest.mark.asyncio
     async def test_analyze_too_few_values(self):
-        client = TradingViewClient(exchange="MEXC", intervals=["1h"])
+        client = TradingViewClient(exchange="BYBIT", intervals=["1h"])
         mock_resp = AsyncMock()
         mock_resp.status = 200
         mock_resp.json = AsyncMock(return_value={"data": [{"d": [0.1, 0.2]}]})

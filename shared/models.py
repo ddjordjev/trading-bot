@@ -248,7 +248,7 @@ class BotDeploymentStatus(BaseModel):
 
     bot_id: str = ""
     bot_style: str = ""  # momentum / meanrev / swing
-    exchange: str = ""  # exchange this bot trades on (e.g. MEXC, BINANCE)
+    exchange: str = ""  # exchange this bot trades on (e.g. BINANCE, BYBIT)
     level: DeploymentLevel = DeploymentLevel.HUNTING
     open_positions: int = 0
     max_positions: int = 3

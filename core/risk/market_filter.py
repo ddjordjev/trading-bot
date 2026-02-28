@@ -43,7 +43,7 @@ class LiquidityProfile:
 class MarketQualityFilter:
     """Evaluates whether market conditions are worth trading.
 
-    Now includes explicit liquidity assessment. On MEXC, low-liquidity coins
+    Now includes explicit liquidity assessment. On smaller-cap symbols, low-liquidity coins
     have unreliable stop-loss execution: the price can wick through your SL
     and liquidate you before the exchange reacts. We classify each symbol
     and adjust behavior accordingly.

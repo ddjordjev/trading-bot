@@ -4,6 +4,8 @@ import { PositionRow } from "../components/PositionRow";
 import { LogViewer } from "../components/LogViewer";
 import { useEffect, useState } from "react";
 
+const ALLOWED_EXCHANGES = new Set(["BINANCE", "BYBIT"]);
+
 interface Props {
   data: FullSnapshot | null;
   showBotColumn?: boolean;
@@ -43,14 +45,25 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
     : eb[exchangeFilter] ?? 0;
   const displayBalance = exchangeBalance > 0 ? exchangeBalance : num(s.balance);
 
+  const safeExchanges = exchanges.filter((ex) => ALLOWED_EXCHANGES.has(String(ex || "").toUpperCase()));
   const visibleBots = exchangeFilter === "all"
     ? bots
     : bots.filter((b) => b.exchange.toUpperCase() === exchangeFilter);
   const visibleOrphans = exchangeFilter === "all"
     ? orphanPositions
     : orphanPositions.filter((o) => String((o as any).exchange_name || "").toUpperCase() === exchangeFilter);
+  const activeExchanges = Array.from(
+    new Set(
+      ((data?.bots || []) as any[])
+        .filter((b) => b && b.connected)
+        .map((b) => String(b.exchange || "").toUpperCase())
+        .filter((ex) => ALLOWED_EXCHANGES.has(ex)),
+    ),
+  ).sort();
 
   const defaultAssignee = (orphan: any): string => {
+    const original = String(orphan.originally_opened_by || "").trim();
+    if (original) return original;
     const ex = String(orphan.exchange_name || "").toUpperCase();
     const sameExchange = bots.filter((b) => b.exchange.toUpperCase() === ex);
     if (sameExchange.length > 0) return sameExchange[0].bot_id;
@@ -184,18 +197,24 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
             {manualStopActive && <span style={{ color: "var(--yellow)", fontSize: "0.7rem" }}> (HALTED)</span>}
           </div>
         </div>
-        {str(s.exchange_url) && (
+        {activeExchanges.length > 0 && (
           <div className="stat-card">
             <div className="label">Exchange</div>
             <div className="value">
-              <a
-                href={str(s.exchange_url)}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ color: "var(--accent)", textDecoration: "none", fontSize: "0.9rem" }}
-              >
-                {str(s.exchange_name)} ↗
-              </a>
+              {activeExchanges.length === 1 && str(s.exchange_url) ? (
+                <a
+                  href={str(s.exchange_url)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ color: "var(--accent)", textDecoration: "none", fontSize: "0.9rem" }}
+                >
+                  {activeExchanges[0]} ↗
+                </a>
+              ) : (
+                <span style={{ color: "var(--heading)", fontSize: "0.9rem" }}>
+                  {activeExchanges.join(", ")}
+                </span>
+              )}
               <div style={{ fontSize: "0.65rem", color: "var(--text-muted)", marginTop: 2 }}>
                 {str(s.trading_mode).startsWith("paper") ? str(s.trading_mode).toUpperCase().replace("_", " ") : "LIVE"}
               </div>
@@ -209,7 +228,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
       </div>
 
       <div className="controls">
-        {onExchangeFilterChange && exchanges.length > 0 && (
+        {onExchangeFilterChange && safeExchanges.length > 0 && (
           <select
             value={exchangeFilter}
             onChange={(e) => onExchangeFilterChange(e.target.value)}
@@ -225,7 +244,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
             }}
           >
             <option value="all">All Exchanges</option>
-            {exchanges.map((ex) => (
+            {safeExchanges.map((ex) => (
               <option key={ex} value={ex}>{ex}</option>
             ))}
           </select>
@@ -345,6 +364,8 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                 <th>Entry</th>
                 <th>Current</th>
                 <th>Detected By</th>
+                <th>Originally Opened By</th>
+                <th>Reason</th>
                 <th>Recommended Bot</th>
                 <th>Actions</th>
               </tr>
@@ -354,6 +375,11 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                 const key = `${String(o.exchange_name || "")}:${o.symbol}`;
                 const suggested = defaultAssignee(o);
                 const chosenBot = orphanAssignees[key] || suggested;
+                const originalOwner = String(o.originally_opened_by || "").trim();
+                const ownerRunning = o.owner_running === true;
+                const ownerOptionMissing = !!originalOwner && !bots.some((b) => b.bot_id === originalOwner);
+                const assignBlockedByOfflineOwner = !!originalOwner && !ownerRunning;
+                const reason = String(o.orphan_reason || "").trim() || "unknown";
                 return (
                   <tr key={key}>
                     <td>{o.symbol}</td>
@@ -363,12 +389,21 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                     <td>{Number(o.entry_price || 0).toFixed(Number(o.entry_price || 0) < 1 ? 6 : 2)}</td>
                     <td>{Number(o.current_price || 0).toFixed(Number(o.current_price || 0) < 1 ? 6 : 2)}</td>
                     <td style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{String(o.detected_by_bot || "—")}</td>
+                    <td style={{ fontSize: "0.75rem", color: ownerRunning ? "var(--text-muted)" : "var(--yellow)" }}>
+                      {originalOwner || "—"}
+                    </td>
+                    <td style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{reason}</td>
                     <td>
                       <select
                         value={chosenBot}
                         onChange={(e) => setOrphanAssignees((prev) => ({ ...prev, [key]: e.target.value }))}
                         style={{ minWidth: 120 }}
                       >
+                        {ownerOptionMissing && (
+                          <option key={originalOwner} value={originalOwner}>
+                            {originalOwner} (offline)
+                          </option>
+                        )}
                         {bots.map((b) => (
                           <option key={b.bot_id} value={b.bot_id}>
                             {b.label} ({b.exchange})
@@ -380,7 +415,8 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                       <button
                         className="btn-primary"
                         style={{ marginRight: 6 }}
-                        disabled={!chosenBot}
+                        disabled={!chosenBot || assignBlockedByOfflineOwner}
+                        title={assignBlockedByOfflineOwner ? "Owner bot is currently not running" : "Assign orphan to selected bot"}
                         onClick={async () => {
                           const res = await postBody("/api/orphan/assign", {
                             symbol: o.symbol,

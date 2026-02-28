@@ -68,7 +68,7 @@ class TestBollingerSignals:
 @pytest.fixture
 def _settings(monkeypatch):
     monkeypatch.setenv("TRADING_MODE", "paper_local")
-    monkeypatch.setenv("EXCHANGE", "mexc")
+    monkeypatch.setenv("EXCHANGE", "bybit")
     monkeypatch.setenv("MAX_POSITION_SIZE_PCT", "5.0")
     monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")
     monkeypatch.setenv("STOP_LOSS_PCT", "2.0")
@@ -209,12 +209,12 @@ class TestTradeQueue:
         from shared.models import SignalPriority, TradeProposal, TradeQueue
 
         q = TradeQueue()
-        p = TradeProposal(priority=SignalPriority.SWING, symbol="SOL/USDT", supported_exchanges=["BINANCE", "MEXC"])
+        p = TradeProposal(priority=SignalPriority.SWING, symbol="SOL/USDT", supported_exchanges=["BINANCE", "BYBIT"])
         q.add(p)
         removed = q.remove_exchange(p.id, "BINANCE")
         assert not removed
         assert q.total == 1
-        assert q.proposals[0].supported_exchanges == ["MEXC"]
+        assert q.proposals[0].supported_exchanges == ["BYBIT"]
 
     def test_remove_exchange_removes_proposal_when_empty(self):
         from shared.models import SignalPriority, TradeProposal, TradeQueue
@@ -332,13 +332,6 @@ class TestSettingsUrls:
         s = Settings(_env_file=None)
         url = s.symbol_platform_url("BTC/USDT")
         assert "bybit" in url.lower() or url == ""
-
-    def test_mexc_url(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper_local")
-        monkeypatch.setenv("EXCHANGE", "mexc")
-        s = Settings(_env_file=None)
-        url = s.symbol_platform_url("BTC/USDT")
-        assert "mexc" in url.lower() or url == ""
 
     def test_binance_api_keys_paper_live(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper_live")
@@ -1447,7 +1440,7 @@ class TestNotifierExtended:
         from notifications.notifier import Notifier
 
         monkeypatch.setenv("TRADING_MODE", "paper_local")
-        monkeypatch.setenv("EXCHANGE", "mexc")
+        monkeypatch.setenv("EXCHANGE", "bybit")
         monkeypatch.setenv("SMTP_USER", "u@test.com")
         monkeypatch.setenv("SMTP_PASSWORD", "pass")
         monkeypatch.setenv("NOTIFY_EMAIL", "a@test.com")
@@ -1472,7 +1465,7 @@ class TestNotifierExtended:
         from notifications.notifier import Notifier
 
         monkeypatch.setenv("TRADING_MODE", "paper_local")
-        monkeypatch.setenv("EXCHANGE", "mexc")
+        monkeypatch.setenv("EXCHANGE", "bybit")
         monkeypatch.setenv("SMTP_USER", "u@test.com")
         monkeypatch.setenv("SMTP_PASSWORD", "pass")
         monkeypatch.setenv("NOTIFY_EMAIL", "a@test.com")

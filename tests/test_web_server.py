@@ -23,9 +23,9 @@ def mock_bot():
     bot.settings = MagicMock()
     bot.settings.bot_id = ""
     bot.settings.trading_mode = "paper_local"
-    bot.settings.exchange = "mexc"
-    bot.settings.platform_url = "https://www.mexc.com"
-    bot.settings.symbol_platform_url = MagicMock(return_value="https://www.mexc.com/trade/BTC_USDT")
+    bot.settings.exchange = "bybit"
+    bot.settings.platform_url = "https://www.bybit.com"
+    bot.settings.symbol_platform_url = MagicMock(return_value="https://www.bybit.com/trade/BTC_USDT")
     bot.settings.intel_enabled = True
     bot.settings.news_enabled = False
     bot.settings.spike_threshold_pct = 5.0
@@ -172,7 +172,7 @@ class TestGetBots:
             {
                 "bot_id": "momentum",
                 "bot_style": "momentum",
-                "exchange": "MEXC",
+                "exchange": "BYBIT",
                 "status": {"running": True},
                 "positions": [],
                 "wick_scalps": [],
@@ -185,7 +185,7 @@ class TestGetBots:
         assert len(bots) >= 1
         bot0 = bots[0]
         assert bot0["bot_id"] == "momentum"
-        assert bot0["exchange"] == "MEXC"
+        assert bot0["exchange"] == "BYBIT"
         _bot_reports.clear()
 
     async def test_bots_empty_when_no_reports(self, client):
@@ -214,7 +214,7 @@ class TestGetStatus:
             report_bot_snapshot(
                 {
                     "bot_id": "solo",
-                    "exchange": "MEXC",
+                    "exchange": "BYBIT",
                     "status": {
                         "running": True,
                         "balance": 10_000.0,
@@ -224,7 +224,7 @@ class TestGetStatus:
                         "total_growth_usd": 1000.0,
                         "total_growth_pct": 25.0,
                         "trading_mode": "paper_local",
-                        "exchange_name": "MEXC",
+                        "exchange_name": "BYBIT",
                         "strategies_count": 0,
                     },
                     "positions": [],
@@ -237,7 +237,7 @@ class TestGetStatus:
                 assert r.status_code == 200
                 data = r.json()
                 assert data["trading_mode"] == "paper_local"
-                assert data["exchange_name"] == "MEXC"
+                assert data["exchange_name"] == "BYBIT"
                 assert data["balance"] == 10_000.0
                 assert data["daily_pnl"] == 500.0
                 assert data["strategies_count"] == 0
@@ -251,7 +251,7 @@ class TestGetStatus:
             report_bot_snapshot(
                 {
                     "bot_id": "solo",
-                    "exchange": "MEXC",
+                    "exchange": "BYBIT",
                     "status": {
                         "running": True,
                         "balance": 10000.0,
@@ -261,7 +261,7 @@ class TestGetStatus:
                         "total_growth_usd": 1000.0,
                         "total_growth_pct": 0,
                         "trading_mode": "paper_local",
-                        "exchange_name": "MEXC",
+                        "exchange_name": "BYBIT",
                         "strategies_count": 0,
                     },
                     "positions": [],
@@ -323,7 +323,7 @@ class TestGetTrades:
         report_bot_snapshot(
             {
                 "bot_id": "test",
-                "exchange": "MEXC",
+                "exchange": "BYBIT",
                 "status": {},
                 "positions": [],
                 "wick_scalps": [],
@@ -502,7 +502,7 @@ class TestGetIntelTrendingStrategies:
         report_bot_snapshot(
             {
                 "bot_id": "test",
-                "exchange": "MEXC",
+                "exchange": "BYBIT",
                 "status": {},
                 "positions": [],
                 "wick_scalps": [],
@@ -539,7 +539,7 @@ class TestGetStrategiesNoneStats:
         report_bot_snapshot(
             {
                 "bot_id": "test",
-                "exchange": "MEXC",
+                "exchange": "BYBIT",
                 "status": {},
                 "positions": [],
                 "wick_scalps": [],
@@ -573,7 +573,7 @@ class TestGetStrategiesNoneStats:
         report_bot_snapshot(
             {
                 "bot_id": "test",
-                "exchange": "MEXC",
+                "exchange": "BYBIT",
                 "status": {},
                 "positions": [],
                 "wick_scalps": [],
@@ -608,7 +608,7 @@ class TestInternalReport:
     async def test_post_internal_report(self, client):
         payload = {
             "bot_id": "momentum",
-            "exchange": "MEXC",
+            "exchange": "BYBIT",
             "status": {
                 "running": True,
                 "balance": 1000,
@@ -623,7 +623,7 @@ class TestInternalReport:
                 "strategies_count": 2,
                 "dynamic_strategies_count": 1,
                 "trading_mode": "paper_local",
-                "exchange_name": "MEXC",
+                "exchange_name": "BYBIT",
                 "exchange_url": "",
                 "tier": "building",
                 "tier_progress_pct": 50,
@@ -641,14 +641,14 @@ class TestInternalReport:
         assert "momentum" in _bot_reports
 
     async def test_post_report_no_bot_id_ignored(self, client):
-        r = await client.post("/internal/report", json={"exchange": "MEXC"})
+        r = await client.post("/internal/report", json={"exchange": "BYBIT"})
         assert r.status_code == 200
         assert len(_bot_reports) == 0
 
     async def test_post_report_ignores_malformed_position_entries(self, client):
         payload = {
             "bot_id": "momentum",
-            "exchange": "MEXC",
+            "exchange": "BYBIT",
             "status": {"running": True},
             "positions": ["bad-row", {"symbol": "BTC/USDT"}, 123],
         }
@@ -786,7 +786,7 @@ class TestInternalReport:
             report_bot_snapshot(
                 {
                     "bot_id": bid,
-                    "exchange": "MEXC",
+                    "exchange": "BYBIT",
                     "status": {
                         "running": True,
                         "balance": bal,
@@ -801,7 +801,7 @@ class TestInternalReport:
                         "strategies_count": 1,
                         "dynamic_strategies_count": 0,
                         "trading_mode": "paper_local",
-                        "exchange_name": "MEXC",
+                        "exchange_name": "BYBIT",
                         "exchange_url": "",
                         "tier": "building",
                         "tier_progress_pct": 50,
@@ -987,7 +987,7 @@ class TestInternalReport:
                 "exchange": "BINANCE",
                 "status": dict(base_status, exchange_name="BINANCE"),
                 "positions": [],
-                "orphan_positions": [{"symbol": "BTC/USDT", "side": "long", "detected_at": "2026-02-01T00:00:00Z"}],
+                "foreign_positions": [{"symbol": "BTC/USDT", "side": "long", "detected_at": "2026-02-01T00:00:00Z"}],
                 "wick_scalps": [],
                 "strategies": [],
             }
@@ -998,18 +998,18 @@ class TestInternalReport:
                 "exchange": "BINANCE",
                 "status": dict(base_status, exchange_name="BINANCE"),
                 "positions": [],
-                "orphan_positions": [{"symbol": "BTC/USDT", "side": "short", "detected_at": "2026-02-01T00:01:00Z"}],
+                "foreign_positions": [{"symbol": "BTC/USDT", "side": "short", "detected_at": "2026-02-01T00:01:00Z"}],
                 "wick_scalps": [],
                 "strategies": [],
             }
         )
         report_bot_snapshot(
             {
-                "bot_id": "orphan-mexc-long",
-                "exchange": "MEXC",
-                "status": dict(base_status, exchange_name="MEXC"),
+                "bot_id": "orphan-bybit-long",
+                "exchange": "BYBIT",
+                "status": dict(base_status, exchange_name="BYBIT"),
                 "positions": [],
-                "orphan_positions": [{"symbol": "BTC/USDT", "side": "long", "detected_at": "2026-02-01T00:02:00Z"}],
+                "foreign_positions": [{"symbol": "BTC/USDT", "side": "long", "detected_at": "2026-02-01T00:02:00Z"}],
                 "wick_scalps": [],
                 "strategies": [],
             }
@@ -1019,16 +1019,13 @@ class TestInternalReport:
 
         snap = _build_merged_snapshot()
         orphan_keys = {
-            (
-                str(o.get("exchange_name", "")).upper(),
-                str(o.get("symbol", "")).upper(),
-                str(o.get("side", "")).lower(),
-            )
+            (str(o.get("exchange_name", "")).upper(), str(o.get("symbol", "")).upper())
             for o in snap["orphan_positions"]
         }
-        assert ("BINANCE", "BTC/USDT", "long") not in orphan_keys
-        assert ("BINANCE", "BTC/USDT", "short") in orphan_keys
-        assert ("MEXC", "BTC/USDT", "long") in orphan_keys
+        assert ("BINANCE", "BTC/USDT") not in orphan_keys
+        assert ("BYBIT", "BTC/USDT") in orphan_keys
+        bybit_row = next(o for o in snap["orphan_positions"] if str(o.get("exchange_name", "")).upper() == "BYBIT")
+        assert str(bybit_row.get("orphan_reason", "")) == "no_owner_record"
         _bot_reports.clear()
 
     async def test_merged_snapshot_filters_orphan_when_wick_scalp_manages_side(self, client, mock_bot):
@@ -1204,7 +1201,7 @@ class TestGetModulesDailyReportAnalytics:
             report_bot_snapshot(
                 {
                     "bot_id": "test",
-                    "exchange": "MEXC",
+                    "exchange": "BYBIT",
                     "status": {},
                     "positions": [],
                     "wick_scalps": [],
@@ -1701,7 +1698,7 @@ class TestResetProfitBuffer:
             report_bot_snapshot(
                 {
                     "bot_id": "solo",
-                    "exchange": "MEXC",
+                    "exchange": "BYBIT",
                     "status": {
                         "running": True,
                         "balance": 1000.0,
@@ -1711,7 +1708,7 @@ class TestResetProfitBuffer:
                         "total_growth_usd": 0,
                         "total_growth_pct": 0,
                         "trading_mode": "paper_local",
-                        "exchange_name": "MEXC",
+                        "exchange_name": "BYBIT",
                         "strategies_count": 0,
                         "profit_buffer_pct": 15.5,
                     },
@@ -2323,7 +2320,7 @@ class TestBuildMergedSnapshot:
         mock_bot.shared_intel.read_intel = MagicMock(return_value=MagicMock(sources_active=[]))
         _bot_reports["m1"] = {
             "bot_id": "m1",
-            "exchange": "MEXC",
+            "exchange": "BYBIT",
             "status": {
                 "balance": 1000,
                 "available_margin": 500,
@@ -2336,7 +2333,7 @@ class TestBuildMergedSnapshot:
                 "dynamic_strategies_count": 2,
                 "uptime_seconds": 3600,
                 "trading_mode": "paper_local",
-                "exchange_name": "MEXC",
+                "exchange_name": "BYBIT",
                 "exchange_url": "",
                 "tier": "strong",
                 "tier_progress_pct": 50,
@@ -2712,7 +2709,7 @@ class TestBotProfiles:
         report_bot_snapshot(
             {
                 "bot_id": "momentum",
-                "exchange": "MEXC",
+                "exchange": "BYBIT",
                 "status": {
                     "running": True,
                     "available_margin": 450.0,

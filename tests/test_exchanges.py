@@ -1,4 +1,4 @@
-"""Tests for core/exchange adapters: Binance, Bybit, MEXC (ccxt wrappers)."""
+"""Tests for core/exchange adapters: Binance and Bybit (ccxt wrappers)."""
 
 from __future__ import annotations
 
@@ -681,6 +681,9 @@ class TestBybitExchange:
         assert order.filled == 0.5
         assert order.average_price == 51_000.0
         assert parse_order_status("closed") == OrderStatus.FILLED
+        kwargs = bybit._spot.create_order.call_args.kwargs
+        assert kwargs["type"] == "market"
+        assert "price" not in kwargs
 
     @pytest.mark.asyncio
     async def test_fetch_order_parsing(self, bybit):
@@ -744,135 +747,75 @@ class TestBybitExchange:
         )
         bybit._futures.set_leverage.assert_not_awaited()
         kwargs = bybit._futures.create_order.call_args.kwargs
-        assert kwargs["type"] == "STOP_MARKET"
+        assert kwargs["type"] == "market"
         assert kwargs["params"]["reduceOnly"] is True
         assert kwargs["params"]["stopPrice"] == 49000.0
-
-
-# ── MexcExchange ───────────────────────────────────────────────────────
-
-
-class TestMexcExchange:
-    @pytest.fixture
-    def mexc(self):
-        with patch("core.exchange.mexc.ccxt") as m_ccxt:
-            m_ccxt.mexc.side_effect = lambda *a, **kw: MagicMock(
-                load_markets=AsyncMock(),
-                close=AsyncMock(),
-                fetch_ticker=AsyncMock(return_value=_raw_ticker()),
-                fetch_tickers=AsyncMock(return_value={"BTC/USDT": _raw_ticker()}),
-                fetch_ohlcv=AsyncMock(return_value=_raw_ohlcv()),
-                fetch_order_book=AsyncMock(return_value=_raw_order_book()),
-                fetch_balance=AsyncMock(return_value={"USDT": {"free": 3_000.0, "used": 0.0}}),
-                create_order=AsyncMock(
-                    return_value={
-                        "id": "mexc-1",
-                        "symbol": "BTC/USDT",
-                        "side": "buy",
-                        "type": "market",
-                        "status": "closed",
-                        "filled": 0.01,
-                        "average": 99.0,
-                        "amount": 0.01,
-                    }
-                ),
-                cancel_order=AsyncMock(return_value={"id": "mexc-1", "amount": 0.01}),
-                fetch_order=AsyncMock(
-                    return_value={
-                        "id": "mexc-1",
-                        "symbol": "BTC/USDT",
-                        "side": "buy",
-                        "type": "market",
-                        "status": "closed",
-                        "filled": 0.01,
-                        "average": 99.0,
-                        "amount": 0.01,
-                    }
-                ),
-                fetch_open_orders=AsyncMock(return_value=[]),
-                markets={"BTC/USDT": {}, "DOGE/USDT": {}},
-            )
-            from core.exchange.mexc import MexcExchange
-
-            return MexcExchange(api_key="k", api_secret="s", sandbox=True)
-
-    def test_name(self, mexc):
-        assert mexc.name == "mexc"
-
-    def test_supported_market_types_spot_only(self, mexc):
-        assert mexc.SUPPORTED_MARKET_TYPES == ("spot",)
-        assert mexc.supports("spot") is True
-        assert mexc.supports("futures") is False
-
-    def test_has_no_testnet(self, mexc):
-        assert mexc.HAS_TESTNET is False
+        assert kwargs["params"]["triggerPrice"] == 49000.0
+        assert kwargs["params"]["triggerDirection"] == 2
 
     @pytest.mark.asyncio
-    async def test_connect_disconnect(self, mexc):
-        await mexc.connect()
-        mexc._spot.load_markets.assert_awaited_once()
-        await mexc.disconnect()
-        mexc._spot.close.assert_awaited_once()
-        assert not hasattr(mexc, "_futures")
-
-    @pytest.mark.asyncio
-    async def test_fetch_positions_always_empty(self, mexc):
-        positions = await mexc.fetch_positions()
-        assert positions == []
-        mexc._spot.fetch_positions.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_place_order_spot_success(self, mexc):
-        order = await mexc.place_order(
+    async def test_place_order_futures_take_profit_sets_trigger_direction(self, bybit):
+        await bybit.place_order(
             "BTC/USDT",
-            OrderSide.BUY,
-            OrderType.MARKET,
-            0.01,
-            market_type=MarketType.SPOT,
-        )
-        assert order.id == "mexc-1"
-        assert order.status == OrderStatus.FILLED
-        assert order.market_type == "spot"
-        mexc._spot.create_order.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_place_order_futures_returns_failed(self, mexc):
-        order = await mexc.place_order(
-            "BTC/USDT",
-            OrderSide.BUY,
-            OrderType.MARKET,
-            0.1,
-            leverage=10,
+            OrderSide.SELL,
+            OrderType.TAKE_PROFIT,
+            0.2,
+            stop_price=53000.0,
+            leverage=7,
             market_type=MarketType.FUTURES,
         )
-        assert order.status == OrderStatus.FAILED
-        assert order.id == ""
-        assert order.market_type == "spot"
-        mexc._spot.create_order.assert_not_called()
+        kwargs = bybit._futures.create_order.call_args.kwargs
+        assert kwargs["type"] == "market"
+        assert kwargs["params"]["reduceOnly"] is True
+        assert kwargs["params"]["stopPrice"] == 53000.0
+        assert kwargs["params"]["triggerPrice"] == 53000.0
+        assert kwargs["params"]["triggerDirection"] == 1
 
     @pytest.mark.asyncio
-    async def test_get_available_symbols_futures_returns_empty(self, mexc):
-        await mexc.connect()
-        syms = await mexc.get_available_symbols(MarketType.FUTURES)
-        assert syms == []
+    async def test_fetch_open_orders_infers_bybit_stop_and_take_profit_types(self, bybit):
+        bybit._futures.fetch_open_orders = AsyncMock(
+            return_value=[
+                {
+                    "id": "sl-1",
+                    "symbol": "PIPPIN/USDT:USDT",
+                    "side": "buy",
+                    "type": "market",
+                    "status": "open",
+                    "amount": 90,
+                    "filled": 0,
+                    "info": {
+                        "triggerPrice": "0.505",
+                        "triggerDirection": "1",
+                        "reduceOnly": True,
+                        "stopOrderType": "StopLoss",
+                    },
+                },
+                {
+                    "id": "tp-1",
+                    "symbol": "PIPPIN/USDT:USDT",
+                    "side": "buy",
+                    "type": "market",
+                    "status": "open",
+                    "amount": 90,
+                    "filled": 0,
+                    "info": {
+                        "triggerPrice": "0.455",
+                        "triggerDirection": "2",
+                        "reduceOnly": True,
+                        "stopOrderType": "TakeProfit",
+                    },
+                },
+            ]
+        )
 
-    @pytest.mark.asyncio
-    async def test_get_available_symbols_spot(self, mexc):
-        await mexc.connect()
-        syms = await mexc.get_available_symbols(MarketType.SPOT)
-        assert "BTC/USDT" in syms
-        assert "DOGE/USDT" in syms
+        orders = await bybit.fetch_open_orders("PIPPIN/USDT", market_type=MarketType.FUTURES)
 
-    @pytest.mark.asyncio
-    async def test_set_leverage_no_op(self, mexc):
-        await mexc.set_leverage("BTC/USDT", 20)
-        # No exception; MEXC spot has no leverage
-
-    @pytest.mark.asyncio
-    async def test_fetch_candles_parsing(self, mexc):
-        candles = await mexc.fetch_candles("DOGE/USDT", "5m", limit=5)
-        assert len(candles) == 3
-        assert all(isinstance(c, Candle) for c in candles)
+        assert len(orders) == 2
+        assert orders[0].symbol == "PIPPIN/USDT"
+        assert orders[0].order_type == OrderType.STOP_LOSS
+        assert orders[0].stop_price == 0.505
+        assert orders[1].order_type == OrderType.TAKE_PROFIT
+        assert orders[1].stop_price == 0.455
 
 
 # ── Error handling (all adapters) ────────────────────────────────────
@@ -915,24 +858,3 @@ class TestExchangeErrorHandling:
             exchange = BybitExchange(sandbox=True)
             positions = await exchange.fetch_positions()
             assert positions == []
-
-    @pytest.mark.asyncio
-    async def test_mexc_fetch_balance_filters_zero_free(self):
-        with patch("core.exchange.mexc.ccxt") as m_ccxt:
-            spot = MagicMock(
-                load_markets=AsyncMock(),
-                close=AsyncMock(),
-                fetch_balance=AsyncMock(
-                    return_value={
-                        "USDT": {"free": 0.0, "used": 100.0},
-                        "BTC": {"free": 0.5, "used": 0.0},
-                    }
-                ),
-            )
-            m_ccxt.mexc.return_value = spot
-            from core.exchange.mexc import MexcExchange
-
-            exchange = MexcExchange(sandbox=True)
-            bal = await exchange.fetch_balance()
-            assert "USDT" not in bal
-            assert bal["BTC"] == 0.5

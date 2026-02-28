@@ -140,6 +140,9 @@ export interface OrphanPositionInfo {
   source: string;
   exchange_name?: string;
   detected_by_bot?: string;
+  originally_opened_by?: string;
+  owner_running?: boolean;
+  orphan_reason?: string;
 }
 
 export interface LogEntry {

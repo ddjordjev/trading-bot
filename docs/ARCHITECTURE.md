@@ -81,8 +81,8 @@ Runs in-process:
   objects with priority (CRITICAL/DAILY/SWING) and strength scores.
   Proposals are filtered for symbol availability BEFORE entering the queue.
   Exchange symbols are fetched directly by the monitor via CCXT (Binance,
-  MEXC, Bybit) on startup and refreshed every 5 minutes. Cached in hub.db
-  for instant availability on restart.
+  Bybit) on startup and refreshed every 5 minutes. Cached in hub.db for
+  instant availability on restart.
 - **AnalyticsService** — reads hub.db trade history, computes strategy
   weights/patterns/suggestions, persists to analytics_state.json (could
   migrate to a hub.db table in the future — currently JSON for simplicity
@@ -278,6 +278,9 @@ evaluates the proposal and reports consumed/rejected immediately.
 1. **Fetch intel** from hub (`GET /internal/intel` — separate call)
 2. Fetch balance and positions from exchange
 3. Check trailing stops + liquidation risk
+   - Trailing policy is profile-aware: aggressive/extreme/wick keeps fast
+     trailing; swing/daily/mean-reversion uses pullback-aware trailing with
+     structure-guarded stop ratchets and ~3-5% breathing room.
 4. Scale into positions (PYRAMID DCA / WINNERS adds)
 5. Try leverage raises on PYRAMID positions
 6. Take partial profit on levered-up positions
@@ -356,6 +359,19 @@ hub already curated. They do not scan the market independently:
 suggestions so they survive hub restarts. It's a JSON file because
 the structure is deeply nested (Pydantic model). Could be moved to a
 hub.db table in the future.
+
+Recommendation lifecycle:
+- Analytics/OpenClaw suggestions are produced in the hub analytics pipeline.
+- SignalGenerator ingests active suggestions every monitor cycle and applies:
+  - `disable` as strong strategy throttling,
+  - `reduce_weight` / `increase_weight` / `weight_override` as direct multipliers,
+  - `regime_filter` / `time_filter` as contextual gates.
+- OpenClaw suggestions with actionable types (`disable`, `reduce_weight`,
+  `increase_weight`, `weight_override`, `regime_filter`, `time_filter`) are
+  auto-marked as `implemented` when they are merged into the active analytics
+  snapshot for execution-time modulation.
+- Manual status changes remain available via dashboard/API, and all suggestion
+  states remain visible in analytics history.
 
 Ephemeral JSON files (`bot_status.json`, `trade_queue.json`, etc.) are
 created at runtime and should be wiped on rebuild:

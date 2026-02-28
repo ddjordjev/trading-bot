@@ -62,9 +62,11 @@ export function Summary() {
     shadow.addEventListener("click", onClick);
 
     const load = async () => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 8000);
       try {
         setState("loading");
-        const response = await fetch("/api/summary-html");
+        const response = await fetch("/api/summary-html", { signal: controller.signal });
         if (!response.ok) throw new Error("Summary not found");
         const html = await response.text();
         if (cancelled) return;
@@ -74,6 +76,8 @@ export function Summary() {
         if (!cancelled) {
           setState("error");
         }
+      } finally {
+        window.clearTimeout(timeout);
       }
     };
 

@@ -108,6 +108,7 @@ class SignalGenerator:
         self._global_bad_hours: set[int] = set()  # hours with high loss rate (all strats)
         self._strat_bad_regimes: dict[str, set[str]] = {}  # per-strategy bad regimes
         self._strat_bad_hours: dict[str, set[int]] = {}  # per-strategy bad hours
+        self._strat_weight_overrides: dict[str, float] = {}  # per-strategy multiplier from suggestions
         self._quick_trade_penalty: float = 1.0  # multiplier for scalp/quick proposals
         self._current_regime: str = "normal"  # set each generate() call
         self._current_hour: int = -1  # set each generate() call
@@ -132,6 +133,7 @@ class SignalGenerator:
         self._global_bad_hours.clear()
         self._strat_bad_regimes.clear()
         self._strat_bad_hours.clear()
+        self._strat_weight_overrides.clear()
         self._quick_trade_penalty = 1.0
 
         for w in snap.weights:
@@ -170,29 +172,57 @@ class SignalGenerator:
             strat = sug.get("strategy", "")
             if not strat:
                 continue
+            analytics_strat = _STRATEGY_ANALYTICS_MAP.get(strat, strat)
 
             if stype == "regime_filter":
                 val = sug.get("suggested_value", "")
                 regime = val.replace("skip ", "").strip()
                 if regime:
-                    self._strat_bad_regimes.setdefault(strat, set()).add(regime)
+                    self._strat_bad_regimes.setdefault(analytics_strat, set()).add(regime)
 
             elif stype == "time_filter":
                 val = sug.get("suggested_value", "")
                 try:
                     hour = int(val.replace("skip hour ", "").strip())
-                    self._strat_bad_hours.setdefault(strat, set()).add(hour)
+                    self._strat_bad_hours.setdefault(analytics_strat, set()).add(hour)
                 except (ValueError, TypeError):
                     pass
+            elif stype == "disable":
+                current = self._strat_weight_overrides.get(analytics_strat, 1.0)
+                self._strat_weight_overrides[analytics_strat] = min(current, 0.3)
+            elif stype in {"reduce_weight", "increase_weight", "weight_override"}:
+                val = str(sug.get("suggested_value", "") or "").strip().lower()
+                parsed = None
+                if "=" in val:
+                    with_value = val.split("=", 1)[1].strip()
+                    try:
+                        parsed = float(with_value)
+                    except (TypeError, ValueError):
+                        parsed = None
+                if parsed is None:
+                    try:
+                        parsed = float(val)
+                    except (TypeError, ValueError):
+                        parsed = None
+                if parsed is not None:
+                    bounded = max(0.3, min(1.5, parsed))
+                    current = self._strat_weight_overrides.get(analytics_strat, 1.0)
+                    if stype == "reduce_weight":
+                        self._strat_weight_overrides[analytics_strat] = min(current, bounded)
+                    elif stype == "increase_weight":
+                        self._strat_weight_overrides[analytics_strat] = max(current, bounded)
+                    else:
+                        self._strat_weight_overrides[analytics_strat] = bounded
 
         if snap.weights:
             logger.debug(
-                "Analytics loaded: {} strategies, {} patterns, {} suggestions | global bad regimes={} bad hours={}",
+                "Analytics loaded: {} strategies, {} patterns, {} suggestions | global bad regimes={} bad hours={} overrides={}",
                 len(snap.weights),
                 len(snap.patterns),
                 len(snap.suggestions),
                 self._global_bad_regimes or "none",
                 self._global_bad_hours or "none",
+                self._strat_weight_overrides or "none",
             )
 
     def update_rejections(self, rejections: dict[str, tuple[str, datetime, int]]) -> None:
@@ -257,6 +287,9 @@ class SignalGenerator:
         combo_key = (analytics_name, symbol)
         if combo_key in self._combo_penalties:
             modifier *= self._combo_penalties[combo_key]
+
+        if analytics_name in self._strat_weight_overrides:
+            modifier *= self._strat_weight_overrides[analytics_name]
 
         if is_quick and self._quick_trade_penalty < 1.0:
             modifier *= self._quick_trade_penalty

@@ -102,7 +102,7 @@ class MarketIntel:
         self,
         coinglass_key: str = "",
         symbols: list[str] | None = None,
-        tv_exchange: str = "MEXC",
+        tv_exchange: str = "BINANCE",
         cmc_api_key: str = "",
         coingecko_api_key: str = "",
         santiment_api_key: str = "",

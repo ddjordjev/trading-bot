@@ -32,7 +32,6 @@ function buildExchangeSymbolUrl(symbol: string, exchange: string | undefined): s
 
   if (ex === "binance") return `https://www.binance.com/en/futures/${clean}`;
   if (ex === "bybit") return `https://www.bybit.com/trade/usdt/${clean}`;
-  if (ex === "mexc") return `https://www.mexc.com/exchange/${clean.replace("USDT", "_USDT")}`;
   return "";
 }
 
@@ -50,11 +49,16 @@ export function Scanner() {
   }, []);
 
   useEffect(() => {
+    const loadingGuard = window.setTimeout(() => setLoading(false), 8000);
     refresh();
     fetchTradeQueue();
     const coinIv = setInterval(refresh, 30000);
     const queueIv = setInterval(fetchTradeQueue, 5000);
-    return () => { clearInterval(coinIv); clearInterval(queueIv); };
+    return () => {
+      window.clearTimeout(loadingGuard);
+      clearInterval(coinIv);
+      clearInterval(queueIv);
+    };
   }, [fetchTradeQueue]);
 
   if (loading) return <div className="empty-state">Loading...</div>;

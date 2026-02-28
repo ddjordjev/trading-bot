@@ -129,7 +129,7 @@ services:
       - TZ=UTC
       - BOT_ID=indicators
       - BOT_STYLE=momentum
-      - EXCHANGE=bybit
+      - EXCHANGE=binance
       - HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
@@ -165,7 +165,7 @@ services:
       - TZ=UTC
       - BOT_ID=swing
       - BOT_STYLE=swing
-      - EXCHANGE=bybit
+      - EXCHANGE=binance
       - TICK_INTERVAL_IDLE=600
       - TICK_INTERVAL_ACTIVE=300
       - HUB_URL=http://bot-hub:9035
@@ -235,7 +235,7 @@ services:
       - TZ=UTC
       - BOT_ID=fullstack
       - BOT_STYLE=momentum
-      - EXCHANGE=binance
+      - EXCHANGE=bybit
       - MAX_CONCURRENT_POSITIONS=10
       - HUB_URL=http://bot-hub:9035
     healthcheck:
@@ -274,7 +274,7 @@ services:
       - TZ=UTC
       - BOT_ID=aggressive
       - BOT_STYLE=momentum
-      - EXCHANGE=binance
+      - EXCHANGE=bybit
       - DEFAULT_LEVERAGE=20
       - MAX_POSITION_SIZE_PCT=10
       - TAKE_PROFIT_PCT=10

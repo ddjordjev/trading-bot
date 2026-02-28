@@ -95,7 +95,7 @@ function AboutSection() {
         {REPO_URL}
       </a>,
     ],
-    ["Exchanges", "MEXC\nBinance\nBybit"],
+    ["Exchanges", "Binance\nBybit"],
     ["License", "Proprietary"],
   ];
 

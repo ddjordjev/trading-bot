@@ -71,11 +71,11 @@ writes the file, the bot detects it and starts up.
 
 | Mode | What happens | Use when |
 |------|-------------|----------|
-| `paper_local` | PaperExchange simulates trades locally. Nothing hits the exchange. | Pre-launch testing, or exchanges without testnet (MEXC) |
+| `paper_local` | PaperExchange simulates trades locally. Nothing hits the exchange. | Pre-launch testing |
 | `paper_live` | Real orders on exchange testnet (demo.binance.com). Fake money, real execution. | 10-day run (Binance/Bybit only — they have testnets) |
 | `live` | Real orders on production exchange. Real money. | After 10-day run proves the bot works |
 
-**Note:** MEXC has no testnet. If you set `paper_live` with MEXC, the bot
+**Note:** If an exchange profile does not support testnet, `paper_live`
 automatically falls back to `paper_local` to prevent real-money trades.
 
 **Pre-launch** uses `paper_local` (TRADING_MODE=paper_local). This validates

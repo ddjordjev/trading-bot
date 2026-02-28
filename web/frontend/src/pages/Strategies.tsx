@@ -20,10 +20,12 @@ export function Strategies() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    const loadingGuard = window.setTimeout(() => setLoading(false), 8000);
     get<Strategy[]>("/api/strategies")
       .then(setStrategies)
       .catch(() => {})
       .finally(() => setLoading(false));
+    return () => window.clearTimeout(loadingGuard);
   }, []);
 
   if (loading) return <div className="empty-state">Loading...</div>;

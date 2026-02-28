@@ -2625,6 +2625,46 @@ class TestOrderManagerProtectionSync:
         assert cancelled_ids == ["sl-sell"]
         assert order_manager._protection_orders["AVAX/USDT"]["sl_order_id"] == "sl-new"
 
+    @pytest.mark.asyncio
+    async def test_sync_cancels_duplicate_same_side_stops(self, order_manager, mock_exchange):
+        pos = Position(
+            symbol="AVAX/USDT",
+            side=OrderSide.BUY,
+            amount=1.0,
+            entry_price=40.0,
+            current_price=39.9,
+            leverage=10,
+            market_type="futures",
+        )
+        ts = MagicMock()
+        ts.current_stop = 38.0
+        mock_exchange.cancel_order = AsyncMock()
+        mock_exchange.fetch_open_orders.return_value = [
+            Order(
+                id="sl-keep",
+                symbol="AVAX/USDT",
+                side=OrderSide.SELL,
+                order_type=OrderType.STOP_LOSS,
+                amount=1.0,
+                stop_price=38.0,
+            ),
+            Order(
+                id="sl-dup",
+                symbol="AVAX/USDT",
+                side=OrderSide.SELL,
+                order_type=OrderType.STOP_LOSS,
+                amount=1.0,
+                stop_price=37.95,
+            ),
+        ]
+
+        await order_manager._sync_symbol_protection(pos, ts)
+
+        cancelled_ids = [call.args[0] for call in mock_exchange.cancel_order.await_args_list]
+        assert cancelled_ids == ["sl-dup"]
+        assert order_manager._protection_orders["AVAX/USDT"]["sl_order_id"] == "sl-keep"
+        mock_exchange.place_order.assert_not_called()
+
 
 class TestOrphanProtectionCleanup:
     @pytest.mark.asyncio

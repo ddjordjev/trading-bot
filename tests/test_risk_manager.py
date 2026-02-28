@@ -15,7 +15,7 @@ from core.risk.manager import RiskManager
 @pytest.fixture
 def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setenv("TRADING_MODE", "paper_local")
-    monkeypatch.setenv("EXCHANGE", "mexc")
+    monkeypatch.setenv("EXCHANGE", "bybit")
     monkeypatch.setenv("MAX_POSITION_SIZE_PCT", "5.0")
     monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")
     monkeypatch.setenv("STOP_LOSS_PCT", "2.0")
@@ -81,7 +81,7 @@ class TestPaperRelaxedDisabled:
     @pytest.fixture
     def strict_risk(self, monkeypatch: pytest.MonkeyPatch) -> RiskManager:
         monkeypatch.setenv("TRADING_MODE", "paper_local")
-        monkeypatch.setenv("EXCHANGE", "mexc")
+        monkeypatch.setenv("EXCHANGE", "bybit")
         monkeypatch.setenv("PAPER_RISK_RELAXED", "false")
         monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")
         monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "5")
@@ -116,7 +116,7 @@ class TestConservativeMode:
     @pytest.fixture
     def live_risk(self, monkeypatch: pytest.MonkeyPatch) -> RiskManager:
         monkeypatch.setenv("TRADING_MODE", "paper_live")
-        monkeypatch.setenv("EXCHANGE", "mexc")
+        monkeypatch.setenv("EXCHANGE", "bybit")
         monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")
         monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "5")
         monkeypatch.setenv("MIN_SIGNAL_STRENGTH", "0.4")
@@ -190,7 +190,7 @@ class TestProfitBufferExpandsLimit:
     @pytest.fixture
     def live_risk(self, monkeypatch: pytest.MonkeyPatch) -> RiskManager:
         monkeypatch.setenv("TRADING_MODE", "paper_live")
-        monkeypatch.setenv("EXCHANGE", "mexc")
+        monkeypatch.setenv("EXCHANGE", "bybit")
         monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")
         s = Settings(_env_file=None)
         rm = RiskManager(s)

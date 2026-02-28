@@ -67,10 +67,10 @@ class TradingBot:
     WINNERS (rare, for ultra-short scalps only):
       Start with $50 -> add when in profit -> trail -> break-even lock
 
-    MEXC-specific:
+    Liquidity-sensitive handling:
     - Low-liq coins: only gambling-sized bets, self-managed stops
     - Lock break-even at +5%, then trail
-    - After a good day, allow tiny yolo bets on trending shitcoins
+    - After a good day, allow tiny yolo bets on trending altcoins
     """
 
     def __init__(self, settings: Settings | None = None, daily_target_pct: float = 10.0):
@@ -120,8 +120,7 @@ class TradingBot:
         self._last_known_cex_protection: dict[str, tuple[float, float]] = {}
         self._last_quick_protection_sync: dict[str, float] = {}
         self._quick_protection_sync_interval_secs: float = 10.0
-        self._orphan_positions: dict[str, dict[str, Any]] = {}
-        self._quick_positions_idle_poll_seconds: float = 5.0
+        self._quick_positions_idle_poll_seconds: float = 30.0
         self._last_quick_positions_poll_ts: float = 0.0
         self._running = False
         self._tick_interval = self.settings.tick_interval_idle
@@ -137,6 +136,8 @@ class TradingBot:
         self.extreme_watcher = ExtremeWatcher(self.exchange, self.settings)
         self._last_extreme_eval: float = 0.0
         self._available_symbols: set[str] = set()
+        self._available_spot_symbols: set[str] = set()
+        self._available_futures_symbols: set[str] = set()
         self._raw_balance: float = 0.0
         self._session_start_balance: float = 0.0
         self._realized_pnl: float = 0.0
@@ -293,12 +294,15 @@ class TradingBot:
         await self.exchange.connect()
 
         self._available_symbols: set[str] = set()
+        self._available_spot_symbols = set()
+        self._available_futures_symbols = set()
         try:
             futures_syms = await self.exchange.get_available_symbols(MarketType.FUTURES)
             spot_syms = await self.exchange.get_available_symbols(MarketType.SPOT)
             # ccxt returns futures as "BTC/USDT:USDT"; normalize to "BTC/USDT"
-            normalized = {s.split(":")[0] for s in futures_syms}
-            normalized |= set(spot_syms)
+            self._available_futures_symbols = {s.split(":")[0] for s in futures_syms}
+            self._available_spot_symbols = set(spot_syms)
+            normalized = set(self._available_futures_symbols) | set(self._available_spot_symbols)
             self._available_symbols = normalized
             logger.info("Published {} available symbols for {}", len(self._available_symbols), self.settings.exchange)
         except Exception as e:
@@ -412,7 +416,7 @@ class TradingBot:
                 "exchange": self.settings.exchange.upper(),
                 "open_symbols": list(self._open_trades.keys()),
                 "ready": warmup_done and not self.target.manual_stop,
-                "orphan_positions": list(self._orphan_positions.values()),
+                "foreign_positions": [],
             }
             # Keep dashboard PnL/price near-real-time between full ticks.
             # Without this, position rows can look stale and then "jump" on full tick.
@@ -420,34 +424,26 @@ class TradingBot:
             now_ts = time.monotonic()
             should_fetch_positions = bool(managed_symbols)
             if not should_fetch_positions:
-                should_fetch_positions = (
-                    now_ts - self._last_quick_positions_poll_ts
-                ) >= self._quick_positions_idle_poll_seconds
+                idle_interval = self._quick_positions_idle_poll_seconds
+                should_fetch_positions = (now_ts - self._last_quick_positions_poll_ts) >= idle_interval
             if should_fetch_positions:
                 positions = await self.exchange.fetch_positions()
-                with contextlib.suppress(Exception):
-                    await self.orders.cleanup_orphan_protection_orders(positions)
                 pos_list: list[dict[str, Any]] = []
-                live_symbols = {
-                    str(getattr(p, "symbol", "") or "")
-                    for p in positions
-                    if float(getattr(p, "amount", 0.0) or 0.0) > 0
-                }
                 for pos in positions:
                     if pos.amount <= 0:
                         continue
                     if pos.symbol not in managed_symbols:
-                        self._record_orphan_position(pos, source="quick_hub_check")
                         continue
-                    self._orphan_positions.pop(pos.symbol, None)
                     ts = self.orders.trailing.active_stops.get(pos.symbol)
                     sp = self.orders.scaler.get(pos.symbol)
                     # Full-tick cadence can be too slow for SL propagation; run a
                     # throttled quick sync pass so CEX follows trailing updates.
                     last_sync = self._last_quick_protection_sync.get(pos.symbol, 0.0)
                     if (now_ts - last_sync) >= self._quick_protection_sync_interval_secs:
-                        with contextlib.suppress(Exception):
+                        try:
                             await self.orders._sync_symbol_protection(pos, ts)
+                        except Exception as e:
+                            logger.error("Quick protection sync failed for {}: {}", pos.symbol, e)
                         self._last_quick_protection_sync[pos.symbol] = now_ts
                     risk = self._build_position_risk_snapshot(pos, ts)
                     age_minutes = self._position_age_minutes(pos.symbol, getattr(pos, "opened_at", None))
@@ -473,14 +469,23 @@ class TradingBot:
                             **risk,
                         }
                     )
-                self._prune_orphan_positions(live_symbols, source="quick_hub_check")
                 payload["positions"] = pos_list
+                payload["foreign_positions"] = self._build_foreign_position_observations(
+                    positions,
+                    source="quick_hub_check",
+                )
                 self._last_quick_positions_poll_ts = now_ts
-                payload["orphan_positions"] = list(self._orphan_positions.values())
 
             url = f"{hub_url.rstrip('/')}/internal/report"
             async with self._hub_session.post(url, json=payload) as resp:
                 if resp.status != 200:
+                    body_snippet = (await resp.text())[:200].strip()
+                    logger.warning(
+                        "Quick hub check non-200 for {}: status={} body={}",
+                        self.settings.bot_id or "default",
+                        resp.status,
+                        body_snippet or "<empty>",
+                    )
                     return
                 body = await resp.json()
                 if "enabled" in body:
@@ -491,7 +496,12 @@ class TradingBot:
                 for key in body.get("confirmed_keys", []):
                     self._pending_hub_acks.pop(key, None)
         except Exception as e:
-            logger.warning("Quick hub check error: {}", e)
+            logger.warning(
+                "Quick hub check error for {} [{}]: {!r}",
+                self.settings.bot_id or "default",
+                type(e).__name__,
+                e,
+            )
             return
         self._retry_pending_hub_trades()
         if warmup_done and not self.target.manual_stop:
@@ -517,6 +527,35 @@ class TradingBot:
         if trade_strategy:
             return trade_strategy
         return "—"
+
+    def _build_foreign_position_observations(self, positions: list[Any], source: str) -> list[dict[str, Any]]:
+        """Build passive foreign-position observations for hub-side classification."""
+        managed_symbols = self._managed_symbols()
+        observed_at = datetime.now(UTC).isoformat()
+        foreign_rows: list[dict[str, Any]] = []
+        for pos in positions:
+            amount = float(getattr(pos, "amount", 0.0) or 0.0)
+            if amount <= 0:
+                continue
+            symbol = str(getattr(pos, "symbol", "") or "")
+            if not symbol or symbol in managed_symbols:
+                continue
+            side_raw = getattr(pos, "side", "")
+            side_txt = side_raw.value if hasattr(side_raw, "value") else str(side_raw or "")
+            foreign_rows.append(
+                {
+                    "symbol": symbol,
+                    "side": side_txt.lower() or "unknown",
+                    "amount": amount,
+                    "entry_price": float(getattr(pos, "entry_price", 0.0) or 0.0),
+                    "current_price": float(getattr(pos, "current_price", 0.0) or 0.0),
+                    "leverage": int(max(1, round(float(getattr(pos, "leverage", 1.0) or 1.0)))),
+                    "market_type": str(getattr(pos, "market_type", "") or "futures"),
+                    "detected_at": observed_at,
+                    "source": source,
+                }
+            )
+        return foreign_rows
 
     def _check_enabled(self) -> bool:
         """Check hub-controlled enable flag (received via /internal/report response)."""
@@ -1012,9 +1051,14 @@ class TradingBot:
             }
             async with self._hub_session.post(url, json=payload) as resp:
                 if resp.status != 200:
-                    logger.warning("Queue outcome report failed: {}", resp.status)
+                    body_snippet = (await resp.text())[:200].strip()
+                    logger.warning(
+                        "Queue outcome report failed: status={} body={}",
+                        resp.status,
+                        body_snippet or "<empty>",
+                    )
         except Exception as e:
-            logger.warning("Queue outcome report error: {}", e)
+            logger.warning("Queue outcome report error [{}]: {!r}", type(e).__name__, e)
 
     async def _is_symbol_open_on_exchange(self, symbol: str) -> bool:
         """Explicitly check the exchange for an existing position on this symbol."""
@@ -1050,7 +1094,7 @@ class TradingBot:
     async def _execute_proposal(self, proposal: TradeProposal, aggression: float) -> bool:
         """Convert a queue proposal into a trading signal and execute it."""
         self._last_queue_exec_reason = ""
-        if not self._symbol_available(proposal.symbol):
+        if not self._symbol_available(proposal.symbol, proposal.market_type):
             logger.debug("Queue skip {}: symbol not available locally", proposal.symbol)
             self._last_queue_exec_reason = "symbol_unavailable"
             return False
@@ -1127,7 +1171,7 @@ class TradingBot:
             logger.debug("Swing skip {}: not on {}", proposal.symbol, my_exchange)
             self._last_queue_exec_reason = "exchange_not_supported"
             return False
-        if not self._symbol_available(proposal.symbol):
+        if not self._symbol_available(proposal.symbol, proposal.market_type):
             logger.debug("Swing skip {}: not on {}", proposal.symbol, my_exchange)
             self._last_queue_exec_reason = "symbol_unavailable"
             return False
@@ -1827,6 +1871,7 @@ class TradingBot:
             "avg_daily_pnl_pct": t.avg_daily_pnl_pct,
             "best_day": best.model_dump() if best else None,
             "worst_day": worst.model_dump() if worst else None,
+            "projected": t.projected_balance,
         }
 
         payload = {
@@ -1853,10 +1898,10 @@ class TradingBot:
                 "dynamic_strategies_count": dynamic_strategies_count,
                 "profit_buffer_pct": self.target.profit_buffer_pct,
                 "manual_stop_active": self.target.manual_stop,
-                "orphan_positions_count": len(self._orphan_positions),
+                "orphan_positions_count": 0,
             },
             "positions": pos_list,
-            "orphan_positions": list(self._orphan_positions.values()),
+            "foreign_positions": self._build_foreign_position_observations(active_positions, source="full_tick"),
             "wick_scalps": wick_list,
             "strategies": strat_list,
             "trade_log": self.orders._trade_log[-50:],
@@ -2022,40 +2067,6 @@ class TradingBot:
         # Runtime scaler/trailing state must not imply ownership.
         return set(self._open_trades.keys())
 
-    def _record_orphan_position(self, pos: Any, source: str) -> None:
-        symbol = str(getattr(pos, "symbol", "") or "")
-        if not symbol:
-            return
-        side_raw = getattr(pos, "side", "")
-        side_txt = side_raw.value if hasattr(side_raw, "value") else str(side_raw or "")
-        self._orphan_positions[symbol] = {
-            "symbol": symbol,
-            "side": side_txt.lower() or "unknown",
-            "amount": float(getattr(pos, "amount", 0.0) or 0.0),
-            "entry_price": float(getattr(pos, "entry_price", 0.0) or 0.0),
-            "current_price": float(getattr(pos, "current_price", 0.0) or 0.0),
-            "leverage": int(max(1, round(float(getattr(pos, "leverage", 1.0) or 1.0)))),
-            "market_type": str(getattr(pos, "market_type", "") or "futures"),
-            "detected_at": datetime.now(UTC).isoformat(),
-            "source": source,
-        }
-
-    def _prune_orphan_positions(self, live_symbols: set[str], source: str) -> None:
-        """Drop orphan rows that are no longer live on exchange or now managed."""
-        managed = self._managed_symbols()
-        removed: list[str] = []
-        for symbol in list(self._orphan_positions.keys()):
-            if symbol in managed or symbol not in live_symbols:
-                self._orphan_positions.pop(symbol, None)
-                removed.append(symbol)
-        if removed:
-            logger.info(
-                "Orphan prune [{}]: removed {} stale/claimed orphan(s): {}",
-                source,
-                len(removed),
-                ", ".join(sorted(removed)[:8]),
-            )
-
     async def _reconcile_open_trades(self, hub_open: list[dict[str, Any]], hub_target: str, bot_id: str) -> None:
         """Check each hub-reported open trade against the exchange. Recovery-close dead ones."""
         if not hub_open:
@@ -2123,12 +2134,9 @@ class TradingBot:
         if positions_fetch_ok:
             managed = self._managed_symbols()
             unknown = [sym for sym in exchange_positions if sym not in managed]
-            for sym in unknown:
-                self._record_orphan_position(exchange_positions[sym], source="startup_reconcile")
-            self._prune_orphan_positions(set(exchange_positions.keys()), source="startup_reconcile")
             if unknown:
                 logger.warning(
-                    "Detected {} orphan live position(s) not owned by bot {}: {}",
+                    "Detected {} foreign live position(s) not owned by bot {}: {}",
                     len(unknown),
                     bot_id,
                     ", ".join(sorted(unknown)[:8]),
@@ -2294,7 +2302,6 @@ class TradingBot:
 
         await self._push_trade_to_hub(rec)
         ok = await self._rehydrate_recovered_position_state(symbol, rec, pos)
-        self._orphan_positions.pop(symbol, None)
         if not ok:
             return False, f"Claimed {symbol} but failed to rehydrate runtime protection state"
         await self._sync_runtime_trade_if_changed(symbol)
@@ -2329,20 +2336,7 @@ class TradingBot:
                 continue
             await self._ensure_managed_position_runtime_state(pos)
 
-        managed_now = self._managed_symbols()
-        for pos in positions:
-            if float(getattr(pos, "amount", 0.0) or 0.0) <= 0:
-                continue
-            symbol = str(getattr(pos, "symbol", "") or "")
-            if not symbol:
-                continue
-            if symbol in managed_now:
-                self._orphan_positions.pop(symbol, None)
-            else:
-                self._record_orphan_position(pos, source="runtime_reconcile")
-
         exchange_symbols = {p.symbol for p in positions if p.amount > 0}
-        self._prune_orphan_positions(exchange_symbols, source="runtime_reconcile")
         tracked_symbols = list(self._open_trades.keys())
         for sym in tracked_symbols:
             if sym in exchange_symbols:
@@ -2598,6 +2592,58 @@ class TradingBot:
 
         return adjusted
 
+    async def _confirm_open_fill(
+        self, sig: Signal, order: Order, attempts: int = 8, delay_seconds: float = 1.0
+    ) -> Order | None:
+        """Confirm exchange fill for accepted-but-pending open orders.
+
+        Some venues (notably Bybit) may acknowledge market orders before the
+        fill is reflected in the immediate response payload.
+        """
+        market_type = MarketType.FUTURES if sig.market_type == "futures" else MarketType.SPOT
+        wanted_side = OrderSide.BUY if sig.action == SignalAction.BUY else OrderSide.SELL
+
+        for idx in range(max(1, attempts)):
+            if order.id:
+                try:
+                    fetched = await self.exchange.fetch_order(order.id, sig.symbol, market_type=market_type)
+                    if fetched:
+                        order = fetched
+                        if order.filled > 0 or order.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                            return order
+                except Exception as e:
+                    if idx == attempts - 1:
+                        logger.warning(
+                            "Fill confirm fetch_order failed for {} [{}]: {!r}",
+                            sig.symbol,
+                            type(e).__name__,
+                            e,
+                        )
+
+            try:
+                positions = await self.exchange.fetch_positions(sig.symbol)
+                for pos in positions:
+                    if pos.symbol != sig.symbol or pos.amount <= 0:
+                        continue
+                    if pos.side != wanted_side:
+                        continue
+                    order.filled = max(float(order.filled or 0.0), float(pos.amount))
+                    order.average_price = float(pos.entry_price or order.average_price or 0.0)
+                    order.status = OrderStatus.FILLED
+                    return order
+            except Exception as e:
+                if idx == attempts - 1:
+                    logger.warning(
+                        "Fill confirm fetch_positions failed for {} [{}]: {!r}",
+                        sig.symbol,
+                        type(e).__name__,
+                        e,
+                    )
+
+            if idx < attempts - 1:
+                await asyncio.sleep(max(0.1, delay_seconds))
+        return None
+
     async def _process_signal(self, sig: Signal, low_liquidity: bool = False, pyramid: bool = False) -> bool:
         mode_tag = "PYRAMID" if pyramid else ("GAMBLING" if low_liquidity else "WINNERS")
         logger.info(
@@ -2637,12 +2683,26 @@ class TradingBot:
         if order:
             status = getattr(order, "status", None)
             if not is_close and isinstance(status, OrderStatus) and status != OrderStatus.FILLED:
-                status_txt = status.value
-                logger.warning("Signal open not filled for {} (status={})", sig.symbol, status_txt)
-                if reserved_opened_at:
-                    await self._release_open_trade_reservation(sig, reserved_opened_at, f"failed_fill:{status_txt}")
-                self._last_queue_exec_reason = f"failed_fill:{status_txt}"
-                return False
+                if status in (OrderStatus.PENDING, OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED):
+                    confirmed = await self._confirm_open_fill(sig, order)
+                    if confirmed is not None:
+                        order = confirmed
+                    else:
+                        status_txt = status.value
+                        logger.warning("Signal open not filled for {} (status={})", sig.symbol, status_txt)
+                        if reserved_opened_at:
+                            await self._release_open_trade_reservation(
+                                sig, reserved_opened_at, f"failed_fill:{status_txt}"
+                            )
+                        self._last_queue_exec_reason = f"failed_fill:{status_txt}"
+                        return False
+                else:
+                    status_txt = status.value
+                    logger.warning("Signal open not filled for {} (status={})", sig.symbol, status_txt)
+                    if reserved_opened_at:
+                        await self._release_open_trade_reservation(sig, reserved_opened_at, f"failed_fill:{status_txt}")
+                    self._last_queue_exec_reason = f"failed_fill:{status_txt}"
+                    return False
             realized_pnl = 0.0
             if is_close:
                 realized_pnl = self._calc_realized_pnl(order)
@@ -2723,10 +2783,17 @@ class TradingBot:
         "LINK/USDT": ["ETH/USDT"],
     }
 
-    def _symbol_available(self, symbol: str) -> bool:
-        """Check if a symbol is tradeable on this bot's exchange."""
+    def _symbol_available(self, symbol: str, market_type: str | None = None) -> bool:
+        """Check if a symbol is tradeable on this bot's exchange for market type."""
         if not self._available_symbols:
             return True  # no data yet, optimistic
+        mkt = (market_type or "").strip().lower()
+        if not mkt:
+            mkt = "futures" if self.settings.futures_allowed else "spot"
+        if mkt == "futures":
+            return symbol in self._available_futures_symbols
+        if mkt == "spot":
+            return symbol in self._available_spot_symbols
         return symbol in self._available_symbols
 
     async def _evaluate_extreme_candidates(self) -> None:
@@ -2752,9 +2819,10 @@ class TradingBot:
         open_symbols = set(self.orders.scaler.active_positions.keys())
         extreme_positions = sum(1 for s in self._active_signals if s.strategy.startswith("extreme_"))
         my_exchange = self.settings.exchange.upper()
+        extreme_market_type = "futures" if self.settings.futures_allowed else "spot"
 
         for candidate in watchlist.candidates:
-            if not self._symbol_available(candidate.symbol):
+            if not self._symbol_available(candidate.symbol, extreme_market_type):
                 logger.debug("Extreme skip {}: not on {}", candidate.symbol, my_exchange)
                 continue
             if my_exchange not in candidate.supported_exchanges:

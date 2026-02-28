@@ -21,7 +21,7 @@ def mock_settings():
     s = MagicMock()
     s.coinglass_api_key = ""
     s.intel_symbol_list = ["BTC", "ETH"]
-    s.tv_exchange = "MEXC"
+    s.tv_exchange = "BYBIT"
     s.tv_interval_list = ["1h", "4h"]
     s.tv_poll_interval = 120
     s.cmc_api_key = ""

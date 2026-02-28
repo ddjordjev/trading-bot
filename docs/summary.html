@@ -35,7 +35,7 @@
 <body>
 
 <h1>Trade Borg — Requirements &amp; Implementation Summary</h1>
-<p class="meta">Last updated: 2026-02-22 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: Binance (primary), Bybit, MEXC &nbsp;|&nbsp; Tests: 1630+ (85%+ coverage) &nbsp;|&nbsp; CI: GitHub Actions (green)</p>
+<p class="meta">Last updated: 2026-02-28 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: Binance (primary), Bybit &nbsp;|&nbsp; Tests: 1630+ (85%+ coverage) &nbsp;|&nbsp; CI: GitHub Actions (green)</p>
 
 <!-- ============================================================ -->
 <h2>Table of Contents</h2>
@@ -179,7 +179,6 @@ Trading bots are lightweight executors that consume proposals from the hub via H
   <tr><td><code>bot.py</code></td><td>Trading bot — tick loop, queue consumer, fast monitor loop, order execution (no strategy analysis)</td></tr>
   <tr><td><code>config/settings.py</code></td><td>All configuration via .env (Pydantic settings)</td></tr>
   <tr><td><code>core/exchange/base.py</code></td><td>Abstract exchange interface (extend for new exchanges)</td></tr>
-  <tr><td><code>core/exchange/mexc.py</code></td><td>MEXC implementation via ccxt</td></tr>
   <tr><td><code>core/exchange/binance.py</code></td><td>Binance implementation (spot + USDT-M futures) via ccxt</td></tr>
   <tr><td><code>core/exchange/bybit.py</code></td><td>Bybit implementation (spot + USDT perpetual) via ccxt</td></tr>
   <tr><td><code>core/exchange/paper.py</code></td><td>Paper trading (simulated orders, real market data)</td></tr>
@@ -323,7 +322,8 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
   <tr><td><code>MAX_CONCURRENT_POSITIONS</code></td><td>3</td><td>Max open positions at once</td></tr>
   <tr><td><code>HEDGE_ENABLED</code></td><td>true</td><td>Enable counter-position hedging</td></tr>
   <tr><td><code>INTEL_ENABLED</code></td><td>true</td><td>Enable external data feeds</td></tr>
-  <tr><td><code>TV_EXCHANGE</code></td><td>MEXC</td><td>Exchange name for TradingView scanner</td></tr>
+  <tr><td><code>TV_EXCHANGE</code></td><td>BINANCE</td><td>Exchange name for TradingView scanner</td></tr>
+  <tr><td><code>PULLBACK_TRAIL_BUFFER_PCT</code></td><td>4.0</td><td>Pullback-aware trailing buffer for non-aggressive strategies</td></tr>
   <tr><td><code>TV_INTERVALS</code></td><td>1h,4h,1D</td><td>Timeframes for TV analysis</td></tr>
   <tr><td><code>CMC_API_KEY</code></td><td>(empty)</td><td>CoinMarketCap pro API key (optional, free works)</td></tr>
   <tr><td><code>COINGECKO_API_KEY</code></td><td>(empty)</td><td>CoinGecko pro API key (optional, free works)</td></tr>
@@ -481,10 +481,9 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
 <h3 id="s7-2">7.2 Exchange &amp; Market Support</h3>
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
-  <tr><td>Multi-exchange support via abstract adapter pattern (Binance as primary, MEXC and Bybit also available)</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/base.py (abstract), core/exchange/factory.py</td></tr>
+  <tr><td>Multi-exchange support via abstract adapter pattern (Binance as primary, Bybit also available)</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/base.py (abstract), core/exchange/factory.py</td></tr>
   <tr><td>Binance exchange adapter (primary — used for paper and live trading)</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/binance.py — spot + USDT-M futures via ccxt</td></tr>
   <tr><td>Bybit exchange adapter</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/bybit.py — spot + USDT perpetual via ccxt</td></tr>
-  <tr><td>MEXC exchange adapter</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/mexc.py — spot + futures via ccxt</td></tr>
   <tr><td>Spot &amp; Futures trading</td><td><span class="badge done">Done</span></td><td class="file">core/models/market.py (MarketType enum)</td></tr>
   <tr><td>Crypto, tokenized stocks, and commodities</td><td><span class="badge done">Done</span></td><td class="file">Any symbol pair supported by the configured exchange</td></tr>
   <tr><td>Configurable leverage (10x default)</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → default_leverage</td></tr>
@@ -499,7 +498,7 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
   <tr><td>Order placement (market, limit)</td><td><span class="badge done">Done</span></td><td class="file">core/orders/manager.py</td></tr>
   <tr><td>Position management &amp; tracking</td><td><span class="badge done">Done</span></td><td class="file">core/models/order.py (Position model)</td></tr>
   <tr><td>PnL tracking</td><td><span class="badge done">Done</span></td><td class="file">core/risk/manager.py, core/risk/daily_target.py</td></tr>
-  <tr><td>Trailing stop-loss</td><td><span class="badge done">Done</span></td><td class="file">core/orders/trailing.py</td></tr>
+  <tr><td>Trailing stop-loss (fast mode for extreme/wick/aggressive + pullback-aware mode for swing/daily)</td><td><span class="badge done">Done</span></td><td class="file">core/orders/trailing.py, core/orders/manager.py</td></tr>
   <tr><td>Fast monitor loop (sub-second stop checks for scalp/momentum)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _fast_monitor_loop() + asyncio.Lock</td></tr>
   <tr><td>Ticker cache (0.8s TTL, avoids redundant API calls within a tick)</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/paper.py → _ticker_cache (bypassed for order execution)</td></tr>
   <tr><td>Adaptive tick interval (SCALP 1s / ACTIVE 60s / SWING 300s / IDLE 60s)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _update_tick_interval(), config/settings.py</td></tr>
@@ -736,8 +735,9 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
   <tr><td>Strategy scoring: win rate, profit factor, expectancy</td><td><span class="badge done">Done</span></td><td class="file">analytics/engine.py → StrategyScore</td></tr>
   <tr><td>Automatic weight factors (0.05-2.0x) based on performance</td><td><span class="badge done">Done</span></td><td class="file">analytics/engine.py → _compute_weight()</td></tr>
   <tr><td>Pattern detection: time, regime, strategy-symbol combos, volatility, DCA depth</td><td><span class="badge done">Done</span></td><td class="file">analytics/engine.py → _detect_patterns()</td></tr>
-  <tr><td>Modification suggestions: disable, reduce weight, time filter, regime filter</td><td><span class="badge done">Done</span></td><td class="file">analytics/engine.py → _generate_suggestions()</td></tr>
-  <tr><td>Apply weights to signal strength in bot tick loop</td><td><span class="badge done">Done</span></td><td class="file">bot.py → analytics weight applied before _adjust_for_target()</td></tr>
+  <tr><td>Modification suggestions: disable, reduce weight, increase/override weight, time filter, regime filter</td><td><span class="badge done">Done</span></td><td class="file">analytics/engine.py → _generate_suggestions(), services/signal_generator.py → update_analytics()</td></tr>
+  <tr><td>Apply recommendation multipliers and filters during proposal routing</td><td><span class="badge done">Done</span></td><td class="file">services/signal_generator.py → _analytics_strength_modifier(), update_analytics()</td></tr>
+  <tr><td>Suggestion status lifecycle (new/accepted/rejected/implemented/removed) with auto-implementation marking for actionable OpenClaw recommendations</td><td><span class="badge done">Done</span></td><td class="file">services/analytics_service.py, db/hub_store.py, web/server.py → /api/openclaw-suggestions/{id}/status, web/frontend/src/pages/Analytics.tsx</td></tr>
   <tr><td>Dashboard: scores table, patterns, suggestions, hourly/regime charts</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Analytics.tsx</td></tr>
   <tr><td>Daily refresh + on-demand via dashboard</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _check_daily_reset(), /api/analytics/refresh</td></tr>
 </table>
@@ -822,7 +822,7 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
   <tr><td><code>ALLOWED_MARKET_TYPES</code> setting: spot, futures, or both</td><td><span class="badge done">Done</span></td><td class="file">config/settings.py → allowed_market_types</td></tr>
-  <tr><td>Per-exchange defaults (e.g. MEXC spot-only due to low-liq futures, Binance both)</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/factory.py, .env.example</td></tr>
+  <tr><td>Per-exchange defaults (Binance + Bybit; market type restricted by <code>ALLOWED_MARKET_TYPES</code>)</td><td><span class="badge done">Done</span></td><td class="file">core/exchange/factory.py, .env.example</td></tr>
   <tr><td>Bot falls back strategies to spot when futures disallowed</td><td><span class="badge done">Done</span></td><td class="file">bot.py → market type filter</td></tr>
   <tr><td>Rejects disallowed trade queue proposals</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _process_trade_queue()</td></tr>
   <tr><td>Preflight check skips futures tests when not enabled</td><td><span class="badge done">Done</span></td><td class="file">scripts/preflight_check.py</td></tr>

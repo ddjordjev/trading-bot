@@ -5,13 +5,26 @@ function headers(): HeadersInit {
   return h;
 }
 
+const REQUEST_TIMEOUT_MS = 15000;
+
 async function api<T>(path: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(path, { headers: headers(), ...opts });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`${res.status}: ${body}`);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(path, { headers: headers(), ...opts, signal: controller.signal });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`${res.status}: ${body}`);
+    }
+    return res.json();
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(`Request timeout after ${REQUEST_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timeout);
   }
-  return res.json();
 }
 
 export const get = <T>(path: string) => api<T>(path);

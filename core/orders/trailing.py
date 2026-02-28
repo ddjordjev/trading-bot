@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -17,7 +18,7 @@ class TrailingStop(BaseModel):
     - Trailing activation: once profit hits activation_pct, stop follows peak price
     - Stop never moves backward
 
-    On low-liquidity coins, MEXC may skip stop-loss execution on fast wicks.
+    On low-liquidity symbols, exchange stop handling can lag on fast wicks.
     For those, we use tighter initial stops and rely on our own polling to
     close via market order rather than trusting exchange stop orders.
     """
@@ -39,6 +40,8 @@ class TrailingStop(BaseModel):
     wick_tighten_enabled: bool = False  # fast wick tighten only for quick/extreme trades
     wick_touched: bool = False  # True once price actually tags the tighten zone
     structure_guard: float = 0.0  # long: max stop, short: min stop (market-structure guard)
+    trailing_mode: Literal["fast", "pullback"] = "fast"
+    pullback_buffer_pct: float = 4.0
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     def model_post_init(self, __context: object) -> None:
@@ -132,12 +135,30 @@ class TrailingStop(BaseModel):
         if price > self.peak_price:
             self.peak_price = price
             if self.activated:
-                new_stop = price * (1 - self.trail_pct / 100)
                 old = self.current_stop
-                if self._move_long_stop(new_stop):
-                    logger.debug(
-                        "Trail raised {}: {:.6f} -> {:.6f} (peak: {:.6f})", self.symbol, old, self.current_stop, price
-                    )
+                if self.trailing_mode == "pullback":
+                    if self.structure_guard > 0:
+                        new_stop = price * (1 - max(0.5, self.pullback_buffer_pct) / 100)
+                        if self._move_long_stop(new_stop):
+                            logger.debug(
+                                "Pullback trail raised {}: {:.6f} -> {:.6f} (peak: {:.6f}, guard: {:.6f}, buffer={:.1f}%)",
+                                self.symbol,
+                                old,
+                                self.current_stop,
+                                price,
+                                self.structure_guard,
+                                self.pullback_buffer_pct,
+                            )
+                else:
+                    new_stop = price * (1 - self.trail_pct / 100)
+                    if self._move_long_stop(new_stop):
+                        logger.debug(
+                            "Trail raised {}: {:.6f} -> {:.6f} (peak: {:.6f})",
+                            self.symbol,
+                            old,
+                            self.current_stop,
+                            price,
+                        )
 
         return False
 
@@ -214,12 +235,30 @@ class TrailingStop(BaseModel):
         if price < self.peak_price:
             self.peak_price = price
             if self.activated:
-                new_stop = price * (1 + self.trail_pct / 100)
                 old = self.current_stop
-                if self._move_short_stop(new_stop):
-                    logger.debug(
-                        "Trail lowered {}: {:.6f} -> {:.6f} (peak: {:.6f})", self.symbol, old, self.current_stop, price
-                    )
+                if self.trailing_mode == "pullback":
+                    if self.structure_guard > 0:
+                        new_stop = price * (1 + max(0.5, self.pullback_buffer_pct) / 100)
+                        if self._move_short_stop(new_stop):
+                            logger.debug(
+                                "Pullback trail lowered {}: {:.6f} -> {:.6f} (peak: {:.6f}, guard: {:.6f}, buffer={:.1f}%)",
+                                self.symbol,
+                                old,
+                                self.current_stop,
+                                price,
+                                self.structure_guard,
+                                self.pullback_buffer_pct,
+                            )
+                else:
+                    new_stop = price * (1 + self.trail_pct / 100)
+                    if self._move_short_stop(new_stop):
+                        logger.debug(
+                            "Trail lowered {}: {:.6f} -> {:.6f} (peak: {:.6f})",
+                            self.symbol,
+                            old,
+                            self.current_stop,
+                            price,
+                        )
 
         return False
 
@@ -314,13 +353,12 @@ class TrailingStopManager:
 
         if aggression > 1.0:
             self.default_trail_pct = max(0.3, self._base_trail_pct * 0.6)
-            self.breakeven_pct = max(2.0, self._base_breakeven_pct * 0.6)
         elif aggression < 1.0:
             self.default_trail_pct = self._base_trail_pct * 1.5
-            self.breakeven_pct = self._base_breakeven_pct * 1.5
         else:
             self.default_trail_pct = self._base_trail_pct
-            self.breakeven_pct = self._base_breakeven_pct
+        # Keep breakeven trigger stable at configured ~5% across modes.
+        self.breakeven_pct = self._base_breakeven_pct
 
         logger.info(
             "Profit-taking mode: {:.1f}x -> {:.1f}x | trail: {:.2f}% | BE trigger: {:.1f}%",
@@ -339,6 +377,8 @@ class TrailingStopManager:
         key: str | None = None,
         tightened_stop: float = 0.0,
         wick_tighten_enabled: bool = False,
+        trailing_mode: Literal["fast", "pullback"] = "fast",
+        pullback_buffer_pct: float = 4.0,
     ) -> TrailingStop:
         ts = TrailingStop(
             symbol=position.symbol,
@@ -351,6 +391,8 @@ class TrailingStopManager:
             wick_tighten_enabled=wick_tighten_enabled,
             breakeven_trigger_pct=self.breakeven_pct,
             low_liquidity=low_liquidity,
+            trailing_mode=trailing_mode,
+            pullback_buffer_pct=max(0.5, pullback_buffer_pct),
         )
         stop_key = key or position.symbol
         self._stops[stop_key] = ts

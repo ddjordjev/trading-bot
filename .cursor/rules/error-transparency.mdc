@@ -1,0 +1,26 @@
+---
+description: Never suppress or hide errors; fix root causes first
+alwaysApply: true
+---
+
+# Error Transparency Rule
+
+## Core Policy
+
+- Never suppress, mute, or hide errors to make logs look clean.
+- Never "fix" issues by reducing log level, swallowing exceptions, or early-breaking error loops without root-cause correction.
+- If an error appears repeatedly, treat it as a bug to fix, not noise to silence.
+
+## Required Behavior
+
+1. First attempt a real fix for the root cause.
+2. If blocked (external dependency, missing creds, unclear architecture impact), explicitly ask the user.
+3. Keep error signals visible until the real fix is in place.
+4. Any temporary workaround must be clearly labeled as temporary and approved by the user.
+
+## Examples
+
+- Bad: catch exception and `continue`/`break` just to stop logs.
+- Bad: downgrade `error` to `debug` to hide repeated failures.
+- Good: validate symbols/inputs earlier so invalid work never reaches failing paths.
+- Good: escalate to user when a hard external blocker prevents a full fix.

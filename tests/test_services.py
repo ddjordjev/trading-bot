@@ -30,7 +30,7 @@ class TestMonitorService:
         s = MagicMock()
         s.coinglass_api_key = ""
         s.intel_symbol_list = ["BTC", "ETH"]
-        s.tv_exchange = "MEXC"
+        s.tv_exchange = "BYBIT"
         s.tv_interval_list = ["1h", "4h"]
         s.tv_poll_interval = 120
         s.cmc_api_key = ""
@@ -260,7 +260,7 @@ class TestMonitorService:
                     symbol="PEPE/USDT",
                     side="long",
                     strategy="test",
-                    supported_exchanges=["MEXC"],
+                    supported_exchanges=["BYBIT"],
                 )
             )
 
@@ -301,7 +301,7 @@ class TestMonitorService:
                     symbol="BTC/USDT",
                     side="long",
                     strategy="test",
-                    supported_exchanges=["MEXC", "BYBIT", "BINANCE"],
+                    supported_exchanges=["BYBIT", "BYBIT", "BINANCE"],
                 )
             )
 
@@ -387,6 +387,79 @@ class TestAnalyticsService:
                     assert read.total_trades_logged == 5
                     assert len(read.weights) == 1
                     assert read.weights[0].strategy == "strat1"
+
+    def test_merge_openclaw_suggestions_marks_actionable_implemented(self):
+        with patch("services.analytics_service.HubState"), patch("services.analytics_service.TradeDB"):
+            from services.analytics_service import AnalyticsService
+
+            svc = AnalyticsService(refresh_interval=300)
+            svc.hub_db = MagicMock()
+            svc.hub_db.list_openclaw_suggestions.return_value = [
+                {
+                    "id": 11,
+                    "status": "new",
+                    "suggestion_type": "reduce_weight",
+                    "strategy": "compound_momentum",
+                    "symbol": "BTC/USDT",
+                    "title": "Trim size",
+                    "description": "Reduce weight for drawdown control",
+                    "suggested_value": "0.7",
+                },
+                {
+                    "id": 12,
+                    "status": "rejected",
+                    "suggestion_type": "disable",
+                    "strategy": "mean_reversion",
+                },
+            ]
+            base = [{"strategy": "rsi", "suggestion_type": "reduce_weight"}]
+            merged = svc._merge_openclaw_suggestions(base)
+
+            assert len(merged) == 2
+            assert merged[1]["source"] == "openclaw"
+            assert merged[1]["strategy"] == "compound_momentum"
+            svc.hub_db.mark_openclaw_suggestion_status.assert_called_once_with(
+                11, "implemented", notes="auto_applied_by_signal_generator"
+            )
+
+    def test_do_refresh_includes_openclaw_suggestions_in_state(self, mock_db, mock_engine, tmp_path):
+        with patch("services.analytics_service.HubState") as state_cls:
+            with patch("services.analytics_service.TradeDB", return_value=mock_db):
+                with patch("services.analytics_service.AnalyticsEngine", return_value=mock_engine):
+                    from hub.state import HubState
+                    from services.analytics_service import AnalyticsService
+
+                    state = HubState(data_dir=tmp_path)
+                    state_cls.return_value = state
+                    svc = AnalyticsService(refresh_interval=60)
+                    svc.state = state
+                    svc.db = mock_db
+                    svc.engine = mock_engine
+                    svc.hub_db = MagicMock()
+                    svc.hub_db.list_openclaw_suggestions.return_value = [
+                        {
+                            "id": 21,
+                            "status": "accepted",
+                            "suggestion_type": "time_filter",
+                            "strategy": "compound_momentum",
+                            "symbol": "ETH/USDT",
+                            "title": "Skip bad hour",
+                            "description": "Avoid low-win-rate hour",
+                            "suggested_value": "skip hour 3",
+                        }
+                    ]
+                    svc.hub_db.mark_openclaw_suggestion_status.return_value = True
+                    mock_engine.scores = {}
+                    mock_engine.patterns = []
+                    mock_engine.suggestions = []
+                    mock_db.trade_count.return_value = 9
+
+                    svc._do_refresh()
+
+                    read = state.read_analytics()
+                    assert len(read.suggestions) == 1
+                    assert read.suggestions[0]["source"] == "openclaw"
+                    assert read.suggestions[0]["suggestion_type"] == "time_filter"
 
 
 # ── SignalGenerator ───────────────────────────────────────────────────
@@ -872,7 +945,7 @@ class TestSignalGenerator:
 
     def test_update_exchange_symbols(self, gen):
         """Exchange symbol sets update correctly."""
-        gen.update_exchange_symbols({"BINANCE": {"BTC/USDT", "ETH/USDT"}, "MEXC": {"BTC/USDT", "PEPE/USDT"}})
+        gen.update_exchange_symbols({"BINANCE": {"BTC/USDT", "ETH/USDT"}, "BYBIT": {"BTC/USDT", "PEPE/USDT"}})
         assert gen._symbol_tradeable("BTC/USDT")
         assert gen._symbol_tradeable("PEPE/USDT")
         assert gen._symbol_tradeable("ETH/USDT")
@@ -880,10 +953,10 @@ class TestSignalGenerator:
 
     def test_supported_exchanges_tagging(self, gen):
         """Symbols are tagged with exchanges that have them."""
-        gen.update_exchange_symbols({"BINANCE": {"BTC/USDT"}, "MEXC": {"BTC/USDT", "PEPE/USDT"}})
-        assert "MEXC" in gen._supported_exchanges("PEPE/USDT")
+        gen.update_exchange_symbols({"BINANCE": {"BTC/USDT"}, "BYBIT": {"BTC/USDT", "PEPE/USDT"}})
+        assert "BYBIT" in gen._supported_exchanges("PEPE/USDT")
         assert "BINANCE" not in gen._supported_exchanges("PEPE/USDT")
-        assert sorted(gen._supported_exchanges("BTC/USDT")) == ["BINANCE", "MEXC"]
+        assert sorted(gen._supported_exchanges("BTC/USDT")) == ["BINANCE", "BYBIT"]
 
     def test_propose_skips_untradeable_symbol(self, gen, empty_queue):
         """Proposals for symbols not on any exchange are dropped."""
@@ -900,7 +973,7 @@ class TestSignalGenerator:
 
     def test_propose_tags_supported_exchanges(self, gen, empty_queue):
         """Proposals get tagged with exchanges that support the symbol."""
-        gen.update_exchange_symbols({"BINANCE": {"BTC/USDT"}, "MEXC": {"BTC/USDT", "SOL/USDT"}})
+        gen.update_exchange_symbols({"BINANCE": {"BTC/USDT"}, "BYBIT": {"BTC/USDT", "SOL/USDT"}})
         prop = TradeProposal(
             priority=SignalPriority.DAILY,
             symbol="SOL/USDT",
@@ -911,7 +984,7 @@ class TestSignalGenerator:
         gen._propose(empty_queue, prop)
         assert empty_queue.total == 1
         queued = empty_queue.proposals[0]
-        assert "MEXC" in queued.supported_exchanges
+        assert "BYBIT" in queued.supported_exchanges
         assert "BINANCE" not in queued.supported_exchanges
 
     def test_propose_blocks_when_no_exchange_data(self, gen, empty_queue):

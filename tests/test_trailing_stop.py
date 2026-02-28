@@ -331,3 +331,12 @@ class TestTrailingBehaviorGuards:
         ts.update(94.0)
         assert ts.current_stop >= 97.0
         assert ts.current_stop == pytest.approx(97.0)
+
+
+class TestTrailingProfitTakingMode:
+    def test_profit_mode_does_not_change_breakeven_trigger(self):
+        mgr = TrailingStopManager(default_trail_pct=0.5, breakeven_pct=5.0)
+        mgr.set_profit_taking_mode(1.3)
+        assert mgr.breakeven_pct == pytest.approx(5.0)
+        mgr.set_profit_taking_mode(0.8)
+        assert mgr.breakeven_pct == pytest.approx(5.0)
