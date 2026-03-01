@@ -373,6 +373,16 @@ Recommendation lifecycle:
 - Manual status changes remain available via dashboard/API, and all suggestion
   states remain visible in analytics history.
 
+Analytics data hygiene:
+- Failed pre-open reservations are cancelled as reservation rows (deleted) and
+  are not converted into synthetic closed trades.
+- Analytics scoring excludes non-executed close noise
+  (`reservation_cancel`, `risk_or_gate`, `open_exception`,
+  `failed_fill:pending`, `recovery`) and operational pseudo-strategies
+  (`risk_manager`, `manual_override`, `stop`).
+- Close records keep the original entry strategy attribution; close reasons are
+  tracked separately in `close_reason`.
+
 Ephemeral JSON files (`bot_status.json`, `trade_queue.json`, etc.) are
 created at runtime and should be wiped on rebuild:
 ```bash

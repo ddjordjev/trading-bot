@@ -1369,7 +1369,9 @@ class TradingBot:
             close_source="reservation_cancel",
             close_reason=reason,
         )
-        await self._push_trade_to_hub(rec, action_override="close")
+        # Reservation cancels are non-executed pre-open artifacts.
+        # Tell hub to drop the reservation row instead of turning it into a closed trade row.
+        await self._push_trade_to_hub(rec, action_override="cancel_reservation")
 
     def _calc_realized_pnl(self, order: Order) -> float:
         """Extract the realized PnL from a close order for deposit detection."""
@@ -1441,10 +1443,17 @@ class TradingBot:
                 else "unknown"
             )
 
+            resolved_strategy = (
+                (open_rec.strategy if open_rec and open_rec.strategy else "")
+                or (sp.strategy if sp and sp.strategy else "")
+                or (order.strategy or "")
+                or "unknown"
+            )
+
             record = TradeRecord(
                 symbol=order.symbol,
                 side=pos_side,
-                strategy=order.strategy or close_reason,
+                strategy=resolved_strategy,
                 action="close",
                 scale_mode=sp.mode.value if sp else "",
                 entry_price=entry_price,

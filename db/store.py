@@ -9,6 +9,9 @@ from loguru import logger
 from db.models import TradeRecord
 
 DB_PATH = Path("data/trades.db")
+_ANALYTICS_EXCLUDED_CLOSE_SOURCES = ("reservation_cancel", "recovery")
+_ANALYTICS_EXCLUDED_CLOSE_REASONS = ("risk_or_gate", "open_exception", "failed_fill:pending")
+_ANALYTICS_EXCLUDED_STRATEGIES = ("risk_manager", "manual_override", "stop")
 
 
 class TradeDB:
@@ -275,13 +278,40 @@ class TradeDB:
 
     def get_strategy_names(self) -> list[str]:
         assert self._conn
-        rows = self._conn.execute("SELECT DISTINCT strategy FROM trades ORDER BY strategy").fetchall()
+        rows = self._conn.execute(
+            """
+            SELECT DISTINCT strategy
+            FROM trades
+            WHERE action='close'
+              AND close_source NOT IN (?, ?)
+              AND close_reason NOT IN (?, ?, ?)
+              AND strategy NOT IN (?, ?, ?)
+            ORDER BY strategy
+            """,
+            (
+                *_ANALYTICS_EXCLUDED_CLOSE_SOURCES,
+                *_ANALYTICS_EXCLUDED_CLOSE_REASONS,
+                *_ANALYTICS_EXCLUDED_STRATEGIES,
+            ),
+        ).fetchall()
         return [r["strategy"] for r in rows]
 
     def get_strategy_stats(self, strategy: str, symbol: str = "") -> dict[str, Any]:
         assert self._conn
-        where = "strategy = ? AND action = 'close'"
+        where = (
+            "strategy = ? AND action = 'close' "
+            "AND close_source NOT IN (?, ?) "
+            "AND close_reason NOT IN (?, ?, ?) "
+            "AND strategy NOT IN (?, ?, ?)"
+        )
         params: list[str] = [strategy]
+        params.extend(
+            [
+                *_ANALYTICS_EXCLUDED_CLOSE_SOURCES,
+                *_ANALYTICS_EXCLUDED_CLOSE_REASONS,
+                *_ANALYTICS_EXCLUDED_STRATEGIES,
+            ]
+        )
         if symbol:
             where += " AND symbol = ?"
             params.append(symbol)
@@ -313,8 +343,20 @@ class TradeDB:
 
     def get_hourly_performance(self, strategy: str = "") -> list[dict[str, Any]]:
         assert self._conn
-        where = "WHERE strategy = ?" if strategy else ""
-        params = [strategy] if strategy else []
+        where = (
+            "WHERE action='close' "
+            "AND close_source NOT IN (?, ?) "
+            "AND close_reason NOT IN (?, ?, ?) "
+            "AND strategy NOT IN (?, ?, ?)"
+        )
+        params: list[Any] = [
+            *_ANALYTICS_EXCLUDED_CLOSE_SOURCES,
+            *_ANALYTICS_EXCLUDED_CLOSE_REASONS,
+            *_ANALYTICS_EXCLUDED_STRATEGIES,
+        ]
+        if strategy:
+            where += " AND strategy = ?"
+            params.append(strategy)
         rows = self._conn.execute(
             f"""
             SELECT
@@ -339,8 +381,20 @@ class TradeDB:
 
     def get_regime_performance(self, strategy: str = "") -> list[dict[str, Any]]:
         assert self._conn
-        where = "WHERE strategy = ? AND market_regime != ''" if strategy else "WHERE market_regime != ''"
-        params = [strategy] if strategy else []
+        where = (
+            "WHERE action='close' AND market_regime != '' "
+            "AND close_source NOT IN (?, ?) "
+            "AND close_reason NOT IN (?, ?, ?) "
+            "AND strategy NOT IN (?, ?, ?)"
+        )
+        params: list[Any] = [
+            *_ANALYTICS_EXCLUDED_CLOSE_SOURCES,
+            *_ANALYTICS_EXCLUDED_CLOSE_REASONS,
+            *_ANALYTICS_EXCLUDED_STRATEGIES,
+        ]
+        if strategy:
+            where += " AND strategy = ?"
+            params.append(strategy)
         rows = self._conn.execute(
             f"""
             SELECT
@@ -367,8 +421,22 @@ class TradeDB:
         """Positive = consecutive wins, negative = consecutive losses."""
         assert self._conn
         rows = self._conn.execute(
-            "SELECT is_winner FROM trades WHERE strategy = ? AND pnl_usd != 0 ORDER BY id DESC LIMIT 20",
-            (strategy,),
+            """
+            SELECT is_winner FROM trades
+            WHERE strategy = ?
+              AND pnl_usd != 0
+              AND action='close'
+              AND close_source NOT IN (?, ?)
+              AND close_reason NOT IN (?, ?, ?)
+              AND strategy NOT IN (?, ?, ?)
+            ORDER BY id DESC LIMIT 20
+            """,
+            (
+                strategy,
+                *_ANALYTICS_EXCLUDED_CLOSE_SOURCES,
+                *_ANALYTICS_EXCLUDED_CLOSE_REASONS,
+                *_ANALYTICS_EXCLUDED_STRATEGIES,
+            ),
         ).fetchall()
         if not rows:
             return 0
@@ -384,8 +452,22 @@ class TradeDB:
     def get_max_loss_streak(self, strategy: str) -> int:
         assert self._conn
         rows = self._conn.execute(
-            "SELECT is_winner FROM trades WHERE strategy = ? AND pnl_usd != 0 ORDER BY id",
-            (strategy,),
+            """
+            SELECT is_winner FROM trades
+            WHERE strategy = ?
+              AND pnl_usd != 0
+              AND action='close'
+              AND close_source NOT IN (?, ?)
+              AND close_reason NOT IN (?, ?, ?)
+              AND strategy NOT IN (?, ?, ?)
+            ORDER BY id
+            """,
+            (
+                strategy,
+                *_ANALYTICS_EXCLUDED_CLOSE_SOURCES,
+                *_ANALYTICS_EXCLUDED_CLOSE_REASONS,
+                *_ANALYTICS_EXCLUDED_STRATEGIES,
+            ),
         ).fetchall()
         max_streak = 0
         current = 0

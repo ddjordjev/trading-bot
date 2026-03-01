@@ -428,6 +428,51 @@ class HubDB(TradeDB):
             self._mark_confirmed(bot_id, request_key)
         return updated
 
+    def cancel_trade_reservation(self, bot_id: str, opened_at: str, request_key: str = "") -> bool:
+        """Delete an unexecuted pre-open reservation row.
+
+        Used when a reserved open never turns into a real exchange fill
+        (risk gate reject, open exception, or fill timeout).
+        """
+        assert self._conn
+        if request_key:
+            existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
+            if existing:
+                self._mark_confirmed(bot_id, request_key)
+                return True
+
+        cursor = self._conn.execute(
+            """
+            DELETE FROM trades
+            WHERE bot_id=? AND opened_at=? AND closed_at='' AND action='open'
+            """,
+            (bot_id, opened_at),
+        )
+        self._conn.commit()
+        deleted = cursor.rowcount > 0
+        if request_key and deleted:
+            self._mark_confirmed(bot_id, request_key)
+        return deleted
+
+    def cleanup_non_executed_close_noise(self) -> int:
+        """Delete close rows that represent failed pre-open flow, not executed trades."""
+        assert self._conn
+        cursor = self._conn.execute(
+            """
+            DELETE FROM trades
+            WHERE action='close'
+              AND COALESCE(recovery_close, 0)=0
+              AND (
+                close_source='reservation_cancel'
+                OR close_reason IN ('risk_or_gate', 'open_exception', 'failed_fill:pending')
+              )
+              AND COALESCE(exit_price, 0) <= 0
+              AND ABS(COALESCE(pnl_usd, 0)) < 1e-12
+            """
+        )
+        self._conn.commit()
+        return int(cursor.rowcount or 0)
+
     def mark_recovery_close(self, bot_id: str, opened_at: str) -> bool:
         """Mark an open trade as closed due to bot recovery (no exit stats)."""
         assert self._conn

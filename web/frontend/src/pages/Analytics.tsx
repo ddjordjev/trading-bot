@@ -130,6 +130,8 @@ const SEVERITY_COLORS: Record<string, string> = {
 const SUGGESTION_COLORS: Record<string, string> = {
   disable: "var(--red)",
   reduce_weight: "var(--yellow)",
+  increase_weight: "var(--green)",
+  weight_override: "var(--green)",
   time_filter: "var(--accent)",
   regime_filter: "var(--purple)",
   change_param: "var(--accent)",
@@ -419,6 +421,11 @@ export function Analytics() {
   }, [tab]);
 
   if (loading && !analytics) return <div className="empty-state">Loading analytics...</div>;
+  const allSuggestions = analytics?.suggestions ?? [];
+  const newSuggestionCount = allSuggestions.filter((s) => String(s.status || "new").toLowerCase() === "new").length;
+  const implementedSuggestionCount = allSuggestions.filter(
+    (s) => String(s.status || "").toLowerCase() === "implemented",
+  ).length;
 
   return (
     <div>
@@ -435,9 +442,12 @@ export function Analytics() {
             </div>
           </div>
           <div className="stat-card">
-            <div className="label">Suggestions</div>
-            <div className="value" style={{ color: (analytics?.suggestions.length ?? 0) > 0 ? "var(--yellow)" : "var(--green)" }}>
-              {analytics?.suggestions.length ?? 0}
+            <div className="label">New Suggestions</div>
+            <div className="value" style={{ color: newSuggestionCount > 0 ? "var(--yellow)" : "var(--green)" }}>
+              {newSuggestionCount}
+            </div>
+            <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginTop: 2 }}>
+              {implementedSuggestionCount} implemented
             </div>
           </div>
           {report && (
@@ -472,7 +482,7 @@ export function Analytics() {
               : t === "closed" ? `Closed Trades (${closedTrades.length})`
               : t === "scores" ? `Strategy Stats (${analytics?.strategy_scores.length ?? 0})`
               : t === "patterns" ? `Patterns (${analytics?.patterns.length ?? 0})`
-              : t === "suggestions" ? `Suggestions (${analytics?.suggestions.length ?? 0})`
+              : t === "suggestions" ? `Suggestions (${newSuggestionCount})`
               : t === "hourly" ? "Time & Regime"
               : t === "db" ? "Database Explorer"
               : "Daily Report"}
@@ -779,11 +789,16 @@ function SuggestionsTab({
   onStatusUpdate: (id: number, status: string) => Promise<void>;
   busySuggestionId: number | null;
 }) {
-  if (suggestions.length === 0) return <div className="empty-state">No modification suggestions. All strategies performing within acceptable bounds.</div>;
+  const [showImplemented, setShowImplemented] = useState(false);
+  const newSuggestions = suggestions.filter((s) => String(s.status || "new").toLowerCase() === "new");
+  const implementedSuggestions = suggestions.filter((s) => String(s.status || "").toLowerCase() === "implemented");
+  if (newSuggestions.length === 0 && implementedSuggestions.length === 0) {
+    return <div className="empty-state">No modification suggestions. All strategies performing within acceptable bounds.</div>;
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-      {suggestions.map((s, i) => (
+      {newSuggestions.map((s, i) => (
         <div key={i} className="card" style={{ borderLeft: `3px solid ${SUGGESTION_COLORS[s.suggestion_type] || "var(--accent)"}` }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.3rem" }}>
             <span style={{ color: "var(--heading)", fontWeight: 600, fontSize: "1rem" }}>
@@ -852,6 +867,32 @@ function SuggestionsTab({
           )}
         </div>
       ))}
+      {implementedSuggestions.length > 0 && (
+        <div className="card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <strong>Implemented Suggestions ({implementedSuggestions.length})</strong>
+            <button className="btn-secondary" onClick={() => setShowImplemented((v) => !v)}>
+              {showImplemented ? "Collapse" : "Expand"}
+            </button>
+          </div>
+          {showImplemented && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.55rem", marginTop: "0.75rem" }}>
+              {implementedSuggestions.map((s, i) => (
+                <div
+                  key={`impl-${i}`}
+                  style={{ border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "0.6rem 0.75rem" }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.2rem" }}>
+                    <span style={{ color: "var(--heading)", fontWeight: 600 }}>{s.title}</span>
+                    <span className="badge">IMPLEMENTED</span>
+                  </div>
+                  <div style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>{s.description}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

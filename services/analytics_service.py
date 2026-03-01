@@ -56,6 +56,9 @@ class AnalyticsService:
 
         self.db.connect()
         self.hub_db.connect()
+        deleted_noise = self.hub_db.cleanup_non_executed_close_noise()
+        if deleted_noise > 0:
+            logger.info("Cleaned {} non-executed close-noise rows before analytics refresh", deleted_noise)
         self.engine = AnalyticsEngine(self.db)
         self._last_trade_count = self.db.trade_count()
         self._running = True

@@ -752,6 +752,66 @@ async def get_analytics(_: str = Depends(verify_token)) -> AnalyticsSnapshot:
             )
         )
 
+    # Suggestion cleanup:
+    # - drop non-actionable analytics pseudo-strategies
+    # - merge repeated same-strategy items into one strongest recommendation
+    non_actionable_analytics = {"risk_manager", "manual_override", "stop"}
+    priority = {
+        "disable": 6,
+        "regime_filter": 5,
+        "time_filter": 4,
+        "weight_override": 3,
+        "reduce_weight": 3,
+        "increase_weight": 3,
+        "change_param": 2,
+        "process": 1,
+    }
+    grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for s in suggestions:
+        src = str(getattr(s, "source", "") or "").strip().lower()
+        strategy = str(getattr(s, "strategy", "") or "").strip().lower()
+        if src == "analytics" and strategy in non_actionable_analytics:
+            continue
+        status = str(getattr(s, "status", "new") or "new").strip().lower()
+        status_bucket = "implemented" if status == "implemented" else "active"
+        symbol = str(getattr(s, "symbol", "") or "").strip().upper()
+        key = (src, status_bucket, strategy, symbol)
+        stype = str(getattr(s, "suggestion_type", "") or "").strip().lower()
+        rank = (
+            priority.get(stype, 0),
+            float(getattr(s, "confidence", 0.0) or 0.0),
+            int(getattr(s, "based_on_trades", 0) or 0),
+        )
+        if key not in grouped:
+            grouped[key] = {"primary": s, "rank": rank, "types": {stype}, "count": 1}
+            continue
+        rec = grouped[key]
+        rec["types"].add(stype)
+        rec["count"] = int(rec["count"]) + 1
+        if rank > rec["rank"]:
+            rec["primary"] = s
+            rec["rank"] = rank
+
+    cleaned: list[ModificationSuggestionInfo] = []
+    for rec in grouped.values():
+        primary = rec["primary"]
+        count = int(rec["count"])
+        if count > 1:
+            types = ", ".join(t.replace("_", " ") for t in sorted(rec["types"]))
+            extra_note = f"merged {count} related suggestions ({types})"
+            existing_notes = str(getattr(primary, "notes", "") or "").strip()
+            primary.notes = f"{existing_notes} | {extra_note}" if existing_notes else extra_note
+        cleaned.append(primary)
+    suggestions = sorted(
+        cleaned,
+        key=lambda s: (
+            0 if str(getattr(s, "status", "new") or "new").lower() == "new" else 1,
+            -priority.get(str(getattr(s, "suggestion_type", "") or "").lower(), 0),
+            -float(getattr(s, "confidence", 0.0) or 0.0),
+            -int(getattr(s, "based_on_trades", 0) or 0),
+        ),
+    )
+
     live = []
     # Pull live positions from all bot reports (multibot)
     for rpt in _bot_reports.values():
@@ -1718,7 +1778,9 @@ async def receive_trade(request: Request, _: str = Depends(verify_token)) -> dic
         return {"status": "error", "detail": "missing bot_id or trade"}
 
     hub = _get_hub_db()
-    if action == "close" and trade.get("opened_at"):
+    if action == "cancel_reservation" and trade.get("opened_at"):
+        hub.cancel_trade_reservation(bot_id, trade["opened_at"], request_key=request_key)
+    elif action == "close" and trade.get("opened_at"):
         updated = hub.update_trade_close(bot_id, trade["opened_at"], trade, request_key=request_key)
         if not updated:
             hub.insert_trade(bot_id, trade, request_key=request_key)

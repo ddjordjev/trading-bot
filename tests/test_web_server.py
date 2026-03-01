@@ -1259,7 +1259,7 @@ class TestGetModulesDailyReportAnalytics:
         hub.upsert_openclaw_suggestion(
             {
                 "suggestion_type": "reduce_weight",
-                "title": "Reduce trending exposure",
+                "title": f"Reduce trending exposure {report_id}",
                 "description": "Trend entries degrade in caution",
                 "strategy": "trending_momentum",
                 "symbol": "BTC/USDT",
@@ -2617,6 +2617,46 @@ class TestHubPushEndpoints:
         )
         assert r.status_code == 200
         assert r.json()["action"] == "update"
+
+    async def test_cancel_reservation_deletes_preopen_row(self, client):
+        await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "momentum",
+                "action": "open",
+                "trade": {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "open",
+                    "entry_price": 50000,
+                    "amount": 0.01,
+                    "opened_at": "2026-02-20T15:00:00",
+                },
+            },
+        )
+        r = await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "momentum",
+                "action": "cancel_reservation",
+                "trade": {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "close",
+                    "opened_at": "2026-02-20T15:00:00",
+                    "closed_at": "2026-02-20T15:00:10",
+                    "close_source": "reservation_cancel",
+                    "close_reason": "risk_or_gate",
+                },
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["action"] == "cancel_reservation"
+        r_open = await client.get("/internal/trades/momentum/open")
+        assert r_open.status_code == 200
+        assert r_open.json() == []
 
     async def test_push_trade_missing_bot_id(self, client):
         r = await client.post(

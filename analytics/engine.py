@@ -15,6 +15,7 @@ from db.store import TradeDB
 
 MIN_TRADES_FOR_ANALYSIS = 10
 MIN_TRADES_FOR_SUGGESTION = 15
+_NON_ACTIONABLE_SUGGESTION_STRATEGIES = {"risk_manager", "manual_override", "stop"}
 
 
 class AnalyticsEngine:
@@ -404,6 +405,8 @@ class AnalyticsEngine:
         self._suggestions.clear()
 
         for name, score in self._scores.items():
+            if name in _NON_ACTIONABLE_SUGGESTION_STRATEGIES:
+                continue
             if score.total_trades < MIN_TRADES_FOR_SUGGESTION:
                 continue
 
