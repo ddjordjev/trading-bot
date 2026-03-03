@@ -435,6 +435,88 @@ class TestHubDB:
         assert trade.effective_stop_loss == 49100
         assert trade.stop_source == "exchange"
 
+    def test_update_trade_open_upgrades_existing_open_row(self, hub: HubDB):
+        hub.insert_trade(
+            "momentum",
+            {
+                "symbol": "BTC/USDT",
+                "side": "long",
+                "strategy": "rsi",
+                "action": "open",
+                "entry_price": 50000,
+                "amount": 0.01,
+                "opened_at": "2026-02-20T10:00:00",
+            },
+        )
+        updated = hub.update_trade_open(
+            "momentum",
+            "2026-02-20T10:00:00",
+            {
+                "symbol": "BTC/USDT",
+                "side": "long",
+                "strategy": "rsi",
+                "entry_price": 50100,
+                "amount": 0.02,
+                "leverage": 7,
+            },
+        )
+        assert updated is True
+        trades = hub.get_all_trades()
+        assert len(trades) == 1
+        assert trades[0].entry_price == 50100
+        assert trades[0].amount == 0.02
+        assert trades[0].leverage == 7
+
+    def test_update_trade_close_updates_only_latest_duplicate_open(self, hub: HubDB):
+        for entry in (50000, 50500):
+            hub.insert_trade(
+                "momentum",
+                {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "open",
+                    "entry_price": entry,
+                    "amount": 0.01,
+                    "opened_at": "2026-02-20T10:00:00",
+                },
+            )
+        updated = hub.update_trade_close(
+            "momentum",
+            "2026-02-20T10:00:00",
+            {
+                "symbol": "BTC/USDT",
+                "exit_price": 51000,
+                "closed_at": "2026-02-20T11:00:00",
+                "pnl_usd": 5,
+                "is_winner": True,
+            },
+        )
+        assert updated is True
+        rows = [t for t in hub.get_all_trades() if t.opened_at == "2026-02-20T10:00:00"]
+        assert len(rows) == 2
+        assert sum(1 for t in rows if t.closed_at == "2026-02-20T11:00:00") == 1
+
+    def test_cleanup_duplicate_trade_rows_keeps_latest(self, hub: HubDB):
+        for price in (50000, 50010):
+            hub.insert_trade(
+                "momentum",
+                {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "open",
+                    "entry_price": price,
+                    "amount": 0.01,
+                    "opened_at": "2026-02-20T10:00:00",
+                },
+            )
+        deleted = hub.cleanup_duplicate_trade_rows()
+        assert deleted == 1
+        rows = [t for t in hub.get_all_trades() if t.opened_at == "2026-02-20T10:00:00"]
+        assert len(rows) == 1
+        assert rows[0].entry_price == 50010
+
     def test_strategy_stats(self, hub: HubDB):
         for i in range(3):
             hub.insert_trade(
@@ -587,6 +669,56 @@ class TestHubDB:
         assert updated is True
         open_trades = hub.get_open_trades_for_bot("bot1")
         assert len(open_trades) == 0
+
+    def test_mark_recovery_close_with_estimate(self, hub: HubDB):
+        hub.insert_trade(
+            "bot1",
+            {
+                "symbol": "ETH/USDT",
+                "side": "long",
+                "strategy": "rsi",
+                "action": "open",
+                "entry_price": 3000.0,
+                "amount": 0.2,
+                "opened_at": "2026-01-02T10:00:00",
+            },
+        )
+        updated = hub.mark_recovery_close(
+            "bot1",
+            "2026-01-02T10:00:00",
+            estimated_exit_price=3050.0,
+            estimated_pnl_usd=10.0,
+            estimated_pnl_pct=1.67,
+        )
+        assert updated is True
+        row = hub.conn.execute(
+            "SELECT close_reason, exit_price, pnl_usd, pnl_pct, recovery_close FROM trades WHERE bot_id=? AND opened_at=?",
+            ("bot1", "2026-01-02T10:00:00"),
+        ).fetchone()
+        assert row is not None
+        assert row["close_reason"] == "missing_on_exchange_estimated"
+        assert float(row["exit_price"]) == 3050.0
+        assert float(row["pnl_usd"]) == 10.0
+        assert float(row["pnl_pct"]) == 1.67
+        assert int(row["recovery_close"]) == 1
+
+    def test_insert_exchange_equity_snapshot(self, hub: HubDB):
+        hub.insert_exchange_equity_snapshot(
+            exchange="bybit",
+            available_usdt=38.0,
+            estimated_equity_usdt=96.5,
+            open_positions=2,
+            source_bot="scalper",
+        )
+        row = hub.conn.execute(
+            "SELECT exchange, available_usdt, estimated_equity_usdt, open_positions, source_bot FROM exchange_equity_snapshots ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        assert row["exchange"] == "BYBIT"
+        assert float(row["available_usdt"]) == 38.0
+        assert float(row["estimated_equity_usdt"]) == 96.5
+        assert int(row["open_positions"]) == 2
+        assert row["source_bot"] == "scalper"
 
     def test_drain_confirmed_keys(self, hub: HubDB):
         hub.insert_trade(

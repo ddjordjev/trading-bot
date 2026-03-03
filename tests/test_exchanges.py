@@ -707,6 +707,22 @@ class TestBybitExchange:
         bybit._futures.create_order.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_set_leverage_treats_not_modified_as_success(self, bybit):
+        bybit._futures.set_leverage = AsyncMock(
+            side_effect=Exception('bybit {"retCode":110043,"retMsg":"leverage not modified"}')
+        )
+        ok = await bybit.set_leverage("BTC/USDT", 7)
+        assert ok is True
+        assert bybit._leverage_by_symbol["BTC/USDT"] == 7
+
+    @pytest.mark.asyncio
+    async def test_set_leverage_skips_call_when_cached(self, bybit):
+        bybit._leverage_by_symbol["BTC/USDT"] = 7
+        ok = await bybit.set_leverage("BTC/USDT", 7)
+        assert ok is True
+        bybit._futures.set_leverage.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_place_order_futures_resolves_linear_symbol(self, bybit):
         await bybit.place_order(
             "ICP/USDT",

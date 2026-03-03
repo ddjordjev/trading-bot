@@ -228,6 +228,7 @@ class HubState:
 
         picked = self._trade_queue.get_next_for_bot(
             exchange=exchange,
+            bot_id=bot_id,
             bot_style=bot_style,
             allowed_priorities=allowed_priorities,
             active_symbols=active,

@@ -164,6 +164,7 @@ class TradeQueue(BaseModel):
     def get_next_for_bot(
         self,
         exchange: str,
+        bot_id: str = "",
         bot_style: str = "",
         allowed_priorities: list[SignalPriority] | None = None,
         active_symbols: set[str] | None = None,
@@ -192,7 +193,7 @@ class TradeQueue(BaseModel):
                 if open_db_symbols and p.symbol in open_db_symbols:
                     continue
                 targets = {t.strip() for t in (p.target_bot or "").split(",") if t.strip()}
-                if targets and bot_style not in targets:
+                if targets and (bot_style not in targets) and (bot_id not in targets):
                     continue
                 return p
         return None

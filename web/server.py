@@ -59,6 +59,7 @@ _BOT_REGISTRY = Path("data/bot_registry.json")
 _bot_urls: dict[str, str] = {}  # bot_id -> base URL (e.g. "http://bot-meanrev:9035")
 _HUB_DB_PATH = Path("data/hub.db")
 _hub_db: HubDB | None = None
+_exchange_snapshot_last_ts: dict[str, float] = {}
 
 
 @dataclass(slots=True)
@@ -1268,6 +1269,57 @@ def report_bot_snapshot(data: dict[str, Any]) -> None:
             existing[key] = value
 
 
+def _maybe_record_exchange_equity_snapshot(data: dict[str, Any], hub: HubDB) -> None:
+    """Persist throttled exchange equity snapshots from bot reports."""
+    if not isinstance(data, dict):
+        return
+    exchange = str(data.get("exchange", "") or "").strip().upper()
+    if not exchange:
+        return
+    status = data.get("status")
+    if not isinstance(status, dict):
+        return
+
+    interval = max(10, int(get_settings().exchange_equity_snapshot_interval_seconds))
+    now_ts = time.monotonic()
+    last_ts = _exchange_snapshot_last_ts.get(exchange, 0.0)
+    if (now_ts - last_ts) < interval:
+        return
+
+    available = float(data.get("exchange_balance", 0.0) or 0.0)
+    positions = data.get("positions")
+    if not isinstance(positions, list):
+        positions = []
+    margin_used = 0.0
+    unrealized = 0.0
+    open_positions = 0
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        amount = float(p.get("amount", 0.0) or 0.0)
+        if amount <= 0:
+            continue
+        open_positions += 1
+        lev = max(float(p.get("leverage", 1.0) or 1.0), 1.0)
+        notional = float(p.get("notional_value", 0.0) or 0.0)
+        if notional <= 0:
+            current = float(p.get("current_price", 0.0) or 0.0)
+            notional = abs(amount) * current
+        margin_used += notional / lev
+        unrealized += float(p.get("pnl_usd", p.get("pnl", 0.0)) or 0.0)
+    estimated_equity = max(0.0, available + margin_used + unrealized)
+    source_bot = str(data.get("bot_id", "") or "")
+    hub.insert_exchange_equity_snapshot(
+        exchange=exchange,
+        available_usdt=available,
+        estimated_equity_usdt=estimated_equity,
+        open_positions=open_positions,
+        source_bot=source_bot,
+        source="bot_report",
+    )
+    _exchange_snapshot_last_ts[exchange] = now_ts
+
+
 async def _forward_to_bot(bot_id: str, path: str, body: dict[str, Any]) -> ActionResponse:
     """Forward an action to a remote bot's API and return its response."""
     import aiohttp
@@ -1635,6 +1687,8 @@ async def receive_bot_report(request: Request, _: str = Depends(verify_token)) -
 
     report_bot_snapshot(data)
     hub = _get_hub_db()
+    with contextlib.suppress(Exception):
+        _maybe_record_exchange_equity_snapshot(data, hub)
     confirmed = hub.drain_confirmed_keys(bot_id) if bot_id else []
     if bot_id:
         from config.bot_profiles import PROFILES_BY_ID
@@ -1682,6 +1736,21 @@ async def receive_bot_report(request: Request, _: str = Depends(verify_token)) -
                 response["proposal"] = proposal.model_dump()
 
     return response
+
+
+@app.post("/internal/bot-disable")
+async def internal_disable_bot(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
+    """Internal endpoint: force-disable a bot profile in hub config."""
+    data = await request.json()
+    bot_id = str(data.get("bot_id", "") or "").strip()
+    reason = str(data.get("reason", "") or "").strip()
+    if not bot_id:
+        return {"status": "error", "detail": "missing bot_id"}
+    hub = _get_hub_db()
+    hub.set_bot_enabled(bot_id, False)
+    logger.warning("Hub auto-disabled bot {} ({})", bot_id, reason or "no reason")
+    nudge_ws()
+    return {"status": "ok", "bot_id": bot_id, "enabled": False}
 
 
 @app.post("/internal/queue-update")
@@ -1780,14 +1849,30 @@ async def receive_trade(request: Request, _: str = Depends(verify_token)) -> dic
     hub = _get_hub_db()
     if action == "cancel_reservation" and trade.get("opened_at"):
         hub.cancel_trade_reservation(bot_id, trade["opened_at"], request_key=request_key)
+    elif action == "open" and trade.get("opened_at"):
+        updated = hub.update_trade_open(bot_id, trade["opened_at"], trade, request_key=request_key)
+        if not updated:
+            hub.insert_trade(bot_id, trade, request_key=request_key)
     elif action == "close" and trade.get("opened_at"):
         updated = hub.update_trade_close(bot_id, trade["opened_at"], trade, request_key=request_key)
         if not updated:
-            hub.insert_trade(bot_id, trade, request_key=request_key)
+            logger.warning(
+                "Deferred close write for bot={} opened_at={} symbol={} (open row missing)",
+                bot_id,
+                trade.get("opened_at", ""),
+                trade.get("symbol", ""),
+            )
+            return {"status": "deferred", "action": action, "request_key": request_key}
     elif action == "update" and trade.get("opened_at"):
         updated = hub.update_trade_runtime(bot_id, trade["opened_at"], trade, request_key=request_key)
         if not updated:
-            hub.insert_trade(bot_id, trade, request_key=request_key)
+            logger.warning(
+                "Deferred runtime update for bot={} opened_at={} symbol={} (open row missing)",
+                bot_id,
+                trade.get("opened_at", ""),
+                trade.get("symbol", ""),
+            )
+            return {"status": "deferred", "action": action, "request_key": request_key}
     else:
         hub.insert_trade(bot_id, trade, request_key=request_key)
 
@@ -1811,14 +1896,26 @@ async def get_bot_strategy_stats(bot_id: str, _: str = Depends(verify_token)) ->
 
 @app.post("/internal/recovery-close")
 async def recovery_close_trade(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
-    """Bot reports a trade that died while it was down. No exit stats."""
+    """Bot reports a trade that died while it was down.
+
+    Accepts optional estimated exit/PnL fields for forensic visibility.
+    """
     data = await request.json()
     bot_id = data.get("bot_id", "")
     opened_at = data.get("opened_at", "")
     if not bot_id or not opened_at:
         return {"status": "error", "detail": "missing bot_id or opened_at"}
+    estimated_exit_price = float(data.get("estimated_exit_price", 0.0) or 0.0)
+    estimated_pnl_usd = float(data.get("estimated_pnl_usd", 0.0) or 0.0)
+    estimated_pnl_pct = float(data.get("estimated_pnl_pct", 0.0) or 0.0)
     hub = _get_hub_db()
-    updated = hub.mark_recovery_close(bot_id, opened_at)
+    updated = hub.mark_recovery_close(
+        bot_id,
+        opened_at,
+        estimated_exit_price=estimated_exit_price,
+        estimated_pnl_usd=estimated_pnl_usd,
+        estimated_pnl_pct=estimated_pnl_pct,
+    )
     return {"status": "ok", "updated": updated}
 
 

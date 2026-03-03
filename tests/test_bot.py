@@ -2385,3 +2385,30 @@ class TestRuntimeReconcileStaleConfirmation:
             await bot._reconcile_runtime_open_trades([])
 
         assert "BTC/USDT" not in bot._open_trades
+
+
+class TestHubAckRetry:
+    @pytest.mark.asyncio
+    async def test_retry_pending_hub_trades_preserves_action_override(self, bot):
+        rec = TradeRecord(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="rsi",
+            action="open",
+            opened_at="2026-02-20T10:00:00+00:00",
+        )
+        bot._pending_hub_acks["rk1"] = {
+            "bot_id": "momentum",
+            "action": "update",
+            "trade": rec.model_dump(),
+            "request_key": "rk1",
+        }
+        bot._push_trade_to_hub = AsyncMock()
+
+        bot._retry_pending_hub_trades()
+        await asyncio.sleep(0)
+
+        bot._push_trade_to_hub.assert_awaited()
+        kwargs = bot._push_trade_to_hub.await_args.kwargs
+        assert kwargs["request_key"] == "rk1"
+        assert kwargs["action_override"] == "update"

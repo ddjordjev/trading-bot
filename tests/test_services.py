@@ -693,8 +693,7 @@ class TestSignalGenerator:
         )
         gen.generate(snap, empty_queue)
         daily = empty_queue.get_actionable(SignalPriority.DAILY)
-        proposal = next(p for p in daily if p.strategy == "trending_momentum" and p.symbol == "PEPE/USDT")
-        assert proposal.strength < 0.55
+        assert not any(p for p in daily if p.strategy == "trending_momentum" and p.symbol == "PEPE/USDT")
 
     def test_count_directional_agreement_zero_for_neutral(self, gen):
         snap = IntelSnapshot(preferred_direction="neutral")

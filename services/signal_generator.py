@@ -412,6 +412,7 @@ class SignalGenerator:
     def _generate_daily(self, snap: IntelSnapshot, q: TradeQueue) -> None:
         # Trending coins with TV alignment — momentum entry
         tv_direction = snap.tv_btc_consensus
+        directional_agreement = self._count_directional_agreement(snap)
         for mover in self._merge_trending(snap):
             if mover.is_low_liquidity:
                 continue
@@ -422,6 +423,14 @@ class SignalGenerator:
             sym = self._pair_symbol(mover.symbol)
 
             tv_aligned = (tv_direction == side) or tv_direction == "neutral"
+            if not (tv_aligned or directional_agreement >= 2):
+                continue
+            if mover.source == "binance_scanner":
+                if float(mover.cex_confidence or 0.0) < 0.35:
+                    continue
+                one_hour = float(mover.change_1h or 0.0)
+                if one_hour != 0 and ((one_hour > 0) != (mover.change_24h > 0)):
+                    continue
             strength = 0.40
             if abs(mover.change_24h) >= 5.0:
                 strength += 0.10
@@ -429,6 +438,7 @@ class SignalGenerator:
                 strength += 0.15
             if abs(mover.change_24h) > 10:
                 strength += 0.10
+            leverage = 10 if strength >= 0.55 else 5
 
             self._propose(
                 q,
@@ -440,8 +450,8 @@ class SignalGenerator:
                     reason=f"{mover.symbol} 24h:{mover.change_24h:+.1f}% vol:${mover.volume_24h / 1e6:.0f}M"
                     f" TV:{tv_direction}",
                     strength=min(0.9, strength),
-                    leverage=10,
-                    max_age_seconds=14400,  # 4 hours
+                    leverage=leverage,
+                    max_age_seconds=7200,
                     source="monitor",
                 ),
             )

@@ -6,6 +6,7 @@ import signal
 import sys
 import time
 import uuid
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -139,10 +140,16 @@ class TradingBot:
         self._available_spot_symbols: set[str] = set()
         self._available_futures_symbols: set[str] = set()
         self._raw_balance: float = 0.0
+        self._estimated_exchange_equity: float = 0.0
         self._session_start_balance: float = 0.0
         self._realized_pnl: float = 0.0
         self._enabled: bool = True  # hub-controlled enable flag
         self._hub_enabled: bool = True  # latest value from hub report response
+        self._low_balance_paused: bool = False
+        self._low_balance_pause_reason: str = ""
+        self._last_low_balance_check_ts: float = 0.0
+        self._insufficient_balance_events: deque[float] = deque()
+        self._last_auto_disable_ts: float = 0.0
         self._validator = get_validator(self.settings.bot_style, paper_mode=self.settings.is_paper())
 
     # -- Strategy Management --
@@ -257,6 +264,130 @@ class TradingBot:
             timeout=aiohttp.ClientTimeout(total=timeout_seconds),
             headers=self._hub_auth_headers(),
         )
+
+    def _entries_allowed(self, warmup_done: bool) -> bool:
+        return warmup_done and not self.target.manual_stop and not self._low_balance_paused
+
+    def _estimate_exchange_equity(self, positions: list[Any], free_usdt: float) -> float:
+        margin_used = 0.0
+        unrealized = 0.0
+        for pos in positions:
+            amount = float(getattr(pos, "amount", 0.0) or 0.0)
+            if amount <= 0:
+                continue
+            lev = max(float(getattr(pos, "leverage", 1.0) or 1.0), 1.0)
+            notional = float(getattr(pos, "notional_value", 0.0) or 0.0)
+            if notional <= 0:
+                current = float(getattr(pos, "current_price", 0.0) or 0.0)
+                notional = abs(amount) * current
+            margin_used += notional / lev
+            unrealized += float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+        return max(0.0, float(free_usdt or 0.0) + margin_used + unrealized)
+
+    def _update_low_balance_guard_state(self, free_usdt: float, positions: list[Any], source: str) -> None:
+        now_ts = time.monotonic()
+        self._last_low_balance_check_ts = now_ts
+        equity = self._estimate_exchange_equity(positions, free_usdt)
+        self._estimated_exchange_equity = equity
+        threshold = float(self.settings.min_tradeable_equity_usdt)
+        was_paused = self._low_balance_paused
+        self._low_balance_paused = equity < threshold
+        if self._low_balance_paused:
+            self._low_balance_pause_reason = (
+                f"low_balance_guard: equity={equity:.2f} < threshold={threshold:.2f} ({source})"
+            )
+            if not was_paused:
+                logger.warning(
+                    "Pausing new entries: estimated exchange equity {:.2f} < {:.2f} (source={})",
+                    equity,
+                    threshold,
+                    source,
+                )
+        elif was_paused:
+            logger.info(
+                "Resuming new entries: estimated exchange equity {:.2f} >= {:.2f} (source={})",
+                equity,
+                threshold,
+                source,
+            )
+            self._low_balance_pause_reason = ""
+
+    async def _maybe_refresh_low_balance_guard(self) -> None:
+        if not self._low_balance_paused:
+            return
+        interval = max(30, int(self.settings.low_balance_recheck_seconds))
+        now_ts = time.monotonic()
+        if (now_ts - self._last_low_balance_check_ts) < interval:
+            return
+        try:
+            balance_map = await self.exchange.fetch_balance()
+            positions = await self.exchange.fetch_positions()
+            free_usdt = float(balance_map.get("USDT", 0.0) or 0.0)
+            self._raw_balance = free_usdt
+            self._update_low_balance_guard_state(free_usdt, positions, source="quick_recheck")
+        except Exception as e:
+            logger.warning("Low-balance guard recheck failed: {}", e)
+
+    @staticmethod
+    def _is_insufficient_balance_reason(reason: str) -> bool:
+        txt = str(reason or "").lower()
+        return any(
+            token in txt
+            for token in (
+                "insufficient balance",
+                "not enough for new order",
+                "170131",
+                "110007",
+                "ab not enough",
+            )
+        )
+
+    async def _maybe_handle_insufficient_balance_outcome(self, outcome_reason: str) -> None:
+        if not self._is_insufficient_balance_reason(outcome_reason):
+            return
+        now_ts = time.monotonic()
+        window = max(60, int(self.settings.insufficient_balance_burst_window_seconds))
+        threshold = max(2, int(self.settings.insufficient_balance_burst_threshold))
+        self._insufficient_balance_events.append(now_ts)
+        while self._insufficient_balance_events and (now_ts - self._insufficient_balance_events[0]) > window:
+            self._insufficient_balance_events.popleft()
+        burst_size = len(self._insufficient_balance_events)
+        logger.warning(
+            "Insufficient-balance event detected ({} in last {}s): {}",
+            burst_size,
+            window,
+            outcome_reason[:160],
+        )
+        if not self.settings.insufficient_balance_auto_disable:
+            return
+        if str(self.settings.exchange).lower() != "bybit":
+            return
+        if burst_size < threshold:
+            return
+        if (now_ts - self._last_auto_disable_ts) < 300:
+            return
+        self._last_auto_disable_ts = now_ts
+        reason = (
+            f"auto-disabled: {burst_size} insufficient-balance errors in {window}s on {self.settings.exchange.upper()}"
+        )
+        await self._disable_self_on_hub(reason)
+
+    async def _disable_self_on_hub(self, reason: str) -> None:
+        hub_url = self.settings.hub_url
+        if not hub_url:
+            return
+        if not self._hub_session:
+            self._hub_session = self._new_hub_session(timeout_seconds=10)
+        payload = {"bot_id": self.settings.bot_id or "default", "reason": reason}
+        try:
+            async with self._hub_session.post(f"{hub_url.rstrip('/')}/internal/bot-disable", json=payload) as resp:
+                if resp.status == 200:
+                    logger.error("Requested hub auto-disable for bot {}: {}", payload["bot_id"], reason)
+                else:
+                    snippet = (await resp.text())[:200].strip()
+                    logger.warning("Hub auto-disable failed (status={}): {}", resp.status, snippet or "<empty>")
+        except Exception as e:
+            logger.warning("Hub auto-disable request error: {}", e)
 
     async def _lean_idle_loop(self) -> None:
         """Minimal loop for inactive bots — no exchange, no strategies, no hub communication.
@@ -406,7 +537,9 @@ class TradingBot:
             uptime_min = (datetime.now(UTC) - self._started_at).total_seconds() / 60
             warmup_done = uptime_min >= self._warmup_minutes
 
-        if warmup_done and not self.target.manual_stop and self._hub_proposal:
+        await self._maybe_refresh_low_balance_guard()
+
+        if self._entries_allowed(warmup_done) and self._hub_proposal:
             await self._process_trade_queue()
 
         try:
@@ -415,8 +548,9 @@ class TradingBot:
                 "bot_style": self.settings.bot_style,
                 "exchange": self.settings.exchange.upper(),
                 "open_symbols": list(self._open_trades.keys()),
-                "ready": warmup_done and not self.target.manual_stop,
+                "ready": self._entries_allowed(warmup_done),
                 "foreign_positions": [],
+                "entries_paused_low_balance": self._low_balance_paused,
             }
             # Keep dashboard PnL/price near-real-time between full ticks.
             # Without this, position rows can look stale and then "jump" on full tick.
@@ -491,7 +625,7 @@ class TradingBot:
                 if "enabled" in body:
                     self._hub_enabled = body["enabled"]
                 self._hub_proposal = None
-                if "proposal" in body and warmup_done and not self.target.manual_stop:
+                if "proposal" in body and self._entries_allowed(warmup_done):
                     self._hub_proposal = TradeProposal(**body["proposal"])
                 for key in body.get("confirmed_keys", []):
                     self._pending_hub_acks.pop(key, None)
@@ -504,9 +638,9 @@ class TradingBot:
             )
             return
         self._retry_pending_hub_trades()
-        if warmup_done and not self.target.manual_stop:
+        if self._entries_allowed(warmup_done):
             await self._process_trade_queue()
-        elif self.target.manual_stop:
+        elif self.target.manual_stop or self._low_balance_paused:
             # Drop any stale proposal while halted.
             self._hub_proposal = None
 
@@ -717,6 +851,7 @@ class TradingBot:
         self._raw_balance = raw_balance
 
         positions = await self.exchange.fetch_positions()
+        self._update_low_balance_guard_state(float(raw_balance or 0.0), positions, source="full_tick")
         await self._reconcile_runtime_open_trades(positions)
         # Shared-account mode: only include positions this bot owns.
         owned_symbols = set(self._open_trades.keys()) | set(self.orders.scaler.active_positions.keys())
@@ -782,6 +917,18 @@ class TradingBot:
         if self.target.manual_stop:
             # HALT mode: keep only protective/close logic active. Never place new
             # scale/hedge/wick/extreme entries while STOP is active.
+            self._hub_proposal = None
+            try:
+                await self._write_deployment_status()
+            except Exception as e:
+                logger.error("Failed to write deployment status: {}", e, exc_info=True)
+            await self._log_status()
+            await self._check_daily_reset()
+            return
+
+        if self._low_balance_paused:
+            # Low-balance safety: no new entries/scale-ins. Keep only monitoring
+            # and protection in place until equity recovers above threshold.
             self._hub_proposal = None
             try:
                 await self._write_deployment_status()
@@ -986,6 +1133,9 @@ class TradingBot:
         if self.target.manual_stop:
             await self._report_queue_outcome(proposal.id, "rejected", "manual_stop")
             return
+        if self._low_balance_paused:
+            await self._report_queue_outcome(proposal.id, "rejected", "low_balance_pause")
+            return
 
         if not self.settings.is_market_type_allowed(proposal.market_type):
             await self._report_queue_outcome(
@@ -1027,6 +1177,7 @@ class TradingBot:
         else:
             outcome_reason = self._last_queue_exec_reason or "execution_failed"
             await self._report_queue_outcome(proposal.id, "rejected", outcome_reason)
+            await self._maybe_handle_insufficient_balance_outcome(outcome_reason)
             logger.warning(
                 "Queue: not executed {} [{}] via {} ({})",
                 proposal.symbol,
@@ -1907,6 +2058,10 @@ class TradingBot:
                 "dynamic_strategies_count": dynamic_strategies_count,
                 "profit_buffer_pct": self.target.profit_buffer_pct,
                 "manual_stop_active": self.target.manual_stop,
+                "entries_paused_low_balance": self._low_balance_paused,
+                "low_balance_threshold_usdt": float(self.settings.min_tradeable_equity_usdt),
+                "estimated_exchange_equity": float(self._estimated_exchange_equity),
+                "low_balance_reason": self._low_balance_pause_reason,
                 "orphan_positions_count": 0,
             },
             "positions": pos_list,
@@ -1934,7 +2089,8 @@ class TradingBot:
         if self._started_at:
             uptime_min = (datetime.now(UTC) - self._started_at).total_seconds() / 60
             warmup_done = uptime_min >= self._warmup_minutes
-        payload["ready"] = warmup_done and not self.target.manual_stop
+        payload["ready"] = self._entries_allowed(warmup_done)
+        payload["entries_paused_low_balance"] = self._low_balance_paused
 
         try:
             url = f"{hub_url.rstrip('/')}/internal/report"
@@ -1948,7 +2104,7 @@ class TradingBot:
                 if "enabled" in body:
                     self._hub_enabled = body["enabled"]
                 self._hub_proposal = None
-                if "proposal" in body and warmup_done and not self.target.manual_stop:
+                if "proposal" in body and self._entries_allowed(warmup_done):
                     self._hub_proposal = TradeProposal(**body["proposal"])
         except Exception as e:
             logger.error("Hub report error: {}", e, exc_info=True)
@@ -2395,11 +2551,33 @@ class TradingBot:
             self.orders.hedger.remove(sym)
             self.orders.wick_scalper.close(sym)
             opened_at = rec.opened_at if rec else ""
+            estimated_exit_price = 0.0
+            estimated_pnl_usd = 0.0
+            estimated_pnl_pct = 0.0
+            if rec and rec.entry_price > 0 and rec.amount > 0:
+                with contextlib.suppress(Exception):
+                    market_type = MarketType.FUTURES if self.settings.futures_allowed else MarketType.SPOT
+                    ticker = await self.exchange.fetch_ticker(sym, market_type=market_type)
+                    estimated_exit_price = float(ticker.last or 0.0)
+                    if estimated_exit_price > 0:
+                        if rec.side == "short":
+                            estimated_pnl_usd = (rec.entry_price - estimated_exit_price) * rec.amount
+                            estimated_pnl_pct = ((rec.entry_price - estimated_exit_price) / rec.entry_price) * 100.0
+                        else:
+                            estimated_pnl_usd = (estimated_exit_price - rec.entry_price) * rec.amount
+                            estimated_pnl_pct = ((estimated_exit_price - rec.entry_price) / rec.entry_price) * 100.0
             if hub_url and self._hub_session and opened_at:
                 with contextlib.suppress(Exception):
                     async with self._hub_session.post(
                         f"{hub_url.rstrip('/')}/internal/recovery-close",
-                        json={"bot_id": bot_id, "opened_at": opened_at},
+                        json={
+                            "bot_id": bot_id,
+                            "opened_at": opened_at,
+                            "symbol": sym,
+                            "estimated_exit_price": estimated_exit_price,
+                            "estimated_pnl_usd": estimated_pnl_usd,
+                            "estimated_pnl_pct": estimated_pnl_pct,
+                        },
                     ):
                         pass
             logger.warning("Runtime reconcile: removed stale local open trade {}", sym)
@@ -2434,8 +2612,9 @@ class TradingBot:
         for payload in stale[:5]:
             rk = payload.get("request_key", "")
             record_data = payload.get("trade", {})
+            action = str(payload.get("action", "") or "").strip() or None
             rec = TradeRecord(**{k: v for k, v in record_data.items() if k in TradeRecord.model_fields})
-            task = asyncio.ensure_future(self._push_trade_to_hub(rec, request_key=rk))
+            task = asyncio.ensure_future(self._push_trade_to_hub(rec, request_key=rk, action_override=action))
             self._hub_tasks.add(task)
             task.add_done_callback(self._hub_tasks.discard)
 

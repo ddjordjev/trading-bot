@@ -11,7 +11,17 @@ from db.models import TradeRecord
 DB_PATH = Path("data/trades.db")
 _ANALYTICS_EXCLUDED_CLOSE_SOURCES = ("reservation_cancel", "recovery")
 _ANALYTICS_EXCLUDED_CLOSE_REASONS = ("risk_or_gate", "open_exception", "failed_fill:pending")
-_ANALYTICS_EXCLUDED_STRATEGIES = ("risk_manager", "manual_override", "stop")
+_ANALYTICS_EXCLUDED_STRATEGIES = (
+    "risk_manager",
+    "manual_override",
+    "stop",
+    "manual_claim",
+    "runtime_recovered",
+    "unknown",
+)
+_ANALYTICS_CLOSE_SOURCE_PH = ", ".join("?" for _ in _ANALYTICS_EXCLUDED_CLOSE_SOURCES)
+_ANALYTICS_CLOSE_REASON_PH = ", ".join("?" for _ in _ANALYTICS_EXCLUDED_CLOSE_REASONS)
+_ANALYTICS_STRATEGY_PH = ", ".join("?" for _ in _ANALYTICS_EXCLUDED_STRATEGIES)
 
 
 class TradeDB:
@@ -252,6 +262,27 @@ class TradeDB:
         rows = self._conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [self._row_to_trade(r) for r in rows]
 
+    def get_analytics_trades(self, limit: int = 500) -> list[TradeRecord]:
+        """Return close-trade records suitable for analytics scoring/patterns."""
+        assert self._conn
+        rows = self._conn.execute(
+            f"""
+            SELECT * FROM trades
+            WHERE action='close'
+              AND close_source NOT IN ({_ANALYTICS_CLOSE_SOURCE_PH})
+              AND close_reason NOT IN ({_ANALYTICS_CLOSE_REASON_PH})
+              AND strategy NOT IN ({_ANALYTICS_STRATEGY_PH})
+            ORDER BY id DESC LIMIT ?
+            """,
+            (
+                *_ANALYTICS_EXCLUDED_CLOSE_SOURCES,
+                *_ANALYTICS_EXCLUDED_CLOSE_REASONS,
+                *_ANALYTICS_EXCLUDED_STRATEGIES,
+                limit,
+            ),
+        ).fetchall()
+        return [self._row_to_trade(r) for r in rows]
+
     def get_trades_by_strategy(self, strategy: str, limit: int = 200) -> list[TradeRecord]:
         assert self._conn
         rows = self._conn.execute(
@@ -279,13 +310,13 @@ class TradeDB:
     def get_strategy_names(self) -> list[str]:
         assert self._conn
         rows = self._conn.execute(
-            """
+            f"""
             SELECT DISTINCT strategy
             FROM trades
             WHERE action='close'
-              AND close_source NOT IN (?, ?)
-              AND close_reason NOT IN (?, ?, ?)
-              AND strategy NOT IN (?, ?, ?)
+              AND close_source NOT IN ({_ANALYTICS_CLOSE_SOURCE_PH})
+              AND close_reason NOT IN ({_ANALYTICS_CLOSE_REASON_PH})
+              AND strategy NOT IN ({_ANALYTICS_STRATEGY_PH})
             ORDER BY strategy
             """,
             (
@@ -300,9 +331,9 @@ class TradeDB:
         assert self._conn
         where = (
             "strategy = ? AND action = 'close' "
-            "AND close_source NOT IN (?, ?) "
-            "AND close_reason NOT IN (?, ?, ?) "
-            "AND strategy NOT IN (?, ?, ?)"
+            f"AND close_source NOT IN ({_ANALYTICS_CLOSE_SOURCE_PH}) "
+            f"AND close_reason NOT IN ({_ANALYTICS_CLOSE_REASON_PH}) "
+            f"AND strategy NOT IN ({_ANALYTICS_STRATEGY_PH})"
         )
         params: list[str] = [strategy]
         params.extend(
@@ -345,9 +376,9 @@ class TradeDB:
         assert self._conn
         where = (
             "WHERE action='close' "
-            "AND close_source NOT IN (?, ?) "
-            "AND close_reason NOT IN (?, ?, ?) "
-            "AND strategy NOT IN (?, ?, ?)"
+            f"AND close_source NOT IN ({_ANALYTICS_CLOSE_SOURCE_PH}) "
+            f"AND close_reason NOT IN ({_ANALYTICS_CLOSE_REASON_PH}) "
+            f"AND strategy NOT IN ({_ANALYTICS_STRATEGY_PH})"
         )
         params: list[Any] = [
             *_ANALYTICS_EXCLUDED_CLOSE_SOURCES,
@@ -383,9 +414,9 @@ class TradeDB:
         assert self._conn
         where = (
             "WHERE action='close' AND market_regime != '' "
-            "AND close_source NOT IN (?, ?) "
-            "AND close_reason NOT IN (?, ?, ?) "
-            "AND strategy NOT IN (?, ?, ?)"
+            f"AND close_source NOT IN ({_ANALYTICS_CLOSE_SOURCE_PH}) "
+            f"AND close_reason NOT IN ({_ANALYTICS_CLOSE_REASON_PH}) "
+            f"AND strategy NOT IN ({_ANALYTICS_STRATEGY_PH})"
         )
         params: list[Any] = [
             *_ANALYTICS_EXCLUDED_CLOSE_SOURCES,
@@ -421,14 +452,14 @@ class TradeDB:
         """Positive = consecutive wins, negative = consecutive losses."""
         assert self._conn
         rows = self._conn.execute(
-            """
+            f"""
             SELECT is_winner FROM trades
             WHERE strategy = ?
               AND pnl_usd != 0
               AND action='close'
-              AND close_source NOT IN (?, ?)
-              AND close_reason NOT IN (?, ?, ?)
-              AND strategy NOT IN (?, ?, ?)
+              AND close_source NOT IN ({_ANALYTICS_CLOSE_SOURCE_PH})
+              AND close_reason NOT IN ({_ANALYTICS_CLOSE_REASON_PH})
+              AND strategy NOT IN ({_ANALYTICS_STRATEGY_PH})
             ORDER BY id DESC LIMIT 20
             """,
             (
@@ -452,14 +483,14 @@ class TradeDB:
     def get_max_loss_streak(self, strategy: str) -> int:
         assert self._conn
         rows = self._conn.execute(
-            """
+            f"""
             SELECT is_winner FROM trades
             WHERE strategy = ?
               AND pnl_usd != 0
               AND action='close'
-              AND close_source NOT IN (?, ?)
-              AND close_reason NOT IN (?, ?, ?)
-              AND strategy NOT IN (?, ?, ?)
+              AND close_source NOT IN ({_ANALYTICS_CLOSE_SOURCE_PH})
+              AND close_reason NOT IN ({_ANALYTICS_CLOSE_REASON_PH})
+              AND strategy NOT IN ({_ANALYTICS_STRATEGY_PH})
             ORDER BY id
             """,
             (

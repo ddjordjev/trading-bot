@@ -62,6 +62,7 @@ class BybitExchange(BaseExchange):
         self._positions_cache: tuple[float, list[Position]] | None = None
         self._positions_cache_ttl_secs = 1.5
         self._positions_cache_lock = asyncio.Lock()
+        self._leverage_by_symbol: dict[str, int] = {}
 
     @property
     def name(self) -> str:
@@ -452,12 +453,21 @@ class BybitExchange(BaseExchange):
         return orders
 
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
+        cached = self._leverage_by_symbol.get(symbol)
+        if cached == leverage:
+            return True
         try:
             resolved_symbol = self._resolve_symbol(symbol, MarketType.FUTURES)
             await self._futures.set_leverage(leverage, resolved_symbol)
+            self._leverage_by_symbol[symbol] = leverage
             logger.debug("Leverage set to {}x for {}", leverage, symbol)
             return True
         except Exception as e:
+            msg = str(e).lower()
+            if 'retcode":110043' in msg or "retcode 110043" in msg or "leverage not modified" in msg:
+                # Bybit returns this when requested leverage already matches current.
+                self._leverage_by_symbol[symbol] = leverage
+                return True
             logger.warning("Could not set leverage for {}: {}", symbol, e)
             return False
 

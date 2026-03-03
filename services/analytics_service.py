@@ -59,6 +59,9 @@ class AnalyticsService:
         deleted_noise = self.hub_db.cleanup_non_executed_close_noise()
         if deleted_noise > 0:
             logger.info("Cleaned {} non-executed close-noise rows before analytics refresh", deleted_noise)
+        deleted_dupes = self.hub_db.cleanup_duplicate_trade_rows()
+        if deleted_dupes > 0:
+            logger.info("Deduplicated {} duplicate trade rows before analytics refresh", deleted_dupes)
         self.engine = AnalyticsEngine(self.db)
         self._last_trade_count = self.db.trade_count()
         self._running = True
@@ -136,6 +139,11 @@ class AnalyticsService:
                 force_periodic = (now - self._last_full_refresh) >= _FULL_REFRESH_INTERVAL
 
                 if new_trades > 0:
+                    deleted_dupes = self.hub_db.cleanup_duplicate_trade_rows()
+                    if deleted_dupes > 0:
+                        logger.info("Deduplicated {} duplicate trade rows before incremental refresh", deleted_dupes)
+                        current_count = self.db.trade_count()
+                        new_trades = current_count - self._last_trade_count
                     logger.info("Detected {} new trade(s) (total: {}), refreshing...", new_trades, current_count)
                     self._do_refresh()
                     self._last_trade_count = current_count

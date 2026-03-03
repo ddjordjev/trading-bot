@@ -443,6 +443,8 @@ class TestAnalyticsService:
         svc = AnalyticsService(refresh_interval=0)
         svc.db = MagicMock()
         svc.db.trade_count.return_value = 5
+        svc.hub_db = MagicMock()
+        svc.hub_db.cleanup_duplicate_trade_rows.return_value = 0
         svc._last_trade_count = 3
         svc._running = True
         mock_engine = MagicMock()

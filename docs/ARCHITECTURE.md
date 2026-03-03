@@ -193,6 +193,18 @@ pre-selected as extreme movers. Bots with `EXTREME_ENABLED=true` subscribe
 to WebSocket tickers for ONLY these candidates — they never scan the full
 market themselves. See "Delegated Local Tasks" below.
 
+Low-balance safety:
+- Bots compute estimated exchange equity (`available + margin_used + uPnL`).
+- If equity drops below `MIN_TRADEABLE_EQUITY_USDT` (default `50`), bots pause
+  new entries and queue consumption, keep managing existing positions, and
+  continue reporting status to the hub.
+- While paused, bots re-check balance every `LOW_BALANCE_RECHECK_SECONDS`
+  (default `300`) and automatically resume queue participation only after
+  equity recovers above threshold.
+- Repeated insufficient-balance exchange errors can auto-disable the bot in hub
+  config (`INSUFFICIENT_BALANCE_*` settings), preventing repeated failed order
+  spam while funds are unavailable.
+
 ### Trade Persistence
 
 ```
@@ -376,12 +388,22 @@ Recommendation lifecycle:
 Analytics data hygiene:
 - Failed pre-open reservations are cancelled as reservation rows (deleted) and
   are not converted into synthetic closed trades.
+- Trade writes are idempotent and canonicalized by ownership tuple
+  (`bot_id + symbol + opened_at`) to avoid duplicate open/close rows during
+  retries and reservation upgrades.
 - Analytics scoring excludes non-executed close noise
   (`reservation_cancel`, `risk_or_gate`, `open_exception`,
   `failed_fill:pending`, `recovery`) and operational pseudo-strategies
-  (`risk_manager`, `manual_override`, `stop`).
+  (`risk_manager`, `manual_override`, `stop`, `manual_claim`,
+  `runtime_recovered`, `unknown`).
 - Close records keep the original entry strategy attribution; close reasons are
   tracked separately in `close_reason`.
+- Recovery closes can store best-effort estimated exit/PnL fields for forensic
+  diagnostics while still remaining excluded from strategy scoring.
+- Hub persists throttled per-exchange equity snapshots in
+  `exchange_equity_snapshots` for account-level incident timelines.
+- AnalyticsService runs a duplicate-row cleanup pass before refresh so strategy
+  scoring stays based on canonical trade history.
 
 Ephemeral JSON files (`bot_status.json`, `trade_queue.json`, etc.) are
 created at runtime and should be wiped on rebuild:

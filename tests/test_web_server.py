@@ -697,6 +697,22 @@ class TestInternalReport:
 
     async def test_get_bot_strategy_stats(self, client):
         for i in range(3):
+            opened_at = f"2026-01-0{i + 1}T00:00:00"
+            await client.post(
+                "/internal/trade",
+                json={
+                    "bot_id": "stats-bot",
+                    "action": "open",
+                    "trade": {
+                        "symbol": "BTC/USDT",
+                        "side": "long",
+                        "strategy": "rsi",
+                        "action": "open",
+                        "opened_at": opened_at,
+                    },
+                    "request_key": f"stats-open-{i}",
+                },
+            )
             await client.post(
                 "/internal/trade",
                 json={
@@ -709,7 +725,7 @@ class TestInternalReport:
                         "action": "close",
                         "pnl_usd": 10.0,
                         "is_winner": True,
-                        "opened_at": f"2026-01-0{i + 1}T00:00:00",
+                        "opened_at": opened_at,
                         "closed_at": f"2026-01-0{i + 1}T01:00:00",
                     },
                     "request_key": f"stats-key-{i}",
@@ -745,6 +761,37 @@ class TestInternalReport:
         open_trades = r2.json()
         symbols = [t["symbol"] for t in open_trades]
         assert "SOL/USDT" not in symbols
+
+    async def test_recovery_close_accepts_estimated_exit(self, client):
+        await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "recover-est-bot",
+                "action": "open",
+                "trade": {
+                    "symbol": "ETH/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "open",
+                    "entry_price": 3000.0,
+                    "amount": 0.1,
+                    "opened_at": "2026-01-06T00:00:00",
+                },
+                "request_key": "recover-est-open-1",
+            },
+        )
+        r = await client.post(
+            "/internal/recovery-close",
+            json={
+                "bot_id": "recover-est-bot",
+                "opened_at": "2026-01-06T00:00:00",
+                "estimated_exit_price": 3050.0,
+                "estimated_pnl_usd": 5.0,
+                "estimated_pnl_pct": 1.67,
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["updated"] is True
 
     async def test_report_returns_confirmed_keys(self, client):
         await client.post(
@@ -2536,6 +2583,35 @@ class TestHubPushEndpoints:
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
 
+    async def test_push_trade_open_second_call_updates_not_duplicates(self, client):
+        payload = {
+            "bot_id": "momentum",
+            "action": "open",
+            "trade": {
+                "symbol": "BTC/USDT",
+                "side": "long",
+                "strategy": "rsi",
+                "action": "open",
+                "entry_price": 50000,
+                "amount": 0.01,
+                "leverage": 10,
+                "opened_at": "2026-02-20T10:00:00",
+            },
+        }
+        r1 = await client.post("/internal/trade", json=payload)
+        assert r1.status_code == 200
+        payload["trade"]["entry_price"] = 50200
+        payload["trade"]["amount"] = 0.02
+        r2 = await client.post("/internal/trade", json=payload)
+        assert r2.status_code == 200
+
+        r_open = await client.get("/internal/trades/momentum/open")
+        assert r_open.status_code == 200
+        rows = r_open.json()
+        assert len(rows) == 1
+        assert rows[0]["entry_price"] == 50200
+        assert rows[0]["amount"] == 0.02
+
     async def test_push_trade_close_updates_open_row(self, client):
         await client.post(
             "/internal/trade",
@@ -2618,6 +2694,27 @@ class TestHubPushEndpoints:
         assert r.status_code == 200
         assert r.json()["action"] == "update"
 
+    async def test_push_trade_close_deferred_when_open_missing(self, client):
+        r = await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "momentum",
+                "action": "close",
+                "trade": {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "close",
+                    "opened_at": "2099-02-20T10:00:00",
+                    "closed_at": "2099-02-20T10:30:00",
+                    "exit_price": 51000,
+                },
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "deferred"
+        assert r.json()["action"] == "close"
+
     async def test_cancel_reservation_deletes_preopen_row(self, client):
         await client.post(
             "/internal/trade",
@@ -2665,6 +2762,17 @@ class TestHubPushEndpoints:
         )
         assert r.status_code == 200
         assert r.json()["status"] == "error"
+
+    async def test_internal_bot_disable(self, client):
+        r = await client.post(
+            "/internal/bot-disable",
+            json={"bot_id": "aggressive", "reason": "insufficient balance burst"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        assert body["bot_id"] == "aggressive"
+        assert body["enabled"] is False
 
 
 # ── Bot Profiles ─────────────────────────────────────────────────────

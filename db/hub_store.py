@@ -159,6 +159,19 @@ class HubDB(TradeDB):
                 ON openclaw_daily_reports(completed_at);
             CREATE INDEX IF NOT EXISTS idx_openclaw_suggestions_status
                 ON openclaw_suggestions(status, updated_at);
+
+            CREATE TABLE IF NOT EXISTS exchange_equity_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                exchange TEXT NOT NULL,
+                available_usdt REAL NOT NULL DEFAULT 0,
+                estimated_equity_usdt REAL NOT NULL DEFAULT 0,
+                open_positions INTEGER NOT NULL DEFAULT 0,
+                source_bot TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'bot_report',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_exchange_equity_snapshots_ex_ts
+                ON exchange_equity_snapshots(exchange, created_at);
         """)
         self._ensure_bot_id_column()
         self._ensure_request_key_column()
@@ -190,6 +203,33 @@ class HubDB(TradeDB):
             self._conn.commit()
 
     # ---- Trade ingestion (hub-specific) ----
+
+    def _latest_open_row_id(self, bot_id: str, opened_at: str, symbol: str = "") -> int | None:
+        """Return the newest unclosed trade row for bot ownership tuple."""
+        assert self._conn
+        if symbol:
+            row = self._conn.execute(
+                """
+                SELECT id
+                FROM trades
+                WHERE bot_id=? AND opened_at=? AND symbol=? AND closed_at=''
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (bot_id, opened_at, symbol),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                """
+                SELECT id
+                FROM trades
+                WHERE bot_id=? AND opened_at=? AND closed_at=''
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (bot_id, opened_at),
+            ).fetchone()
+        return int(row["id"]) if row else None
 
     def insert_trade(self, bot_id: str, trade: dict[str, Any], request_key: str = "") -> int:
         """Insert a trade record pushed by a bot. Deduplicates by request_key."""
@@ -294,6 +334,86 @@ class HubDB(TradeDB):
             self._mark_confirmed(bot_id, request_key)
         return row_id
 
+    def update_trade_open(self, bot_id: str, opened_at: str, data: dict[str, Any], request_key: str = "") -> bool:
+        """Upgrade an existing reservation/open row with actual fill details."""
+        assert self._conn
+        if request_key:
+            existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
+            if existing:
+                self._mark_confirmed(bot_id, request_key)
+                return True
+
+        row_id = self._latest_open_row_id(bot_id, opened_at, str(data.get("symbol", "") or ""))
+        if row_id is None:
+            row_id = self._latest_open_row_id(bot_id, opened_at)
+        if row_id is None:
+            return False
+
+        try:
+            cursor = self._conn.execute(
+                """UPDATE trades SET
+                action='open',
+                symbol=?, side=?, strategy=?, scale_mode=?,
+                entry_price=?, amount=?, leverage=?,
+                market_regime=?, fear_greed=?, daily_tier=?, daily_pnl_at_entry=?,
+                signal_strength=?, hour_utc=?, day_of_week=?, volatility_pct=?,
+                planned_stop_loss=?, planned_tp1=?, planned_tp2=?,
+                exchange_stop_loss=?, exchange_take_profit=?,
+                bot_stop_loss=?, bot_take_profit=?,
+                effective_stop_loss=?, effective_take_profit=?,
+                stop_source=?, tp_source=?,
+                was_quick_trade=?, was_low_liquidity=?, dca_count=?, max_drawdown_pct=?,
+                request_key=CASE WHEN ?='' THEN request_key ELSE ? END
+            WHERE id=?""",
+                (
+                    data.get("symbol", ""),
+                    data.get("side", ""),
+                    data.get("strategy", ""),
+                    data.get("scale_mode", ""),
+                    data.get("entry_price", 0),
+                    data.get("amount", 0),
+                    data.get("leverage", 1),
+                    data.get("market_regime", ""),
+                    data.get("fear_greed", 50),
+                    data.get("daily_tier", ""),
+                    data.get("daily_pnl_at_entry", 0),
+                    data.get("signal_strength", 0),
+                    data.get("hour_utc", 0),
+                    data.get("day_of_week", 0),
+                    data.get("volatility_pct", 0),
+                    data.get("planned_stop_loss", 0),
+                    data.get("planned_tp1", 0),
+                    data.get("planned_tp2", 0),
+                    data.get("exchange_stop_loss", 0),
+                    data.get("exchange_take_profit", 0),
+                    data.get("bot_stop_loss", 0),
+                    data.get("bot_take_profit", 0),
+                    data.get("effective_stop_loss", 0),
+                    data.get("effective_take_profit", 0),
+                    data.get("stop_source", "none"),
+                    data.get("tp_source", "none"),
+                    int(data.get("was_quick_trade", False)),
+                    int(data.get("was_low_liquidity", False)),
+                    data.get("dca_count", 0),
+                    data.get("max_drawdown_pct", 0),
+                    request_key,
+                    request_key,
+                    row_id,
+                ),
+            )
+            self._conn.commit()
+        except sqlite3.IntegrityError:
+            if request_key:
+                existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
+                if existing:
+                    self._mark_confirmed(bot_id, request_key)
+                    return True
+            raise
+        updated = cursor.rowcount > 0
+        if updated and request_key:
+            self._mark_confirmed(bot_id, request_key)
+        return updated
+
     def update_trade_close(self, bot_id: str, opened_at: str, data: dict[str, Any], request_key: str = "") -> bool:
         """Update an open trade row with exit data (matched by bot_id + opened_at)."""
         assert self._conn
@@ -302,6 +422,12 @@ class HubDB(TradeDB):
             if existing:
                 self._mark_confirmed(bot_id, request_key)
                 return True
+
+        row_id = self._latest_open_row_id(bot_id, opened_at, str(data.get("symbol", "") or ""))
+        if row_id is None:
+            row_id = self._latest_open_row_id(bot_id, opened_at)
+        if row_id is None:
+            return False
 
         try:
             cursor = self._conn.execute(
@@ -316,7 +442,7 @@ class HubDB(TradeDB):
                 exchange_close_order_id=?, exchange_close_trade_id=?,
                 close_detected_at=?,
                 request_key=CASE WHEN ?='' THEN request_key ELSE ? END
-            WHERE bot_id=? AND opened_at=? AND closed_at=''""",
+            WHERE id=?""",
                 (
                     data.get("exit_price", 0),
                     data.get("amount", 0),
@@ -339,8 +465,7 @@ class HubDB(TradeDB):
                     data.get("close_detected_at", ""),
                     request_key,
                     request_key,
-                    bot_id,
-                    opened_at,
+                    row_id,
                 ),
             )
             self._conn.commit()
@@ -373,6 +498,12 @@ class HubDB(TradeDB):
                 self._mark_confirmed(bot_id, request_key)
                 return True
 
+        row_id = self._latest_open_row_id(bot_id, opened_at, str(data.get("symbol", "") or ""))
+        if row_id is None:
+            row_id = self._latest_open_row_id(bot_id, opened_at)
+        if row_id is None:
+            return False
+
         try:
             cursor = self._conn.execute(
                 """UPDATE trades SET
@@ -388,7 +519,7 @@ class HubDB(TradeDB):
                 stop_source=?,
                 tp_source=?,
                 request_key=CASE WHEN ?='' THEN request_key ELSE ? END
-            WHERE bot_id=? AND opened_at=? AND closed_at=''""",
+            WHERE id=?""",
                 (
                     data.get("planned_stop_loss", 0),
                     data.get("planned_tp1", 0),
@@ -403,8 +534,7 @@ class HubDB(TradeDB):
                     data.get("tp_source", "none"),
                     request_key,
                     request_key,
-                    bot_id,
-                    opened_at,
+                    row_id,
                 ),
             )
             self._conn.commit()
@@ -441,12 +571,16 @@ class HubDB(TradeDB):
                 self._mark_confirmed(bot_id, request_key)
                 return True
 
+        row_id = self._latest_open_row_id(bot_id, opened_at)
+        if row_id is None:
+            return False
+
         cursor = self._conn.execute(
             """
             DELETE FROM trades
-            WHERE bot_id=? AND opened_at=? AND closed_at='' AND action='open'
+            WHERE id=? AND action='open'
             """,
-            (bot_id, opened_at),
+            (row_id,),
         )
         self._conn.commit()
         deleted = cursor.rowcount > 0
@@ -473,19 +607,110 @@ class HubDB(TradeDB):
         self._conn.commit()
         return int(cursor.rowcount or 0)
 
-    def mark_recovery_close(self, bot_id: str, opened_at: str) -> bool:
-        """Mark an open trade as closed due to bot recovery (no exit stats)."""
+    def cleanup_duplicate_trade_rows(self) -> int:
+        """Deduplicate rows created by retried/reserved writes.
+
+        Keep only the newest row per `(bot_id, symbol, opened_at, action, closed_at)`.
+        Rows without `opened_at` are ignored to avoid collapsing historical legacy data.
+        """
+        assert self._conn
+        cursor = self._conn.execute(
+            """
+            DELETE FROM trades
+            WHERE COALESCE(opened_at, '') != ''
+              AND id NOT IN (
+                SELECT MAX(id)
+                FROM trades
+                WHERE COALESCE(opened_at, '') != ''
+                GROUP BY
+                  bot_id,
+                  symbol,
+                  opened_at,
+                  action,
+                  COALESCE(closed_at, '')
+              )
+            """
+        )
+        self._conn.commit()
+        return int(cursor.rowcount or 0)
+
+    def mark_recovery_close(
+        self,
+        bot_id: str,
+        opened_at: str,
+        estimated_exit_price: float = 0.0,
+        estimated_pnl_usd: float = 0.0,
+        estimated_pnl_pct: float = 0.0,
+    ) -> bool:
+        """Mark an open trade as closed due to bot recovery.
+
+        Recovery rows remain excluded from strategy analytics, but we store
+        best-effort exit estimates when available for operational forensics.
+        """
         assert self._conn
         closed_at = datetime.now(UTC).isoformat()
+        has_estimate = abs(float(estimated_exit_price or 0.0)) > 0 or abs(float(estimated_pnl_usd or 0.0)) > 0
         cursor = self._conn.execute(
             """UPDATE trades SET
                 action='close', recovery_close=1, closed_at=?,
-                close_source='recovery', close_reason='missing_on_exchange'
+                close_source='recovery',
+                close_reason=?,
+                exit_price=CASE WHEN ? > 0 THEN ? ELSE exit_price END,
+                pnl_usd=CASE WHEN ? != 0 THEN ? ELSE pnl_usd END,
+                pnl_pct=CASE WHEN ? != 0 THEN ? ELSE pnl_pct END,
+                is_winner=CASE
+                    WHEN ? != 0 THEN CASE WHEN ? > 0 THEN 1 ELSE 0 END
+                    ELSE is_winner
+                END
             WHERE bot_id=? AND opened_at=? AND closed_at=''""",
-            (closed_at, bot_id, opened_at),
+            (
+                closed_at,
+                "missing_on_exchange_estimated" if has_estimate else "missing_on_exchange",
+                float(estimated_exit_price or 0.0),
+                float(estimated_exit_price or 0.0),
+                float(estimated_pnl_usd or 0.0),
+                float(estimated_pnl_usd or 0.0),
+                float(estimated_pnl_pct or 0.0),
+                float(estimated_pnl_pct or 0.0),
+                float(estimated_pnl_usd or 0.0),
+                float(estimated_pnl_usd or 0.0),
+                bot_id,
+                opened_at,
+            ),
         )
         self._conn.commit()
         return cursor.rowcount > 0
+
+    def insert_exchange_equity_snapshot(
+        self,
+        exchange: str,
+        available_usdt: float,
+        estimated_equity_usdt: float,
+        open_positions: int,
+        source_bot: str,
+        source: str = "bot_report",
+    ) -> None:
+        """Persist a point-in-time account equity snapshot for an exchange."""
+        assert self._conn
+        now_iso = datetime.now(UTC).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO exchange_equity_snapshots (
+                exchange, available_usdt, estimated_equity_usdt,
+                open_positions, source_bot, source, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(exchange or "").strip().upper(),
+                float(available_usdt or 0.0),
+                float(estimated_equity_usdt or 0.0),
+                int(open_positions or 0),
+                str(source_bot or ""),
+                str(source or "bot_report"),
+                now_iso,
+            ),
+        )
+        self._conn.commit()
 
     # ---- Bot-centric queries ----
 

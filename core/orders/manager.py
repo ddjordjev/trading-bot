@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import re
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -68,9 +69,14 @@ class OrderManager:
         self._ORDER_COOLDOWN_SECS = 60
         self._protection_orders: dict[str, dict[str, Any]] = {}
         self._protection_retry_after: dict[str, datetime] = {}
+        self._protection_error_counts: dict[str, int] = {}
+        self._protection_short_stop_floor: dict[str, float] = {}
+        self._protection_long_stop_ceiling: dict[str, float] = {}
         self._protection_replace_min_interval_secs = 10
         self._protection_place_min_interval_secs = 10
         self._protection_alignment_tolerance_pct = 0.03
+        self._protection_error_backoff_base_secs = 30
+        self._protection_error_backoff_max_secs = 300
         self._orphan_protection_cleanup_interval_secs = 60
         self._last_orphan_protection_cleanup_at: datetime | None = None
         # Keep wick scalp strictly smaller than main exposure so it cannot flip
@@ -281,6 +287,90 @@ class OrderManager:
             return valid[0]
         return min(valid, key=lambda o: abs(float(o.stop_price or 0.0) - target_price))
 
+    def _normalize_stop_trigger_price(self, pos: Position, desired_stop: float) -> float:
+        """Keep SL trigger on the valid side of current price for futures exchanges."""
+        if desired_stop <= 0:
+            return desired_stop
+        current_price = float(getattr(pos, "current_price", 0.0) or 0.0)
+        if current_price <= 0 or not math.isfinite(current_price):
+            return desired_stop
+
+        min_gap = max(current_price * 0.002, 1e-8)
+        if pos.side == OrderSide.BUY:
+            # Long position closes via SELL stop -> trigger should be below current price.
+            adjusted = min(desired_stop, current_price - min_gap)
+            ceiling = float(self._protection_long_stop_ceiling.get(pos.symbol, 0.0) or 0.0)
+            if ceiling > 0:
+                adjusted = min(adjusted, ceiling)
+        else:
+            # Short position closes via BUY stop -> trigger should be above current price.
+            adjusted = max(desired_stop, current_price + min_gap)
+            floor = float(self._protection_short_stop_floor.get(pos.symbol, 0.0) or 0.0)
+            if floor > 0:
+                adjusted = max(adjusted, floor)
+
+        if adjusted <= 0 or not math.isfinite(adjusted):
+            return desired_stop
+        return adjusted
+
+    @staticmethod
+    def _extract_error_current_price(error_text: str) -> float:
+        match = re.search(r"current\[(\d+(?:\.\d+)?)\]", error_text)
+        if not match:
+            return 0.0
+        raw = float(match.group(1))
+        if raw <= 0:
+            return 0.0
+        # Bybit occasionally encodes prices in 1e8-style integer units in errors.
+        if raw > 10000:
+            raw = raw / 100000000.0
+        return raw
+
+    @staticmethod
+    def _is_retryable_protection_exchange_error(error: Exception) -> bool:
+        text = str(error).lower()
+        return any(
+            token in text
+            for token in (
+                'retcode":110092',
+                "retcode 110092",
+                "expect rising",
+                "expect falling",
+                "trigger_price",
+                'retcode":110043',
+                "retcode 110043",
+                "leverage not modified",
+            )
+        )
+
+    def _register_protection_error_backoff(self, symbol: str, error: Exception) -> bool:
+        if not self._is_retryable_protection_exchange_error(error):
+            return False
+        error_text = str(error)
+        lowered = error_text.lower()
+        current_from_error = self._extract_error_current_price(error_text)
+        if "expect rising" in lowered and current_from_error > 0:
+            self._protection_short_stop_floor[symbol] = current_from_error * 1.002
+        elif "expect falling" in lowered and current_from_error > 0:
+            self._protection_long_stop_ceiling[symbol] = current_from_error * 0.998
+        failures = self._protection_error_counts.get(symbol, 0) + 1
+        self._protection_error_counts[symbol] = failures
+        exponent = min(failures - 1, 3)
+        delay_seconds = min(
+            self._protection_error_backoff_max_secs,
+            self._protection_error_backoff_base_secs * (2**exponent),
+        )
+        retry_after = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+        self._protection_retry_after[symbol] = retry_after
+        logger.warning(
+            "Protection sync {} paused {}s after exchange error (failure #{}): {}",
+            symbol,
+            delay_seconds,
+            failures,
+            error,
+        )
+        return True
+
     async def _cancel_protection_order(self, order_id: str, symbol: str, market_type: MarketType) -> None:
         if not order_id:
             return
@@ -453,6 +543,16 @@ class OrderManager:
         if bot_stop <= 0:
             logger.debug("Protection sync skip {}: bot_stop <= 0 (has_trail={})", pos.symbol, bool(ts))
             return
+        exchange_stop = self._normalize_stop_trigger_price(pos, bot_stop)
+        if self._is_meaningful_price_change(bot_stop, exchange_stop, min_delta_pct=0.001):
+            logger.debug(
+                "Protection sync {}: adjusted invalid stop trigger {:.6f} -> {:.6f} (current={:.6f}, side={})",
+                pos.symbol,
+                bot_stop,
+                exchange_stop,
+                float(getattr(pos, "current_price", 0.0) or 0.0),
+                "long" if pos.side == OrderSide.BUY else "short",
+            )
 
         symbol = pos.symbol
         retry_after = self._protection_retry_after.get(symbol)
@@ -514,7 +614,7 @@ class OrderManager:
                 try:
                     open_orders = await self.exchange.fetch_open_orders(symbol=symbol, market_type=market_type)
                     stop_orders = [o for o in open_orders if o.order_type == OrderType.STOP_LOSS]
-                    fallback = self._pick_closest_stop_order(stop_orders, bot_stop)
+                    fallback = self._pick_closest_stop_order(stop_orders, exchange_stop)
                     if fallback:
                         fallback_price = float(fallback.stop_price or 0.0)
                         logger.warning(
@@ -572,7 +672,7 @@ class OrderManager:
             sl_order_id
             and self._is_meaningful_price_change(
                 sl_price,
-                bot_stop,
+                exchange_stop,
                 min_delta_pct=self._protection_alignment_tolerance_pct,
             )
         )
@@ -595,7 +695,7 @@ class OrderManager:
                 symbol,
                 sl_order_id,
                 sl_price,
-                bot_stop,
+                exchange_stop,
             )
             await self._cancel_protection_order(sl_order_id, symbol, market_type)
             sl_order_id = ""
@@ -618,7 +718,7 @@ class OrderManager:
                     side=stop_side,
                     order_type=OrderType.STOP_LOSS,
                     amount=amount,
-                    stop_price=bot_stop,
+                    stop_price=exchange_stop,
                     leverage=pos.leverage,
                     market_type=market_type,
                 )
@@ -632,17 +732,22 @@ class OrderManager:
                         e,
                     )
                     return
+                if self._register_protection_error_backoff(symbol, e):
+                    return
                 raise
             sl_order_id = sl_order.id
-            logger.info("Protection SL synced on {} @ {:.6f}", symbol, bot_stop)
+            logger.info("Protection SL synced on {} @ {:.6f}", symbol, exchange_stop)
             self._protection_retry_after.pop(symbol, None)
+            self._protection_error_counts.pop(symbol, None)
+            self._protection_short_stop_floor.pop(symbol, None)
+            self._protection_long_stop_ceiling.pop(symbol, None)
             state["sl_last_replace_at"] = datetime.now(UTC)
             state["sl_last_place_at"] = datetime.now(UTC)
             sl_replaced_or_created = True
 
         state["sl_order_id"] = sl_order_id
         if sl_replaced_or_created:
-            state["sl_price"] = bot_stop
+            state["sl_price"] = exchange_stop
         elif sl_price > 0:
             # Keep the last confirmed exchange SL price when no replacement
             # happened, so diff checks compare CEX vs bot target correctly.
@@ -709,10 +814,13 @@ class OrderManager:
                         e,
                     )
                     return
+                if self._register_protection_error_backoff(symbol, e):
+                    return
                 raise
             tp_order_id = tp_order.id
             logger.info("Protection TP synced on {} @ {:.6f}", symbol, target_tp)
             self._protection_retry_after.pop(symbol, None)
+            self._protection_error_counts.pop(symbol, None)
 
         state["tp_order_id"] = tp_order_id
         state["tp_price"] = target_tp

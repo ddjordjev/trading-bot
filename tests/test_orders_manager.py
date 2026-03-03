@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -2664,6 +2664,66 @@ class TestOrderManagerProtectionSync:
         assert cancelled_ids == ["sl-dup"]
         assert order_manager._protection_orders["AVAX/USDT"]["sl_order_id"] == "sl-keep"
         mock_exchange.place_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_normalizes_invalid_short_stop_trigger(self, order_manager, mock_exchange):
+        pos = Position(
+            symbol="PIPPIN/USDT",
+            side=OrderSide.SELL,
+            amount=100.0,
+            entry_price=0.5,
+            current_price=0.6,
+            leverage=5,
+            market_type="futures",
+        )
+        ts = MagicMock()
+        # Invalid for short stop (BUY stop must be above current price).
+        ts.current_stop = 0.55
+        mock_exchange.fetch_open_orders.return_value = []
+        mock_exchange.place_order.return_value = Order(
+            id="sl-new",
+            symbol="PIPPIN/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.STOP_LOSS,
+            amount=100.0,
+            stop_price=0.6012,
+            status=OrderStatus.OPEN,
+        )
+
+        await order_manager._sync_symbol_protection(pos, ts)
+
+        assert mock_exchange.place_order.await_count == 1
+        kwargs = mock_exchange.place_order.await_args.kwargs
+        assert kwargs["order_type"] == OrderType.STOP_LOSS
+        assert kwargs["side"] == OrderSide.BUY
+        assert kwargs["stop_price"] > pos.current_price
+
+    @pytest.mark.asyncio
+    async def test_sync_backoffs_on_retryable_bybit_trigger_error(self, order_manager, mock_exchange):
+        pos = Position(
+            symbol="PIPPIN/USDT",
+            side=OrderSide.SELL,
+            amount=100.0,
+            entry_price=0.5,
+            current_price=0.6,
+            leverage=5,
+            market_type="futures",
+        )
+        ts = MagicMock()
+        ts.current_stop = 0.55
+        mock_exchange.fetch_open_orders.return_value = []
+        mock_exchange.place_order.side_effect = Exception(
+            'bybit {"retCode":110092,"retMsg":"expect Rising, but trigger_price[56110000] <= current[56352000]"}'
+        )
+
+        await order_manager._sync_symbol_protection(pos, ts)
+
+        retry_after = order_manager._protection_retry_after.get("PIPPIN/USDT")
+        assert retry_after is not None
+        assert retry_after > datetime.now(UTC)
+        assert retry_after <= datetime.now(UTC) + timedelta(seconds=order_manager._protection_error_backoff_max_secs)
+        assert order_manager._protection_error_counts.get("PIPPIN/USDT") == 1
+        assert order_manager._protection_short_stop_floor.get("PIPPIN/USDT", 0.0) > 0.0
 
 
 class TestOrphanProtectionCleanup:

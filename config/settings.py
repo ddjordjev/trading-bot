@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     max_concurrent_positions: int = 5
     min_signal_strength: float = 0.4  # ignore weak signals entirely
     consecutive_loss_cooldown: int = 3  # pause after N consecutive losses
+    min_tradeable_equity_usdt: float = 50.0  # pause new entries below this equity
+    low_balance_recheck_seconds: int = 300  # when paused, re-check balance every 5 min
+    insufficient_balance_burst_threshold: int = 8  # repeated insufficient-balance errors before auto-disable
+    insufficient_balance_burst_window_seconds: int = 900  # burst window for auto-disable logic
+    insufficient_balance_auto_disable: bool = True  # hub-disable bot on repeated insufficient-balance errors
 
     # Paper risk overrides for local simulation.
     # Position size override can also apply in paper_live to increase testnet
@@ -213,6 +218,7 @@ class Settings(BaseSettings):
     dashboard_port: int = 9035
     dashboard_token: str = ""  # set a secret token for remote access
     grafana_port: int = 3001
+    exchange_equity_snapshot_interval_seconds: int = 60  # hub DB snapshot cadence per exchange
 
     # Hub URL — bots POST status snapshots here
     hub_url: str = ""

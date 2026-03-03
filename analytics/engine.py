@@ -15,7 +15,14 @@ from db.store import TradeDB
 
 MIN_TRADES_FOR_ANALYSIS = 10
 MIN_TRADES_FOR_SUGGESTION = 15
-_NON_ACTIONABLE_SUGGESTION_STRATEGIES = {"risk_manager", "manual_override", "stop"}
+_NON_ACTIONABLE_SUGGESTION_STRATEGIES = {
+    "risk_manager",
+    "manual_override",
+    "stop",
+    "manual_claim",
+    "runtime_recovered",
+    "unknown",
+}
 
 
 class AnalyticsEngine:
@@ -203,7 +210,7 @@ class AnalyticsEngine:
     def _detect_patterns(self) -> None:
         self._patterns.clear()
 
-        all_trades = self._db.get_all_trades(limit=500)
+        all_trades = self._db.get_analytics_trades(limit=500)
         if len(all_trades) < MIN_TRADES_FOR_ANALYSIS:
             return
 

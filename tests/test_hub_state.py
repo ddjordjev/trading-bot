@@ -366,3 +366,24 @@ class TestHubStateTradeQueue:
         result = state.serve_proposal_to_bot("momentum", "bot1", "BINANCE")
         assert result is not None
         assert result.symbol == "SOL/USDT"
+
+    def test_target_bot_can_match_bot_id(self, state):
+        p = TradeProposal(
+            priority=SignalPriority.CRITICAL,
+            symbol="NEWT/USDT",
+            side="long",
+            strategy="extreme_mover",
+            reason="r",
+            strength=0.9,
+            market_type="futures",
+            target_bot="extreme",
+            supported_exchanges=["BINANCE"],
+        )
+        q = TradeQueue()
+        q.add(p)
+        state.write_trade_queue(q)
+
+        # Extreme bot uses style=momentum, but its bot_id is "extreme".
+        result = state.serve_proposal_to_bot("momentum", "extreme", "BINANCE")
+        assert result is not None
+        assert result.symbol == "NEWT/USDT"
