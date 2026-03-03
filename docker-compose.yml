@@ -214,7 +214,7 @@ services:
       - TZ=UTC
       - BOT_ID=scalper
       - BOT_STYLE=momentum
-      - EXCHANGE=bybit
+      - EXCHANGE=binance
       - TICK_INTERVAL_ACTIVE=15
       - STOP_LOSS_PCT=0.8
       - TAKE_PROFIT_PCT=2.0
@@ -235,7 +235,7 @@ services:
       - TZ=UTC
       - BOT_ID=fullstack
       - BOT_STYLE=momentum
-      - EXCHANGE=bybit
+      - EXCHANGE=binance
       - MAX_CONCURRENT_POSITIONS=10
       - HUB_URL=http://bot-hub:9035
     healthcheck:
@@ -253,7 +253,7 @@ services:
       - TZ=UTC
       - BOT_ID=conservative
       - BOT_STYLE=meanrev
-      - EXCHANGE=bybit
+      - EXCHANGE=binance
       - DEFAULT_LEVERAGE=3
       - MAX_POSITION_SIZE_PCT=3
       - STOP_LOSS_PCT=1.0
@@ -274,7 +274,7 @@ services:
       - TZ=UTC
       - BOT_ID=aggressive
       - BOT_STYLE=momentum
-      - EXCHANGE=bybit
+      - EXCHANGE=binance
       - DEFAULT_LEVERAGE=20
       - MAX_POSITION_SIZE_PCT=10
       - TAKE_PROFIT_PCT=10
@@ -296,7 +296,7 @@ services:
       - TZ=UTC
       - BOT_ID=hedger
       - BOT_STYLE=momentum
-      - EXCHANGE=bybit
+      - EXCHANGE=binance
       - HEDGE_ENABLED=true
       - HEDGE_RATIO=0.40
       - HEDGE_MIN_PROFIT_PCT=2.0

@@ -11,6 +11,13 @@ from scanner.binance_futures import BinanceFuturesScanner
 
 
 class TestBinanceFuturesScanner:
+    def test_sample_at_or_before_empty_returns_cutoff_and_zero(self):
+        """Guard against IndexError when sample lists are empty."""
+        cutoff = datetime.now(UTC)
+        ts, price = BinanceFuturesScanner._sample_at_or_before([], [], cutoff)
+        assert ts == cutoff
+        assert price == 0.0
+
     def test_confidence_grows_with_samples(self):
         assert BinanceFuturesScanner._confidence(0) == 0.1
         assert BinanceFuturesScanner._confidence(5) > BinanceFuturesScanner._confidence(1)

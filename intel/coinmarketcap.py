@@ -180,7 +180,8 @@ class CoinMarketCapClient:
                 if resp.status != 200:
                     return
                 data = await resp.json()
-        except Exception:
+        except Exception as e:
+            logger.warning("CoinMarketCap spotlight fetch failed: {}", e)
             return
 
         if not isinstance(data, dict):
@@ -217,7 +218,8 @@ class CoinMarketCapClient:
                 if resp.status != 200:
                     return
                 data = await resp.json()
-        except Exception:
+        except Exception as e:
+            logger.warning("CoinMarketCap gainers API fetch failed: {}", e)
             return
 
         if not isinstance(data, dict):
@@ -252,7 +254,8 @@ class CoinMarketCapClient:
                 if resp.status != 200:
                     return
                 data = await resp.json()
-        except Exception:
+        except Exception as e:
+            logger.warning("CoinMarketCap recently-added fetch failed: {}", e)
             return
 
         if not isinstance(data, dict):

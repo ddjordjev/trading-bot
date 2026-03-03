@@ -22,6 +22,11 @@ fi
 
 count=0
 for db in $dbs; do
+    # Skip corrupted DBs — don't overwrite good backup with bad
+    if ! sqlite3 "$db" "PRAGMA quick_check;" 2>/dev/null | grep -q "ok"; then
+        echo "Skipping corrupted: $db"
+        continue
+    fi
     rel="${db#$DATA_DIR/}"
     dest="$BACKUP_DIR/$rel"
     mkdir -p "$(dirname "$dest")"

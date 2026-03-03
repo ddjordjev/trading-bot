@@ -257,7 +257,7 @@ Clean ephemeral state, start all containers, and verify health:
 
 ```bash
 # Wipe ephemeral state (keeps .db files intact):
-find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" | xargs rm -f
+find "$HOST_DATA_DIR" \( -name "*.json" -o -name "*.lock" \) | xargs rm -f
 
 # Start
 docker compose up -d
@@ -298,7 +298,7 @@ being evaluated by checking log lines like "Queue: warmup" or "Risk check: passe
 
 ```bash
 docker compose down
-find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" | xargs rm -f
+find "$HOST_DATA_DIR" \( -name "*.json" -o -name "*.lock" \) | xargs rm -f
 ```
 
 Once all steps pass, the system is running and you proceed to Day 1.

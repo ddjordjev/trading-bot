@@ -179,8 +179,8 @@ def _save_bot_registry() -> None:
     try:
         _BOT_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
         _BOT_REGISTRY.write_text(json.dumps(_bot_urls, indent=2))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Could not save bot registry: {}", e)
 
 
 _load_bot_registry()

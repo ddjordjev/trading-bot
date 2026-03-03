@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -32,10 +34,17 @@ class HubDB(TradeDB):
         self._ack_buffer: dict[str, set[str]] = {}
 
     def connect(self) -> None:
-        self._conn = sqlite3.connect(str(self._path))
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=30000")
+        try:
+            self._conn = sqlite3.connect(str(self._path))
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=30000")
+            # Validate DB before creating tables (catches "file is not a database")
+            self._conn.execute("PRAGMA quick_check").fetchone()
+        except sqlite3.DatabaseError as e:
+            if "not a database" in str(e).lower() or "file" in str(e).lower():
+                logger.error("hub.db is corrupted. Run: ./scripts/recover_hub_db.sh to restore from backup")
+            raise
         self._create_tables()
         self._ensure_trade_columns()
         self._create_hub_tables()
@@ -231,6 +240,45 @@ class HubDB(TradeDB):
             ).fetchone()
         return int(row["id"]) if row else None
 
+    def _execute_write_with_lock_retry(
+        self,
+        sql: str,
+        params: tuple[Any, ...],
+        *,
+        retries: int = 3,
+        base_sleep_seconds: float = 0.05,
+    ) -> sqlite3.Cursor:
+        """Run a write query with rollback + retry on transient SQLite lock contention."""
+        assert self._conn
+        last_exc: sqlite3.OperationalError | None = None
+        for attempt in range(retries):
+            try:
+                cursor = self._conn.execute(sql, params)
+                self._conn.commit()
+                return cursor
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                msg = str(exc).lower()
+                if "database is locked" not in msg and "database table is locked" not in msg:
+                    with suppress(sqlite3.Error):
+                        self._conn.rollback()
+                    raise
+                with suppress(sqlite3.Error):
+                    self._conn.rollback()
+                if attempt >= retries - 1:
+                    raise
+                sleep_for = base_sleep_seconds * float(attempt + 1)
+                logger.warning(
+                    "SQLite lock contention in HubDB write (attempt {}/{}), retrying in {:.2f}s",
+                    attempt + 1,
+                    retries,
+                    sleep_for,
+                )
+                time.sleep(sleep_for)
+        if last_exc is not None:
+            raise last_exc
+        raise sqlite3.OperationalError("HubDB write failed without exception")
+
     def insert_trade(self, bot_id: str, trade: dict[str, Any], request_key: str = "") -> int:
         """Insert a trade record pushed by a bot. Deduplicates by request_key."""
         assert self._conn
@@ -241,7 +289,7 @@ class HubDB(TradeDB):
                 return int(existing["id"])
 
         try:
-            cursor = self._conn.execute(
+            cursor = self._execute_write_with_lock_retry(
                 """INSERT INTO trades (
                 bot_id, symbol, side, strategy, action, scale_mode,
                 entry_price, exit_price, amount, leverage,
@@ -313,7 +361,6 @@ class HubDB(TradeDB):
                     int(trade.get("recovery_close", False)),
                 ),
             )
-            self._conn.commit()
         except sqlite3.IntegrityError:
             # Idempotent race: another request committed this key first.
             if request_key:
@@ -350,7 +397,7 @@ class HubDB(TradeDB):
             return False
 
         try:
-            cursor = self._conn.execute(
+            cursor = self._execute_write_with_lock_retry(
                 """UPDATE trades SET
                 action='open',
                 symbol=?, side=?, strategy=?, scale_mode=?,
@@ -401,7 +448,6 @@ class HubDB(TradeDB):
                     row_id,
                 ),
             )
-            self._conn.commit()
         except sqlite3.IntegrityError:
             if request_key:
                 existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
@@ -430,7 +476,7 @@ class HubDB(TradeDB):
             return False
 
         try:
-            cursor = self._conn.execute(
+            cursor = self._execute_write_with_lock_retry(
                 """UPDATE trades SET
                 action='close', exit_price=?, amount=?, leverage=?,
                 pnl_usd=?, pnl_pct=?, is_winner=?,
@@ -468,7 +514,6 @@ class HubDB(TradeDB):
                     row_id,
                 ),
             )
-            self._conn.commit()
         except sqlite3.IntegrityError:
             if request_key:
                 existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
@@ -505,7 +550,7 @@ class HubDB(TradeDB):
             return False
 
         try:
-            cursor = self._conn.execute(
+            cursor = self._execute_write_with_lock_retry(
                 """UPDATE trades SET
                 planned_stop_loss=?,
                 planned_tp1=?,
@@ -537,7 +582,6 @@ class HubDB(TradeDB):
                     row_id,
                 ),
             )
-            self._conn.commit()
         except sqlite3.IntegrityError:
             if request_key:
                 existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
@@ -575,14 +619,13 @@ class HubDB(TradeDB):
         if row_id is None:
             return False
 
-        cursor = self._conn.execute(
+        cursor = self._execute_write_with_lock_retry(
             """
             DELETE FROM trades
             WHERE id=? AND action='open'
             """,
             (row_id,),
         )
-        self._conn.commit()
         deleted = cursor.rowcount > 0
         if request_key and deleted:
             self._mark_confirmed(bot_id, request_key)
@@ -868,7 +911,8 @@ class HubDB(TradeDB):
         for r in rows:
             try:
                 result[r["exchange"]] = set(json.loads(r["symbols"]))
-            except Exception:
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning("Skipping corrupt exchange_symbols row for {}: {}", r.get("exchange", "?"), e)
                 continue
         return result
 

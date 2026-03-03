@@ -510,6 +510,8 @@ class BinanceFuturesScanner:
     ) -> tuple[datetime, float]:
         idx = bisect.bisect_right(sample_times, cutoff) - 1
         if idx < 0:
+            if not sample_times or not sample_prices:
+                return cutoff, 0.0
             return sample_times[0], sample_prices[0]
         return sample_times[idx], sample_prices[idx]
 

@@ -101,7 +101,7 @@ async def _send_compound_daily_report() -> None:
         pnl_pct = status.get("daily_pnl_pct", 0.0)
         tier = status.get("tier", "?")
         history = daily.get("history") or []
-        trades = history[-1].get("trades", 0) if history else 0
+        trades = history[-1].get("trades", 0) if (isinstance(history, list) and len(history) > 0) else 0
         positions = len(rpt.get("positions", []))
 
         total_balance += bal

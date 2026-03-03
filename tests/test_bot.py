@@ -2134,8 +2134,7 @@ class TestQuickHubCheck:
 
         assert mock_exchange.fetch_positions.await_count == 1
         payload = bot._hub_session.post.call_args_list[-1].kwargs["json"]
-        assert "foreign_positions" in payload
-        assert payload["foreign_positions"] == []
+        assert "foreign_positions" not in payload
 
 
 # ── _execute_proposal / _handle_spike ───────────────────────────────────────

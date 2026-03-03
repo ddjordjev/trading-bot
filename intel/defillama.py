@@ -126,8 +126,8 @@ class DeFiLlamaClient:
                     data = await resp.json()
                     if isinstance(data, list):
                         return [c for c in data if isinstance(c, dict)]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("DeFiLlama chains fetch failed: {}", e)
         return []
 
     def summary(self) -> str:

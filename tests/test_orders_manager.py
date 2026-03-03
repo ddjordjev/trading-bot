@@ -2535,6 +2535,50 @@ class TestOrderManagerTradeHistory:
         assert len(history) == 1
 
 
+class TestOrderManagerPickClosestStopOrder:
+    """_pick_closest_stop_order returns None when no valid stop orders."""
+
+    def test_pick_closest_returns_none_when_no_valid_stop_price(self):
+        orders = [
+            Order(
+                id="o1", symbol="X/USDT", side=OrderSide.SELL, order_type=OrderType.STOP_LOSS, amount=1.0, stop_price=0
+            ),
+            Order(
+                id="o2",
+                symbol="X/USDT",
+                side=OrderSide.SELL,
+                order_type=OrderType.STOP_LOSS,
+                amount=1.0,
+                stop_price=None,
+            ),
+        ]
+        result = OrderManager._pick_closest_stop_order(orders, 100.0)
+        assert result is None
+
+    def test_pick_closest_returns_closest_valid(self):
+        orders = [
+            Order(
+                id="o1",
+                symbol="X/USDT",
+                side=OrderSide.SELL,
+                order_type=OrderType.STOP_LOSS,
+                amount=1.0,
+                stop_price=95.0,
+            ),
+            Order(
+                id="o2",
+                symbol="X/USDT",
+                side=OrderSide.SELL,
+                order_type=OrderType.STOP_LOSS,
+                amount=1.0,
+                stop_price=105.0,
+            ),
+        ]
+        result = OrderManager._pick_closest_stop_order(orders, 100.0)
+        assert result is not None
+        assert result.stop_price == 95.0  # 95 is closer to 100 than 105
+
+
 class TestOrderManagerProtectionSync:
     @pytest.mark.asyncio
     async def test_sync_adopts_side_matched_stop_without_cancelling(self, order_manager, mock_exchange):

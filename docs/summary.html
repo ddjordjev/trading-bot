@@ -35,7 +35,7 @@
 <body>
 
 <h1>Trade Borg — Requirements &amp; Implementation Summary</h1>
-<p class="meta">Last updated: 2026-02-28 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: Binance (primary), Bybit &nbsp;|&nbsp; Tests: 1630+ (85%+ coverage) &nbsp;|&nbsp; CI: GitHub Actions (green)</p>
+<p class="meta">Last updated: 2026-03-03 &nbsp;|&nbsp; Project: <a href="https://github.com/ddjordjev/trading-bot">github.com/ddjordjev/trading-bot</a> &nbsp;|&nbsp; Language: Python &nbsp;|&nbsp; Exchanges: Binance (primary), Bybit &nbsp;|&nbsp; Tests: 1786+ (80%+ required, 85%+ typical) &nbsp;|&nbsp; CI: GitHub Actions (green)</p>
 
 <!-- ============================================================ -->
 <h2>Table of Contents</h2>
@@ -265,7 +265,7 @@ Trading bots are lightweight executors that consume proposals from the hub via H
   <tr><td><code>docs/new_ideas.md</code></td><td>Backlog of ideas not yet in summary.html section 6</td></tr>
   <tr><td><code>docs/current_issues.md</code></td><td>Known issues and recent session changes</td></tr>
   <tr><td><code>loki/</code></td><td>Loki + Promtail config and Dockerfiles for log aggregation</td></tr>
-  <tr><td><code>tests/</code></td><td>1669+ tests across 38 files covering all modules (85%+ coverage)</td></tr>
+  <tr><td><code>tests/</code></td><td>1786+ tests across 38 files covering all modules (80%+ required, 85%+ typical)</td></tr>
 </table>
 
 <h3>3.1 Runtime Data Directory (<code>data/</code>)</h3>
@@ -296,7 +296,7 @@ uses <code>data/</code>. In Docker this is bind-mounted from <code>$HOST_DATA_DI
 docker compose down
 
 # Wipe ephemeral state only (keeps DBs intact)
-find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" | xargs rm -f
+find "$HOST_DATA_DIR" \( -name "*.json" -o -name "*.lock" \) | xargs rm -f
 
 # Full wipe (destructive — loses trade history)
 rm -rf "$HOST_DATA_DIR"         # all DBs, JSON state
@@ -843,7 +843,7 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
   <tr><td>Ruff linting (pycodestyle, pyflakes, bugbear, isort, pyupgrade, simplify)</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml, pyproject.toml</td></tr>
   <tr><td>Mypy type checking (strict mode on critical modules)</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml → mypy --ignore-missing-imports</td></tr>
   <tr><td>Pytest with coverage enforcement (80%+ required)</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml, pyproject.toml → fail_under=80</td></tr>
-  <tr><td>1630+ tests across 37 test files, covering all modules (85%+ coverage)</td><td><span class="badge done">Done</span></td><td class="file">tests/ directory</td></tr>
+  <tr><td>1786+ tests across 38 test files, covering all modules (80%+ required)</td><td><span class="badge done">Done</span></td><td class="file">tests/ directory</td></tr>
   <tr><td>Frontend build check (React/Vite)</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml</td></tr>
   <tr><td>Docker build verification</td><td><span class="badge done">Done</span></td><td class="file">.github/workflows/ci.yml</td></tr>
   <tr><td>Git branching: develop → master (fast-forward merge when CI green)</td><td><span class="badge done">Done</span></td><td class="file">git workflow</td></tr>

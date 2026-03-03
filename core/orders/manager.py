@@ -282,7 +282,7 @@ class OrderManager:
             return None
         valid = [o for o in orders if float(o.stop_price or 0.0) > 0]
         if not valid:
-            return orders[0]
+            return None
         if target_price <= 0:
             return valid[0]
         return min(valid, key=lambda o: abs(float(o.stop_price or 0.0) - target_price))

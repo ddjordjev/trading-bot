@@ -549,7 +549,6 @@ class TradingBot:
                 "exchange": self.settings.exchange.upper(),
                 "open_symbols": list(self._open_trades.keys()),
                 "ready": self._entries_allowed(warmup_done),
-                "foreign_positions": [],
                 "entries_paused_low_balance": self._low_balance_paused,
             }
             # Keep dashboard PnL/price near-real-time between full ticks.

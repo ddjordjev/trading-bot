@@ -238,7 +238,7 @@ Missing on exchange → POST /internal/recovery-close (excluded from stats)
   locks it for 300s, returns a copy. Matching criteria:
   - Bot's exchange in `supported_exchanges`
   - Priority in bot's `allowed_priorities` (from BotProfile)
-  - `target_bot` matches bot style (or empty = any)
+  - `target_bot` matches bot style or bot_id (or empty = any)
   - Symbol not in `active_symbols` (held by any bot on same exchange)
   - Symbol not in hub.db open trades
 - **On consume**: proposal is deleted from the queue. The trade is now
@@ -408,7 +408,7 @@ Analytics data hygiene:
 Ephemeral JSON files (`bot_status.json`, `trade_queue.json`, etc.) are
 created at runtime and should be wiped on rebuild:
 ```bash
-find "$HOST_DATA_DIR" -name "*.json" -o -name "*.lock" | xargs rm -f
+find "$HOST_DATA_DIR" \( -name "*.json" -o -name "*.lock" -o -name "activate" -o -name "STOP" -o -name "CLOSE_ALL" \) | xargs rm -f
 ```
 
 ---
