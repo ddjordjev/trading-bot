@@ -51,6 +51,11 @@ class SwingOpportunityStrategy(BaseStrategy):
         # Wider stops and longer holds for swing trades
         self.swing_stop_pct = float(params.get("swing_stop_pct", 5.0))
         self.swing_max_hold_hours = int(params.get("swing_max_hold_hours", 48))
+        self.cooldown_candles = int(params.get("cooldown_candles", 90))
+        self.require_reversal_candle = bool(params.get("require_reversal_candle", True))
+        self.min_quote_volume_usd = float(params.get("min_quote_volume_usd", 250_000.0))
+        self.min_atr_pct = float(params.get("min_atr_pct", 0.30))
+        self.max_atr_pct = float(params.get("max_atr_pct", 35.0))
 
         self._cooldown_candles: int = 0
 
@@ -62,6 +67,13 @@ class SwingOpportunityStrategy(BaseStrategy):
         if self._cooldown_candles > 0:
             self._cooldown_candles -= 1
             return None
+        if not self._passes_crypto_market_filters(
+            df,
+            min_quote_volume_usd=self.min_quote_volume_usd,
+            min_atr_pct=self.min_atr_pct,
+            max_atr_pct=self.max_atr_pct,
+        ):
+            return None
 
         price = df["close"].iloc[-1]
         if not math.isfinite(price) or price <= 0:
@@ -69,12 +81,12 @@ class SwingOpportunityStrategy(BaseStrategy):
 
         crash_buy = self._detect_crash_buy(df, price)
         if crash_buy:
-            self._cooldown_candles = 60  # don't fire again for an hour
+            self._cooldown_candles = self.cooldown_candles
             return crash_buy
 
         blow_off_short = self._detect_blow_off_top(df, price)
         if blow_off_short:
-            self._cooldown_candles = 60
+            self._cooldown_candles = self.cooldown_candles
             return blow_off_short
 
         return None
@@ -110,6 +122,10 @@ class SwingOpportunityStrategy(BaseStrategy):
         # Check if price is near or below the long-term MA (support)
         ma = df["close"].rolling(min(self.ma_period, len(df))).mean().iloc[-1]
         near_support = price <= ma * 1.02  # within 2% of MA
+
+        # Avoid catching falling knives without a first bounce confirmation.
+        if self.require_reversal_candle and float(df["close"].iloc[-1]) < float(df["open"].iloc[-1]):
+            return None
 
         if self.extreme_crash_pct <= 0:
             return None
@@ -169,6 +185,8 @@ class SwingOpportunityStrategy(BaseStrategy):
         ma = df["close"].rolling(min(self.ma_period, len(df))).mean().iloc[-1]
         above_ma_pct = (price - ma) / ma * 100 if ma > 0 else 0
         if above_ma_pct < 10:
+            return None
+        if self.require_reversal_candle and float(df["close"].iloc[-1]) > float(df["open"].iloc[-1]):
             return None
 
         if self.extreme_crash_pct <= 0:

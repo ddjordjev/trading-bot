@@ -138,6 +138,32 @@ class TestTradingBotStrategyManagement:
         assert bot._strategies[0].name == "custom"
         assert bot._strategies[0].symbol == "XRP/USDT"
 
+    def test_add_strategy_applies_profile_defaults(self, settings, mock_exchange):
+        settings.allowed_market_types = "spot,futures"
+        settings.bot_id = "conservative"
+        with patch("bot.create_exchange", return_value=mock_exchange):
+            from bot import TradingBot
+
+            b = TradingBot(settings=settings)
+            b.add_strategy("rsi", "BTC/USDT", market_type="futures")
+            s = b._strategies[0]
+            assert s.period == 10
+            assert s.oversold == 20
+            assert s.overbought == 80
+
+    def test_add_strategy_explicit_params_override_profile_defaults(self, settings, mock_exchange):
+        settings.allowed_market_types = "spot,futures"
+        settings.bot_id = "conservative"
+        with patch("bot.create_exchange", return_value=mock_exchange):
+            from bot import TradingBot
+
+            b = TradingBot(settings=settings)
+            b.add_strategy("rsi", "BTC/USDT", market_type="futures", period=6, oversold=24)
+            s = b._strategies[0]
+            assert s.period == 6
+            assert s.oversold == 24
+            assert s.overbought == 80
+
 
 # ── _log_closed_trade ───────────────────────────────────────────────────────
 

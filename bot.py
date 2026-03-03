@@ -52,6 +52,73 @@ from volatility import SpikeEvent, VolatilityDetector
 # Only these scalp-only strategies use WINNERS mode (add to winners only):
 SCALP_ONLY_STRATEGIES: set[str] = set()  # currently none -- everything pyramids
 
+PROFILE_STRATEGY_PARAMS: dict[str, dict[str, dict[str, float | int | bool]]] = {
+    "conservative": {
+        "rsi": {
+            "period": 10,
+            "oversold": 20,
+            "overbought": 80,
+            "min_quote_volume_usd": 250_000.0,
+            "min_atr_pct": 0.18,
+            "max_atr_pct": 14.0,
+        },
+        "bollinger": {
+            "min_band_width_pct": 1.1,
+            "volume_confirm_mult": 1.25,
+            "min_quote_volume_usd": 250_000.0,
+            "min_atr_pct": 0.18,
+            "max_atr_pct": 14.0,
+        },
+    },
+    "aggressive": {
+        "rsi": {
+            "period": 7,
+            "oversold": 22,
+            "overbought": 78,
+            "min_quote_volume_usd": 120_000.0,
+            "min_atr_pct": 0.15,
+            "max_atr_pct": 24.0,
+        },
+        "compound_momentum": {
+            "spike_pct": 1.7,
+            "volume_surge_mult": 2.4,
+            "breakout_threshold_pct": 0.8,
+            "min_quote_volume_usd": 120_000.0,
+            "min_atr_pct": 0.20,
+            "max_atr_pct": 24.0,
+        },
+    },
+    "extreme": {
+        "compound_momentum": {
+            "spike_pct": 1.9,
+            "volume_surge_mult": 2.6,
+            "breakout_threshold_pct": 0.9,
+            "min_quote_volume_usd": 150_000.0,
+            "min_atr_pct": 0.24,
+            "max_atr_pct": 26.0,
+        },
+    },
+    "scalper": {
+        "compound_momentum": {
+            "spike_pct": 1.6,
+            "volume_surge_mult": 2.3,
+            "breakout_threshold_pct": 0.8,
+            "min_quote_volume_usd": 120_000.0,
+            "min_atr_pct": 0.22,
+            "max_atr_pct": 22.0,
+        },
+    },
+    "swing": {
+        "swing_opportunity": {
+            "cooldown_candles": 120,
+            "capitulation_volume_mult": 3.5,
+            "min_quote_volume_usd": 350_000.0,
+            "min_atr_pct": 0.35,
+            "max_atr_pct": 30.0,
+        },
+    },
+}
+
 
 class TradingBot:
     """Main bot orchestrator.
@@ -154,6 +221,12 @@ class TradingBot:
 
     # -- Strategy Management --
 
+    def _profile_strategy_params(self, strategy_name: str) -> dict[str, object]:
+        bot_id = (self.settings.bot_id or "").strip().lower()
+        if not bot_id:
+            return {}
+        return dict(PROFILE_STRATEGY_PARAMS.get(bot_id, {}).get(strategy_name, {}))
+
     def add_strategy(
         self, name: str, symbol: str, market_type: str = "spot", leverage: int = 0, **params: object
     ) -> None:
@@ -183,7 +256,9 @@ class TradingBot:
         cls = BUILTIN_STRATEGIES.get(name)
         if not cls:
             raise ValueError(f"Unknown strategy: {name}. Available: {list(BUILTIN_STRATEGIES.keys())}")
-        strategy = cls(symbol=symbol, market_type=market_type, leverage=lev, **params)
+        merged_params = self._profile_strategy_params(name)
+        merged_params.update(params)
+        strategy = cls(symbol=symbol, market_type=market_type, leverage=lev, **merged_params)
         self._strategies.append(strategy)
         mode = "WINNERS" if name in SCALP_ONLY_STRATEGIES else "PYRAMID"
         logger.info("Added strategy '{}' for {} ({}, {}x, mode={})", name, symbol, market_type, lev, mode)

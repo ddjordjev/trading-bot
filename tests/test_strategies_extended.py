@@ -281,7 +281,7 @@ class TestSwingOpportunityExtended:
             assert sig.action == SignalAction.BUY
             assert sig.quick_trade is False
             assert "CRASH" in sig.reason or "SWING" in sig.reason
-            assert s._cooldown_candles == 60
+            assert s._cooldown_candles == s.cooldown_candles
 
     def test_blow_off_top_short_signal(self):
         from strategies.swing_opportunity import SwingOpportunityStrategy
@@ -304,7 +304,7 @@ class TestSwingOpportunityExtended:
         if sig:
             assert sig.action == SignalAction.SELL
             assert "BLOW-OFF" in sig.reason or "SWING" in sig.reason
-            assert s._cooldown_candles == 60
+            assert s._cooldown_candles == s.cooldown_candles
 
     def test_insufficient_candles_returns_none(self):
         from strategies.swing_opportunity import SwingOpportunityStrategy

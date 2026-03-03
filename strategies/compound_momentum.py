@@ -33,21 +33,24 @@ class CompoundMomentumStrategy(BaseStrategy):
 
         # Breakout detection
         self.consolidation_period = int(params.get("consolidation_period", 20))
-        self.breakout_threshold_pct = float(params.get("breakout_threshold_pct", 0.5))
+        self.breakout_threshold_pct = float(params.get("breakout_threshold_pct", 0.7))
 
         # Momentum confirmation
-        self.rsi_period = int(params.get("rsi_period", 14))
-        self.rsi_bull_min = float(params.get("rsi_bull_min", 50))
-        self.rsi_bear_max = float(params.get("rsi_bear_max", 50))
-        self.volume_surge_mult = float(params.get("volume_surge_mult", 1.8))
+        self.rsi_period = int(params.get("rsi_period", 10))
+        self.rsi_bull_min = float(params.get("rsi_bull_min", 55))
+        self.rsi_bear_max = float(params.get("rsi_bear_max", 45))
+        self.volume_surge_mult = float(params.get("volume_surge_mult", 2.2))
 
         # Spike detection (primary scalp entry)
-        self.spike_pct = float(params.get("spike_pct", 1.0))
+        self.spike_pct = float(params.get("spike_pct", 1.5))
         self.spike_candles = int(params.get("spike_candles", 3))
         self.spike_max_hold = int(params.get("spike_max_hold", 8))
 
         # Breakout quick trade timing
         self.breakout_max_hold = int(params.get("breakout_max_hold", 15))
+        self.min_quote_volume_usd = float(params.get("min_quote_volume_usd", 100_000.0))
+        self.min_atr_pct = float(params.get("min_atr_pct", 0.18))
+        self.max_atr_pct = float(params.get("max_atr_pct", 20.0))
 
         # Exit signals
         self.exit_rsi_overbought = float(params.get("exit_rsi_overbought", 75))
@@ -77,6 +80,14 @@ class CompoundMomentumStrategy(BaseStrategy):
                 self._in_position = False
                 self._position_side = None
                 return exit_signal
+            return None
+
+        if not self._passes_crypto_market_filters(
+            df,
+            min_quote_volume_usd=self.min_quote_volume_usd,
+            min_atr_pct=self.min_atr_pct,
+            max_atr_pct=self.max_atr_pct,
+        ):
             return None
 
         # Priority 1: spike scalps
@@ -146,7 +157,7 @@ class CompoundMomentumStrategy(BaseStrategy):
         support = lows.min()
 
         range_size = (resistance - support) / support * 100 if support > 0 else 0
-        if range_size < 0.3 or range_size > 8.0:
+        if range_size < 0.5 or range_size > 5.0:
             return None
 
         rsi = ta.momentum.RSIIndicator(df["close"], window=self.rsi_period).rsi()
