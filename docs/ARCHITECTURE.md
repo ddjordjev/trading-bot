@@ -56,7 +56,7 @@ Startup order for new chats:
 │                    HOST                          │
 │                                                  │
 │  HOST_DATA_DIR (/Users/damirdjordjev/workspace/trading-bot-data)     │
-│    └── hub.db          ← sole persistent DB      │
+│    └── legacy hub.db   ← migration source only   │
 │                                                  │
 │  HOST_LOGS_DIR (/Users/damirdjordjev/workspace/trading-bot-logs)     │
 │    └── bot_*.log, hub_*.log                      │
@@ -71,7 +71,12 @@ Startup order for new chats:
 │       │  │ bot-meanrev       │  │ grafana :3001  │
 │       │  │ bot-swing         │  └────────────────┘
 │       │  │ + 5 idle bots     │
-└───────┘  └───────────────────┘
+└───┬───┘  └───────────────────┘
+    │
+┌───▼──────────────────────────┐
+│ bot-hub-postgres :5432       │
+│ PostgreSQL trading_db        │
+└──────────────────────────────┘
 ```
 
 ### bot-hub (1 container)
@@ -85,7 +90,7 @@ Runs in-process:
   hot movers.
 - **BinanceFuturesScanner** — exchange-native scanner that polls Binance
   public futures endpoints (`/fapi/v1/ticker/24hr`, `/fapi/v1/premiumIndex`),
-  persists minute snapshots to hub.db, restores rolling history on restart,
+  persists minute snapshots to trading Postgres, restores rolling history on restart,
   and computes confidence-weighted hot movers from local rolling data.
   It also maintains incremental per-symbol aggregate state (single row per
   symbol) across horizons (`1m/5m/1h/4h/1d/1w/3w/1mo/3mo/1y`) and feeds the
@@ -96,16 +101,15 @@ Runs in-process:
   Exchange symbols are fetched directly by the monitor via CCXT (Binance,
   Bybit) on startup and refreshed every 5 minutes. Cached in hub.db for
   instant availability on restart.
-- **AnalyticsService** — reads hub.db trade history, computes strategy
-  weights/patterns/suggestions, persists to analytics_state.json (could
-  migrate to a hub.db table in the future — currently JSON for simplicity
-  with the nested structure).
+- **AnalyticsService** — reads trading Postgres trade history, computes strategy
+  weights/patterns/suggestions, persists the latest snapshot to
+  `analytics_snapshots` for restart survival.
 - **Web dashboard** — React frontend at `/`, health at `/health`.
 - **Internal API** — `/internal/report` (bot ↔ hub), `/internal/trade`
   (trade persistence), `/internal/trades/{bot_id}/open` (recovery).
 
-State: single `HubState` instance (in-memory). Persistent disk state includes
-hub.db (trade history + Binance scanner tables) and `analytics_state.json`.
+State: single `HubState` instance (in-memory). Persistent DB state is in
+PostgreSQL `trading_db` (trade history + scanner tables + analytics snapshot tables).
 Everything else is ephemeral.
 
 Does NOT: connect to exchanges, place orders, manage positions.
@@ -367,23 +371,21 @@ hub already curated. They do not scan the market independently:
 
 | What | Where | Survives restart |
 |------|-------|-----------------|
-| Trade history | hub.db (host bind mount) | Yes |
-| Binance scanner snapshots | hub.db (`cex_binance_snapshots`) | Yes |
-| Binance scanner per-symbol state | hub.db (`cex_binance_symbol_state`) | Yes |
-| Analytics scores | analytics_state.json (host) | Yes |
+| Trade history | PostgreSQL `trading_db.trades` | Yes |
+| Binance scanner snapshots | PostgreSQL `trading_db.cex_binance_snapshots` | Yes |
+| Binance scanner per-symbol state | PostgreSQL `trading_db.cex_binance_symbol_state` | Yes |
+| Analytics scores | PostgreSQL `trading_db.analytics_snapshots` | Yes |
 | Bot status | HubState (memory) | No |
 | Intel snapshots | HubState (memory) | No |
 | Trade queue | HubState (memory) | No |
 | Extreme watchlist | HubState (memory) | No |
 
-**hub.db** is the ONLY persistent database. Lives on host at
-`$HOST_DATA_DIR/hub.db`. Never delete. Backups in
-`/Users/damirdjordjev/workspace/trading-bot-backups/`.
+**PostgreSQL `trading_db`** is the primary persistent trading database
+(`bot-hub-postgres` service). `hub.db` is retained only as migration fallback
+source. Backups live in `/Users/damirdjordjev/workspace/trading-bot-backups/`.
 
-**analytics_state.json** persists strategy weights, patterns, and
-suggestions so they survive hub restarts. It's a JSON file because
-the structure is deeply nested (Pydantic model). Could be moved to a
-hub.db table in the future.
+**analytics_snapshots** persists strategy weights, patterns, and
+suggestions as JSON payloads in Postgres so they survive hub restarts.
 
 Recommendation lifecycle:
 - Analytics/OpenClaw suggestions are produced in the hub analytics pipeline.
@@ -423,6 +425,9 @@ created at runtime and should be wiped on rebuild:
 ```bash
 find "$HOST_DATA_DIR" \( -name "*.json" -o -name "*.lock" -o -name "activate" -o -name "STOP" -o -name "CLOSE_ALL" \) | xargs rm -f
 ```
+
+When DB architecture changes, update and re-check these docs together in the same change:
+`docs/ARCHITECTURE.md`, `docs/AI_CONTEXT.md`, and `docs/summary.html`.
 
 ---
 

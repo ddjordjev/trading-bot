@@ -10,6 +10,7 @@ Use this file as the default startup context for new chats.
 Read `docs/AI_CONTEXT.md` first.  
 Read `docs/ARCHITECTURE.md` only if the task touches architecture or data flow.  
 Read `docs/summary.html` only when requirements history or deep human narrative is needed.
+Optional: consult external `ai-memory` knowledge base for higher-level cross-project context; treat this repo docs as canonical when conflicts appear.
 
 ## One-Screen System Snapshot
 
@@ -18,7 +19,8 @@ Read `docs/summary.html` only when requirements history or deep human narrative 
 - There is one in-memory queue in the hub; bots pop one proposal at a time.
 - The hub filters invalid symbols before queueing (exchange support, dedup, open-trade checks).
 - Bots run last-minute validation (candles + ticker) before execution.
-- Trade persistence is hub-centric: bots push events to hub, hub writes `hub.db`.
+- Trade persistence is hub-centric: bots push events to hub, hub writes PostgreSQL `trading_db`.
+- Analytics snapshot persistence is hub-centric: latest snapshot is stored in `trading_db.analytics_snapshots`.
 - Bots are stateless and recover by asking hub for open trades, then reconciling with exchange.
 - Idle bots are silent: no exchange and no hub communication until activation file appears.
 - Hub intelligence includes monitor, scanner, signal generation, analytics, and dashboard APIs.
@@ -159,6 +161,8 @@ POST /internal/recovery-close         -> close missing-on-exchange records
 - 2026-03-04: Introduced AI-first startup document and doc role split.
 - 2026-03-04: Standardized startup instruction to read AI context first.
 - 2026-03-04: Marked `ARCHITECTURE.md` as canonical technical source and `summary.html` as human reference.
+- 2026-03-04: Moved persisted analytics snapshot from JSON file into `hub.db.analytics_snapshots`.
+- 2026-03-04: Added PostgreSQL trading DB backend (`trading_db`) and sqlite-to-postgres cutover tooling.
 
 ## Constants Quick Block
 
@@ -166,6 +170,9 @@ POST /internal/recovery-close         -> close missing-on-exchange records
 Hub URL in containers: http://bot-hub:9035
 Hub internal report cadence: 5s
 Proposal lock duration: 300s
-Primary persistent DB: $HOST_DATA_DIR/hub.db
+Primary persistent DB: PostgreSQL trading_db (`bot-hub-postgres`)
+Analytics snapshot table: analytics_snapshots
 Bots local DB policy: forbidden
 ```
+
+Keep `docs/ARCHITECTURE.md`, `docs/AI_CONTEXT.md`, and `docs/summary.html` in sync whenever DB architecture changes.

@@ -1576,17 +1576,26 @@ class TradingBot:
             "request_key": request_key,
             "trade": trade_stub,
         }
-        try:
-            url = f"{hub_url.rstrip('/')}/internal/trade-reserve"
-            async with self._hub_session.post(url, json=payload) as resp:
-                if resp.status != 200:
-                    logger.error("Hub pre-open reserve failed: {}", resp.status)
+        url = f"{hub_url.rstrip('/')}/internal/trade-reserve"
+        for attempt in range(3):
+            try:
+                async with self._hub_session.post(url, json=payload) as resp:
+                    if resp.status == 200:
+                        body = await resp.json()
+                        return str(body.get("opened_at", "") or opened_at)
+                    snippet = (await resp.text())[:200].strip()
+                    if resp.status in {500, 503} and attempt < 2:
+                        await asyncio.sleep(0.3 * float(attempt + 1))
+                        continue
+                    logger.error("Hub pre-open reserve failed: {} {}", resp.status, snippet or "<empty>")
                     return ""
-                body = await resp.json()
-                return str(body.get("opened_at", "") or opened_at)
-        except Exception as e:
-            logger.error("Hub pre-open reserve error for {}: {}", sig.symbol, e)
-            return ""
+            except Exception as e:
+                if attempt < 2:
+                    await asyncio.sleep(0.3 * float(attempt + 1))
+                    continue
+                logger.error("Hub pre-open reserve error for {}: {}", sig.symbol, e)
+                return ""
+        return ""
 
     async def _release_open_trade_reservation(self, sig: Signal, opened_at: str, reason: str) -> None:
         """Close a reserved pre-open row when CEX open fails or is rejected."""

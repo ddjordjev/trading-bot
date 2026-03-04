@@ -10,7 +10,7 @@ import aiohttp
 from loguru import logger
 
 from config.settings import Settings
-from db.hub_store import HubDB
+from db.hub_repository import make_hub_repository
 from hub.state import HubState
 
 
@@ -20,7 +20,7 @@ class OpenClawAdvisorService:
     def __init__(self, *, settings: Settings, state: HubState, db_path: Path = Path("data/hub.db")) -> None:
         self.settings = settings
         self.state = state
-        self.db = HubDB(path=db_path)
+        self.db = make_hub_repository(path=db_path)
         self._running = False
         self._loop_sleep_seconds = 300
 

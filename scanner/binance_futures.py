@@ -12,6 +12,8 @@ from typing import Any
 import aiohttp
 from loguru import logger
 
+from config.settings import get_settings
+from db.hub_repository import make_hub_repository
 from db.hub_store import HubDB
 from scanner.trending import TrendingCoin
 
@@ -74,6 +76,12 @@ class BinanceFuturesScanner:
     def set_exchange_symbols(self, symbols: set[str] | list[str]) -> None:
         """Reuse monitor-fetched BINANCE symbol list to avoid duplicate existence checks."""
         self._binance_symbols = {s.upper().split(":")[0] for s in symbols}
+
+    def _new_hub_db(self):
+        backend = str(get_settings().hub_db_backend or "sqlite").strip().lower()
+        if backend == "postgres":
+            return make_hub_repository(path=self._db_path)
+        return HubDB(path=self._db_path)
 
     @property
     def latest_scan(self) -> list[TrendingCoin]:
@@ -211,7 +219,7 @@ class BinanceFuturesScanner:
     def _persist_tick_blocking(
         self, rows: list[dict[str, Any]], state_rows: list[dict[str, Any]], now: datetime
     ) -> int:
-        db = HubDB(path=self._db_path)
+        db = self._new_hub_db()
         try:
             db.connect()
             db.save_binance_snapshots(rows)
@@ -257,7 +265,7 @@ class BinanceFuturesScanner:
             logger.info("Binance futures scanner restored {} symbol states", len(rows))
 
     def _load_recent_history_blocking(self, since: str) -> list[sqlite3.Row]:
-        db = HubDB(path=self._db_path)
+        db = self._new_hub_db()
         try:
             db.connect()
             return db.load_binance_snapshots_since(since)
@@ -265,7 +273,7 @@ class BinanceFuturesScanner:
             db.close()
 
     def _load_symbol_states_blocking(self) -> list[sqlite3.Row]:
-        db = HubDB(path=self._db_path)
+        db = self._new_hub_db()
         try:
             db.connect()
             return db.load_binance_symbol_states()
@@ -382,7 +390,7 @@ class BinanceFuturesScanner:
         return min(1.0, 0.1 + (sample_count / 60.0) * 0.9)
 
     def _persist_rows(self, rows: list[dict[str, Any]]) -> None:
-        db = HubDB(path=self._db_path)
+        db = self._new_hub_db()
         try:
             db.connect()
             db.save_binance_snapshots(rows)
@@ -390,7 +398,7 @@ class BinanceFuturesScanner:
             db.close()
 
     def _persist_symbol_states(self, rows: list[dict[str, Any]]) -> None:
-        db = HubDB(path=self._db_path)
+        db = self._new_hub_db()
         try:
             db.connect()
             db.save_binance_symbol_states(rows)
@@ -401,7 +409,7 @@ class BinanceFuturesScanner:
         if (now - self._last_cleanup) < timedelta(hours=1):
             return
         cutoff = (now - timedelta(days=self.retention_days)).isoformat()
-        db = HubDB(path=self._db_path)
+        db = self._new_hub_db()
         try:
             db.connect()
             removed = db.cleanup_binance_snapshots_before(cutoff)

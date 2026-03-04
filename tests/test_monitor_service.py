@@ -28,6 +28,7 @@ def mock_settings():
     s.cmc_poll_interval = 300
     s.coingecko_api_key = ""
     s.coingecko_poll_interval = 300
+    s.hub_db_backend = "sqlite"
     return s
 
 
@@ -503,7 +504,11 @@ class TestRouteToBotsMonitor:
                 bot_id="bot-momentum", bot_style="momentum", should_trade=True, open_positions=10, max_positions=10
             ),
         ]
-        monitor._route_to_bots(staging, statuses)
+        with patch("db.hub_store.HubDB") as mock_db_cls:
+            mock_db = MagicMock()
+            mock_db.get_open_trade_symbols.return_value = set()
+            mock_db_cls.return_value = mock_db
+            monitor._route_to_bots(staging, statuses)
         hub_state.write_trade_queue.assert_called_once()
         call_queue = hub_state.write_trade_queue.call_args[0][0]
         assert call_queue.pending_count >= 1
@@ -710,3 +715,16 @@ class TestMonitorDbRetry:
 
         assert db.connect.call_count == 2
         assert db.save_exchange_symbols.call_count == 2
+
+    def test_persist_exchange_symbols_blocking_uses_postgres_repo(self, monitor):
+        db = MagicMock()
+        settings = MagicMock()
+        settings.hub_db_backend = "postgres"
+        with (
+            patch("config.settings.get_settings", return_value=settings),
+            patch("db.hub_repository.make_hub_repository", return_value=db),
+        ):
+            monitor._persist_exchange_symbols_blocking({"BINANCE": {"BTC/USDT"}})
+        db.connect.assert_called_once()
+        db.save_exchange_symbols.assert_called_once_with("BINANCE", {"BTC/USDT"})
+        db.close.assert_called_once()

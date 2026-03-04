@@ -49,7 +49,7 @@ class TestHubStateAnalytics:
         read = state.read_analytics()
         assert read.updated_at is not None
 
-    def test_analytics_persisted_to_disk(self, tmp_path):
+    def test_analytics_persisted_to_db_and_reloaded(self, tmp_path):
         s1 = HubState(data_dir=tmp_path)
         snap = AnalyticsSnapshot(
             weights=[
@@ -61,8 +61,11 @@ class TestHubStateAnalytics:
             total_trades_logged=60,
         )
         s1.write_analytics(snap)
-
-        assert (tmp_path / "analytics_state.json").exists()
+        row = s1._hub_db.conn.execute(
+            "SELECT COUNT(*) AS c FROM analytics_snapshots",
+        ).fetchone()
+        assert row is not None
+        assert int(row["c"]) == 1
 
         s2 = HubState(data_dir=tmp_path)
         loaded = s2.read_analytics()
@@ -80,11 +83,39 @@ class TestHubStateAnalytics:
         assert loaded.weights == []
         assert loaded.total_trades_logged == 0
 
-    def test_analytics_handles_corrupt_file(self, tmp_path):
-        (tmp_path / "analytics_state.json").write_text("NOT VALID JSON {{{{")
+    def test_analytics_handles_corrupt_db_snapshot(self, tmp_path):
+        s1 = HubState(data_dir=tmp_path)
+        assert s1._hub_db.conn is not None
+        s1._hub_db.conn.execute(
+            """
+            INSERT INTO analytics_snapshots (snapshot_json, total_trades_logged, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            ("NOT VALID JSON {{{{", 0, "2026-03-04T00:00:00+00:00"),
+        )
+        s1._hub_db.conn.commit()
+
         s = HubState(data_dir=tmp_path)
         loaded = s.read_analytics()
         assert loaded.weights == []
+
+    def test_analytics_imports_legacy_json_once_when_db_empty(self, tmp_path):
+        legacy = AnalyticsSnapshot(
+            weights=[StrategyWeightEntry(strategy="momentum", weight=1.1)],
+            total_trades_logged=7,
+        )
+        (tmp_path / "analytics_state.json").write_text(legacy.model_dump_json())
+
+        s = HubState(data_dir=tmp_path)
+        loaded = s.read_analytics()
+        assert len(loaded.weights) == 1
+        assert loaded.total_trades_logged == 7
+
+        row = s._hub_db.conn.execute(
+            "SELECT snapshot_json FROM analytics_snapshots ORDER BY id DESC LIMIT 1",
+        ).fetchone()
+        assert row is not None
+        assert "momentum" in str(row["snapshot_json"])
 
 
 class TestHubStateExtremeWatchlist:

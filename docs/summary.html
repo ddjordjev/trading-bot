@@ -234,7 +234,7 @@ Trading bots are lightweight executors that consume proposals from the hub via H
   <tr><td><code>scanner/binance_futures.py</code></td><td>Binance futures scanner with incremental per-symbol horizons (1m..1y), DB-backed snapshots/state, primary CEX hot-mover stream</td></tr>
   <tr><td><code>notifications/notifier.py</code></td><td>Email alerts with bounded queue (liquidation, stops, daily summary, legendary ride)</td></tr>
   <tr><td><code>db/store.py</code></td><td>Per-bot SQLite trade database (legacy — bots now push trades to hub)</td></tr>
-  <tr><td><code>db/hub_store.py</code></td><td>Hub SQLite database — merged trade history for all bots (the sole persistent DB)</td></tr>
+  <tr><td><code>db/hub_store.py</code> + <code>db/hub_store_postgres.py</code></td><td>Hub persistence adapters — SQLite (migration source) + PostgreSQL (primary)</td></tr>
   <tr><td><code>db/models.py</code></td><td>TradeRecord, StrategyScore, PatternInsight, ModificationSuggestion</td></tr>
   <tr><td><code>analytics/engine.py</code></td><td>Pattern detection, strategy scoring, weight factors, modification suggestions</td></tr>
   <tr><td><code>hub_main.py</code></td><td>Hub entry point — FastAPI + Monitor + Analytics + daily report (NOT a TradingBot)</td></tr>
@@ -244,7 +244,7 @@ Trading bots are lightweight executors that consume proposals from the hub via H
   <tr><td><code>shared/models.py</code></td><td>BotDeploymentStatus, IntelSnapshot, AnalyticsSnapshot, TradeQueue, TradeProposal, ExtremeWatchlist</td></tr>
   <tr><td><code>services/monitor.py</code></td><td>Monitoring service — runs in-process inside hub (intel feeds + signal generation)</td></tr>
   <tr><td><code>services/signal_generator.py</code></td><td>Converts intel snapshots into CRITICAL/DAILY/SWING trade proposals, stored in HubState</td></tr>
-  <tr><td><code>services/analytics_service.py</code></td><td>Analytics service — runs in-process inside hub (reads hub.db, computes scores)</td></tr>
+  <tr><td><code>services/analytics_service.py</code></td><td>Analytics service — runs in-process inside hub (reads trading Postgres, computes scores)</td></tr>
   <tr><td><code>validators/</code></td><td>Per-bot-type lightweight validators (momentum, indicators, meanrev, swing, extreme)</td></tr>
   <tr><td><code>config/bot_profiles.py</code></td><td>Bot profile definitions — strategies, env overrides, enable/disable defaults</td></tr>
   <tr><td><code>web/server.py</code></td><td>FastAPI dashboard — REST API + WebSocket + /metrics + /health (runs in hub)</td></tr>
@@ -257,7 +257,7 @@ Trading bots are lightweight executors that consume proposals from the hub via H
   <tr><td><code>docs/summary.html</code></td><td>This document — requirements &amp; implementation summary</td></tr>
   <tr><td><code>docs/EXECUTION_PLAN.md</code></td><td>10-day testnet execution plan with crash recovery and reporting</td></tr>
   <tr><td><code>scripts/deploy-digitalocean.sh</code></td><td>DigitalOcean Docker deployment</td></tr>
-  <tr><td><code>scripts/backup_dbs.sh</code></td><td>Host-side DB backup (copies hub.db to timestamped backup dir)</td></tr>
+  <tr><td><code>scripts/backup_hub_postgres.sh</code></td><td>Host-side Postgres backup (<code>pg_dump</code> from <code>bot-hub-postgres</code>)</td></tr>
   <tr><td><code>scripts/build-dashboard.sh</code></td><td>Build the React frontend for production</td></tr>
   <tr><td><code>scripts/preflight_check.py</code></td><td>Pre-live sanity check: API keys, balance, futures, leverage, risk</td></tr>
   <tr><td><code>scripts/run_session.sh</code></td><td>10-day session helper: start/stop/status/snapshot/logs</td></tr>
@@ -286,8 +286,8 @@ uses <code>data/</code>. In Docker this is bind-mounted from <code>$HOST_DATA_DI
 <table>
   <tr><th colspan="3" style="text-align:left; padding-top:1rem;">Persistent (on disk)</th></tr>
   <tr><th>Path</th><th>Created By</th><th>Purpose</th></tr>
-  <tr><td><code>data/hub.db</code></td><td>Hub (<code>db/hub_store.py</code>)</td><td>SQLite — merged trade history + CEX scanner tables (<code>cex_binance_snapshots</code>, <code>cex_binance_symbol_state</code>)</td></tr>
-  <tr><td><code>data/analytics_state.json</code></td><td>Hub (<code>hub/state.py</code>)</td><td>Strategy scores, patterns, suggestions (survives restarts)</td></tr>
+  <tr><td><code>PostgreSQL trading_db</code></td><td>Hub (<code>db/hub_repository.py</code>)</td><td>Primary persistence: merged trade history + CEX scanner tables + analytics snapshots</td></tr>
+  <tr><td><code>data/hub.db</code></td><td>Host fallback</td><td>Legacy SQLite migration source retained for rollback and forensic diffs</td></tr>
   <tr><td><code>data/bot_registry.json</code></td><td>Hub (<code>web/server.py</code>)</td><td>Known bot IDs and their command-server URLs</td></tr>
   <tr><td><code>logs/bot_*.log</code></td><td>Each bot (<code>bot.py</code>)</td><td>Rotated daily, 30-day retention (host bind mount via <code>$HOST_LOGS_DIR</code>)</td></tr>
   <tr><td><code>logs/hub_*.log</code></td><td>Hub (<code>hub_main.py</code>)</td><td>Rotated daily, 14-day retention</td></tr>
@@ -314,6 +314,8 @@ rm -rf "$HOST_LOGS_DIR"         # all log files
 </pre>
 <p>On next <code>docker compose up</code>, all directories and files are recreated automatically.
 Data lives on the host via bind mounts — <code>docker compose down -v</code> does NOT delete it.</p>
+<p><strong>Doc sync rule:</strong> when persistence architecture changes, update and verify
+<code>docs/ARCHITECTURE.md</code>, <code>docs/AI_CONTEXT.md</code>, and <code>docs/summary.html</code> together.</p>
 
 <!-- ============================================================ -->
 <h2 id="s4">4. Key Configuration</h2>
@@ -735,12 +737,12 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
 <h3 id="s7-20">7.20 Trade Analytics &amp; Pattern Detection</h3>
 
 <div class="principle">
-  <strong>Learn from every trade.</strong> Every closed position is logged to a local SQLite database with full context: strategy, market regime, Fear &amp; Greed, time of day, volatility, DCA depth, signal strength. The analytics engine detects patterns in losing trades and generates concrete modification suggestions. Strategy weights are automatically adjusted based on historical performance.
+  <strong>Learn from every trade.</strong> Every closed position is logged to the hub PostgreSQL trading database with full context: strategy, market regime, Fear &amp; Greed, time of day, volatility, DCA depth, signal strength. The analytics engine detects patterns in losing trades and generates concrete modification suggestions. Strategy weights are automatically adjusted based on historical performance.
 </div>
 
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
-  <tr><td>Central SQLite database for trade history (hub-only)</td><td><span class="badge done">Done</span></td><td class="file">db/hub_store.py → data/hub.db</td></tr>
+  <tr><td>Central PostgreSQL database for trade history (hub-only)</td><td><span class="badge done">Done</span></td><td class="file">db/hub_repository.py → bot-hub-postgres/trading_db</td></tr>
   <tr><td>Log every trade with full market context</td><td><span class="badge done">Done</span></td><td class="file">db/models.py → TradeRecord (27 fields)</td></tr>
   <tr><td>Strategy scoring: win rate, profit factor, expectancy</td><td><span class="badge done">Done</span></td><td class="file">analytics/engine.py → StrategyScore</td></tr>
   <tr><td>Automatic weight factors (0.05-2.0x) based on performance</td><td><span class="badge done">Done</span></td><td class="file">analytics/engine.py → _compute_weight()</td></tr>
@@ -797,7 +799,7 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
   <tr><td>Monitor runs in-process inside hub (intel feeds + signal generation)</td><td><span class="badge done">Done</span></td><td class="file">services/monitor.py, hub_main.py</td></tr>
-  <tr><td>Analytics runs in-process inside hub (hub.db → scores, patterns)</td><td><span class="badge done">Done</span></td><td class="file">services/analytics_service.py, hub_main.py</td></tr>
+  <tr><td>Analytics runs in-process inside hub (trading_db → scores, patterns)</td><td><span class="badge done">Done</span></td><td class="file">services/analytics_service.py, hub_main.py</td></tr>
   <tr><td>In-memory state via HubState (replaces file-based SharedState)</td><td><span class="badge done">Done</span></td><td class="file">hub/state.py → HubState</td></tr>
   <tr><td>Bots POST snapshots to hub and receive enablement + optional queue proposal in response</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _report_to_hub(), web/server.py → /internal/report</td></tr>
   <tr><td>Bots fetch cached intel/analytics/extreme watchlist via dedicated endpoint (no file access)</td><td><span class="badge done">Done</span></td><td class="file">bot.py → _fetch_hub_intel(), web/server.py → /internal/intel</td></tr>
@@ -1007,7 +1009,7 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
 <h3 id="s7-32">7.32 Multi-Bot Strategy Tournament</h3>
 
 <div class="principle">
-  <strong>Run 10 bot instances in parallel with different strategies, same capital, one central hub.</strong> The hub runs the dashboard, monitor, and analytics. Bots are lightweight trade executors that POST snapshots to the hub and receive intel/queue via HTTP response. All persistent data flows through <code>hub.db</code> only.
+  <strong>Run 10 bot instances in parallel with different strategies, same capital, one central hub.</strong> The hub runs the dashboard, monitor, and analytics. Bots are lightweight trade executors that POST snapshots to the hub and receive intel/queue via HTTP response. All persistent trading data flows through PostgreSQL <code>trading_db</code>.
 </div>
 
 <table>
@@ -1066,14 +1068,14 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
 <h3 id="s7-36">7.36 Persistent Data &amp; DB Sync</h3>
 
 <div class="principle">
-  <strong>Data survives container rebuilds.</strong> Docker named volumes replaced with host bind mounts (<code>$HOST_DATA_DIR</code>, <code>$HOST_LOGS_DIR</code>). All trade persistence flows through <code>hub.db</code> (the sole persistent DB). Bots are fully stateless — no per-bot DBs, no file I/O. Analytics state persisted to <code>analytics_state.json</code> for restart survival.
+  <strong>Data survives container rebuilds.</strong> Docker named volumes replaced with host bind mounts (<code>$HOST_DATA_DIR</code>, <code>$HOST_LOGS_DIR</code>). All trade persistence flows through PostgreSQL <code>trading_db</code>, including the analytics snapshot table (<code>analytics_snapshots</code>). Bots are fully stateless — no per-bot DBs, no file I/O.
 </div>
 
 <table>
   <tr><th>Requirement</th><th>Status</th><th>Where</th></tr>
   <tr><td>Host bind mounts: <code>$HOST_DATA_DIR</code> and <code>$HOST_LOGS_DIR</code></td><td><span class="badge done">Done</span></td><td class="file">docker-compose.yml → volumes, .env</td></tr>
-  <tr><td>Single hub.db is the sole persistent trade DB — bots push trades via HTTP</td><td><span class="badge done">Done</span></td><td class="file">db/hub_store.py, web/server.py → /internal/trade</td></tr>
-  <tr><td>Analytics state persisted to disk (survives hub restarts)</td><td><span class="badge done">Done</span></td><td class="file">hub/state.py → _persist_analytics()</td></tr>
+  <tr><td>Single PostgreSQL trading_db is the sole persistent trade DB — bots push trades via HTTP</td><td><span class="badge done">Done</span></td><td class="file">db/hub_repository.py, web/server.py → /internal/trade</td></tr>
+  <tr><td>Analytics snapshot persisted in trading_db (survives hub restarts)</td><td><span class="badge done">Done</span></td><td class="file">hub/state.py, db/hub_store_postgres.py → analytics_snapshots</td></tr>
   <tr><td>Bots recover open positions from hub on startup</td><td><span class="badge done">Done</span></td><td class="file">bot.py → recovery on connect</td></tr>
   <tr><td>Host-side DB backup script</td><td><span class="badge done">Done</span></td><td class="file">scripts/backup_dbs.sh</td></tr>
 </table>

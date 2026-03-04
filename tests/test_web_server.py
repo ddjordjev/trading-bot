@@ -1206,6 +1206,58 @@ class TestInternalReport:
         assert str(bybit_row.get("orphan_reason", "")) == "no_owner_record"
         _bot_reports.clear()
 
+    async def test_merged_snapshot_normalizes_bot_id_for_owner_matching(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports.clear()
+
+        base_status = {
+            "running": True,
+            "balance": 100.0,
+            "available_margin": 80.0,
+            "daily_pnl": 0.0,
+            "daily_pnl_pct": 0.0,
+            "total_growth_usd": 0.0,
+            "total_growth_pct": 0.0,
+            "profit_buffer_pct": 0.0,
+            "uptime_seconds": 10,
+            "manual_stop_active": False,
+            "strategies_count": 0,
+            "dynamic_strategies_count": 0,
+            "trading_mode": "paper_local",
+            "exchange_name": "BINANCE",
+            "exchange_url": "",
+            "tier": "building",
+            "tier_progress_pct": 0,
+            "daily_target_pct": 10,
+        }
+
+        report_bot_snapshot(
+            {
+                "bot_id": " Extreme ",
+                "exchange": "BINANCE",
+                "status": dict(base_status, exchange_name="BINANCE"),
+                "positions": [],
+                "foreign_positions": [{"symbol": "BTC/USDT", "side": "long", "detected_at": "2026-02-01T00:00:00Z"}],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+
+        hub = MagicMock()
+        hub.get_all_bot_enabled.return_value = {"extreme": True}
+        hub.get_open_trade_owner_rows.return_value = [{"bot_id": "EXTREME", "symbol": "BTC/USDT"}]
+        with patch("web.server._get_hub_db", return_value=hub):
+            from web.server import _build_merged_snapshot
+
+            snap = _build_merged_snapshot()
+
+        orphan_keys = {
+            (str(o.get("exchange_name", "")).upper(), str(o.get("symbol", "")).upper())
+            for o in snap["orphan_positions"]
+        }
+        assert ("BINANCE", "BTC/USDT") not in orphan_keys
+        _bot_reports.clear()
+
     async def test_merged_snapshot_filters_orphan_when_wick_scalp_manages_side(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
         _bot_reports.clear()

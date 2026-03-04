@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
+from unittest.mock import MagicMock
+
 import pytest
 
+import db.hub_store_postgres as hub_store_postgres_mod
 from db.hub_store import HubDB
+from db.hub_store_postgres import PostgresHubDB
 from db.models import ModificationSuggestion, PatternInsight, StrategyScore, TradeRecord
+from db.pg_compat import PgConnCompat
 from db.store import TradeDB
+from shared.models import AnalyticsSnapshot, StrategyWeightEntry
 
 # ── DB Models ───────────────────────────────────────────────────────
 
@@ -557,6 +565,24 @@ class TestHubDB:
     def test_conn_property(self, hub: HubDB):
         assert hub.conn is not None
 
+    def test_analytics_snapshot_roundtrip(self, hub: HubDB):
+        snap = AnalyticsSnapshot(
+            weights=[StrategyWeightEntry(strategy="momentum", weight=1.25, total_trades=10, total_pnl=42.0)],
+            patterns=[{"pattern_type": "weekday", "description": "works better mon-thu"}],
+            suggestions=[{"strategy": "momentum", "suggestion_type": "increase_weight"}],
+            total_trades_logged=99,
+        )
+        hub.save_analytics_snapshot(snap)
+        loaded = hub.load_latest_analytics_snapshot()
+        assert loaded is not None
+        assert loaded.total_trades_logged == 99
+        assert len(loaded.weights) == 1
+        assert loaded.weights[0].strategy == "momentum"
+
+    def test_analytics_snapshot_load_returns_none_when_missing(self, hub: HubDB):
+        loaded = hub.load_latest_analytics_snapshot()
+        assert loaded is None
+
     def test_request_key_dedup(self, hub: HubDB):
         row1 = hub.insert_trade(
             "bot1",
@@ -892,3 +918,95 @@ class TestHubDB:
         rows2 = hub.list_openclaw_suggestions(include_removed=True)
         assert rows2[0]["status"] == "implemented"
         assert rows2[0]["implemented_at"] != ""
+
+
+class TestPostgresCompatibility:
+    def test_pg_conn_compat_execute_and_script(self, monkeypatch):
+        class FakeCursor:
+            def __init__(self):
+                self.rowcount = 2
+                self.executed: list[tuple[str, object]] = []
+
+            def execute(self, sql, params=()):
+                self.executed.append((sql, params))
+
+            def executemany(self, sql, params_seq):
+                self.executed.append((sql, params_seq))
+
+            def fetchone(self):
+                return {"id": 7}
+
+            def fetchall(self):
+                return [{"k": 1}, {"k": 2}]
+
+        class FakeConn:
+            def __init__(self):
+                self.cur = FakeCursor()
+                self.closed = False
+
+            def cursor(self):
+                return self.cur
+
+            def close(self):
+                self.closed = True
+
+        fake_conn = FakeConn()
+        monkeypatch.setattr("db.pg_compat.psycopg.connect", lambda *args, **kwargs: fake_conn)
+
+        conn = PgConnCompat("postgresql://example")
+        c1 = conn.execute("INSERT INTO trades (symbol) VALUES (?)", ("BTC/USDT",))
+        assert c1.lastrowid == 7
+        c2 = conn.execute("SELECT * FROM trades WHERE symbol=?", ("BTC/USDT",))
+        assert c2.rowcount == 2
+        assert c2.fetchone() == {"id": 7}
+        assert c2.fetchall() == [{"k": 1}, {"k": 2}]
+        conn.executemany("UPDATE trades SET symbol=? WHERE id=?", [("ETH/USDT", 1)])
+        conn.executescript("SELECT 1; SELECT 2;")
+        conn.commit()
+        conn.rollback()
+        conn.close()
+        assert fake_conn.closed is True
+
+    def test_postgres_hubdb_connect_and_retry(self, monkeypatch, tmp_path):
+        schema_file = tmp_path / "schema.sql"
+        schema_file.write_text("CREATE TABLE t(id INT);")
+        monkeypatch.setattr(hub_store_postgres_mod, "_POSTGRES_SCHEMA_FILE", schema_file)
+
+        class FakePgConn:
+            def __init__(self, _dsn):
+                self.executed_scripts: list[str] = []
+                self.calls = 0
+
+            def executescript(self, script: str):
+                self.executed_scripts.append(script)
+
+            def execute(self, _sql, _params):
+                self.calls += 1
+                if self.calls == 1:
+                    raise sqlite3.OperationalError("database is locked")
+                return MagicMock()
+
+            def commit(self):
+                return None
+
+        monkeypatch.setattr(hub_store_postgres_mod, "PgConnCompat", FakePgConn)
+        monkeypatch.setattr(hub_store_postgres_mod.time, "sleep", lambda *_args: None)
+
+        db = PostgresHubDB("postgresql://example")
+        db.connect()
+        db._ensure_bot_id_column()
+        db._ensure_request_key_column()
+        db._ensure_recovery_close_column()
+        assert isinstance(db._conn, FakePgConn)
+        assert db._conn.executed_scripts
+
+        cur = db._execute_write_with_lock_retry("UPDATE x SET y=?", ("v",), retries=2)
+        assert cur is not None
+
+    def test_postgres_hubdb_missing_schema_raises(self, monkeypatch):
+        missing = Path("/tmp/definitely-missing-schema.sql")
+        monkeypatch.setattr(hub_store_postgres_mod, "_POSTGRES_SCHEMA_FILE", missing)
+        db = PostgresHubDB("postgresql://example")
+        db._conn = MagicMock()
+        with pytest.raises(RuntimeError):
+            db._apply_schema()

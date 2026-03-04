@@ -213,9 +213,12 @@ class MonitorService:
 
     @staticmethod
     def _persist_exchange_symbols_blocking(fresh: dict[str, set[str]]) -> None:
+        from config.settings import get_settings
+        from db.hub_repository import make_hub_repository
         from db.hub_store import HubDB
 
-        db = HubDB()
+        backend = str(get_settings().hub_db_backend or "sqlite").strip().lower()
+        db = make_hub_repository() if backend == "postgres" else HubDB()
         try:
             db.connect()
             for ex_name, syms in fresh.items():
@@ -405,9 +408,14 @@ class MonitorService:
     async def _seed_exchange_symbols(self) -> None:
         """On startup: load from DB, then refresh from exchanges."""
         try:
-            from db.hub_store import HubDB
+            from db.hub_repository import make_hub_repository
 
-            db = HubDB()
+            if str(self.settings.hub_db_backend or "sqlite").strip().lower() == "postgres":
+                db = make_hub_repository()
+            else:
+                from db.hub_store import HubDB
+
+                db = HubDB()
             db.connect()
             cached = db.load_all_exchange_symbols()
             db.close()
@@ -675,15 +683,24 @@ class MonitorService:
         try:
             from pathlib import Path
 
-            from db.hub_store import HubDB
+            from db.hub_repository import make_hub_repository
 
-            hub = HubDB(path=Path("data/hub.db"))
+            if str(self.settings.hub_db_backend or "sqlite").strip().lower() == "postgres":
+                hub = make_hub_repository(path=Path("data/hub.db"))
+            else:
+                from db.hub_store import HubDB
+
+                hub = HubDB(path=Path("data/hub.db"))
             hub.connect()
             open_db_symbols = hub.get_open_trade_symbols()
             self._last_open_db_symbols = set(open_db_symbols)
         except Exception as e:
-            logger.warning("Skipping queue routing: failed reading open trades from hub.db: {}", e)
-            return
+            open_db_symbols = set(self._last_open_db_symbols)
+            logger.warning(
+                "Queue routing fallback: failed reading open trades from hub.db: {} (using cached={} symbols)",
+                e,
+                len(open_db_symbols),
+            )
         finally:
             with contextlib.suppress(Exception):
                 if hub is not None:
@@ -1129,15 +1146,24 @@ class MonitorService:
         try:
             from pathlib import Path
 
-            from db.hub_store import HubDB
+            from db.hub_repository import make_hub_repository
 
-            hub = HubDB(path=Path("data/hub.db"))
+            if str(self.settings.hub_db_backend or "sqlite").strip().lower() == "postgres":
+                hub = make_hub_repository(path=Path("data/hub.db"))
+            else:
+                from db.hub_store import HubDB
+
+                hub = HubDB(path=Path("data/hub.db"))
             hub.connect()
             open_db_symbols = hub.get_open_trade_symbols()
             self._last_open_db_symbols = set(open_db_symbols)
         except Exception as e:
-            logger.warning("Skipping extreme queueing: failed reading open trades from hub.db: {}", e)
-            return
+            open_db_symbols = set(self._last_open_db_symbols)
+            logger.warning(
+                "Extreme queue fallback: failed reading open trades from hub.db: {} (using cached={} symbols)",
+                e,
+                len(open_db_symbols),
+            )
         finally:
             with contextlib.suppress(Exception):
                 if hub is not None:

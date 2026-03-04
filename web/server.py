@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
+import sqlite3
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +50,7 @@ from web.schemas import (
 
 if TYPE_CHECKING:
     from db.hub_store import HubDB
+    from db.hub_store_postgres import PostgresHubDB
     from hub.state import HubState
 
 _hub_state_ref: HubState | None = None
@@ -58,7 +62,7 @@ _bot_reports: dict[str, dict[str, Any]] = {}
 _BOT_REGISTRY = Path("data/bot_registry.json")
 _bot_urls: dict[str, str] = {}  # bot_id -> base URL (e.g. "http://bot-meanrev:9035")
 _HUB_DB_PATH = Path("data/hub.db")
-_hub_db: HubDB | None = None
+_hub_db: HubDB | PostgresHubDB | None = None
 _exchange_snapshot_last_ts: dict[str, float] = {}
 
 
@@ -151,15 +155,27 @@ def _strategies_state_token() -> tuple[Any, ...]:
     )
 
 
-def _get_hub_db() -> HubDB:
+def _get_hub_db() -> HubDB | PostgresHubDB:
     """Return the singleton HubDB (creates on first call)."""
     global _hub_db
     if _hub_db is None:
-        from db.hub_store import HubDB
+        from db.hub_repository import make_hub_repository
 
-        _hub_db = HubDB(path=_HUB_DB_PATH)
+        _hub_db = make_hub_repository(path=_HUB_DB_PATH)
         _hub_db.connect()
     return _hub_db
+
+
+def _normalize_bot_id(bot_id: Any) -> str:
+    """Canonical bot id shape used across hub ingress/state/queries."""
+    return str(bot_id or "").strip().lower()
+
+
+def _pair_symbol(symbol: Any) -> str:
+    raw = str(symbol or "").strip().upper()
+    if not raw:
+        return ""
+    return raw.split(":")[0]
 
 
 def _load_bot_registry() -> None:
@@ -349,7 +365,7 @@ async def get_bots(_: str = Depends(verify_token)) -> list[BotInstance]:
     enabled_map = hub.get_all_bot_enabled()
 
     for rpt in _bot_reports.values():
-        bid = rpt.get("bot_id", "")
+        bid = _normalize_bot_id(rpt.get("bot_id", ""))
         if bid == "hub":
             continue
         profile = PROFILES_BY_ID.get(bid)
@@ -1179,6 +1195,7 @@ def _write_activation_file(bot_id: str) -> None:
 # --------------- DB Explorer (read-only) ---------------
 
 _ALLOWED_TABLES: set[str] = set()
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _get_db_conn() -> Any:
@@ -1187,17 +1204,45 @@ def _get_db_conn() -> Any:
     return hub.conn
 
 
+def _db_backend_for_conn(conn: Any) -> str:
+    if conn is None:
+        return "sqlite"
+    if conn.__class__.__name__ == "PgConnCompat":
+        return "postgres"
+    return str(get_settings().hub_db_backend or "sqlite").strip().lower()
+
+
+def _quote_ident(name: str, *, backend: str) -> str:
+    if not _IDENT_RE.match(name):
+        raise HTTPException(status_code=400, detail="invalid table name")
+    if backend == "postgres":
+        return f'"{name}"'
+    return f"[{name}]"
+
+
 def _get_db_tables() -> list[dict[str, Any]]:
     conn = _get_db_conn()
     if not conn:
         return []
-    rows = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-    ).fetchall()
+    backend = _db_backend_for_conn(conn)
+    if backend == "postgres":
+        rows = conn.execute(
+            """
+            SELECT table_name AS name
+            FROM information_schema.tables
+            WHERE table_schema='public'
+            ORDER BY table_name
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
     result = []
     for r in rows:
         name = r["name"]
-        count = conn.execute(f"SELECT COUNT(*) as c FROM [{name}]").fetchone()["c"]
+        qname = _quote_ident(name, backend=backend)
+        count = conn.execute(f"SELECT COUNT(*) as c FROM {qname}").fetchone()["c"]
         result.append({"name": name, "row_count": count})
     _ALLOWED_TABLES.update(t["name"] for t in result)
     return result
@@ -1225,10 +1270,16 @@ async def db_table_rows(
         raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found")
     page_size = min(max(page_size, 10), 500)
     offset = (max(page, 1) - 1) * page_size
+    backend = _db_backend_for_conn(conn)
+    qname = _quote_ident(table_name, backend=backend)
 
-    total = conn.execute(f"SELECT COUNT(*) as c FROM [{table_name}]").fetchone()["c"]
+    total = conn.execute(f"SELECT COUNT(*) as c FROM {qname}").fetchone()["c"]
+    preview_cursor = conn.execute(f"SELECT * FROM {qname} LIMIT 0")
+    preview_cols = [desc[0] for desc in preview_cursor.description] if preview_cursor.description else []
+    order_col = next((c for c in ("id", "updated_at", "created_at", "opened_at") if c in preview_cols), "")
+    order_sql = f" ORDER BY {_quote_ident(order_col, backend=backend)} DESC" if order_col else ""
     cursor = conn.execute(
-        f"SELECT * FROM [{table_name}] ORDER BY rowid DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM {qname}{order_sql} LIMIT ? OFFSET ?",
         (page_size, offset),
     )
     columns = [desc[0] for desc in cursor.description] if cursor.description else []
@@ -1256,10 +1307,11 @@ def report_bot_snapshot(data: dict[str, Any]) -> None:
     """
     if not isinstance(data, dict):
         return
-    bot_id = data.get("bot_id", "")
+    bot_id = _normalize_bot_id(data.get("bot_id", ""))
     if not bot_id:
         return
     stamped = dict(data)
+    stamped["bot_id"] = bot_id
     stamped["_reported_at"] = time.time()
     existing = _bot_reports.get(bot_id)
     if existing is None:
@@ -1308,7 +1360,7 @@ def _maybe_record_exchange_equity_snapshot(data: dict[str, Any], hub: HubDB) -> 
         margin_used += notional / lev
         unrealized += float(p.get("pnl_usd", p.get("pnl", 0.0)) or 0.0)
     estimated_equity = max(0.0, available + margin_used + unrealized)
-    source_bot = str(data.get("bot_id", "") or "")
+    source_bot = _normalize_bot_id(data.get("bot_id", ""))
     hub.insert_exchange_equity_snapshot(
         exchange=exchange,
         available_usdt=available,
@@ -1398,7 +1450,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
         s = rpt.get("status", {})
         if not isinstance(s, dict):
             s = {}
-        bid = rpt.get("bot_id", "")
+        bid = _normalize_bot_id(rpt.get("bot_id", ""))
         ex_name = str(rpt.get("exchange", "") or "").strip().upper()
         if bid and bid != "hub":
             if ex_name:
@@ -1490,10 +1542,10 @@ def _build_merged_snapshot() -> dict[str, Any]:
     managed_symbol_keys = {
         (
             str(p.get("exchange_name", p.get("exchange", "")) or "").strip().upper(),
-            str(p.get("symbol", "") or "").strip().upper(),
+            _pair_symbol(p.get("symbol", "")),
         )
         for p in all_positions
-        if isinstance(p, dict) and str(p.get("symbol", "") or "").strip()
+        if isinstance(p, dict) and _pair_symbol(p.get("symbol", ""))
     }
     for wick in all_wicks:
         if not isinstance(wick, dict):
@@ -1501,14 +1553,14 @@ def _build_merged_snapshot() -> dict[str, Any]:
         managed_symbol_keys.add(
             (
                 str(wick.get("exchange_name", wick.get("exchange", "")) or "").strip().upper(),
-                str(wick.get("symbol", "") or "").strip().upper(),
+                _pair_symbol(wick.get("symbol", "")),
             )
         )
 
     ownership_by_key: dict[tuple[str, str], str] = {}
     for row in hub.get_open_trade_owner_rows():
-        owner_bot = str(row.get("bot_id", "") or "").strip()
-        symbol = str(row.get("symbol", "") or "").strip().upper()
+        owner_bot = _normalize_bot_id(row.get("bot_id", ""))
+        symbol = _pair_symbol(row.get("symbol", ""))
         if not owner_bot or not symbol:
             continue
         exchange = bot_exchange.get(owner_bot, "").strip().upper()
@@ -1523,7 +1575,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
         if not isinstance(obs, dict):
             continue
         exchange = str(obs.get("exchange_name", obs.get("exchange", "")) or "").strip().upper()
-        symbol = str(obs.get("symbol", "") or "").strip().upper()
+        symbol = _pair_symbol(obs.get("symbol", ""))
         if not exchange or not symbol:
             continue
         key = (exchange, symbol)
@@ -1632,6 +1684,41 @@ def _build_merged_snapshot() -> dict[str, Any]:
     }
 
 
+def _backfill_open_trade_ownership_from_report(bot_id: str, payload: dict[str, Any], hub: Any) -> None:
+    """Create minimal open ownership rows for live managed positions missing in DB."""
+    positions = payload.get("positions")
+    if not isinstance(positions, list):
+        return
+    existing = {_pair_symbol(s) for s in hub.get_open_trade_symbols()}
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        symbol = _pair_symbol(pos.get("symbol", ""))
+        if not symbol or symbol in existing:
+            continue
+        side = str(pos.get("side", "") or "").strip().lower()
+        if side not in {"long", "buy", "short", "sell"}:
+            continue
+        opened_at = str(pos.get("opened_at", "") or "").strip()
+        if not opened_at:
+            opened_at = datetime.now(UTC).isoformat()
+        trade_row = {
+            "symbol": symbol,
+            "side": "short" if side in {"short", "sell"} else "long",
+            "strategy": str(pos.get("strategy", "") or "runtime_recovered").strip() or "runtime_recovered",
+            "action": "open",
+            "opened_at": opened_at,
+            "entry_price": float(pos.get("entry_price", 0.0) or 0.0),
+            "amount": float(pos.get("amount", 0.0) or 0.0),
+            "leverage": int(max(1, round(float(pos.get("leverage", 1) or 1)))),
+            "close_source": "",
+            "close_reason": "",
+        }
+        request_key = f"backfill:{bot_id}:{symbol}:{opened_at}"
+        hub.insert_trade(bot_id, trade_row, request_key=request_key)
+        existing.add(symbol)
+
+
 @app.post("/internal/report")
 async def receive_bot_report(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
     """Bots POST snapshots here; hub returns all data bots need.
@@ -1647,7 +1734,9 @@ async def receive_bot_report(request: Request, _: str = Depends(verify_token)) -
             data = {}
     except Exception:
         data = {}
-    bot_id = str(data.get("bot_id", "") or "").strip()
+    bot_id = _normalize_bot_id(data.get("bot_id", ""))
+    if bot_id:
+        data["bot_id"] = bot_id
     if bot_id:
         url = f"http://bot-{bot_id}:9035"
         if _bot_urls.get(bot_id) != url:
@@ -1687,6 +1776,9 @@ async def receive_bot_report(request: Request, _: str = Depends(verify_token)) -
 
     report_bot_snapshot(data)
     hub = _get_hub_db()
+    if bot_id:
+        with contextlib.suppress(Exception):
+            _backfill_open_trade_ownership_from_report(bot_id, data, hub)
     with contextlib.suppress(Exception):
         _maybe_record_exchange_equity_snapshot(data, hub)
     confirmed = hub.drain_confirmed_keys(bot_id) if bot_id else []
@@ -1742,7 +1834,7 @@ async def receive_bot_report(request: Request, _: str = Depends(verify_token)) -
 async def internal_disable_bot(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
     """Internal endpoint: force-disable a bot profile in hub config."""
     data = await request.json()
-    bot_id = str(data.get("bot_id", "") or "").strip()
+    bot_id = _normalize_bot_id(data.get("bot_id", ""))
     reason = str(data.get("reason", "") or "").strip()
     if not bot_id:
         return {"status": "error", "detail": "missing bot_id"}
@@ -1757,7 +1849,7 @@ async def internal_disable_bot(request: Request, _: str = Depends(verify_token))
 async def queue_update(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
     """Immediate consume/reject report from a bot — updates the queue right away."""
     data = await request.json()
-    bot_id = data.get("bot_id", "")
+    bot_id = _normalize_bot_id(data.get("bot_id", ""))
     exchange = data.get("exchange", "")
     action = data.get("action", "")
     proposal_id = data.get("proposal_id", "")
@@ -1802,7 +1894,7 @@ async def get_bot_intel(_: str = Depends(verify_token)) -> dict[str, Any]:
 async def reserve_trade_open(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
     """Create a pre-open ownership row so restart recovery has deterministic bot ownership."""
     data = await request.json()
-    bot_id = data.get("bot_id", "")
+    bot_id = _normalize_bot_id(data.get("bot_id", ""))
     trade = data.get("trade", {}) or {}
     request_key = data.get("request_key", "")
     if not bot_id or not isinstance(trade, dict):
@@ -1828,7 +1920,11 @@ async def reserve_trade_open(request: Request, _: str = Depends(verify_token)) -
         "planned_tp2": trade.get("planned_tp2", 0.0),
     }
     hub = _get_hub_db()
-    hub.insert_trade(bot_id, reserve_trade, request_key=request_key)
+    try:
+        hub.insert_trade(bot_id, reserve_trade, request_key=request_key)
+    except sqlite3.Error as e:
+        logger.warning("Trade reserve failed for {} {}: {}", bot_id, reserve_trade.get("symbol", ""), e)
+        raise HTTPException(status_code=503, detail=f"hub_db_unavailable: {e}") from e
     return {"status": "ok", "opened_at": opened_at, "request_key": request_key}
 
 
@@ -1839,7 +1935,7 @@ async def receive_trade(request: Request, _: str = Depends(verify_token)) -> dic
     Accepts ``request_key`` for idempotent writes and deferred ack.
     """
     data = await request.json()
-    bot_id = data.get("bot_id", "")
+    bot_id = _normalize_bot_id(data.get("bot_id", ""))
     action = data.get("action", "")
     trade = data.get("trade", {})
     request_key = data.get("request_key", "")
@@ -1847,34 +1943,38 @@ async def receive_trade(request: Request, _: str = Depends(verify_token)) -> dic
         return {"status": "error", "detail": "missing bot_id or trade"}
 
     hub = _get_hub_db()
-    if action == "cancel_reservation" and trade.get("opened_at"):
-        hub.cancel_trade_reservation(bot_id, trade["opened_at"], request_key=request_key)
-    elif action == "open" and trade.get("opened_at"):
-        updated = hub.update_trade_open(bot_id, trade["opened_at"], trade, request_key=request_key)
-        if not updated:
+    try:
+        if action == "cancel_reservation" and trade.get("opened_at"):
+            hub.cancel_trade_reservation(bot_id, trade["opened_at"], request_key=request_key)
+        elif action == "open" and trade.get("opened_at"):
+            updated = hub.update_trade_open(bot_id, trade["opened_at"], trade, request_key=request_key)
+            if not updated:
+                hub.insert_trade(bot_id, trade, request_key=request_key)
+        elif action == "close" and trade.get("opened_at"):
+            updated = hub.update_trade_close(bot_id, trade["opened_at"], trade, request_key=request_key)
+            if not updated:
+                logger.warning(
+                    "Deferred close write for bot={} opened_at={} symbol={} (open row missing)",
+                    bot_id,
+                    trade.get("opened_at", ""),
+                    trade.get("symbol", ""),
+                )
+                return {"status": "deferred", "action": action, "request_key": request_key}
+        elif action == "update" and trade.get("opened_at"):
+            updated = hub.update_trade_runtime(bot_id, trade["opened_at"], trade, request_key=request_key)
+            if not updated:
+                logger.warning(
+                    "Deferred runtime update for bot={} opened_at={} symbol={} (open row missing)",
+                    bot_id,
+                    trade.get("opened_at", ""),
+                    trade.get("symbol", ""),
+                )
+                return {"status": "deferred", "action": action, "request_key": request_key}
+        else:
             hub.insert_trade(bot_id, trade, request_key=request_key)
-    elif action == "close" and trade.get("opened_at"):
-        updated = hub.update_trade_close(bot_id, trade["opened_at"], trade, request_key=request_key)
-        if not updated:
-            logger.warning(
-                "Deferred close write for bot={} opened_at={} symbol={} (open row missing)",
-                bot_id,
-                trade.get("opened_at", ""),
-                trade.get("symbol", ""),
-            )
-            return {"status": "deferred", "action": action, "request_key": request_key}
-    elif action == "update" and trade.get("opened_at"):
-        updated = hub.update_trade_runtime(bot_id, trade["opened_at"], trade, request_key=request_key)
-        if not updated:
-            logger.warning(
-                "Deferred runtime update for bot={} opened_at={} symbol={} (open row missing)",
-                bot_id,
-                trade.get("opened_at", ""),
-                trade.get("symbol", ""),
-            )
-            return {"status": "deferred", "action": action, "request_key": request_key}
-    else:
-        hub.insert_trade(bot_id, trade, request_key=request_key)
+    except sqlite3.Error as e:
+        logger.warning("Trade write failed action={} bot_id={}: {}", action, bot_id, e)
+        raise HTTPException(status_code=503, detail=f"hub_db_unavailable: {e}") from e
 
     return {"status": "ok", "action": action, "request_key": request_key}
 
@@ -1883,7 +1983,7 @@ async def receive_trade(request: Request, _: str = Depends(verify_token)) -> dic
 async def get_bot_open_trades(bot_id: str, _: str = Depends(verify_token)) -> list[dict[str, Any]]:
     """Return open (unclosed) trades for a bot — used on bot startup to recover state."""
     hub = _get_hub_db()
-    trades = hub.get_open_trades_for_bot(bot_id)
+    trades = hub.get_open_trades_for_bot(_normalize_bot_id(bot_id))
     return [t.model_dump() for t in trades]
 
 
@@ -1891,7 +1991,7 @@ async def get_bot_open_trades(bot_id: str, _: str = Depends(verify_token)) -> li
 async def get_bot_strategy_stats(bot_id: str, _: str = Depends(verify_token)) -> dict[str, dict[str, Any]]:
     """Return per-strategy stats for a bot, keyed by 'strategy:symbol'."""
     hub = _get_hub_db()
-    return hub.get_all_strategy_stats_for_bot(bot_id)
+    return hub.get_all_strategy_stats_for_bot(_normalize_bot_id(bot_id))
 
 
 @app.post("/internal/recovery-close")
@@ -1901,7 +2001,7 @@ async def recovery_close_trade(request: Request, _: str = Depends(verify_token))
     Accepts optional estimated exit/PnL fields for forensic visibility.
     """
     data = await request.json()
-    bot_id = data.get("bot_id", "")
+    bot_id = _normalize_bot_id(data.get("bot_id", ""))
     opened_at = data.get("opened_at", "")
     if not bot_id or not opened_at:
         return {"status": "error", "detail": "missing bot_id or opened_at"}

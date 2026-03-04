@@ -11,6 +11,28 @@ from scanner.binance_futures import BinanceFuturesScanner
 
 
 class TestBinanceFuturesScanner:
+    def test_new_hub_db_uses_postgres_repository(self, tmp_path):
+        scanner = BinanceFuturesScanner(db_path=tmp_path / "hub.db", enabled=False)
+        sentinel = MagicMock()
+        settings = MagicMock()
+        settings.hub_db_backend = "postgres"
+        with (
+            patch("scanner.binance_futures.get_settings", return_value=settings),
+            patch("scanner.binance_futures.make_hub_repository", return_value=sentinel),
+        ):
+            db = scanner._new_hub_db()
+        assert db is sentinel
+
+    def test_new_hub_db_uses_sqlite_hubdb(self, tmp_path):
+        scanner = BinanceFuturesScanner(db_path=tmp_path / "hub.db", enabled=False)
+        settings = MagicMock()
+        settings.hub_db_backend = "sqlite"
+        with patch("scanner.binance_futures.get_settings", return_value=settings):
+            db = scanner._new_hub_db()
+        from db.hub_store import HubDB
+
+        assert isinstance(db, HubDB)
+
     def test_sample_at_or_before_empty_returns_cutoff_and_zero(self):
         """Guard against IndexError when sample lists are empty."""
         cutoff = datetime.now(UTC)

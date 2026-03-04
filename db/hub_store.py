@@ -22,6 +22,7 @@ from loguru import logger
 
 from db.models import TradeRecord
 from db.store import TradeDB
+from shared.models import AnalyticsSnapshot
 
 _HUB_DB_DEFAULT = Path("data/hub.db")
 
@@ -34,17 +35,32 @@ class HubDB(TradeDB):
         self._ack_buffer: dict[str, set[str]] = {}
 
     def connect(self) -> None:
-        try:
-            self._conn = sqlite3.connect(str(self._path))
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA busy_timeout=30000")
-            # Validate DB before creating tables (catches "file is not a database")
-            self._conn.execute("PRAGMA quick_check").fetchone()
-        except sqlite3.DatabaseError as e:
-            if "not a database" in str(e).lower() or "file" in str(e).lower():
-                logger.error("hub.db is corrupted. Run: ./scripts/recover_hub_db.sh to restore from backup")
-            raise
+        last_exc: sqlite3.Error | None = None
+        for attempt in range(3):
+            try:
+                self._conn = sqlite3.connect(str(self._path))
+                self._conn.row_factory = sqlite3.Row
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                self._conn.execute("PRAGMA busy_timeout=30000")
+                # Validate DB before creating tables (catches malformed/not-a-db early)
+                self._conn.execute("PRAGMA quick_check").fetchone()
+                break
+            except sqlite3.Error as e:
+                last_exc = e
+                with suppress(Exception):
+                    if self._conn is not None:
+                        self._conn.close()
+                self._conn = None
+                msg = str(e).lower()
+                retryable = "database is locked" in msg or "database table is locked" in msg or "disk i/o error" in msg
+                if retryable and attempt < 2:
+                    time.sleep(0.2 * float(attempt + 1))
+                    continue
+                if "not a database" in msg or "malformed" in msg:
+                    logger.error("hub.db is corrupted. Run: ./scripts/recover_hub_db.sh to restore from backup")
+                raise
+        if self._conn is None and last_exc is not None:
+            raise last_exc
         self._create_tables()
         self._ensure_trade_columns()
         self._create_hub_tables()
@@ -181,6 +197,15 @@ class HubDB(TradeDB):
             );
             CREATE INDEX IF NOT EXISTS idx_exchange_equity_snapshots_ex_ts
                 ON exchange_equity_snapshots(exchange, created_at);
+
+            CREATE TABLE IF NOT EXISTS analytics_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_json TEXT NOT NULL DEFAULT '{}',
+                total_trades_logged INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_analytics_snapshots_updated_at
+                ON analytics_snapshots(updated_at);
         """)
         self._ensure_bot_id_column()
         self._ensure_request_key_column()
@@ -634,7 +659,7 @@ class HubDB(TradeDB):
     def cleanup_non_executed_close_noise(self) -> int:
         """Delete close rows that represent failed pre-open flow, not executed trades."""
         assert self._conn
-        cursor = self._conn.execute(
+        cursor = self._execute_write_with_lock_retry(
             """
             DELETE FROM trades
             WHERE action='close'
@@ -645,9 +670,9 @@ class HubDB(TradeDB):
               )
               AND COALESCE(exit_price, 0) <= 0
               AND ABS(COALESCE(pnl_usd, 0)) < 1e-12
-            """
+            """,
+            (),
         )
-        self._conn.commit()
         return int(cursor.rowcount or 0)
 
     def cleanup_duplicate_trade_rows(self) -> int:
@@ -657,7 +682,7 @@ class HubDB(TradeDB):
         Rows without `opened_at` are ignored to avoid collapsing historical legacy data.
         """
         assert self._conn
-        cursor = self._conn.execute(
+        cursor = self._execute_write_with_lock_retry(
             """
             DELETE FROM trades
             WHERE COALESCE(opened_at, '') != ''
@@ -672,9 +697,9 @@ class HubDB(TradeDB):
                   action,
                   COALESCE(closed_at, '')
               )
-            """
+            """,
+            (),
         )
-        self._conn.commit()
         return int(cursor.rowcount or 0)
 
     def mark_recovery_close(
@@ -1091,6 +1116,46 @@ class HubDB(TradeDB):
     @property
     def conn(self) -> sqlite3.Connection | None:
         return self._conn
+
+    # ---- Analytics snapshot persistence ----
+
+    def save_analytics_snapshot(self, snapshot: AnalyticsSnapshot) -> None:
+        """Persist one analytics snapshot row (latest row is authoritative)."""
+        assert self._conn
+        payload = snapshot.model_dump_json()
+        self._execute_write_with_lock_retry(
+            """
+            INSERT INTO analytics_snapshots (snapshot_json, total_trades_logged, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (
+                payload,
+                int(snapshot.total_trades_logged or 0),
+                str(snapshot.updated_at or datetime.now(UTC).isoformat()),
+            ),
+        )
+
+    def load_latest_analytics_snapshot(self) -> AnalyticsSnapshot | None:
+        """Load latest persisted analytics snapshot from hub.db."""
+        assert self._conn
+        row = self._conn.execute(
+            """
+            SELECT snapshot_json
+            FROM analytics_snapshots
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if not row:
+            return None
+        raw = str(row["snapshot_json"] or "")
+        if not raw:
+            return None
+        try:
+            return AnalyticsSnapshot.model_validate_json(raw)
+        except Exception as e:
+            logger.warning("Invalid analytics snapshot JSON in hub.db: {}", e)
+            return None
 
     # ---- OpenClaw advisory persistence ----
 

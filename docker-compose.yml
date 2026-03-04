@@ -2,6 +2,7 @@ volumes:
   loki-data:
   grafana-data:
   prometheus-data:
+  hub-postgres-data:
 
 x-bot-common: &bot-common
   build:
@@ -25,6 +26,27 @@ x-bot-common: &bot-common
       max-file: "5"
 
 services:
+  bot-hub-postgres:
+    image: postgres:16
+    container_name: bot-hub-postgres
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - POSTGRES_USER=${HUB_POSTGRES_USER:-tradeborg}
+      - POSTGRES_PASSWORD=${HUB_POSTGRES_PASSWORD:-tradeborg}
+      - POSTGRES_DB=${HUB_POSTGRES_DB:-trading_db}
+      - TZ=UTC
+    ports:
+      - "${HUB_POSTGRES_PORT:-5438}:5432"
+    volumes:
+      - hub-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${HUB_POSTGRES_USER:-tradeborg} -d ${HUB_POSTGRES_DB:-trading_db}"]
+      interval: 20s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
   # ---- HUB: Brain + data presenter + orchestrator ----
   # Runs monitor + analytics in-process. Single container replaces
   # the old hub + monitor + analytics (3 → 1).
@@ -90,6 +112,8 @@ services:
       - OPENCLAW_BRIDGE_PAID_MAX_TOKENS=600
     command: python scripts/openclaw_intel_bridge.py
     depends_on:
+      bot-hub-postgres:
+        condition: service_healthy
       bot-hub:
         condition: service_healthy
     healthcheck:

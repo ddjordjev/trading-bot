@@ -64,8 +64,8 @@ cmd_status() {
     echo ""
     log "Trade count:"
     docker compose exec -T bot-hub python -c "
-from db.hub_store import HubDB
-db = HubDB(); db.connect()
+from db.hub_repository import make_hub_repository
+db = make_hub_repository(); db.connect()
 print(f'  Trades logged: {db.trade_count()}')
 " 2>/dev/null || warn "Could not read trade DB"
 }
@@ -106,8 +106,8 @@ $(docker compose logs --tail 30 bot-hub 2>/dev/null || echo "No logs")
 ## Trade Database
 \`\`\`
 $(docker compose exec -T bot-hub python -c "
-from db.hub_store import HubDB
-db = HubDB(); db.connect()
+from db.hub_repository import make_hub_repository
+db = make_hub_repository(); db.connect()
 print(f'Total trades: {db.trade_count()}')
 for t in db.get_all_trades(10):
     print(f'  {t.closed_at} {t.symbol} {t.side} {t.action} PnL:{t.pnl_usd:+.2f}')

@@ -3,7 +3,8 @@
 Reads trade history from hub.db, computes strategy scores, detects
 patterns, generates suggestions, and persists results via HubState.
 
-On startup the previously persisted snapshot is already loaded by HubState,
+On startup the previously persisted snapshot is already loaded by HubState
+from hub.db,
 so scores/patterns/suggestions are available immediately.  A full recompute
 only happens when new trades are detected or on a periodic cadence (default
 every 30 minutes) to pick up time-sensitive shifts like streak cooloff.
@@ -18,7 +19,7 @@ from pathlib import Path
 from loguru import logger
 
 from analytics.engine import AnalyticsEngine
-from db.hub_store import HubDB
+from db.hub_repository import make_hub_repository
 from db.store import TradeDB
 from hub.state import HubState
 from shared.models import AnalyticsSnapshot, StrategyWeightEntry
@@ -26,12 +27,13 @@ from shared.models import AnalyticsSnapshot, StrategyWeightEntry
 HUB_DB = Path("data/hub.db")
 
 _FULL_REFRESH_INTERVAL = 1800  # 30 min — periodic recompute even without new trades
+_DUPLICATE_CLEANUP_INTERVAL = 900  # run heavy dedupe at most every 15 min
 
 
 class AnalyticsService:
     """Incremental analytics process.
 
-    - On boot: persisted snapshot is already in HubState (loaded from disk).
+    - On boot: persisted snapshot is already in HubState (loaded from hub.db).
       If new trades arrived while the hub was down, recompute immediately.
       Otherwise skip the expensive full refresh.
     - On each tick: check trade count.  Only recompute when new trades exist.
@@ -41,12 +43,13 @@ class AnalyticsService:
     def __init__(self, refresh_interval: int = 300, state: HubState | None = None):
         self.refresh_interval = refresh_interval
         self.state: HubState = state or HubState()
-        self.db = TradeDB(path=HUB_DB)
-        self.hub_db = HubDB(path=HUB_DB)
+        self.hub_db = make_hub_repository(path=HUB_DB)
+        self.db: TradeDB = self.hub_db
         self.engine: AnalyticsEngine | None = None
         self._running = False
         self._last_trade_count = 0
         self._last_full_refresh: float = 0.0
+        self._last_duplicate_cleanup: float = 0.0
 
     async def start(self) -> None:
         logger.info("=" * 50)
@@ -55,13 +58,7 @@ class AnalyticsService:
         logger.info("=" * 50)
 
         self.db.connect()
-        self.hub_db.connect()
-        deleted_noise = self.hub_db.cleanup_non_executed_close_noise()
-        if deleted_noise > 0:
-            logger.info("Cleaned {} non-executed close-noise rows before analytics refresh", deleted_noise)
-        deleted_dupes = self.hub_db.cleanup_duplicate_trade_rows()
-        if deleted_dupes > 0:
-            logger.info("Deduplicated {} duplicate trade rows before analytics refresh", deleted_dupes)
+        self._run_hygiene_cleanup(include_noise=True, force=True)
         self.engine = AnalyticsEngine(self.db)
         self._last_trade_count = self.db.trade_count()
         self._running = True
@@ -69,14 +66,14 @@ class AnalyticsService:
         existing = self.state.read_analytics()
         if existing.weights and existing.total_trades_logged == self._last_trade_count:
             logger.info(
-                "Analytics loaded from disk: {} strategies, {} patterns — no new trades, skipping recompute",
+                "Analytics loaded from hub.db: {} strategies, {} patterns — no new trades, skipping recompute",
                 len(existing.weights),
                 len(existing.patterns),
             )
         else:
             new = self._last_trade_count - existing.total_trades_logged
             logger.info(
-                "Analytics: {} new trade(s) since last persist (disk had {}), recomputing...",
+                "Analytics: {} new trade(s) since last persist (hub.db had {}), recomputing...",
                 max(new, 0),
                 existing.total_trades_logged,
             )
@@ -87,8 +84,25 @@ class AnalyticsService:
     async def stop(self) -> None:
         self._running = False
         self.db.close()
-        self.hub_db.close()
+        if self.hub_db is not self.db:
+            self.hub_db.close()
         logger.info("Analytics service stopped")
+
+    def _run_hygiene_cleanup(self, *, include_noise: bool, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and (now - self._last_duplicate_cleanup) < _DUPLICATE_CLEANUP_INTERVAL:
+            return
+        try:
+            if include_noise:
+                deleted_noise = self.hub_db.cleanup_non_executed_close_noise()
+                if deleted_noise > 0:
+                    logger.info("Cleaned {} non-executed close-noise rows before analytics refresh", deleted_noise)
+            deleted_dupes = self.hub_db.cleanup_duplicate_trade_rows()
+            if deleted_dupes > 0:
+                logger.info("Deduplicated {} duplicate trade rows before analytics refresh", deleted_dupes)
+            self._last_duplicate_cleanup = now
+        except Exception as e:
+            logger.warning("Analytics hygiene cleanup skipped: {}", e)
 
     def _merge_openclaw_suggestions(self, base: list[dict]) -> list[dict]:
         """Append actionable OpenClaw suggestions and mark them implemented."""
@@ -139,11 +153,9 @@ class AnalyticsService:
                 force_periodic = (now - self._last_full_refresh) >= _FULL_REFRESH_INTERVAL
 
                 if new_trades > 0:
-                    deleted_dupes = self.hub_db.cleanup_duplicate_trade_rows()
-                    if deleted_dupes > 0:
-                        logger.info("Deduplicated {} duplicate trade rows before incremental refresh", deleted_dupes)
-                        current_count = self.db.trade_count()
-                        new_trades = current_count - self._last_trade_count
+                    self._run_hygiene_cleanup(include_noise=False)
+                    current_count = self.db.trade_count()
+                    new_trades = current_count - self._last_trade_count
                     logger.info("Detected {} new trade(s) (total: {}), refreshing...", new_trades, current_count)
                     self._do_refresh()
                     self._last_trade_count = current_count

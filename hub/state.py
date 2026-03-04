@@ -13,13 +13,12 @@ dicts/lists are safe.  If we ever add threads, swap to asyncio.Lock.
 
 from __future__ import annotations
 
-import os
-import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from loguru import logger
 
+from db.hub_repository import make_hub_repository
 from shared.models import (
     AnalyticsSnapshot,
     BotDeploymentStatus,
@@ -30,7 +29,9 @@ from shared.models import (
     TradeQueue,
 )
 
+_DATA_DIR = Path("data")
 _ANALYTICS_PATH = Path("data/analytics_state.json")
+_HUB_DB_PATH = Path("data/hub.db")
 
 
 class QueueOutcome:
@@ -68,12 +69,13 @@ class RejectionRecord:
 class HubState:
     """In-memory state backend for the hub.
 
-    Analytics snapshot is the one exception — it's persisted to disk on
+    Analytics snapshot is the one exception — it's persisted in hub.db on
     every write and loaded on init so strategy scores, patterns, and
     suggestions survive hub restarts.
     """
 
     def __init__(self, data_dir: Path | None = None) -> None:
+        self._data_dir = data_dir or _DATA_DIR
         self._intel: IntelSnapshot = IntelSnapshot()
         self._extreme_watchlist: ExtremeWatchlist = ExtremeWatchlist()
 
@@ -86,7 +88,10 @@ class HubState:
         self._bot_positions: dict[str, tuple[str, set[str]]] = {}
         self._active_symbols_by_exchange: dict[str, set[str]] = {}
 
-        self._analytics_path = (data_dir / "analytics_state.json") if data_dir else _ANALYTICS_PATH
+        self._analytics_path = (self._data_dir / "analytics_state.json") if data_dir else _ANALYTICS_PATH
+        self._hub_db = make_hub_repository(path=(self._data_dir / "hub.db") if data_dir else _HUB_DB_PATH)
+        self._hub_db_ready = False
+        self._connect_hub_db()
         self._analytics: AnalyticsSnapshot = self._load_analytics()
 
     # ---- Intel (written by monitor, read by endpoints / bots) ---- #
@@ -121,11 +126,27 @@ class HubState:
         return self._analytics
 
     def _load_analytics(self) -> AnalyticsSnapshot:
+        if self._hub_db_ready:
+            try:
+                snap = self._hub_db.load_latest_analytics_snapshot()
+                if snap:
+                    logger.info(
+                        "Loaded analytics from hub.db: {} strategies, {} patterns, {} suggestions",
+                        len(snap.weights),
+                        len(snap.patterns),
+                        len(snap.suggestions),
+                    )
+                    return snap
+                migrated = self._import_legacy_analytics_snapshot()
+                if migrated:
+                    return migrated
+            except Exception as e:
+                logger.warning("Failed to load analytics from hub.db: {}", e)
         try:
             raw = self._analytics_path.read_text()
             snap = AnalyticsSnapshot.model_validate_json(raw)
             logger.info(
-                "Loaded analytics from disk: {} strategies, {} patterns, {} suggestions",
+                "Loaded analytics from legacy file: {} strategies, {} patterns, {} suggestions",
                 len(snap.weights),
                 len(snap.patterns),
                 len(snap.suggestions),
@@ -138,25 +159,53 @@ class HubState:
             return AnalyticsSnapshot()
 
     def _save_analytics(self, analytics: AnalyticsSnapshot) -> None:
+        if self._hub_db_ready:
+            try:
+                self._hub_db.save_analytics_snapshot(analytics)
+                return
+            except Exception as e:
+                logger.warning("Failed to persist analytics to hub.db: {}", e)
         try:
             self._analytics_path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=str(self._analytics_path.parent), suffix=".tmp")
-            closed = False
-            try:
-                data = analytics.model_dump_json(indent=2)
-                os.write(fd, data.encode())
-                os.fsync(fd)
-                os.close(fd)
-                closed = True
-                os.replace(tmp, str(self._analytics_path))
-            except BaseException:
-                if not closed:
-                    os.close(fd)
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
-                raise
+            self._analytics_path.write_text(analytics.model_dump_json(indent=2))
         except Exception as e:
-            logger.warning("Failed to persist analytics to {}: {}", self._analytics_path, e)
+            logger.warning("Failed to persist fallback analytics to {}: {}", self._analytics_path, e)
+
+    def _connect_hub_db(self) -> None:
+        try:
+            self._hub_db.connect()
+            self._hub_db_ready = True
+        except Exception as e:
+            self._hub_db_ready = False
+            logger.warning("HubState analytics persistence disabled (hub.db unavailable): {}", e)
+
+    def _import_legacy_analytics_snapshot(self) -> AnalyticsSnapshot | None:
+        try:
+            raw = self._analytics_path.read_text()
+        except FileNotFoundError:
+            return None
+        except Exception as e:
+            logger.warning("Failed reading legacy analytics snapshot {}: {}", self._analytics_path, e)
+            return None
+
+        try:
+            snapshot = AnalyticsSnapshot.model_validate_json(raw)
+        except Exception as e:
+            logger.warning("Legacy analytics snapshot is invalid JSON {}: {}", self._analytics_path, e)
+            return None
+
+        try:
+            self._hub_db.save_analytics_snapshot(snapshot)
+            logger.info(
+                "Imported legacy analytics snapshot into hub.db: {} strategies, {} patterns, {} suggestions",
+                len(snapshot.weights),
+                len(snapshot.patterns),
+                len(snapshot.suggestions),
+            )
+            return snapshot
+        except Exception as e:
+            logger.warning("Failed to import legacy analytics snapshot into hub.db: {}", e)
+            return None
 
     # ---- Extreme watchlist (written by monitor, read by bots) ---- #
 
