@@ -1558,17 +1558,19 @@ def _build_merged_snapshot() -> dict[str, Any]:
         )
 
     ownership_by_key: dict[tuple[str, str], str] = {}
+    ownership_by_symbol: dict[str, str] = {}
     for row in hub.get_open_trade_owner_rows():
         owner_bot = _normalize_bot_id(row.get("bot_id", ""))
         symbol = _pair_symbol(row.get("symbol", ""))
         if not owner_bot or not symbol:
             continue
+        if symbol not in ownership_by_symbol:
+            ownership_by_symbol[symbol] = owner_bot
         exchange = bot_exchange.get(owner_bot, "").strip().upper()
-        if not exchange:
-            continue
-        key = (exchange, symbol)
-        if key not in ownership_by_key:
-            ownership_by_key[key] = owner_bot
+        if exchange:
+            key = (exchange, symbol)
+            if key not in ownership_by_key:
+                ownership_by_key[key] = owner_bot
 
     latest_foreign_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for obs in foreign_observations:
@@ -1590,7 +1592,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
     all_orphans: list[dict[str, Any]] = []
     for (exchange, symbol), obs in latest_foreign_by_key.items():
-        owner_bot = ownership_by_key.get((exchange, symbol), "")
+        owner_bot = ownership_by_key.get((exchange, symbol), "") or ownership_by_symbol.get(symbol, "")
         owner_is_running = bool(owner_bot and bot_running.get(owner_bot, False))
         if owner_bot and owner_is_running:
             continue
