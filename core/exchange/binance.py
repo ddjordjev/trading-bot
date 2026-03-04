@@ -760,8 +760,9 @@ class BinanceExchange(BaseExchange):
                             client = fallback
                             supports_ws = hasattr(client, "watch_ticker")
                             continue
-                        logger.warning("watchTicker not supported for {} — unsubscribing", symbol)
-                        break
+                        logger.warning("watchTicker not supported for {} — using polling fallback", symbol)
+                        supports_ws = False
+                        continue
                     logger.error("Ticker watch error for {}: {}", symbol, e)
                     await asyncio.sleep(5)
 

@@ -230,6 +230,7 @@ class TestBinanceExchange:
         await asyncio.sleep(0.05)
         assert binance._futures.watch_ticker.await_count >= 1
         callback.assert_awaited()
+        await binance.disconnect()
 
     @pytest.mark.asyncio
     async def test_watch_ticker_falls_back_to_spot_when_futures_not_supported(self, binance):
@@ -239,7 +240,9 @@ class TestBinanceExchange:
         await binance.watch_ticker("BTC/USDT", callback)
         await asyncio.sleep(0.05)
         assert binance._spot.watch_ticker.await_count >= 1
+        assert binance._spot.fetch_ticker.await_count >= 1
         callback.assert_awaited()
+        await binance.disconnect()
 
     @pytest.mark.asyncio
     async def test_fetch_candles(self, binance):
