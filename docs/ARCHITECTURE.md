@@ -5,6 +5,19 @@
 
 ---
 
+## Documentation Roles (AI-First)
+
+- `docs/AI_CONTEXT.md` is the startup brief for new chats (fast context load).
+- `docs/ARCHITECTURE.md` (this file) is the canonical technical source of truth.
+- `docs/summary.html` is the human-oriented reference (history, narrative, deep detail).
+
+Startup order for new chats:
+1. Read `docs/AI_CONTEXT.md`.
+2. Read `docs/ARCHITECTURE.md` when the task touches architecture, contracts, or data flow.
+3. Read `docs/summary.html` only for requirement history or deeper human context.
+
+---
+
 ## Golden Rules
 
 1. **Bots are lightweight executors.** They receive 1 trade proposal from
@@ -503,3 +516,15 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
 
 - **Don't add hub communication to idle bots.** Idle bots only watch a
   local activation file. No HTTP, no exchange, no nothing.
+
+---
+
+## Documentation Update Policy
+
+When architecture behavior changes:
+
+1. Update `docs/ARCHITECTURE.md` (canonical full detail).
+2. Update `docs/AI_CONTEXT.md` (compact startup brief).
+3. Update `docs/summary.html` only if human-facing narrative/history also changed.
+
+This keeps AI startup context short and current while preserving richer human docs.
