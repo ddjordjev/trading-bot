@@ -190,6 +190,10 @@ class TradingBot:
         self._quick_protection_sync_interval_secs: float = 10.0
         self._quick_positions_idle_poll_seconds: float = 30.0
         self._last_quick_positions_poll_ts: float = 0.0
+        fast_sync_bot_ids = {"extreme", "aggressive", "scalper"}
+        if str(self.settings.bot_id or "").strip().lower() in fast_sync_bot_ids:
+            self._quick_protection_sync_interval_secs = 2.0
+            self._quick_positions_idle_poll_seconds = 10.0
         self._running = False
         self._tick_interval = self.settings.tick_interval_idle
         self._status_interval = 300
@@ -217,7 +221,7 @@ class TradingBot:
         self._last_low_balance_check_ts: float = 0.0
         self._insufficient_balance_events: deque[float] = deque()
         self._last_auto_disable_ts: float = 0.0
-        self._validator = get_validator(self.settings.bot_style, paper_mode=self.settings.is_paper())
+        self._validator = get_validator(self.settings.bot_style, paper_mode=self.settings.is_paper_local())
 
     # -- Strategy Management --
 
@@ -1968,10 +1972,15 @@ class TradingBot:
             manual_stop=self.target.manual_stop,
         )
         self._last_bot_status = status
-        await self._report_dashboard_snapshot(active)
+        await self._report_dashboard_snapshot(active, all_positions=positions)
 
-    async def _report_dashboard_snapshot(self, active_positions: list[Any]) -> None:
+    async def _report_dashboard_snapshot(
+        self,
+        active_positions: list[Any],
+        all_positions: list[Any] | None = None,
+    ) -> None:
         """Build and send dashboard snapshot to the central hub."""
+        foreign_source_positions = all_positions if all_positions is not None else active_positions
         cex_levels_by_symbol: dict[str, tuple[float, float]] = {}
         try:
             open_orders = await self.exchange.fetch_open_orders(market_type=MarketType.FUTURES)
@@ -2139,7 +2148,10 @@ class TradingBot:
                 "orphan_positions_count": 0,
             },
             "positions": pos_list,
-            "foreign_positions": self._build_foreign_position_observations(active_positions, source="full_tick"),
+            "foreign_positions": self._build_foreign_position_observations(
+                foreign_source_positions,
+                source="full_tick",
+            ),
             "wick_scalps": wick_list,
             "strategies": strat_list,
             "trade_log": self.orders._trade_log[-50:],

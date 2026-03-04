@@ -103,3 +103,15 @@ class TestSettings:
         s = Settings()
         with pytest.raises(ValueError, match="production EXCHANGE_PLATFORM_URL"):
             s.validate_startup_mode_guard()
+
+    def test_paper_live_keeps_live_like_position_risk(self, monkeypatch):
+        monkeypatch.setenv("TRADING_MODE", "paper_live")
+        monkeypatch.setenv("EXCHANGE", "binance")
+        monkeypatch.setenv("BINANCE_TEST_API_KEY", "tk")
+        monkeypatch.setenv("BINANCE_TEST_API_SECRET", "ts")
+        monkeypatch.setenv("MAX_POSITION_SIZE_PCT", "5.0")
+        monkeypatch.setenv("PAPER_MAX_POSITION_SIZE_PCT", "30.0")
+        from config.settings import Settings
+
+        s = Settings()
+        assert s.effective_max_position_size_pct == 5.0

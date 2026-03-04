@@ -491,6 +491,15 @@ def order_manager(mock_exchange, mock_risk, settings):
     return OrderManager(mock_exchange, mock_risk, settings)
 
 
+class TestOrderManagerProtectionCadence:
+    def test_extreme_bot_uses_fast_protection_cadence(self, mock_exchange, mock_risk, settings):
+        s = settings.model_copy(deep=True)
+        s.bot_id = "extreme"
+        om = OrderManager(mock_exchange, mock_risk, s)
+        assert om._protection_replace_min_interval_secs == 2
+        assert om._protection_place_min_interval_secs == 2
+
+
 class TestOrderManagerExecuteSignal:
     async def test_execute_signal_hold_returns_none(self, order_manager):
         signal = Signal(
@@ -588,6 +597,74 @@ class TestOrderManagerExecuteSignal:
         ts = order_manager.trailing.get("BTC/USDT")
         assert ts is not None
         assert ts.wick_tighten_enabled is True
+
+    async def test_execute_signal_extreme_uses_extreme_trail_pct(self, mock_exchange, mock_risk, settings):
+        s = settings.model_copy(deep=True)
+        s.bot_id = "extreme"
+        s.extreme_trail_pct = 0.2
+        om = OrderManager(mock_exchange, mock_risk, s)
+        om._sync_symbol_protection = AsyncMock()
+
+        signal = Signal(
+            symbol="POWER/USDT",
+            action=SignalAction.BUY,
+            strategy="extreme_mover",
+            suggested_price=0.18,
+            leverage=20,
+        )
+        mock_exchange.place_order.return_value = Order(
+            id="o-ext",
+            symbol="POWER/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=1000.0,
+            status=OrderStatus.FILLED,
+            filled=1000.0,
+            average_price=0.18,
+            leverage=20,
+        )
+
+        out = await om.execute_signal(signal)
+        assert out is not None
+        ts = om.trailing.get("POWER/USDT")
+        assert ts is not None
+        assert ts.trailing_mode == "fast"
+        assert ts.trail_pct == pytest.approx(0.2)
+
+    async def test_execute_signal_non_extreme_keeps_default_trail_pct(self, mock_exchange, mock_risk, settings):
+        s = settings.model_copy(deep=True)
+        s.bot_id = "momentum"
+        s.stop_loss_pct = 1.5
+        s.extreme_trail_pct = 0.2
+        om = OrderManager(mock_exchange, mock_risk, s)
+        om._sync_symbol_protection = AsyncMock()
+
+        signal = Signal(
+            symbol="BTC/USDT",
+            action=SignalAction.BUY,
+            strategy="compound_momentum",
+            suggested_price=50_000.0,
+            leverage=10,
+            quick_trade=True,
+        )
+        mock_exchange.place_order.return_value = Order(
+            id="o-non-ext",
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.01,
+            status=OrderStatus.FILLED,
+            filled=0.01,
+            average_price=50_000.0,
+            leverage=10,
+        )
+
+        out = await om.execute_signal(signal)
+        assert out is not None
+        ts = om.trailing.get("BTC/USDT")
+        assert ts is not None
+        # Default trail for manager is stop_loss_pct * 0.4 => 0.6
+        assert ts.trail_pct == pytest.approx(0.6)
 
     async def test_execute_signal_no_price_skips(self, order_manager):
         signal = Signal(

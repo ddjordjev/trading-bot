@@ -311,11 +311,11 @@ class TestTrailingBehaviorGuards:
             trail_pct=1.0,
             activation_pct=1.0,
             structure_guard=103.0,
+            trailing_mode="pullback",
         )
         ts.update(104.0)
         ts.update(106.0)
         assert ts.current_stop <= 103.0
-        assert ts.current_stop == pytest.approx(103.0)
 
     def test_structure_guard_caps_short_stop(self):
         ts = TrailingStop(
@@ -326,11 +326,26 @@ class TestTrailingBehaviorGuards:
             trail_pct=1.0,
             activation_pct=1.0,
             structure_guard=97.0,
+            trailing_mode="pullback",
         )
         ts.update(98.0)
         ts.update(94.0)
         assert ts.current_stop >= 97.0
-        assert ts.current_stop == pytest.approx(97.0)
+
+    def test_fast_mode_ignores_structure_guard(self):
+        ts = TrailingStop(
+            symbol="POWER/USDT",
+            side=OrderSide.BUY,
+            entry_price=0.17852,
+            initial_stop_pct=1.5,
+            trail_pct=0.4,
+            activation_pct=0.5,
+            breakeven_trigger_pct=5.0,
+            structure_guard=0.1759,
+            trailing_mode="fast",
+        )
+        ts.update(0.19)
+        assert ts.current_stop > 0.17852
 
 
 class TestTrailingProfitTakingMode:

@@ -142,7 +142,7 @@ class TestRiskManagerExtended:
             Position(
                 symbol="BTC/USDT",
                 side=OrderSide.BUY,
-                amount=100.0,
+                amount=300.0,
                 entry_price=200.0,
                 current_price=200.0,
             )

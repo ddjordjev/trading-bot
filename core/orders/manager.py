@@ -82,6 +82,12 @@ class OrderManager:
         # Keep wick scalp strictly smaller than main exposure so it cannot flip
         # net direction and look like a "double trade" against the main idea.
         self._wick_scalp_max_main_fraction = 0.45
+        bot_id = str(getattr(self.settings, "bot_id", "") or "").strip().lower()
+        if bot_id in {"extreme", "aggressive", "scalper"}:
+            # Fast profiles need tighter SL propagation to avoid stale exchange stops
+            # during violent moves.
+            self._protection_replace_min_interval_secs = 2
+            self._protection_place_min_interval_secs = 2
 
     def _is_fast_trailing_signal(self, signal: Signal) -> bool:
         strategy = str(getattr(signal, "strategy", "") or "").strip().lower()
@@ -91,6 +97,17 @@ class OrderManager:
         if bool(getattr(signal, "quick_trade", False)):
             return True
         return strategy.startswith("extreme_") or "wick" in strategy or strategy == "wick_scalp"
+
+    def _trail_pct_override_for_signal(self, signal: Signal, fast_trailing: bool) -> float | None:
+        """Allow profile/strategy-specific fast-trailing tuning."""
+        if not fast_trailing:
+            return None
+        strategy = str(getattr(signal, "strategy", "") or "").strip().lower()
+        bot_id = str(getattr(self.settings, "bot_id", "") or "").strip().lower()
+        if strategy.startswith("extreme_") or bot_id == "extreme":
+            pct = float(getattr(self.settings, "extreme_trail_pct", 0.0) or 0.0)
+            return max(0.05, pct) if pct > 0 else None
+        return None
 
     # ------------------------------------------------------------------ #
     #  Signal execution
@@ -235,9 +252,11 @@ class OrderManager:
             is_major = signal.symbol in self.settings.major_symbol_list
             pyramid_stop = max(sp.dca_interval_pct * 3, 5.0) if is_major else max(sp.dca_interval_pct * 8, 15.0)
             fast_trailing = self._is_fast_trailing_signal(signal)
+            trail_pct_override = self._trail_pct_override_for_signal(signal, fast_trailing)
             self.trailing.register(
                 pos,
                 initial_stop_pct=pyramid_stop,
+                trail_pct=trail_pct_override,
                 low_liquidity=low_liquidity,
                 tightened_stop=tightened,
                 wick_tighten_enabled=wick_tighten_enabled,
@@ -252,8 +271,10 @@ class OrderManager:
             )
         else:
             fast_trailing = self._is_fast_trailing_signal(signal)
+            trail_pct_override = self._trail_pct_override_for_signal(signal, fast_trailing)
             self.trailing.register(
                 pos,
+                trail_pct=trail_pct_override,
                 low_liquidity=low_liquidity,
                 tightened_stop=tightened,
                 wick_tighten_enabled=wick_tighten_enabled,

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import WebSocketDisconnect
 from httpx import ASGITransport, AsyncClient
 
 from web.server import _ALLOWED_TABLES, _bot_reports, _get_hub_db, app, report_bot_snapshot, set_bot
@@ -826,6 +827,59 @@ class TestInternalReport:
         body = r.json()
         assert body["enabled"] is True
 
+    async def test_internal_report_handles_malformed_bot_status_gracefully(self, client):
+        hub_state = MagicMock()
+        hub_state.write_bot_status.side_effect = ValueError("bad payload")
+        with patch("web.server._hub_state_ref", hub_state):
+            r = await client.post(
+                "/internal/report",
+                json={
+                    "bot_id": "momentum",
+                    "exchange": "BINANCE",
+                    "bot_status": {"bot_id": "momentum", "level": "bad"},
+                    "open_symbols": ["BTC/USDT"],
+                },
+            )
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        hub_state.update_bot_positions.assert_called_once()
+
+    async def test_internal_report_updates_positions_with_empty_open_symbols(self, client):
+        hub_state = MagicMock()
+        with patch("web.server._hub_state_ref", hub_state):
+            r = await client.post(
+                "/internal/report",
+                json={
+                    "bot_id": "momentum",
+                    "exchange": "BINANCE",
+                    "open_symbols": [],
+                },
+            )
+        assert r.status_code == 200
+        hub_state.update_bot_positions.assert_called_once_with("momentum", "BINANCE", set())
+
+    async def test_internal_report_serves_proposal_when_ready(self, client):
+        from shared.models import SignalPriority, TradeProposal
+
+        hub_state = MagicMock()
+        proposal = TradeProposal(priority=SignalPriority.DAILY, symbol="BTC/USDT", side="long", strategy="rsi")
+        hub_state.serve_proposal_to_bot.return_value = proposal
+        with patch("web.server._hub_state_ref", hub_state):
+            r = await client.post(
+                "/internal/report",
+                json={
+                    "bot_id": "momentum",
+                    "bot_style": "momentum",
+                    "exchange": "BINANCE",
+                    "ready": True,
+                    "status": {"running": True},
+                },
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        assert body.get("proposal", {}).get("symbol") == "BTC/USDT"
+
     async def test_merged_snapshot_aggregates_bots(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
         _bot_reports.clear()
@@ -867,6 +921,83 @@ class TestInternalReport:
         assert len(snap["positions"]) == 2
         assert len(snap["bots"]) == 2
         _bot_reports.clear()
+
+    async def test_get_internal_intel_without_hub_state(self, client):
+        with patch("web.server._hub_state_ref", None):
+            r = await client.get("/internal/intel")
+        assert r.status_code == 200
+        assert r.json()["intel_age"] == 999999.0
+
+    async def test_get_internal_intel_with_hub_state(self, client):
+        hub_state = MagicMock()
+        hub_state.read_intel.return_value.model_dump.return_value = {"regime": "neutral"}
+        hub_state.read_analytics.return_value.model_dump.return_value = {"weights": {}}
+        hub_state.read_extreme_watchlist.return_value.model_dump.return_value = {"symbols": {}}
+        hub_state.intel_age_seconds.return_value = 3.5
+        with patch("web.server._hub_state_ref", hub_state):
+            r = await client.get("/internal/intel")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["intel"]["regime"] == "neutral"
+        assert body["analytics"]["weights"] == {}
+        assert body["extreme_watchlist"]["symbols"] == {}
+        assert body["intel_age"] == 3.5
+
+    async def test_trade_reserve_missing_fields(self, client):
+        r = await client.post("/internal/trade-reserve", json={"bot_id": "", "trade": {}})
+        assert r.status_code == 200
+        assert r.json()["status"] == "error"
+
+    async def test_trade_reserve_missing_opened_at(self, client):
+        r = await client.post(
+            "/internal/trade-reserve",
+            json={"bot_id": "reserve-bot", "trade": {"symbol": "BTC/USDT"}},
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "error"
+
+    async def test_trade_reserve_success(self, client):
+        r = await client.post(
+            "/internal/trade-reserve",
+            json={
+                "bot_id": "reserve-bot",
+                "request_key": "reserve-rk-1",
+                "trade": {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "opened_at": "2026-03-03T00:00:00Z",
+                },
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        assert body["opened_at"] == "2026-03-03T00:00:00Z"
+
+    async def test_trade_update_returns_deferred_when_no_open_row(self, client):
+        r = await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "defer-bot",
+                "action": "update",
+                "request_key": "defer-rk-1",
+                "trade": {
+                    "symbol": "BTC/USDT",
+                    "opened_at": "2099-01-01T00:00:00Z",
+                    "planned_stop_loss": 100.0,
+                },
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "deferred"
+        assert body["action"] == "update"
+
+    async def test_recovery_close_missing_fields_returns_error(self, client):
+        r = await client.post("/internal/recovery-close", json={"bot_id": "x"})
+        assert r.status_code == 200
+        assert r.json()["status"] == "error"
 
     async def test_merged_snapshot_balance_uses_available_plus_margin_plus_upnl(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
@@ -2944,3 +3075,231 @@ class TestBotProfiles:
         profile = next(p for p in data if p["id"] == "extreme")
         assert profile["enabled"] is True
         assert profile["container_status"] == "idle"
+
+
+# ── Branch Coverage Guards ─────────────────────────────────────────────
+
+
+class TestServerBranchCoverage:
+    def test_report_bot_snapshot_handles_non_dict_and_merges_existing(self):
+        from web.server import report_bot_snapshot
+
+        _bot_reports.clear()
+        report_bot_snapshot("bad-payload")  # type: ignore[arg-type]
+        assert _bot_reports == {}
+
+        report_bot_snapshot({"bot_id": "merge-bot", "status": {"running": True}})
+        report_bot_snapshot({"bot_id": "merge-bot", "positions": [{"symbol": "BTC/USDT"}]})
+        assert _bot_reports["merge-bot"]["status"]["running"] is True
+        assert _bot_reports["merge-bot"]["positions"][0]["symbol"] == "BTC/USDT"
+        _bot_reports.clear()
+
+    @pytest.mark.asyncio
+    async def test_positions_and_wicks_helpers_skip_invalid_rows(self):
+        from web.server import _positions, _wick_scalps
+
+        with patch(
+            "web.server._build_merged_snapshot",
+            return_value={
+                "positions": [{"symbol": "BTC/USDT", "side": "long", "amount": "oops"}],
+                "wick_scalps": [{"symbol": "ETH/USDT", "entry_price": "bad"}],
+            },
+        ):
+            pos = await _positions()
+            wicks = _wick_scalps()
+        assert pos == []
+        assert wicks == []
+
+    def test_clear_openclaw_cache_noop_without_hub_state(self):
+        from web.server import _clear_openclaw_intel_cache
+
+        with patch("web.server._hub_state_ref", None):
+            _clear_openclaw_intel_cache()
+
+    @pytest.mark.asyncio
+    async def test_db_table_rows_handles_missing_connection(self, client):
+        with patch("web.server._get_db_conn", return_value=None):
+            r = await client.get("/api/db/table/trades")
+        assert r.status_code == 200
+        assert r.json()["rows"] == []
+
+    @pytest.mark.asyncio
+    async def test_internal_report_handles_invalid_json_body(self, client):
+        r = await client.post("/internal/report", content="{invalid", headers={"content-type": "application/json"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        assert body["enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_internal_bot_disable_missing_bot_id(self, client):
+        r = await client.post("/internal/bot-disable", json={"reason": "missing"})
+        assert r.status_code == 200
+        assert r.json()["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_internal_queue_update_validation_and_routing(self, client):
+        hub_state = MagicMock()
+        with patch("web.server._hub_state_ref", None):
+            bad = await client.post("/internal/queue-update", json={"bot_id": "b"})
+            assert bad.status_code == 200
+            assert bad.json()["status"] == "error"
+
+        with patch("web.server._hub_state_ref", None):
+            no_hub = await client.post(
+                "/internal/queue-update",
+                json={"bot_id": "b", "proposal_id": "p", "action": "consumed", "exchange": "BINANCE"},
+            )
+            assert no_hub.status_code == 200
+            assert no_hub.json()["detail"] == "hub not ready"
+
+        with patch("web.server._hub_state_ref", hub_state):
+            consumed = await client.post(
+                "/internal/queue-update",
+                json={"bot_id": "b1", "proposal_id": "p1", "action": "consumed", "exchange": "BINANCE"},
+            )
+            rejected = await client.post(
+                "/internal/queue-update",
+                json={
+                    "bot_id": "b1",
+                    "proposal_id": "p2",
+                    "action": "rejected",
+                    "exchange": "BINANCE",
+                    "reason": "risk",
+                },
+            )
+        assert consumed.status_code == 200
+        assert rejected.status_code == 200
+        hub_state.handle_consume.assert_called_once_with("p1", "BINANCE", "b1")
+        hub_state.handle_reject.assert_called_once_with("p2", "BINANCE", "b1", "risk")
+
+    @pytest.mark.asyncio
+    async def test_trade_endpoint_unknown_action_falls_back_to_insert(self, client):
+        hub = _get_hub_db()
+        with patch.object(hub, "insert_trade", wraps=hub.insert_trade) as insert_spy:
+            r = await client.post(
+                "/internal/trade",
+                json={
+                    "bot_id": "fallback-bot",
+                    "action": "mystery",
+                    "trade": {"symbol": "XRP/USDT", "opened_at": "2026-03-03T00:00:00Z"},
+                },
+            )
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        assert insert_spy.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_toggle_module_disable_failure_branch(self, client):
+        monitor = MagicMock()
+        monitor.is_module_enabled.return_value = True
+        monitor.set_module_enabled = AsyncMock(return_value=True)
+        with patch("web.server._monitor_ref", monitor):
+            r = await client.post("/api/module/news/toggle")
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+        assert "disable failed" in r.json()["message"]
+
+    @pytest.mark.asyncio
+    async def test_serve_summary_existing_file(self, client, tmp_path):
+        summary = tmp_path / "summary.html"
+        summary.write_text("<h1>ok</h1>", encoding="utf-8")
+        with patch("web.server.DOCS_DIR", tmp_path):
+            r = await client.get("/api/summary-html")
+        assert r.status_code == 200
+        assert "ok" in r.text
+
+    @pytest.mark.asyncio
+    async def test_build_merged_snapshot_handles_malformed_report_values(self):
+        from web.server import _build_merged_snapshot
+
+        _bot_reports.clear()
+        hub = MagicMock()
+        hub.get_all_bot_enabled.return_value = {"momentum": True}
+        hub.get_open_trade_owner_rows.return_value = [
+            {"bot_id": "momentum", "symbol": "BTC/USDT"},
+            {"bot_id": "", "symbol": "ETH/USDT"},
+        ]
+        with patch("web.server._get_hub_db", return_value=hub):
+            _bot_reports["momentum"] = {
+                "bot_id": "momentum",
+                "exchange": "BINANCE",
+                "exchange_balance": "bad-float",
+                "status": {"running": True, "manual_stop_active": True, "balance": 100.0, "available_margin": 50.0},
+                "positions": ["bad-position"],
+                "wick_scalps": ["bad-wick"],
+                "foreign_positions": [
+                    {"symbol": "", "detected_at": "2026-01-01T00:00:00Z"},
+                    {"symbol": "BTC/USDT", "detected_at": "2026-01-01T00:00:01Z"},
+                    {"symbol": "ETH/USDT", "detected_at": "2026-01-01T00:00:02Z", "amount": 1, "entry_price": 10},
+                    {"symbol": "ETH/USDT", "detected_at": "2026-01-01T00:00:03Z", "amount": 2, "entry_price": 11},
+                ],
+            }
+            _bot_reports["hub"] = {"bot_id": "hub", "status": "bad-status"}
+            snap = _build_merged_snapshot()
+        assert snap["status"]["manual_stop_active"] is True
+        assert len(snap["positions"]) == 0
+        assert len(snap["wick_scalps"]) == 0
+        orphan_symbols = {o.get("symbol") for o in snap["orphan_positions"]}
+        assert "ETH/USDT" in orphan_symbols
+        _bot_reports.clear()
+
+    @pytest.mark.asyncio
+    async def test_websocket_endpoint_handles_token_reject_disconnect_and_error(self):
+        from web.server import websocket_endpoint
+
+        class FakeWebSocket:
+            def __init__(self, mode: str = "ok"):
+                self.mode = mode
+                self.accepted = False
+                self.sent = 0
+
+            async def accept(self):
+                self.accepted = True
+
+            async def send_json(self, _payload):
+                self.sent += 1
+                if self.mode == "disconnect":
+                    raise WebSocketDisconnect()
+                if self.mode == "error":
+                    raise RuntimeError("boom")
+
+        ws_reject = FakeWebSocket()
+        with patch("web.server.verify_ws_token", new=AsyncMock(return_value=False)):
+            await websocket_endpoint(ws_reject)  # type: ignore[arg-type]
+        assert ws_reject.accepted is False
+
+        ws_disconnect = FakeWebSocket(mode="disconnect")
+        with (
+            patch("web.server.verify_ws_token", new=AsyncMock(return_value=True)),
+            patch("web.server._build_merged_snapshot", return_value={"status": {}}),
+        ):
+            await websocket_endpoint(ws_disconnect)  # type: ignore[arg-type]
+        assert ws_disconnect.accepted is True
+        assert ws_disconnect.sent >= 1
+
+        ws_error = FakeWebSocket(mode="error")
+        with (
+            patch("web.server.verify_ws_token", new=AsyncMock(return_value=True)),
+            patch("web.server._build_merged_snapshot", return_value={"status": {}}),
+        ):
+            await websocket_endpoint(ws_error)  # type: ignore[arg-type]
+        assert ws_error.accepted is True
+
+    @pytest.mark.asyncio
+    async def test_serve_spa_known_and_fallback_file(self, tmp_path):
+        import web.server
+
+        if not hasattr(web.server, "serve_spa"):
+            pytest.skip("SPA route not mounted in this environment")
+
+        index = tmp_path / "index.html"
+        index.write_text("<html>home</html>", encoding="utf-8")
+        nested = tmp_path / "assets"
+        nested.mkdir(parents=True, exist_ok=True)
+        (nested / "ok.js").write_text("console.log('ok')", encoding="utf-8")
+        with patch("web.server.FRONTEND_DIR", tmp_path):
+            r_file = await web.server.serve_spa("assets/ok.js")
+            r_fallback = await web.server.serve_spa("missing.js")
+        assert "ok.js" in str(r_file.path)
+        assert str(r_fallback.path).endswith("index.html")

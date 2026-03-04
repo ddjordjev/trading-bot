@@ -71,7 +71,7 @@ class Settings(BaseSettings):
 
     @property
     def effective_max_position_size_pct(self) -> float:
-        if self.is_paper() and self.paper_risk_relaxed:
+        if self.is_paper_local() and self.paper_risk_relaxed:
             return self.paper_max_position_size_pct
         return self.max_position_size_pct
 

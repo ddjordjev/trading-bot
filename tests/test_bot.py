@@ -21,8 +21,11 @@ from db.models import TradeRecord
 @pytest.fixture
 def settings():
     """Settings with intel disabled to avoid external clients in __init__."""
-    s = get_settings()
+    s = get_settings().model_copy(deep=True)
     s.intel_enabled = False
+    # Keep lifecycle tests deterministic; individual tests can override these.
+    s.bot_id = ""
+    s.hub_url = ""
     return s
 
 
@@ -73,6 +76,37 @@ class TestTradingBotInit:
 
             b = TradingBot(settings=settings)
         assert b.intel is None
+
+    def test_init_uses_strict_validator_in_paper_live(self, settings, mock_exchange):
+        settings.intel_enabled = False
+        settings.trading_mode = "paper_live"
+        with (
+            patch("bot.create_exchange", return_value=mock_exchange),
+            patch("bot.get_validator", return_value=MagicMock()) as gv,
+        ):
+            from bot import TradingBot
+
+            TradingBot(settings=settings)
+        gv.assert_called_once_with(settings.bot_style, paper_mode=False)
+
+    def test_paper_live_uses_live_like_total_exposure_cap(self, settings, mock_exchange):
+        settings.intel_enabled = False
+        settings.trading_mode = "paper_live"
+        with patch("bot.create_exchange", return_value=mock_exchange):
+            from bot import TradingBot
+
+            b = TradingBot(settings=settings)
+        assert b.risk.max_total_exposure_mult == 1.5
+
+    def test_extreme_profile_uses_faster_protection_sync(self, settings, mock_exchange):
+        settings.intel_enabled = False
+        settings.bot_id = "extreme"
+        with patch("bot.create_exchange", return_value=mock_exchange):
+            from bot import TradingBot
+
+            b = TradingBot(settings=settings)
+        assert b._quick_protection_sync_interval_secs == 2.0
+        assert b._quick_positions_idle_poll_seconds == 10.0
 
 
 # ── add_strategy / add_custom_strategy ──────────────────────────────────────
@@ -1314,6 +1348,49 @@ class TestReportDashboardSnapshot:
         assert by_name["compound_momentum"]["is_dynamic"] is False
         assert by_name["trending_momentum"]["is_dynamic"] is True
         assert payload["status"]["dynamic_strategies_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_report_dashboard_snapshot_uses_all_positions_for_foreign_detection(self, bot):
+        bot.settings.hub_url = "http://hub.example.com"
+        bot._post_to_hub = AsyncMock()
+        bot._sync_runtime_trade_if_changed = AsyncMock()
+        bot._open_trades["BTC/USDT"] = TradeRecord(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="compound_momentum",
+            action="open",
+            opened_at=datetime.now(UTC).isoformat(),
+        )
+
+        managed = MagicMock()
+        managed.symbol = "BTC/USDT"
+        managed.side = OrderSide.BUY
+        managed.amount = 0.1
+        managed.entry_price = 50_000.0
+        managed.current_price = 50_250.0
+        managed.pnl_pct = 0.5
+        managed.unrealized_pnl = 25.0
+        managed.leverage = 3
+        managed.market_type = "futures"
+        managed.strategy = "compound_momentum"
+        managed.notional_value = 5025.0
+        managed.opened_at = datetime.now(UTC)
+
+        orphan = MagicMock()
+        orphan.symbol = "ETH/USDT"
+        orphan.side = OrderSide.SELL
+        orphan.amount = 0.3
+        orphan.entry_price = 3200.0
+        orphan.current_price = 3180.0
+        orphan.leverage = 5
+        orphan.market_type = "futures"
+
+        await bot._report_dashboard_snapshot([managed], all_positions=[managed, orphan])
+
+        payload = bot._post_to_hub.call_args[0][1]
+        assert payload["positions"][0]["symbol"] == "BTC/USDT"
+        assert payload["foreign_positions"]
+        assert payload["foreign_positions"][0]["symbol"] == "ETH/USDT"
 
     def test_position_age_minutes_prefers_open_trade_timestamp(self, bot):
         opened_at = (datetime.now(UTC) - timedelta(minutes=25)).isoformat()

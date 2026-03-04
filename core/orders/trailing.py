@@ -263,6 +263,10 @@ class TrailingStop(BaseModel):
         return False
 
     def _apply_structure_guard(self, candidate: float) -> float:
+        # Structure guards are designed for pullback mode; applying them in fast mode
+        # can freeze aggressive trails (notably extreme mover) at an old stop level.
+        if self.trailing_mode != "pullback":
+            return candidate
         if self.structure_guard <= 0:
             return candidate
         if self.side == OrderSide.BUY:

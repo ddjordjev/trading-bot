@@ -26,9 +26,9 @@ class RiskManager:
         self.max_concurrent = settings.effective_max_concurrent_positions
         self.min_strength = settings.effective_min_signal_strength
         self.loss_cooldown_threshold = settings.effective_consecutive_loss_cooldown
-        # Paper-live research mode needs more room to deploy multiple ideas.
-        # Keep live trading conservative at the historical 1.5x cap.
-        self.max_total_exposure_mult = 5.0 if settings.is_paper_live() else 1.5
+        # Paper-local simulation can run with wider aggregate exposure for stress tests.
+        # Paper-live (testnet) should mirror live-like discipline.
+        self.max_total_exposure_mult = 5.0 if settings.is_paper_local() else 1.5
 
         self._daily_pnl: float = 0.0
         self._day_start_balance: float = 0.0
