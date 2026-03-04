@@ -40,7 +40,7 @@ Startup order for new chats:
    drops it. Bots never see it.
 
 4. **Bots are stateless.** No local database. All trade persistence goes to
-   hub.db via HTTP. On restart, bots ask the hub for their open trades and
+   PostgreSQL `trading_db` via HTTP. On restart, bots ask the hub for their open trades and
    reconcile with the exchange.
 
 5. **Don't get creative.** If the architecture doesn't support something,
@@ -56,7 +56,7 @@ Startup order for new chats:
 │                    HOST                          │
 │                                                  │
 │  HOST_DATA_DIR (/Users/damirdjordjev/workspace/trading-bot-data)     │
-│    └── legacy hub.db   ← migration source only   │
+│    └── runtime JSON state + logs bind mounts     │
 │                                                  │
 │  HOST_LOGS_DIR (/Users/damirdjordjev/workspace/trading-bot-logs)     │
 │    └── bot_*.log, hub_*.log                      │
@@ -99,7 +99,7 @@ Runs in-process:
   objects with priority (CRITICAL/DAILY/SWING) and strength scores.
   Proposals are filtered for symbol availability BEFORE entering the queue.
   Exchange symbols are fetched directly by the monitor via CCXT (Binance,
-  Bybit) on startup and refreshed every 5 minutes. Cached in hub.db for
+  Bybit) on startup and refreshed every 5 minutes. Cached in `trading_db` for
   instant availability on restart.
 - **AnalyticsService** — reads trading Postgres trade history, computes strategy
   weights/patterns/suggestions, persists the latest snapshot to
@@ -145,7 +145,7 @@ the only thing idle bots do — watch for that file. Nothing else.
 
 ```
 Monitor startup → CCXT load_markets() for all exchanges
-                  (seeded from hub.db cache, then live fetch)
+                  (seeded from trading_db cache, then live fetch)
                               ↓
                   exchange_symbols → SignalGenerator
                               ↓
@@ -160,7 +160,7 @@ BinanceFuturesScanner (primary) + TrendingScanner (additive)
                         _route_to_bots() filters:
                           - symbol on exchange? (drop if not)
                           - symbol already in queue? (dedup)
-                          - symbol in hub.db open trades? (dedup)
+                          - symbol in trading_db open trades? (dedup)
                           - symbol held by a bot on that exchange? (remove exchange)
                                        ↓
 Extreme watchlist → top 5 injected as CRITICAL proposals
@@ -182,7 +182,7 @@ The bot sends its current open symbols (from local `_open_trades`) every 5
 seconds so the hub always knows what each bot holds (max 5s lag). The `ready`
 flag is false during warmup (1 min) — hub returns no proposal until the bot
 is ready. When ready, hub picks the best matching proposal (filtered by bot
-style, exchange, priority, dedup against hub.db and active symbols), locks
+style, exchange, priority, dedup against trading_db and active symbols), locks
 it for 300s, and returns it. Full ticks also include `bot_status` and
 `positions` for dashboard reporting.
 
@@ -226,7 +226,7 @@ Low-balance safety:
 
 ```
 Bot executes trade → POST /internal/trade {bot_id, action, trade, request_key}
-Hub writes to hub.db (dedup by request_key)
+Hub writes to trading_db (dedup by request_key)
 Hub confirms via confirmed_keys in next /internal/report response
 Bot removes from pending buffer
 ```
@@ -249,7 +249,7 @@ Missing on exchange → POST /internal/recovery-close (excluded from stats)
   fields. A proposal is either available, locked (being evaluated), or
   removed from the queue.
 - **Monitor writes**: `_route_to_bots()` adds proposals after filtering
-  for symbol availability, queue dedup, hub.db open trade dedup, and
+  for symbol availability, queue dedup, trading_db open trade dedup, and
   active symbols on each exchange.
 - **Hub serves**: `serve_proposal_to_bot()` picks 1 matching proposal,
   locks it for 300s, returns a copy. Matching criteria:
@@ -257,9 +257,9 @@ Missing on exchange → POST /internal/recovery-close (excluded from stats)
   - Priority in bot's `allowed_priorities` (from BotProfile)
   - `target_bot` matches bot style or bot_id (or empty = any)
   - Symbol not in `active_symbols` (held by any bot on same exchange)
-  - Symbol not in hub.db open trades
+  - Symbol not in trading_db open trades
 - **On consume**: proposal is deleted from the queue. The trade is now
-  open — symbol protection shifts to `open_db_symbols` (hub.db) and
+  open — symbol protection shifts to `open_db_symbols` (trading_db) and
   `active_symbols` (bot reports `open_symbols` every 5s).
 - **On reject**: bot's exchange is removed from the proposal. Proposal
   stays for other exchanges. Removed entirely when no exchanges left.
@@ -272,7 +272,7 @@ Missing on exchange → POST /internal/recovery-close (excluded from stats)
 | Layer | Where | What |
 |-------|-------|------|
 | Queue dedup | Hub, `_route_to_bots` | Symbol already in queue? |
-| Hub DB dedup | Hub, routing + serving | Open trade in hub.db (`closed_at=''`)? |
+| Hub DB dedup | Hub, routing + serving | Open trade in trading_db (`closed_at=''`)? |
 | Active symbols | Hub, serving | Any bot on this exchange holding it? |
 | Exchange check | Bot, before execution | `fetch_positions()` — asks exchange directly |
 
@@ -381,8 +381,8 @@ hub already curated. They do not scan the market independently:
 | Extreme watchlist | HubState (memory) | No |
 
 **PostgreSQL `trading_db`** is the primary persistent trading database
-(`bot-hub-postgres` service). `hub.db` is retained only as migration fallback
-source. Backups live in `/Users/damirdjordjev/workspace/trading-bot-backups/`.
+(`bot-hub-postgres` service). Backups live in
+`/Users/damirdjordjev/workspace/trading-bot-backups/postgres/` with rolling retention.
 
 **analytics_snapshots** persists strategy weights, patterns, and
 suggestions as JSON payloads in Postgres so they survive hub restarts.
@@ -487,7 +487,7 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
 | `core/orders/manager.py` | Order management (stops, scales, partials) |
 | `core/risk/manager.py` | Risk checks (daily loss, position limits) |
 | `core/risk/daily_target.py` | Daily target tier system |
-| `db/store.py` | TradeDB (hub.db read/write) |
+| `db/store.py` | TradeDB (legacy compatibility layer, migration/testing only) |
 | `shared/models.py` | Pydantic models (TradeQueue, TradeProposal, etc.) |
 | `docker-compose.yml` | Container orchestration |
 
@@ -508,7 +508,7 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
   the hub. Bots only talk to the hub and the exchange.
 
 - **Don't persist state in bots.** No local DB, no state files. Everything
-  goes to hub.db via HTTP.
+  goes to trading_db via HTTP.
 
 - **Don't add complexity to the queue.** Serve 1 proposal, lock 300s, bot
   reports immediately. No broadcasting, no copy-on-read, no round-robin.
@@ -516,7 +516,7 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
 
 - **Don't lower test coverage thresholds.** Write tests instead.
 
-- **Don't touch hub.db directly.** Use TradeDB methods. Never DROP TABLE,
+- **Don't touch trading_db directly from runtime code.** Use store/repository methods. Never DROP TABLE,
   DELETE FROM, or raw SQL outside the store module.
 
 - **Don't add hub communication to idle bots.** Idle bots only watch a

@@ -65,7 +65,7 @@ writes the file, the bot detects it and starts up.
 
 | Container | Role | Balance |
 |-----------|------|---------|
-| bot-hub | Dashboard, coordination, trade persistence (hub.db), CEX scanner aggregation | $0 |
+| bot-hub | Dashboard, coordination, trade persistence (PostgreSQL trading_db), CEX scanner aggregation | $0 |
 
 ### Trading Modes
 
@@ -86,7 +86,7 @@ the code without touching the exchange. Once all checks pass, switch to
 placed on Binance testnet — you can see them on demo.binance.com. The
 testnet pre-funds accounts with $5,000–$10,000 USDT. SESSION_BUDGET=1000
 caps each bot's usable balance to $1,000. The hub runs with SESSION_BUDGET=0
-(no trading). Trade PnL is tracked per-trade in `hub.db` (via the hub) and
+(no trading). Trade PnL is tracked per-trade in PostgreSQL `trading_db` (via the hub) and
 the daily target tracker.
 
 To reset after a blown bot: restart that specific container. It re-reads
@@ -126,7 +126,7 @@ You are a trading desk operator. You have 10 days and $10,000 across 10 bots. Yo
 
 After each day (or sooner if something is clearly wrong):
 
-1. **Check the numbers:** Query `data/hub.db` for win rate, avg PnL,
+1. **Check the numbers:** Query PostgreSQL `trading_db` for win rate, avg PnL,
    per-strategy breakdown. Check the analytics dashboard.
 2. **Assess:** Is the bot making money? Which strategies are contributing?
    Which are bleeding? Are positions getting stuck?
@@ -286,7 +286,7 @@ Monitor polls intel + BinanceFuturesScanner updates incremental symbol state
   → writes IntelSnapshot to HubState → SignalGenerator produces TradeProposals
   → proposals stored in HubState trade queue → active bots receive via /internal/report response
   → bot validates + executes → PaperExchange.place_order() → trade pushed to hub via HTTP
-Hub writes hub.db → Analytics reads hub.db → computes strategy weights → persists analytics
+Hub writes trading_db → Analytics reads trading_db → computes strategy weights → persists analytics
 Idle bots stay in lean idle mode (activation-file watch only): no exchange
 connection and no hub communication until activated
 ```
@@ -456,17 +456,17 @@ Host paths are configured in `.env`:
 
 | Data | Host location | Notes |
 |------|--------------|-------|
-| Hub database | `$HOST_DATA_DIR/hub.db` | **Sole** persistent trade + analytics DB (critical) |
-| Binance snapshots | `hub.db.cex_binance_snapshots` | Minute-level Binance futures snapshot history |
-| Binance symbol state | `hub.db.cex_binance_symbol_state` | Incremental one-row-per-symbol multi-horizon aggregates |
-| Analytics | `$HOST_DATA_DIR/analytics_state.json` | Persisted strategy scores (survives restarts) |
+| Hub database | `bot-hub-postgres:5432 / trading_db` | **Sole** persistent trade + analytics DB (critical) |
+| Binance snapshots | `trading_db.cex_binance_snapshots` | Minute-level Binance futures snapshot history |
+| Binance symbol state | `trading_db.cex_binance_symbol_state` | Incremental one-row-per-symbol multi-horizon aggregates |
+| Analytics | `trading_db.analytics_snapshots` | Persisted strategy scores (survives restarts) |
 | Bot logs | `$HOST_LOGS_DIR/bot_*.log` | 1-day rotation, 30-day retention |
 | Monitor logs | `$HOST_LOGS_DIR/monitor_*.log` | 1-day rotation, 30-day retention |
 | Analytics logs | `$HOST_LOGS_DIR/analytics_*.log` | 1-day rotation, 30-day retention |
 | Daily reports | `docs/reports/` | Git (committed) |
-| Daily backups | `/Users/damirdjordjev/workspace/trading-bot-backups/` | Host-side, launchd 3 AM daily |
+| Daily backups | `/Users/damirdjordjev/workspace/trading-bot-backups/postgres/` | Host-side rolling Postgres backups |
 
-**Important:** Only `hub.db` is critical. Per-bot `trades.db` files no longer
+**Important:** Only PostgreSQL `trading_db` is critical. Per-bot `trades.db` files no longer
 exist — trading bots are fully stateless (in-memory only). All trade
 persistence flows through the hub via HTTP. Bots recover open positions from
 the hub on startup and mark dead trades via `recovery_close`.

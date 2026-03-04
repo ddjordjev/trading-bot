@@ -366,9 +366,32 @@ class TradingBot:
             unrealized += float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
         return max(0.0, float(free_usdt or 0.0) + margin_used + unrealized)
 
+    def _is_reliable_equity_snapshot(self, free_usdt: float, positions: list[Any], source: str) -> bool:
+        """Guard against transient exchange/API failures reporting false zero equity.
+
+        When Binance testnet is rate-limited/banned, balance/positions can both
+        come back empty. Treat that as unreliable if we recently had non-zero
+        equity; keep current pause state instead of forcing low-balance pause.
+        """
+        if float(free_usdt or 0.0) > 0.0 or bool(positions):
+            return True
+        if source not in {"full_tick", "quick_recheck"}:
+            return True
+        had_recent_equity = float(self._raw_balance or 0.0) > 0.0 or float(self._estimated_exchange_equity or 0.0) > 0.0
+        return not had_recent_equity
+
     def _update_low_balance_guard_state(self, free_usdt: float, positions: list[Any], source: str) -> None:
         now_ts = time.monotonic()
         self._last_low_balance_check_ts = now_ts
+        if not self._is_reliable_equity_snapshot(free_usdt, positions, source):
+            logger.warning(
+                "Skipping low-balance update due unreliable exchange snapshot "
+                "(free_usdt={:.2f}, positions={}, source={})",
+                float(free_usdt or 0.0),
+                len(positions),
+                source,
+            )
+            return
         equity = self._estimate_exchange_equity(positions, free_usdt)
         self._estimated_exchange_equity = equity
         threshold = float(self.settings.min_tradeable_equity_usdt)

@@ -16,14 +16,17 @@ import asyncio
 import contextlib
 import signal
 import sys
+from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import uvicorn
 from loguru import logger
 
+from config.bot_profiles import PROFILES_BY_ID
 from config.settings import get_settings
+from db.hub_repository import make_hub_repository
 from hub.state import HubState
 from notifications.notifier import NotificationType, Notifier
 from services.analytics_service import AnalyticsService
@@ -44,6 +47,218 @@ _analytics: AnalyticsService | None = None
 _openclaw_advisor: OpenClawAdvisorService | None = None
 _notifier: Notifier | None = None
 _background_tasks: list[asyncio.Task] = []  # type: ignore[type-arg]
+_INSIGHTS_MIN_EVIDENCE_TRADES = 15
+_INSIGHTS_MIN_ABS_PNL_USD = 2.0
+_SWING_STRATEGIES = {
+    "swing_opportunity",
+    "grid",
+    "major_swing",
+    "capitulation_dip_buy",
+    "greed_reversal_plan",
+    "eth_rotation_play",
+}
+
+
+def _summarize_reported_strategies(strategies: list[dict[str, object]], max_items: int = 8) -> str:
+    """Summarize noisy per-symbol strategy rows into compact counts."""
+    counts: Counter[str] = Counter()
+    for row in strategies:
+        name = str(row.get("name", "") or "").strip()
+        if name:
+            counts[name] += 1
+    if not counts:
+        return "none"
+    items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    shown = items[: max(1, max_items)]
+    out = ", ".join(f"{name} ({count})" for name, count in shown)
+    if len(items) > len(shown):
+        out = f"{out}, +{len(items) - len(shown)} more"
+    return out
+
+
+def _strategy_set_jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 1.0
+    union = a | b
+    if not union:
+        return 0.0
+    return len(a & b) / len(union)
+
+
+def _is_noise_strategy(strategy: str) -> bool:
+    s = strategy.strip().lower()
+    return s in {"manual_override", "manual_claim", "risk_manager", "unknown", "stop"}
+
+
+def _build_bot_similarity_lines(
+    bot_ids: list[str],
+    config_sets: dict[str, set[str]],
+    realized_sets: dict[str, set[str]],
+) -> list[str]:
+    lines: list[str] = []
+    for i, left in enumerate(bot_ids):
+        for right in bot_ids[i + 1 :]:
+            cfg = _strategy_set_jaccard(config_sets.get(left, set()), config_sets.get(right, set()))
+            rz = _strategy_set_jaccard(realized_sets.get(left, set()), realized_sets.get(right, set()))
+            if cfg >= 0.80 or rz >= 0.80:
+                lines.append(f"{left} ~ {right} (config={cfg:.2f}, realized={rz:.2f})")
+    return lines[:8]
+
+
+def _build_daily_performance_insights(active_bot_ids: set[str], lookback_days: int = 30) -> list[str]:
+    """Build compact strategy efficacy + bot-overlap insights from hub DB."""
+    db = None
+
+    def _row_value(row: object, key: str, default: float | int = 0) -> float | int:
+        if row is None:
+            return default
+        try:
+            return row[key]  # type: ignore[index]
+        except Exception:
+            return default
+
+    try:
+        db = make_hub_repository()
+        db.connect()
+        conn = db.conn
+        if conn is None:
+            return ["insights unavailable (db connection missing)"]
+
+        since_iso = (datetime.now(UTC) - timedelta(days=max(1, lookback_days))).replace(microsecond=0).isoformat()
+
+        strategy_rows = conn.execute(
+            """
+            SELECT strategy,
+                   COUNT(*) AS trades,
+                   SUM(CASE WHEN is_winner=1 THEN 1 ELSE 0 END) AS winners,
+                   COALESCE(SUM(pnl_usd), 0) AS total_pnl
+            FROM trades
+            WHERE action='close'
+              AND recovery_close=0
+              AND strategy <> ''
+              AND closed_at >= ?
+            GROUP BY strategy
+            """,
+            (since_iso,),
+        ).fetchall()
+
+        non_noise = [r for r in strategy_rows if not _is_noise_strategy(str(r["strategy"] or ""))]
+        stable = [r for r in non_noise if int(r["trades"] or 0) >= _INSIGHTS_MIN_EVIDENCE_TRADES]
+        winners = sorted(stable, key=lambda r: float(r["total_pnl"] or 0.0), reverse=True)
+        losers = sorted(stable, key=lambda r: float(r["total_pnl"] or 0.0))
+
+        lines: list[str] = [
+            f"lookback={lookback_days}d",
+            f"evidence gate: >= {_INSIGHTS_MIN_EVIDENCE_TRADES} trades and |pnl| >= {_INSIGHTS_MIN_ABS_PNL_USD:.2f}",
+        ]
+        if winners:
+            top = [r for r in winners if float(r["total_pnl"] or 0.0) >= _INSIGHTS_MIN_ABS_PNL_USD][:3]
+            if not top:
+                lines.append("working: no strategy clears positive pnl significance gate")
+            else:
+                lines.append(
+                    "working: "
+                    + "; ".join(
+                        f"{r['strategy']!s} pnl={float(r['total_pnl'] or 0.0):+.2f} ({int(r['trades'] or 0)} trades)"
+                        for r in top
+                    )
+                )
+        else:
+            lines.append("working: insufficient non-noise trade sample")
+
+        bad = [r for r in losers if float(r["total_pnl"] or 0.0) <= -_INSIGHTS_MIN_ABS_PNL_USD]
+        if bad:
+            bottom = bad[:3]
+            lines.append(
+                "not working: "
+                + "; ".join(
+                    f"{r['strategy']!s} pnl={float(r['total_pnl'] or 0.0):+.2f} ({int(r['trades'] or 0)} trades)"
+                    for r in bottom
+                )
+            )
+        else:
+            lines.append("not working: no strategy clears negative pnl significance gate")
+
+        realized_rows = conn.execute(
+            """
+            SELECT bot_id, strategy
+            FROM trades
+            WHERE action='close'
+              AND recovery_close=0
+              AND strategy <> ''
+              AND closed_at >= ?
+            GROUP BY bot_id, strategy
+            """,
+            (since_iso,),
+        ).fetchall()
+
+        realized_sets: dict[str, set[str]] = {}
+        for row in realized_rows:
+            bot_id = str(row["bot_id"] or "").strip()
+            strategy = str(row["strategy"] or "").strip()
+            if not bot_id or not strategy or _is_noise_strategy(strategy):
+                continue
+            realized_sets.setdefault(bot_id, set()).add(strategy)
+
+        config_sets: dict[str, set[str]] = {}
+        active_ids = sorted(active_bot_ids)
+        for bot_id in active_ids:
+            prof = PROFILES_BY_ID.get(bot_id)
+            if not prof:
+                continue
+            config_sets[bot_id] = {s for s in prof.strategies if s and not _is_noise_strategy(s)}
+
+        overlaps = _build_bot_similarity_lines(active_ids, config_sets, realized_sets)
+        if overlaps:
+            lines.append("overlap: " + " | ".join(overlaps))
+        else:
+            lines.append("overlap: no near-duplicate active bots detected")
+
+        swing_placeholders = ",".join("?" for _ in _SWING_STRATEGIES)
+        swing_sql = f"""
+            SELECT
+                COUNT(*) AS trades,
+                COALESCE(SUM(pnl_usd), 0) AS total_pnl
+            FROM trades
+            WHERE action='close'
+              AND recovery_close=0
+              AND strategy IN ({swing_placeholders})
+              AND closed_at >= ?
+        """
+        swing_row = conn.execute(swing_sql, [*_SWING_STRATEGIES, since_iso]).fetchone()
+        swing_trades = int(_row_value(swing_row, "trades", 0) or 0)
+        swing_pnl = float(_row_value(swing_row, "total_pnl", 0.0) or 0.0)
+        lines.append(f"swing realized: trades={swing_trades}, pnl={swing_pnl:+.2f}")
+        if swing_trades < _INSIGHTS_MIN_EVIDENCE_TRADES:
+            lines.append("swing coverage: low realized sample; check queue mix and symbol-level dedupe effects")
+
+        swing_mix_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS trades,
+                COALESCE(SUM(CASE WHEN strategy IN ('manual_override','manual_claim','risk_manager','unknown','stop') THEN 1 ELSE 0 END), 0) AS noise_trades
+            FROM trades
+            WHERE action='close'
+              AND recovery_close=0
+              AND bot_id='swing'
+              AND closed_at >= %s
+            """,
+            (since_iso,),
+        ).fetchone()
+        swing_total = int(_row_value(swing_mix_row, "trades", 0) or 0)
+        swing_noise = int(_row_value(swing_mix_row, "noise_trades", 0) or 0)
+        if swing_total > 0:
+            noise_pct = swing_noise * 100.0 / swing_total
+            lines.append(f"swing bot trade mix: noise={noise_pct:.1f}% ({swing_noise}/{swing_total})")
+            if noise_pct >= 70.0:
+                lines.append("swing bot quality: high noise share; likely few true swing closes in current window")
+        return lines
+    except Exception as e:
+        return [f"insights unavailable: {e!r}"]
+    finally:
+        if db is not None:
+            with contextlib.suppress(Exception):
+                db.close()
 
 
 async def _daily_report_loop() -> None:
@@ -109,7 +324,7 @@ async def _send_compound_daily_report() -> None:
         total_positions += positions
         total_trades += trades
 
-        strats = ", ".join(s.get("name", "") for s in rpt.get("strategies", []))
+        strats = _summarize_reported_strategies(rpt.get("strategies", []))
         section = (
             f"  [{bid.upper()}] {tier.upper()}\n"
             f"    Balance: ${bal:,.2f}  |  PnL: {pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
@@ -131,6 +346,13 @@ async def _send_compound_daily_report() -> None:
     lines.append("-" * 60)
     lines.append("")
     lines.extend(bot_sections)
+    lines.append("")
+
+    lines.append("-" * 60)
+    lines.append("  PERFORMANCE INSIGHTS")
+    lines.append("-" * 60)
+    for insight in _build_daily_performance_insights({str(r.get("bot_id", "") or "") for r in reports}):
+        lines.append(f"  - {insight}")
     lines.append("")
 
     first_compound = ""

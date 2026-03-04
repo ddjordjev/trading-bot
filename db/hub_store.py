@@ -57,7 +57,9 @@ class HubDB(TradeDB):
                     time.sleep(0.2 * float(attempt + 1))
                     continue
                 if "not a database" in msg or "malformed" in msg:
-                    logger.error("hub.db is corrupted. Run: ./scripts/recover_hub_db.sh to restore from backup")
+                    logger.error(
+                        "hub.db is corrupted. Run: ./scripts/recover_hub_postgres.sh and restore from Postgres backup"
+                    )
                 raise
         if self._conn is None and last_exc is not None:
             raise last_exc

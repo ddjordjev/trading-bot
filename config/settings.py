@@ -220,7 +220,7 @@ class Settings(BaseSettings):
     grafana_port: int = 3001
 
     # Hub persistence backend
-    hub_db_backend: Literal["sqlite", "postgres"] = "sqlite"
+    hub_db_backend: Literal["sqlite", "postgres"] = "postgres"
     hub_postgres_dsn: str = "postgresql://tradeborg:tradeborg@bot-hub-postgres:5432/trading_db"
     exchange_equity_snapshot_interval_seconds: int = 60  # hub DB snapshot cadence per exchange
 

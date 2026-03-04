@@ -233,8 +233,8 @@ Trading bots are lightweight executors that consume proposals from the hub via H
   <tr><td><code>scanner/trending.py</code></td><td>Multi-source scanner: CryptoBubbles + CMC + CoinGecko</td></tr>
   <tr><td><code>scanner/binance_futures.py</code></td><td>Binance futures scanner with incremental per-symbol horizons (1m..1y), DB-backed snapshots/state, primary CEX hot-mover stream</td></tr>
   <tr><td><code>notifications/notifier.py</code></td><td>Email alerts with bounded queue (liquidation, stops, daily summary, legendary ride)</td></tr>
-  <tr><td><code>db/store.py</code></td><td>Per-bot SQLite trade database (legacy — bots now push trades to hub)</td></tr>
-  <tr><td><code>db/hub_store.py</code> + <code>db/hub_store_postgres.py</code></td><td>Hub persistence adapters — SQLite (migration source) + PostgreSQL (primary)</td></tr>
+  <tr><td><code>db/store.py</code></td><td>Legacy trade layer (migration/testing only — bots do not persist locally)</td></tr>
+  <tr><td><code>db/hub_store.py</code> + <code>db/hub_store_postgres.py</code></td><td>Hub persistence adapters — PostgreSQL primary runtime with compatibility adapter</td></tr>
   <tr><td><code>db/models.py</code></td><td>TradeRecord, StrategyScore, PatternInsight, ModificationSuggestion</td></tr>
   <tr><td><code>analytics/engine.py</code></td><td>Pattern detection, strategy scoring, weight factors, modification suggestions</td></tr>
   <tr><td><code>hub_main.py</code></td><td>Hub entry point — FastAPI + Monitor + Analytics + daily report (NOT a TradingBot)</td></tr>
@@ -287,7 +287,6 @@ uses <code>data/</code>. In Docker this is bind-mounted from <code>$HOST_DATA_DI
   <tr><th colspan="3" style="text-align:left; padding-top:1rem;">Persistent (on disk)</th></tr>
   <tr><th>Path</th><th>Created By</th><th>Purpose</th></tr>
   <tr><td><code>PostgreSQL trading_db</code></td><td>Hub (<code>db/hub_repository.py</code>)</td><td>Primary persistence: merged trade history + CEX scanner tables + analytics snapshots</td></tr>
-  <tr><td><code>data/hub.db</code></td><td>Host fallback</td><td>Legacy SQLite migration source retained for rollback and forensic diffs</td></tr>
   <tr><td><code>data/bot_registry.json</code></td><td>Hub (<code>web/server.py</code>)</td><td>Known bot IDs and their command-server URLs</td></tr>
   <tr><td><code>logs/bot_*.log</code></td><td>Each bot (<code>bot.py</code>)</td><td>Rotated daily, 30-day retention (host bind mount via <code>$HOST_LOGS_DIR</code>)</td></tr>
   <tr><td><code>logs/hub_*.log</code></td><td>Hub (<code>hub_main.py</code>)</td><td>Rotated daily, 14-day retention</td></tr>
@@ -424,7 +423,7 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
 <div class="section-card">
   <p>An AI agent running as a separate service that analyzes trade logs, bot logs, and market data to find non-obvious correlations and generate natural-language insights.</p>
   <p><strong>Capabilities:</strong> Trade pattern analysis, log anomaly detection, strategy parameter recommendations, market regime classification, correlation discovery.</p>
-  <p><strong>Status:</strong> Under review. Would run as an additional Docker service with read-only access to <code>hub.db</code> and the hub API. Scheduled hourly to keep LLM costs low.</p>
+  <p><strong>Status:</strong> Under review. Would run as an additional Docker service with read-only access to trading hub APIs and persisted analytics context.</p>
 </div>
 
 <h3>6.5 Manual Trade Ideas &amp; Price Alerts</h3>
@@ -785,7 +784,7 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
   <tr><td>Strategies: Open/Closed/Wins/Losses columns with live "ACTIVE" badge from open positions</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Strategies.tsx, web/server.py → get_strategies()</td></tr>
   <tr><td>Analytics: Live Positions tab (default) showing real-time open positions with PnL, notional, leverage, age, DCA count; auto-refreshes every 10s</td><td><span class="badge done">Done</span></td><td class="file">web/frontend/src/pages/Analytics.tsx, web/server.py → get_analytics()</td></tr>
   <tr><td>Monitoring: strictly system resources only (trading state removed from /api/system-metrics)</td><td><span class="badge done">Done</span></td><td class="file">web/metrics.py → get_metrics_json()</td></tr>
-  <tr><td>Monitoring: Database Explorer — browse all SQLite tables with paginated read-only data view</td><td><span class="badge done">Done</span></td><td class="file">web/server.py → /api/db/tables, /api/db/table/{name}, web/frontend/src/pages/Monitoring.tsx</td></tr>
+  <tr><td>Monitoring: Database Explorer — browse hub DB tables with paginated read-only data view</td><td><span class="badge done">Done</span></td><td class="file">web/server.py → /api/db/tables, /api/db/table/{name}, web/frontend/src/pages/Monitoring.tsx</td></tr>
   <tr><td>Position actions (Close/TP/Tighten) use body-based endpoints to handle symbols with slashes</td><td><span class="badge done">Done</span></td><td class="file">web/server.py, web/frontend/src/components/PositionRow.tsx</td></tr>
   <tr><td>Notifications: configurable — only daily_summary enabled by default, others logged but not emailed</td><td><span class="badge done">Done</span></td><td class="file">notifications/notifier.py, config/settings.py → NOTIFICATIONS_ENABLED</td></tr>
 </table>
@@ -1077,7 +1076,7 @@ Data lives on the host via bind mounts — <code>docker compose down -v</code> d
   <tr><td>Single PostgreSQL trading_db is the sole persistent trade DB — bots push trades via HTTP</td><td><span class="badge done">Done</span></td><td class="file">db/hub_repository.py, web/server.py → /internal/trade</td></tr>
   <tr><td>Analytics snapshot persisted in trading_db (survives hub restarts)</td><td><span class="badge done">Done</span></td><td class="file">hub/state.py, db/hub_store_postgres.py → analytics_snapshots</td></tr>
   <tr><td>Bots recover open positions from hub on startup</td><td><span class="badge done">Done</span></td><td class="file">bot.py → recovery on connect</td></tr>
-  <tr><td>Host-side DB backup script</td><td><span class="badge done">Done</span></td><td class="file">scripts/backup_dbs.sh</td></tr>
+  <tr><td>Host-side DB backup script (rolling Postgres backups)</td><td><span class="badge done">Done</span></td><td class="file">scripts/backup_hub_postgres.sh</td></tr>
 </table>
 
 <h3 id="s7-37">7.37 Centralized Log Analysis (Loki + Grafana)</h3>

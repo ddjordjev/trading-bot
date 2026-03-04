@@ -617,6 +617,48 @@ class TestRouteToBotsMonitor:
         queued = hub_state.read_trade_queue().proposals
         assert len(queued) == 0
 
+    def test_route_to_bots_keeps_swing_and_daily_for_same_symbol(self, monitor):
+        from shared.models import SignalPriority, TradeProposal
+
+        hub_state = HubState()
+        monitor.state = hub_state
+        monitor._exchange_symbols = {"BINANCE": {"BTC/USDT"}}
+
+        staging = TradeQueue()
+        staging.add(
+            TradeProposal(
+                priority=SignalPriority.DAILY,
+                symbol="BTC/USDT",
+                side="long",
+                strength=0.7,
+                supported_exchanges=["BINANCE"],
+                target_bot="momentum",
+            )
+        )
+        staging.add(
+            TradeProposal(
+                priority=SignalPriority.SWING,
+                symbol="BTC/USDT",
+                side="long",
+                strength=0.55,
+                supported_exchanges=["BINANCE"],
+                target_bot="swing",
+            )
+        )
+
+        with patch("db.hub_store.HubDB") as mock_db_cls:
+            mock_db = MagicMock()
+            mock_db.connect = MagicMock()
+            mock_db.close = MagicMock()
+            mock_db.get_open_trade_symbols = MagicMock(return_value=set())
+            mock_db_cls.return_value = mock_db
+            monitor._route_to_bots(staging, [])
+
+        queued = hub_state.read_trade_queue().proposals
+        assert len(queued) == 2
+        priorities = {p.priority for p in queued}
+        assert priorities == {SignalPriority.DAILY, SignalPriority.SWING}
+
 
 class TestExchangeSymbolFiltering:
     @pytest.mark.asyncio

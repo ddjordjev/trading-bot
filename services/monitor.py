@@ -717,7 +717,7 @@ class MonitorService:
             if all_tradeable and proposal.symbol not in all_tradeable:
                 skipped += 1
                 continue
-            if existing.has_symbol(proposal.symbol):
+            if self._is_symbol_deduped_in_queue(existing, proposal):
                 deduped += 1
                 continue
             if proposal.symbol in open_db_symbols:
@@ -761,6 +761,26 @@ class MonitorService:
                 existing.total,
                 existing.pending_count,
             )
+
+    @staticmethod
+    def _is_symbol_deduped_in_queue(existing: TradeQueue, proposal: TradeProposal) -> bool:
+        """Queue-level dedupe with swing awareness.
+
+        We keep the legacy symbol dedupe for CRITICAL/DAILY proposals to
+        avoid queue spam, but we allow SWING and non-SWING proposals for the
+        same symbol to coexist because they represent different horizons and
+        target different bot styles.
+        """
+        for queued in existing.proposals:
+            if queued.consumed or queued.is_expired:
+                continue
+            if queued.symbol != proposal.symbol:
+                continue
+            if queued.priority == proposal.priority:
+                return True
+            if queued.priority != SignalPriority.SWING and proposal.priority != SignalPriority.SWING:
+                return True
+        return False
 
     async def _refresh_tv(self, bot_status: BotDeploymentStatus) -> None:
         """Refresh TradingView analysis, adapting to deployment state."""

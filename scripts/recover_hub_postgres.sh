@@ -1,10 +1,7 @@
 #!/bin/bash
-# Postgres-first hub DB recovery workflow.
+# Hub DB recovery workflow for PostgreSQL.
 # - Verifies postgres connectivity
-# - Restores from latest postgres backup if requested
-# - Restarts hub services
-#
-# Legacy SQLite recovery is no longer the default path.
+# - Restarts hub service
 
 set -euo pipefail
 

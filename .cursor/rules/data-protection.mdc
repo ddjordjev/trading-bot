@@ -80,5 +80,5 @@ docker compose build && docker compose up -d
    on the host. Still avoid `-v` unless needed.
 2. Never `rm` any `.db` file or run `DROP TABLE` / `DELETE FROM`.
 3. If a migration or schema change needs data changes, ask first.
-4. The backup script (`scripts/backup_dbs.sh`) copies directly from the
-   host data dir — no Docker dependency needed.
+4. The backup script (`scripts/backup_hub_postgres.sh`) writes compressed
+   PostgreSQL dumps to the host backup dir with rolling retention.

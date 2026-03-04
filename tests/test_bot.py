@@ -115,6 +115,32 @@ class TestTradingBotInit:
             TradingBot(settings=settings)
         gv.assert_called_once_with("indicators", paper_mode=True)
 
+
+class TestLowBalanceGuardSnapshotReliability:
+    def test_unreliable_empty_snapshot_does_not_force_pause(self, bot):
+        bot._raw_balance = 500.0
+        bot._estimated_exchange_equity = 500.0
+        bot._low_balance_paused = False
+        bot._update_low_balance_guard_state(0.0, [], source="full_tick")
+        assert bot._low_balance_paused is False
+        assert bot._estimated_exchange_equity == 500.0
+
+    def test_reliable_zero_snapshot_can_pause(self, bot):
+        bot._raw_balance = 0.0
+        bot._estimated_exchange_equity = 0.0
+        bot._low_balance_paused = False
+        bot.settings.min_tradeable_equity_usdt = 50.0
+        bot._update_low_balance_guard_state(0.0, [], source="full_tick")
+        assert bot._low_balance_paused is True
+
+    def test_positive_balance_snapshot_is_reliable(self, bot):
+        bot._raw_balance = 0.0
+        bot._estimated_exchange_equity = 0.0
+        bot._low_balance_paused = False
+        bot.settings.min_tradeable_equity_usdt = 50.0
+        bot._update_low_balance_guard_state(120.0, [], source="full_tick")
+        assert bot._low_balance_paused is False
+
     def test_paper_live_uses_live_like_total_exposure_cap(self, settings, mock_exchange):
         settings.intel_enabled = False
         settings.trading_mode = "paper_live"

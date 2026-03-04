@@ -17,6 +17,8 @@ from hub.state import HubState
 class OpenClawAdvisorService:
     """Daily OpenClaw optimization loop with persistent suggestion lifecycle."""
 
+    _NO_MORE_CREDITS_MESSAGE = "no more credits"
+
     def __init__(self, *, settings: Settings, state: HubState, db_path: Path = Path("data/hub.db")) -> None:
         self.settings = settings
         self.state = state
@@ -59,6 +61,34 @@ class OpenClawAdvisorService:
         if str(meta.get("paid_model_used", "") or "").strip():
             return "paid"
         return "fallback"
+
+    @classmethod
+    def _no_credits_response_payload(cls) -> dict[str, Any]:
+        return {
+            "summary": cls._NO_MORE_CREDITS_MESSAGE,
+            "suggestions": [],
+            "meta": {
+                "lane_used": "fallback",
+                "no_credits": True,
+            },
+        }
+
+    @classmethod
+    def _looks_like_no_credits(cls, *, status_code: int, text: str = "", payload: dict[str, Any] | None = None) -> bool:
+        if status_code in {402, 429}:
+            return True
+
+        haystacks = [text.lower()]
+        if isinstance(payload, dict):
+            meta = payload.get("meta", {})
+            if isinstance(meta, dict):
+                haystacks.append(str(meta.get("budget_reason", "") or "").lower())
+            haystacks.append(str(payload.get("summary", "") or "").lower())
+            haystacks.append(str(payload.get("error", "") or "").lower())
+
+        joined = " ".join(h for h in haystacks if h)
+        markers = ("no more credits", "insufficient credits", "credit", "quota", "billing", "budget exceeded")
+        return any(marker in joined for marker in markers)
 
     async def start(self) -> None:
         if not self.enabled:
@@ -195,11 +225,27 @@ class OpenClawAdvisorService:
                     session.post(url, headers=headers, json=body) as resp,
                 ):
                     if resp.status != 200:
-                        error_text = f"http_{resp.status}"
+                        response_text = await resp.text()
+                        if self._looks_like_no_credits(status_code=resp.status, text=response_text):
+                            response_payload = self._no_credits_response_payload()
+                            lane_used = "fallback"
+                            status = "ok"
+                            error_text = ""
+                        else:
+                            error_text = f"http_{resp.status}"
                     else:
-                        response_payload = await resp.json()
-                        lane_used = self._resolve_lane_used(response_payload)
-                        status = "ok"
+                        raw_payload = await resp.json()
+                        if not isinstance(raw_payload, dict):
+                            raw_payload = {}
+                        if self._looks_like_no_credits(status_code=resp.status, payload=raw_payload):
+                            response_payload = self._no_credits_response_payload()
+                            lane_used = "fallback"
+                            status = "ok"
+                            error_text = ""
+                        else:
+                            response_payload = raw_payload
+                            lane_used = self._resolve_lane_used(response_payload)
+                            status = "ok"
             except Exception as e:
                 error_text = repr(e)
 

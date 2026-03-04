@@ -161,8 +161,8 @@ POST /internal/recovery-close         -> close missing-on-exchange records
 - 2026-03-04: Introduced AI-first startup document and doc role split.
 - 2026-03-04: Standardized startup instruction to read AI context first.
 - 2026-03-04: Marked `ARCHITECTURE.md` as canonical technical source and `summary.html` as human reference.
-- 2026-03-04: Moved persisted analytics snapshot from JSON file into `hub.db.analytics_snapshots`.
-- 2026-03-04: Added PostgreSQL trading DB backend (`trading_db`) and sqlite-to-postgres cutover tooling.
+- 2026-03-04: Moved persisted analytics snapshot from JSON file into `trading_db.analytics_snapshots`.
+- 2026-03-04: Added PostgreSQL trading DB backend (`trading_db`) and cut over hub persistence.
 
 ## Constants Quick Block
 
