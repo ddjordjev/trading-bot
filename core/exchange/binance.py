@@ -751,6 +751,7 @@ class BinanceExchange(BaseExchange):
             client = self._futures
             feed_name = "futures"
             supports_ws = hasattr(client, "watch_ticker")
+            poll_interval_seconds = 5.0
             while True:
                 try:
                     if supports_ws:
@@ -768,7 +769,7 @@ class BinanceExchange(BaseExchange):
                     )
                     await callback(ticker)
                     if not supports_ws:
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(poll_interval_seconds)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -799,7 +800,10 @@ class BinanceExchange(BaseExchange):
                         break
                     if "not supported" in normalized:
                         logger.warning(
-                            "watchTicker not supported on {} for {} — using polling fallback", feed_name, symbol
+                            "watchTicker not supported on {} for {} — using polling fallback ({}s)",
+                            feed_name,
+                            symbol,
+                            poll_interval_seconds,
                         )
                         supports_ws = False
                         continue

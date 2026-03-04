@@ -3180,6 +3180,8 @@ class TradingBot:
                 continue
 
             approved[candidate.symbol] = candidate.direction
+            # Keep entry-hunt subscriptions bounded per bot cycle.
+            extreme_positions += 1
 
         await self.extreme_watcher.sync_watchlist(approved, existing_position_symbols)
 
