@@ -2265,6 +2265,50 @@ class TestQuickHubCheck:
         payload = bot._hub_session.post.call_args_list[-1].kwargs["json"]
         assert "foreign_positions" not in payload
 
+    @pytest.mark.asyncio
+    async def test_quick_hub_check_processes_at_most_one_proposal_per_poll(self, bot, mock_exchange):
+        from shared.models import SignalPriority, TradeProposal
+
+        bot.settings.hub_url = "http://hub.example.com"
+        bot.settings.bot_id = "test-bot"
+        bot._multibot = True
+        bot._started_at = datetime.now(UTC) - timedelta(minutes=5)
+        bot._process_trade_queue = AsyncMock()
+        mock_exchange.fetch_positions = AsyncMock(return_value=[])
+
+        existing = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="existing",
+            reason="existing",
+            strength=0.6,
+            market_type="futures",
+        )
+        served = TradeProposal(
+            priority=SignalPriority.DAILY,
+            symbol="ETH/USDT",
+            side="long",
+            strategy="served",
+            reason="served",
+            strength=0.6,
+            market_type="futures",
+        )
+        bot._hub_proposal = existing
+
+        resp = MagicMock()
+        resp.status = 200
+        resp.json = AsyncMock(return_value={"confirmed_keys": [], "proposal": served.model_dump(mode="json")})
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=None)
+        bot._hub_session = MagicMock(post=MagicMock(return_value=resp))
+
+        await bot._quick_hub_check()
+
+        assert bot._process_trade_queue.await_count == 1
+        assert bot._hub_proposal is not None
+        assert bot._hub_proposal.symbol == "ETH/USDT"
+
 
 # ── _execute_proposal / _handle_spike ───────────────────────────────────────
 

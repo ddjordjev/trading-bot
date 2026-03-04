@@ -621,8 +621,10 @@ class TradingBot:
 
         await self._maybe_refresh_low_balance_guard()
 
+        processed_existing_proposal = False
         if self._entries_allowed(warmup_done) and self._hub_proposal:
             await self._process_trade_queue()
+            processed_existing_proposal = True
 
         try:
             payload: dict[str, Any] = {
@@ -719,7 +721,7 @@ class TradingBot:
             )
             return
         self._retry_pending_hub_trades()
-        if self._entries_allowed(warmup_done):
+        if self._entries_allowed(warmup_done) and not processed_existing_proposal:
             await self._process_trade_queue()
         elif self.target.manual_stop or self._low_balance_paused:
             # Drop any stale proposal while halted.
