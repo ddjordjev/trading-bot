@@ -2185,6 +2185,31 @@ class TestTickStrategyLoop:
         approved = bot.extreme_watcher.sync_watchlist.await_args.args[0]
         assert len(approved) == 2
 
+    @pytest.mark.asyncio
+    async def test_evaluate_extreme_candidates_skips_symbols_without_ws_ticker(self, bot):
+        now_iso = datetime.now(UTC).isoformat()
+        bot.settings.exchange = "binance"
+        bot._hub_extreme_watchlist = ExtremeWatchlist(
+            candidates=[
+                ExtremeCandidate(
+                    symbol="BTC/USDT", direction="bull", detected_at=now_iso, supported_exchanges=["BINANCE"]
+                )
+            ]
+        )
+        bot._symbol_available = MagicMock(return_value=True)
+        bot.target.should_trade = MagicMock(return_value=True)
+        bot._active_signals = []
+        bot.orders.scaler.active_positions.clear()
+        bot.exchange.supports_ticker_ws = MagicMock(return_value=False)
+        bot.extreme_watcher.sync_watchlist = AsyncMock()
+
+        with patch.object(type(bot.target), "manual_stop", PropertyMock(return_value=False)):
+            await bot._evaluate_extreme_candidates()
+
+        bot.extreme_watcher.sync_watchlist.assert_awaited_once()
+        approved = bot.extreme_watcher.sync_watchlist.await_args.args[0]
+        assert approved == {}
+
 
 # ── start() non-multibot get_available_symbols exception ────────────────────
 

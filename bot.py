@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import signal
 import sys
 import time
@@ -3139,6 +3140,14 @@ class TradingBot:
             if my_exchange not in candidate.supported_exchanges:
                 logger.debug("Extreme skip {}: not on {}", candidate.symbol, my_exchange)
                 continue
+            supports_ws_ticker = getattr(self.exchange, "supports_ticker_ws", None)
+            if callable(supports_ws_ticker):
+                supports_ws_value = supports_ws_ticker(candidate.symbol)
+                if inspect.isawaitable(supports_ws_value):
+                    supports_ws_value = await supports_ws_value
+                if not bool(supports_ws_value):
+                    logger.info("Extreme skip {}: WS ticker unavailable", candidate.symbol)
+                    continue
             try:
                 detected = datetime.fromisoformat(candidate.detected_at.replace("Z", "+00:00"))
                 age = now_ts - detected.timestamp()

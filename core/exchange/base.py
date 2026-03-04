@@ -226,6 +226,10 @@ class BaseExchange(ABC):
     @abstractmethod
     async def get_available_symbols(self, market_type: MarketType = MarketType.SPOT) -> list[str]: ...
 
+    def supports_ticker_ws(self, symbol: str) -> bool:
+        """Whether this exchange supports ticker WebSocket for a symbol."""
+        return False
+
     # -- Stream --
 
     @abstractmethod

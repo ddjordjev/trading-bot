@@ -488,6 +488,14 @@ class BybitExchange(BaseExchange):
         client = self._client(market_type)
         return list(client.markets.keys())
 
+    def supports_ticker_ws(self, symbol: str) -> bool:
+        futures_symbol = self._resolve_symbol(symbol, MarketType.FUTURES)
+        futures_markets = getattr(self._futures, "markets", {}) or {}
+        spot_markets = getattr(self._spot, "markets", {}) or {}
+        use_futures = futures_symbol in futures_markets and symbol not in spot_markets
+        client = self._futures if use_futures else self._spot
+        return bool(hasattr(client, "watch_ticker"))
+
     async def watch_ticker(self, symbol: str, callback: Callable[..., Any]) -> None:
         async def _loop() -> None:
             futures_symbol = self._resolve_symbol(symbol, MarketType.FUTURES)
@@ -497,12 +505,12 @@ class BybitExchange(BaseExchange):
             client = self._futures if use_futures else self._spot
             watch_symbol = futures_symbol if use_futures else symbol
             supports_ws = hasattr(client, "watch_ticker")
+            if not supports_ws:
+                logger.warning("Bybit WS ticker unavailable for {}, unsubscribing watcher", symbol)
+                return
             while True:
                 try:
-                    if supports_ws:
-                        data = await client.watch_ticker(watch_symbol)
-                    else:
-                        data = await client.fetch_ticker(watch_symbol)
+                    data = await client.watch_ticker(watch_symbol)
                     ticker = Ticker(
                         symbol=symbol,
                         bid=data.get("bid", 0) or 0,
@@ -513,17 +521,13 @@ class BybitExchange(BaseExchange):
                         timestamp=ts_to_dt(data.get("timestamp")),
                     )
                     await callback(ticker)
-                    if not supports_ws:
-                        await asyncio.sleep(1)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
                     msg = str(e).lower()
-                    if supports_ws and "not supported yet" in msg:
-                        supports_ws = False
-                        logger.warning("Bybit WS ticker unsupported for {}, falling back to polling", symbol)
-                        await asyncio.sleep(1)
-                        continue
+                    if "not supported yet" in msg:
+                        logger.warning("Bybit WS ticker unsupported for {}, unsubscribing watcher", symbol)
+                        break
                     logger.error("Ticker watch error for {}: {}", symbol, e)
                     await asyncio.sleep(5)
 

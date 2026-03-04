@@ -746,18 +746,27 @@ class BinanceExchange(BaseExchange):
         client = self._client(market_type)
         return list(client.markets.keys())
 
+    def supports_ticker_ws(self, symbol: str) -> bool:
+        """Extreme watcher requirement: ticker WS must exist for this symbol."""
+        if not hasattr(self._futures, "watch_ticker"):
+            return False
+        try:
+            self._futures.market(symbol)
+            return True
+        except Exception:
+            return False
+
     async def watch_ticker(self, symbol: str, callback: Callable[..., Any]) -> None:
         async def _loop() -> None:
             client = self._futures
             feed_name = "futures"
             supports_ws = hasattr(client, "watch_ticker")
-            poll_interval_seconds = 5.0
+            if not supports_ws:
+                logger.warning("watchTicker not supported on {} for {} — unsubscribing watcher", feed_name, symbol)
+                return
             while True:
                 try:
-                    if supports_ws:
-                        data = await client.watch_ticker(symbol)
-                    else:
-                        data = await client.fetch_ticker(symbol)
+                    data = await client.watch_ticker(symbol)
                     ticker = Ticker(
                         symbol=symbol,
                         bid=data.get("bid", 0) or 0,
@@ -768,8 +777,6 @@ class BinanceExchange(BaseExchange):
                         timestamp=ts_to_dt(data.get("timestamp")),
                     )
                     await callback(ticker)
-                    if not supports_ws:
-                        await asyncio.sleep(poll_interval_seconds)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -790,23 +797,13 @@ class BinanceExchange(BaseExchange):
                         await asyncio.sleep(cooldown)
                         continue
                     if "does not have market symbol" in normalized:
-                        if client is self._futures:
-                            logger.warning("Ticker symbol unavailable on futures for {} — trying spot feed", symbol)
-                            client = self._spot
-                            feed_name = "spot"
-                            supports_ws = hasattr(client, "watch_ticker")
-                            continue
                         logger.warning("Ticker symbol unavailable for {} — unsubscribing watcher", symbol)
                         break
                     if "not supported" in normalized:
                         logger.warning(
-                            "watchTicker not supported on {} for {} — using polling fallback ({}s)",
-                            feed_name,
-                            symbol,
-                            poll_interval_seconds,
+                            "watchTicker not supported on {} for {} — unsubscribing watcher", feed_name, symbol
                         )
-                        supports_ws = False
-                        continue
+                        break
                     logger.error("Ticker watch error for {}: {}", symbol, e)
                     await asyncio.sleep(5)
 

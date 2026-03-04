@@ -397,5 +397,8 @@ class PaperExchange(BaseExchange):
     async def watch_ticker(self, symbol: str, callback: Callable[..., Any]) -> None:
         await self._real.watch_ticker(symbol, callback)
 
+    def supports_ticker_ws(self, symbol: str) -> bool:
+        return bool(self._real.supports_ticker_ws(symbol))
+
     async def watch_candles(self, symbol: str, timeframe: str, callback: Callable[..., Any]) -> None:
         await self._real.watch_candles(symbol, timeframe, callback)
