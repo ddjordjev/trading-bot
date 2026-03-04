@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -101,6 +103,23 @@ class BinanceExchange(BaseExchange):
         if market_id.endswith("USDT") and len(market_id) > 4:
             return f"{market_id[:-4]}/USDT"
         return market_id
+
+    @staticmethod
+    def _rate_limit_cooldown_seconds(error_message: str) -> int:
+        """Return a sane cooldown for Binance rate-limit/ban responses."""
+        lowered = str(error_message or "").lower()
+        # Binance often returns: "IP banned until 1772610818128" (ms epoch)
+        match = re.search(r"ip banned until\s+(\d{10,16})", lowered)
+        if match:
+            raw_ts = int(match.group(1))
+            # Normalize to milliseconds if response happened to be in seconds.
+            ts_ms = raw_ts if raw_ts > 10_000_000_000 else raw_ts * 1000
+            now_ms = int(time.time() * 1000)
+            if ts_ms > now_ms:
+                delta = int((ts_ms - now_ms) / 1000)
+                return max(5, min(delta + 2, 900))
+        # Conservative default when no explicit ban-until timestamp is present.
+        return 60
 
     @staticmethod
     def _parse_algo_status(raw_status: str) -> OrderStatus:
@@ -755,6 +774,20 @@ class BinanceExchange(BaseExchange):
                 except Exception as e:
                     msg = str(e)
                     normalized = msg.lower()
+                    if (
+                        'code":-1003' in normalized
+                        or "way too much request weight used" in normalized
+                        or "ip banned until" in normalized
+                    ):
+                        cooldown = self._rate_limit_cooldown_seconds(msg)
+                        logger.warning(
+                            "Ticker rate-limited for {} on {} feed — cooling down {}s before retry",
+                            symbol,
+                            feed_name,
+                            cooldown,
+                        )
+                        await asyncio.sleep(cooldown)
+                        continue
                     if "does not have market symbol" in normalized:
                         if client is self._futures:
                             logger.warning("Ticker symbol unavailable on futures for {} — trying spot feed", symbol)

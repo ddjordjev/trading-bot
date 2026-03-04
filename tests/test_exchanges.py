@@ -275,6 +275,30 @@ class TestBinanceExchange:
         await binance.disconnect()
 
     @pytest.mark.asyncio
+    async def test_watch_ticker_rate_limit_cools_down_and_retries(self, binance):
+        callback = AsyncMock()
+        binance._futures.watch_ticker = AsyncMock(side_effect=Exception("not supported"))
+        binance._futures.fetch_ticker = AsyncMock(
+            side_effect=[
+                Exception(
+                    'binance 418 I\'m a teapot {"code":-1003,"msg":"Way too much request weight used; IP banned until 4070908800000."}'
+                ),
+                _raw_ticker(symbol="BTC/USDT"),
+                Exception("binance does not have market symbol BTC/USDT"),
+            ]
+        )
+        binance._spot.watch_ticker = AsyncMock(side_effect=Exception("not supported"))
+        binance._spot.fetch_ticker = AsyncMock(side_effect=Exception("binance does not have market symbol BTC/USDT"))
+
+        with patch.object(binance, "_rate_limit_cooldown_seconds", return_value=0):
+            await binance.watch_ticker("BTC/USDT", callback)
+            await asyncio.sleep(0.05)
+
+        assert binance._futures.fetch_ticker.await_count >= 2
+        callback.assert_awaited()
+        await binance.disconnect()
+
+    @pytest.mark.asyncio
     async def test_fetch_candles(self, binance):
         candles = await binance.fetch_candles("BTC/USDT", "1m", limit=10)
         assert len(candles) == 3
