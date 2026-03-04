@@ -245,6 +245,17 @@ class TestBinanceExchange:
         await binance.disconnect()
 
     @pytest.mark.asyncio
+    async def test_watch_ticker_unavailable_symbol_unsubscribes(self, binance):
+        callback = AsyncMock()
+        binance._futures.watch_ticker = AsyncMock(side_effect=Exception("not supported"))
+        binance._spot.watch_ticker = AsyncMock(side_effect=Exception("not supported"))
+        binance._spot.fetch_ticker = AsyncMock(side_effect=Exception("binance does not have market symbol POWER/USDT"))
+        await binance.watch_ticker("POWER/USDT", callback)
+        await asyncio.sleep(0.05)
+        assert binance._watchers[-1].done()
+        await binance.disconnect()
+
+    @pytest.mark.asyncio
     async def test_fetch_candles(self, binance):
         candles = await binance.fetch_candles("BTC/USDT", "1m", limit=10)
         assert len(candles) == 3

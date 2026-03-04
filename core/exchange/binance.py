@@ -754,6 +754,10 @@ class BinanceExchange(BaseExchange):
                     break
                 except Exception as e:
                     msg = str(e)
+                    normalized = msg.lower()
+                    if "does not have market symbol" in normalized:
+                        logger.warning("Ticker symbol unavailable for {} — unsubscribing watcher", symbol)
+                        break
                     if "not supported" in msg.lower():
                         if client is not fallback:
                             logger.warning("watchTicker not supported on futures for {} — trying spot fallback", symbol)
