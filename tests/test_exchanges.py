@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -219,6 +220,26 @@ class TestBinanceExchange:
         ticker = await binance.fetch_ticker("BTC/USDT")
         assert ticker.bid == 0
         assert ticker.last == 0
+
+    @pytest.mark.asyncio
+    async def test_watch_ticker_prefers_futures_stream(self, binance):
+        callback = AsyncMock()
+        binance._futures.watch_ticker = AsyncMock(side_effect=[_raw_ticker(), Exception("not supported")])
+        binance._spot.watch_ticker = AsyncMock(side_effect=Exception("not supported"))
+        await binance.watch_ticker("BTC/USDT", callback)
+        await asyncio.sleep(0.05)
+        assert binance._futures.watch_ticker.await_count >= 1
+        callback.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_watch_ticker_falls_back_to_spot_when_futures_not_supported(self, binance):
+        callback = AsyncMock()
+        binance._futures.watch_ticker = AsyncMock(side_effect=Exception("not supported"))
+        binance._spot.watch_ticker = AsyncMock(side_effect=[_raw_ticker(), Exception("not supported")])
+        await binance.watch_ticker("BTC/USDT", callback)
+        await asyncio.sleep(0.05)
+        assert binance._spot.watch_ticker.await_count >= 1
+        callback.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_fetch_candles(self, binance):

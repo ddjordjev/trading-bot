@@ -729,13 +729,15 @@ class BinanceExchange(BaseExchange):
 
     async def watch_ticker(self, symbol: str, callback: Callable[..., Any]) -> None:
         async def _loop() -> None:
-            supports_ws = hasattr(self._spot, "watch_ticker")
+            client = self._futures
+            fallback = self._spot
+            supports_ws = hasattr(client, "watch_ticker")
             while True:
                 try:
                     if supports_ws:
-                        data = await self._spot.watch_ticker(symbol)
+                        data = await client.watch_ticker(symbol)
                     else:
-                        data = await self._spot.fetch_ticker(symbol)
+                        data = await client.fetch_ticker(symbol)
                     ticker = Ticker(
                         symbol=symbol,
                         bid=data.get("bid", 0) or 0,
@@ -753,6 +755,11 @@ class BinanceExchange(BaseExchange):
                 except Exception as e:
                     msg = str(e)
                     if "not supported" in msg.lower():
+                        if client is not fallback:
+                            logger.warning("watchTicker not supported on futures for {} — trying spot fallback", symbol)
+                            client = fallback
+                            supports_ws = hasattr(client, "watch_ticker")
+                            continue
                         logger.warning("watchTicker not supported for {} — unsubscribing", symbol)
                         break
                     logger.error("Ticker watch error for {}: {}", symbol, e)

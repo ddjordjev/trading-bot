@@ -43,7 +43,7 @@ from shared.models import (
 )
 from strategies import BUILTIN_STRATEGIES
 from strategies.base import BaseStrategy
-from validators import ValidationResult, get_validator
+from validators import VALIDATORS_BY_STYLE, ValidationResult, get_validator
 from volatility import SpikeEvent, VolatilityDetector
 
 # PYRAMID (DCA in) is the DEFAULT for all strategies. Nobody can predict exact
@@ -221,7 +221,10 @@ class TradingBot:
         self._last_low_balance_check_ts: float = 0.0
         self._insufficient_balance_events: deque[float] = deque()
         self._last_auto_disable_ts: float = 0.0
-        self._validator = get_validator(self.settings.bot_style, paper_mode=self.settings.is_paper_local())
+        validator_key = (self.settings.bot_id or "").strip().lower()
+        if validator_key not in VALIDATORS_BY_STYLE:
+            validator_key = self.settings.bot_style
+        self._validator = get_validator(validator_key, paper_mode=self.settings.is_paper_local())
 
     # -- Strategy Management --
 

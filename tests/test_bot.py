@@ -89,6 +89,32 @@ class TestTradingBotInit:
             TradingBot(settings=settings)
         gv.assert_called_once_with(settings.bot_style, paper_mode=False)
 
+    def test_init_uses_extreme_validator_for_extreme_bot_id(self, settings, mock_exchange):
+        settings.intel_enabled = False
+        settings.bot_id = "extreme"
+        settings.bot_style = "momentum"
+        with (
+            patch("bot.create_exchange", return_value=mock_exchange),
+            patch("bot.get_validator", return_value=MagicMock()) as gv,
+        ):
+            from bot import TradingBot
+
+            TradingBot(settings=settings)
+        gv.assert_called_once_with("extreme", paper_mode=True)
+
+    def test_init_uses_indicators_validator_for_indicators_bot_id(self, settings, mock_exchange):
+        settings.intel_enabled = False
+        settings.bot_id = "indicators"
+        settings.bot_style = "momentum"
+        with (
+            patch("bot.create_exchange", return_value=mock_exchange),
+            patch("bot.get_validator", return_value=MagicMock()) as gv,
+        ):
+            from bot import TradingBot
+
+            TradingBot(settings=settings)
+        gv.assert_called_once_with("indicators", paper_mode=True)
+
     def test_paper_live_uses_live_like_total_exposure_cap(self, settings, mock_exchange):
         settings.intel_enabled = False
         settings.trading_mode = "paper_live"
