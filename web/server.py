@@ -63,6 +63,8 @@ _bot_urls: dict[str, str] = {}  # bot_id -> base URL (e.g. "http://bot-meanrev:9
 _HUB_DB_PATH = Path("data/hub.db")
 _hub_db: HubDB | PostgresHubDB | None = None
 _exchange_snapshot_last_ts: dict[str, float] = {}
+_last_stable_snapshot: dict[str, Any] | None = None
+_last_stable_snapshot_ts: float = 0.0
 
 
 @dataclass(slots=True)
@@ -1318,7 +1320,17 @@ def report_bot_snapshot(data: dict[str, Any]) -> None:
     stamped["bot_id"] = bot_id
     stamped["_reported_at"] = time.time()
     existing = _bot_reports.get(bot_id)
+    status_payload = stamped.get("status")
+    has_full_status_payload = isinstance(status_payload, dict) and bool(status_payload)
+    has_aux_payload = any(
+        isinstance(stamped.get(key), list) and len(stamped.get(key) or []) > 0
+        for key in ("positions", "wick_scalps", "strategies", "trade_log", "foreign_positions", "orphan_positions")
+    ) or isinstance(stamped.get("daily_report"), dict)
     if existing is None:
+        # Ignore first heartbeat-only payloads (quick hub checks) so they don't
+        # create zero-state dashboard frames before first full status snapshot.
+        if not (has_full_status_payload or has_aux_payload):
+            return
         _bot_reports[bot_id] = stamped
     else:
         for key, value in stamped.items():
@@ -1434,6 +1446,9 @@ def _build_merged_snapshot() -> dict[str, Any]:
     total_uptime = 0.0
     any_running = False
     any_halted = False
+    any_exchange_access_halted = False
+    exchange_access_alert_message = ""
+    exchange_access_alert_exchange = ""
     strategies_count = 0
     dynamic_count = 0
     bot_count = 0
@@ -1496,6 +1511,13 @@ def _build_merged_snapshot() -> dict[str, Any]:
             any_running = True
         if s.get("manual_stop_active"):
             any_halted = True
+        if bool(s.get("exchange_access_halted")):
+            any_exchange_access_halted = True
+            if not exchange_access_alert_exchange:
+                exchange_access_alert_exchange = ex_name or str(s.get("exchange_name", "") or "").strip().upper()
+            reason = str(s.get("exchange_access_reason", "") or "").strip()
+            if reason and not exchange_access_alert_message:
+                exchange_access_alert_message = reason[:300]
         strategies_count += int(s.get("strategies_count", 0) or 0)
         dynamic_count += int(s.get("dynamic_strategies_count", 0) or 0)
         bot_count += 1
@@ -1563,6 +1585,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
     ownership_by_key: dict[tuple[str, str], str] = {}
     ownership_by_symbol: dict[str, str] = {}
+    original_owner_by_symbol: dict[str, str] = {}
     for row in hub.get_open_trade_owner_rows():
         owner_bot = _normalize_bot_id(row.get("bot_id", ""))
         symbol = _pair_symbol(row.get("symbol", ""))
@@ -1575,6 +1598,16 @@ def _build_merged_snapshot() -> dict[str, Any]:
             key = (exchange, symbol)
             if key not in ownership_by_key:
                 ownership_by_key[key] = owner_bot
+
+    original_owner_rows_fn = getattr(hub, "get_original_trade_owner_rows", None)
+    if callable(original_owner_rows_fn):
+        for row in original_owner_rows_fn():
+            owner_bot = _normalize_bot_id(row.get("bot_id", ""))
+            symbol = _pair_symbol(row.get("symbol", ""))
+            if not owner_bot or not symbol:
+                continue
+            if symbol not in original_owner_by_symbol:
+                original_owner_by_symbol[symbol] = owner_bot
 
     recent_owner_rows_fn = getattr(hub, "get_recent_recovery_owner_rows", None)
     if callable(recent_owner_rows_fn):
@@ -1606,18 +1639,19 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
     all_orphans: list[dict[str, Any]] = []
     for (exchange, symbol), obs in latest_foreign_by_key.items():
-        owner_bot = ownership_by_key.get((exchange, symbol), "") or ownership_by_symbol.get(symbol, "")
-        owner_is_running = bool(owner_bot and bot_running.get(owner_bot, False))
-        if owner_bot and owner_is_running:
+        current_owner_bot = ownership_by_key.get((exchange, symbol), "") or ownership_by_symbol.get(symbol, "")
+        owner_is_running = bool(current_owner_bot and bot_running.get(current_owner_bot, False))
+        if current_owner_bot and owner_is_running:
             continue
+        original_owner_bot = original_owner_by_symbol.get(symbol, "") or current_owner_bot
         all_orphans.append(
             {
                 **obs,
                 "exchange_name": exchange,
                 "symbol": symbol,
-                "originally_opened_by": owner_bot,
+                "originally_opened_by": original_owner_bot,
                 "owner_running": owner_is_running,
-                "orphan_reason": "owner_not_running" if owner_bot else "no_owner_record",
+                "orphan_reason": "owner_not_running" if current_owner_bot else "no_owner_record",
             }
         )
 
@@ -1683,12 +1717,15 @@ def _build_merged_snapshot() -> dict[str, Any]:
         "total_growth_pct": total_growth_pct / bot_count if bot_count else 0,
         "uptime_seconds": total_uptime,
         "manual_stop_active": any_halted,
+        "exchange_access_halted": any_exchange_access_halted,
+        "exchange_access_alert_exchange": exchange_access_alert_exchange,
+        "exchange_access_alert_message": exchange_access_alert_message,
         "strategies_count": strategies_count,
         "dynamic_strategies_count": dynamic_count,
         "profit_buffer_pct": total_profit_buffer / bot_count if bot_count else 0,
     }
 
-    return {
+    snapshot = {
         "status": merged_status,
         "positions": all_positions,
         "wick_scalps": all_wicks,
@@ -1698,6 +1735,18 @@ def _build_merged_snapshot() -> dict[str, Any]:
         "bots": bot_snapshots,
         "exchange_balances": exchange_balances,
     }
+
+    # Prevent brief zero-state flicker when an intermediate empty frame appears.
+    global _last_stable_snapshot, _last_stable_snapshot_ts
+    now_mono = time.monotonic()
+    if bot_count == 0:
+        if _last_stable_snapshot and (now_mono - _last_stable_snapshot_ts) <= 15.0:
+            return _last_stable_snapshot
+        return snapshot
+
+    _last_stable_snapshot = snapshot
+    _last_stable_snapshot_ts = now_mono
+    return snapshot
 
 
 def _backfill_open_trade_ownership_from_report(bot_id: str, payload: dict[str, Any], hub: Any) -> None:

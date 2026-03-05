@@ -425,6 +425,15 @@ class OrderManager:
         await self._cancel_protection_order(str(state.get("sl_order_id", "") or ""), symbol, market_type)
         await self._cancel_protection_order(str(state.get("tp_order_id", "") or ""), symbol, market_type)
 
+    async def clear_symbol_protection_orders(self, symbol: str, market_type: MarketType) -> int:
+        """Cancel all known/open SL/TP protection orders for one symbol."""
+        cancelled = 0
+        with contextlib.suppress(Exception):
+            open_orders = await self.exchange.fetch_open_orders(symbol=symbol, market_type=market_type)
+            cancelled += await self._cancel_symbol_protection_orders(symbol, market_type, open_orders)
+        await self._clear_symbol_protection(symbol, market_type)
+        return cancelled
+
     async def cleanup_orphan_protection_orders(self, positions: list[Position], force: bool = False) -> int:
         """Cancel stale futures SL/TP orders for symbols with no live position.
 

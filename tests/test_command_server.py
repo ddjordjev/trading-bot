@@ -43,6 +43,7 @@ def bot_stub():
     bot._running = False
     bot._hub_proposal = object()
     bot._process_signal = AsyncMock()
+    bot._prepare_symbol_for_forced_close = AsyncMock()
     bot._claim_orphan_position = AsyncMock(return_value=(True, "claimed"))
     bot._close_all_positions = AsyncMock()
     bot._write_deployment_status = AsyncMock()
@@ -95,6 +96,7 @@ async def test_close_position_success_and_incomplete(bot_stub):
         ok = _resp_json(await cs.close_position(_Req({"symbol": "BTC/USDT"})))
     assert ok["success"] is True
     assert "Closed BTC/USDT" in ok["message"]
+    bot_stub._prepare_symbol_for_forced_close.assert_awaited_once_with("BTC/USDT")
 
     bot_stub._open_trades = {"ETH/USDT": object()}
     with patch("asyncio.create_task", return_value=_DoneTask()):

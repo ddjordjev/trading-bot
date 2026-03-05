@@ -841,6 +841,43 @@ class TestHubDB:
         stats = hub.get_strategy_stats_for_bot("b1", "rsi")
         assert stats.get("total", 0) == 0
 
+    def test_get_original_trade_owner_rows_returns_first_open_owner(self, hub: HubDB):
+        hub.insert_trade(
+            "swing",
+            {
+                "symbol": "MATIC/USDT",
+                "side": "long",
+                "strategy": "swing",
+                "action": "open",
+                "opened_at": "2026-01-01T10:00:00",
+            },
+        )
+        hub.insert_trade(
+            "swing",
+            {
+                "symbol": "MATIC/USDT",
+                "side": "long",
+                "strategy": "swing",
+                "action": "close",
+                "opened_at": "2026-01-01T10:00:00",
+                "closed_at": "2026-01-01T11:00:00",
+            },
+        )
+        hub.insert_trade(
+            "scalper",
+            {
+                "symbol": "MATIC/USDT",
+                "side": "long",
+                "strategy": "manual_claim",
+                "action": "close",
+                "opened_at": "2026-01-02T10:00:00",
+                "closed_at": "2026-01-02T11:00:00",
+            },
+        )
+        rows = hub.get_original_trade_owner_rows()
+        by_symbol = {str(r["symbol"]): str(r["bot_id"]) for r in rows}
+        assert by_symbol.get("MATIC/USDT") == "swing"
+
     def test_binance_snapshots_roundtrip(self, hub: HubDB):
         rows = [
             {

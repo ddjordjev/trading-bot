@@ -75,6 +75,7 @@ async def close_position(request: web.Request) -> web.Response:
     sig = Signal(symbol=symbol, action=SignalAction.CLOSE, strategy="dashboard", reason="Manual close from hub")
     try:
         was_open = symbol in _bot._open_trades
+        await _bot._prepare_symbol_for_forced_close(symbol)
         # Route through bot-level signal handling so close bookkeeping stays
         # consistent (trade log, realized PnL, daily target, hub sync).
         await _bot._process_signal(sig)

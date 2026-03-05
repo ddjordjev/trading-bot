@@ -46,6 +46,9 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
   const logs = Array.isArray(data?.logs) ? data.logs : [];
 
   const manualStopActive = manualStopOverride ?? s.manual_stop_active;
+  const exchangeAccessHalted = bool((s as any).exchange_access_halted);
+  const exchangeAccessExchange = str((s as any).exchange_access_alert_exchange, "Exchange");
+  const exchangeAccessBanner = `${exchangeAccessExchange} API key stopped working. Please check the config manually.`;
   const pnlClass = num(s.daily_pnl_pct) >= 0 ? "pnl-positive" : "pnl-negative";
 
   const eb = data?.exchange_balances ?? {};
@@ -328,6 +331,24 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
       <h3 style={{ color: "var(--heading)", marginBottom: "0.5rem" }}>
         Open Positions ({positions.length})
       </h3>
+      {exchangeAccessHalted && (
+        <div
+          style={{
+            marginBottom: "0.75rem",
+            padding: "0.65rem 0.85rem",
+            borderRadius: 6,
+            border: "2px solid #ff3b3b",
+            background: "rgba(255, 59, 59, 0.16)",
+            color: "#ff4d4d",
+            fontWeight: 800,
+            fontSize: "0.95rem",
+            letterSpacing: "0.02em",
+            textTransform: "uppercase",
+          }}
+        >
+          {exchangeAccessBanner}
+        </div>
+      )}
       {positions.length === 0 ? (
         <div className="empty-state">No open positions</div>
       ) : (

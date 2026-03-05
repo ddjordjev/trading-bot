@@ -67,25 +67,6 @@ Prefer Playwright (Python, headless, good assertion library).
 
 ---
 
-## Test Coverage Strategy — Surge & Coast
-
-The `fail_under` floor stays at 80%. The workflow:
-
-1. **Surge** — when coverage drops near or below 80%, push it back up to
-   85-90%. Focus on critical areas (exchange, orders, risk, daily target)
-   for deeper coverage. Less critical areas (intel clients, frontend glue)
-   just need enough to clear the bar.
-2. **Coast** — when adding new features, write basic tests for the new code
-   but don't obsess over hitting 90% again. Let coverage naturally drift
-   down as new lines are added.
-3. **Repeat** — when it drops below 80% again, do another surge. Rinse and
-   repeat.
-
-The point: maintain a meaningful safety net without wasting time writing
-filler tests every commit. The surges build a buffer; the coasts spend it.
-
-**Status:** Active policy. Current coverage: ~91% (post-surge).
-
 ---
 
 ## WebSocket for Bot ↔ Hub Communication

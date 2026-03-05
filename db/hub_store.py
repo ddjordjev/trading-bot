@@ -891,6 +891,24 @@ class HubDB(TradeDB):
         ).fetchall()
         return [{"id": int(r["id"]), "bot_id": str(r["bot_id"] or ""), "symbol": str(r["symbol"] or "")} for r in rows]
 
+    def get_original_trade_owner_rows(self) -> list[dict[str, Any]]:
+        """Return immutable original owner per symbol (first open row ever)."""
+        assert self._conn
+        rows = self._conn.execute(
+            """
+            SELECT id, bot_id, symbol
+            FROM (
+                SELECT id, bot_id, symbol,
+                       ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY id ASC) AS rn
+                FROM trades
+                WHERE action='open' AND symbol!='' AND bot_id!=''
+            ) first_owner
+            WHERE rn=1
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        return [{"id": int(r["id"]), "bot_id": str(r["bot_id"] or ""), "symbol": str(r["symbol"] or "")} for r in rows]
+
     def get_recent_recovery_owner_rows(self, lookback_hours: int = 24) -> list[dict[str, Any]]:
         """Return recent recovery-closed owner rows as fallback ownership hints."""
         assert self._conn

@@ -51,6 +51,8 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - run: pytest tests/ -v --tb=short -m "not integration"
+      - name: Coverage surge/coast guard
+        run: python scripts/coverage_guard.py --surge-trigger 82 --surge-target 88
 
   frontend-build:
     name: Frontend Build

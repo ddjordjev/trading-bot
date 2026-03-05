@@ -21,6 +21,7 @@ class NotificationType(str, Enum):
     SPIKE_DETECTED = "spike_detected"
     NEWS_ALERT = "news_alert"
     WHALE_POSITION = "whale_position"  # always on: $100K+ position at 20%+ profit
+    EXCHANGE_ACCESS_LOST = "exchange_access_lost"  # always on: auth/key/IP access dropped
 
 
 class Notifier:
@@ -37,7 +38,7 @@ class Notifier:
         self._running = False
         self._background_tasks: list[asyncio.Task[None]] = []
 
-    ALWAYS_ON = {NotificationType.LIQUIDATION, NotificationType.WHALE_POSITION}
+    ALWAYS_ON = {NotificationType.LIQUIDATION, NotificationType.WHALE_POSITION, NotificationType.EXCHANGE_ACCESS_LOST}
 
     def is_enabled(self, ntype: NotificationType) -> bool:
         if ntype in self.ALWAYS_ON:
@@ -140,6 +141,21 @@ class Notifier:
                 f"  - Close it entirely\n\n"
                 + (f"Dashboard: {dashboard_url}\n\n" if dashboard_url else "")
                 + "The bot will NOT auto-close this. It's your call.\n"
+            ),
+        )
+
+    async def alert_exchange_access_lost(self, exchange: str, bot_id: str, reason: str, context: str = "") -> None:
+        """Immediate alert when API key/IP/auth access is lost."""
+        ctx = f"\nContext: {context}" if context else ""
+        await self.send(
+            NotificationType.EXCHANGE_ACCESS_LOST,
+            f"EXCHANGE ACCESS LOST - {exchange.upper()} ({bot_id})",
+            (
+                f"Exchange access appears to be blocked for bot '{bot_id}'.\n\n"
+                f"Exchange: {exchange.upper()}\n"
+                f"Reason: {reason}{ctx}\n"
+                f"Time: {datetime.now(UTC).isoformat()}\n\n"
+                "Bot should be halted to avoid hammering the exchange until manual intervention."
             ),
         )
 

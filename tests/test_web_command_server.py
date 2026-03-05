@@ -27,6 +27,7 @@ def bot_stub(tmp_path):
     bot = SimpleNamespace(
         _open_trades={},
         _process_signal=AsyncMock(),
+        _prepare_symbol_for_forced_close=AsyncMock(),
         _claim_orphan_position=AsyncMock(return_value=(True, "claimed")),
         _write_deployment_status=AsyncMock(),
         _quick_hub_check=AsyncMock(),
@@ -129,6 +130,7 @@ async def test_close_position_success(bot_stub, stub_tasks):
     body = _json_body(await cs.close_position(_Req({"symbol": "BTC/USDT"})))
     assert body["success"] is True
     assert "Closed BTC/USDT" in body["message"]
+    bot_stub._prepare_symbol_for_forced_close.assert_awaited_once_with("BTC/USDT")
 
 
 @pytest.mark.asyncio

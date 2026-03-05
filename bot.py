@@ -225,6 +225,9 @@ class TradingBot:
         self._last_low_balance_check_ts: float = 0.0
         self._insufficient_balance_events: deque[float] = deque()
         self._last_auto_disable_ts: float = 0.0
+        self._exchange_access_halted: bool = False
+        self._exchange_access_reason: str = ""
+        self._exchange_access_last_alert_ts: float = 0.0
         validator_key = (self.settings.bot_id or "").strip().lower()
         if validator_key not in VALIDATORS_BY_STYLE:
             validator_key = self.settings.bot_style
@@ -422,7 +425,7 @@ class TradingBot:
             self._low_balance_pause_reason = ""
 
     async def _maybe_refresh_low_balance_guard(self) -> None:
-        if not self._low_balance_paused:
+        if self._exchange_access_halted or not self._low_balance_paused:
             return
         interval = max(30, int(self.settings.low_balance_recheck_seconds))
         now_ts = time.monotonic()
@@ -436,6 +439,7 @@ class TradingBot:
             self._update_low_balance_guard_state(free_usdt, positions, source="quick_recheck")
         except Exception as e:
             logger.warning("Low-balance guard recheck failed: {}", e)
+            await self._handle_exchange_access_loss(str(e), "low_balance_recheck")
 
     @staticmethod
     def _is_insufficient_balance_reason(reason: str) -> bool:
@@ -497,6 +501,72 @@ class TradingBot:
                     logger.warning("Hub auto-disable failed (status={}): {}", resp.status, snippet or "<empty>")
         except Exception as e:
             logger.warning("Hub auto-disable request error: {}", e)
+
+    @staticmethod
+    def _is_exchange_access_loss_reason(reason: str) -> bool:
+        txt = str(reason or "").lower()
+        return any(
+            token in txt
+            for token in (
+                "invalid api-key",
+                "api-key format invalid",
+                "api key is invalid",
+                "invalid api key",
+                "invalid api secret",
+                "api key does not exist",
+                "api key expired",
+                "whitelist",
+                "permissions for action",
+                "permission denied",
+                "unauthorized",
+                "forbidden",
+                "authenticationerror",
+                "authentication failed",
+                "access denied",
+                "-2015",
+                "-2014",
+                "10003",
+                "33004",
+            )
+        )
+
+    async def _handle_exchange_access_loss(self, reason: str, context: str) -> None:
+        if not self._is_exchange_access_loss_reason(reason):
+            return
+
+        now_ts = time.monotonic()
+        # Avoid alert spam on repeated failures with the same root cause.
+        if self._exchange_access_halted and (now_ts - self._exchange_access_last_alert_ts) < 300:
+            return
+
+        self._exchange_access_halted = True
+        self._exchange_access_reason = str(reason or "")[:400]
+        self._exchange_access_last_alert_ts = now_ts
+        self._hub_enabled = False
+        self._enabled = False
+
+        with contextlib.suppress(Exception):
+            stop_path = Path(self.settings.data_dir) / "STOP"
+            stop_path.parent.mkdir(parents=True, exist_ok=True)
+            stop_path.touch()
+
+        logger.critical(
+            "Exchange access loss detected [{}] for {} on {}: {}",
+            context,
+            self.settings.bot_id or "default",
+            str(self.settings.exchange).upper(),
+            self._exchange_access_reason,
+        )
+
+        await self.notifier.alert_exchange_access_lost(
+            exchange=self.settings.exchange,
+            bot_id=self.settings.bot_id or "default",
+            reason=self._exchange_access_reason,
+            context=context,
+        )
+        await self._disable_self_on_hub(
+            f"auto-disabled: exchange access lost ({str(self.settings.exchange).upper()}) [{context}]"
+        )
 
     async def _lean_idle_loop(self) -> None:
         """Minimal loop for inactive bots — no exchange, no strategies, no hub communication.
@@ -598,14 +668,22 @@ class TradingBot:
         while self._running:
             try:
                 was_enabled = self._enabled
-                self._enabled = self._check_enabled()
+                hub_enabled = self._check_enabled()
+                if self._exchange_access_halted and hub_enabled and not self.target.manual_stop:
+                    logger.warning("Clearing exchange-access halt after manual resume signal")
+                    self._exchange_access_halted = False
+                    self._exchange_access_reason = ""
+                self._enabled = hub_enabled and not self._exchange_access_halted
 
                 if not was_enabled and self._enabled:
                     logger.info("Bot ENABLED by hub — resuming trading")
 
                 if was_enabled and not self._enabled:
-                    logger.info("Bot DISABLED by hub — winding down")
-                    await self._wind_down()
+                    if self._exchange_access_halted:
+                        logger.warning("Bot disabled due exchange-access halt — skipping wind-down exchange calls")
+                    else:
+                        logger.info("Bot DISABLED by hub — winding down")
+                        await self._wind_down()
 
                 if self._enabled:
                     t0 = time.perf_counter()
@@ -631,6 +709,7 @@ class TradingBot:
                 break
             except Exception as e:
                 logger.exception("Error in main loop: {}", e)
+                await self._handle_exchange_access_loss(str(e), "main_loop")
                 await asyncio.sleep(10)
 
     async def _quick_hub_check(self) -> None:
@@ -746,6 +825,7 @@ class TradingBot:
                 type(e).__name__,
                 e,
             )
+            await self._handle_exchange_access_loss(str(e), "quick_hub_check")
             return
         self._retry_pending_hub_trades()
         if self._entries_allowed(warmup_done) and not processed_existing_proposal:
@@ -855,6 +935,9 @@ class TradingBot:
         """
         while self._running:
             try:
+                if self._exchange_access_halted:
+                    await asyncio.sleep(2)
+                    continue
                 # --- Emergency overrides (always checked, even with no positions) ---
 
                 if self.target.manual_close_all:
@@ -926,6 +1009,7 @@ class TradingBot:
                 break
             except Exception as e:
                 logger.error("Fast monitor error: {}", e)
+                await self._handle_exchange_access_loss(str(e), "fast_monitor_loop")
                 await asyncio.sleep(2)
 
     def _update_tick_interval(self) -> None:
@@ -1817,6 +1901,18 @@ class TradingBot:
             for pos in positions:
                 if pos.amount <= 0:
                     continue
+                try:
+                    market_type = (
+                        MarketType(pos.market_type)
+                        if pos.market_type
+                        else (MarketType.FUTURES if self.settings.futures_allowed else MarketType.SPOT)
+                    )
+                except Exception:
+                    market_type = MarketType.FUTURES if self.settings.futures_allowed else MarketType.SPOT
+
+                await self._prepare_symbol_for_forced_close(pos.symbol, market_type=market_type)
+
+                # 3) Close the live position.
                 signal = Signal(
                     symbol=pos.symbol,
                     action=SignalAction.CLOSE,
@@ -1833,6 +1929,25 @@ class TradingBot:
                     logger.info("Closed {} ({})", pos.symbol, reason)
                 except Exception as e:
                     logger.error("Failed to close {}: {}", pos.symbol, e)
+
+    async def _prepare_symbol_for_forced_close(self, symbol: str, market_type: MarketType | None = None) -> None:
+        """Pre-close sequence: ladder orders -> protection orders."""
+        mt = market_type
+        if mt is None:
+            mt = MarketType.FUTURES if self.settings.futures_allowed else MarketType.SPOT
+            with contextlib.suppress(Exception):
+                positions = await self.exchange.fetch_positions(symbol)
+                if positions:
+                    first = positions[0]
+                    mt = MarketType(first.market_type) if getattr(first, "market_type", None) else mt
+
+        # 1) For swing ownership, cancel ladder limit orders first.
+        if self._is_swing_owner_bot():
+            await self._cancel_swing_ladder_orders_for_symbol(symbol, market_type=mt)
+
+        # 2) Cancel all SL/TP protection orders for the pair.
+        with contextlib.suppress(Exception):
+            await self.orders.clear_symbol_protection_orders(symbol, mt)
 
     # -- Whale position alerts -- #
 
@@ -2219,6 +2334,8 @@ class TradingBot:
                 "low_balance_threshold_usdt": float(self.settings.min_tradeable_equity_usdt),
                 "estimated_exchange_equity": float(self._estimated_exchange_equity),
                 "low_balance_reason": self._low_balance_pause_reason,
+                "exchange_access_halted": self._exchange_access_halted,
+                "exchange_access_reason": self._exchange_access_reason,
                 "orphan_positions_count": 0,
             },
             "positions": pos_list,
@@ -2520,6 +2637,38 @@ class TradingBot:
                 active += 1
 
         await self._sync_swing_ladder_to_hub(symbol, rec, ladder)
+
+    async def _cancel_swing_ladder_orders_for_symbol(self, symbol: str, market_type: MarketType) -> int:
+        """Cancel placed swing ladder limits for one symbol before emergency close."""
+        rec = self._open_trades.get(symbol)
+        if rec is None:
+            return 0
+        if symbol not in self._swing_entry_ladders:
+            loaded = await self._load_swing_ladder_from_hub(symbol, rec)
+            self._swing_entry_ladders[symbol] = loaded or []
+        ladder = self._swing_entry_ladders.get(symbol, [])
+        if not ladder:
+            return 0
+
+        cancelled = 0
+        for item in ladder:
+            if str(item.get("status", "") or "").strip().lower() != "placed":
+                continue
+            oid = str(item.get("order_id", "") or "").strip()
+            if not oid:
+                continue
+            try:
+                await self.exchange.cancel_order(oid, symbol, market_type=market_type)
+                cancelled += 1
+            except Exception as e:
+                logger.warning("Swing ladder cancel failed for {} idx={}: {}", symbol, item.get("entry_idx", 0), e)
+                continue
+            item["status"] = "cancelled"
+            item["order_id"] = ""
+
+        if cancelled > 0:
+            await self._sync_swing_ladder_to_hub(symbol, rec, ladder)
+        return cancelled
 
     # ---- Hub state recovery & in-memory stats ----
 

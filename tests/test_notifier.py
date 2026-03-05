@@ -28,12 +28,14 @@ class TestNotificationType:
     def test_always_on_types(self):
         assert NotificationType.LIQUIDATION in Notifier.ALWAYS_ON
         assert NotificationType.WHALE_POSITION in Notifier.ALWAYS_ON
+        assert NotificationType.EXCHANGE_ACCESS_LOST in Notifier.ALWAYS_ON
 
 
 class TestNotifier:
     def test_is_enabled_always_on(self, notifier):
         assert notifier.is_enabled(NotificationType.LIQUIDATION) is True
         assert notifier.is_enabled(NotificationType.WHALE_POSITION) is True
+        assert notifier.is_enabled(NotificationType.EXCHANGE_ACCESS_LOST) is True
 
     def test_is_enabled_configured(self, notifier):
         assert notifier.is_enabled(NotificationType.STOP_LOSS) is True

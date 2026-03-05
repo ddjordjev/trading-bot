@@ -1425,6 +1425,61 @@ class TestInternalReport:
         assert str(orphan_row.get("orphan_reason", "")) == "owner_not_running"
         _bot_reports.clear()
 
+    async def test_merged_snapshot_prefers_original_owner_for_display(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports.clear()
+
+        base_status = {
+            "running": True,
+            "balance": 100.0,
+            "available_margin": 80.0,
+            "daily_pnl": 0.0,
+            "daily_pnl_pct": 0.0,
+            "total_growth_usd": 0.0,
+            "total_growth_pct": 0.0,
+            "profit_buffer_pct": 0.0,
+            "uptime_seconds": 10,
+            "manual_stop_active": False,
+            "strategies_count": 0,
+            "dynamic_strategies_count": 0,
+            "trading_mode": "paper_local",
+            "exchange_name": "BINANCE",
+            "exchange_url": "",
+            "tier": "building",
+            "tier_progress_pct": 0,
+            "daily_target_pct": 10,
+        }
+
+        report_bot_snapshot(
+            {
+                "bot_id": "hedger",
+                "exchange": "BINANCE",
+                "status": dict(base_status, exchange_name="BINANCE"),
+                "positions": [],
+                "foreign_positions": [{"symbol": "DOGE/USDT", "side": "long", "detected_at": "2026-02-01T00:00:00Z"}],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+
+        hub = MagicMock()
+        hub.get_all_bot_enabled.return_value = {"hedger": True}
+        hub.get_open_trade_owner_rows.return_value = []
+        hub.get_original_trade_owner_rows.return_value = [{"bot_id": "swing", "symbol": "DOGE/USDT"}]
+        hub.get_recent_recovery_owner_rows.return_value = [{"bot_id": "scalper", "symbol": "DOGE/USDT"}]
+        with patch("web.server._get_hub_db", return_value=hub):
+            from web.server import _build_merged_snapshot
+
+            snap = _build_merged_snapshot()
+
+        orphan_row = next(
+            o
+            for o in snap["orphan_positions"]
+            if str(o.get("exchange_name", "")).upper() == "BINANCE" and str(o.get("symbol", "")).upper() == "DOGE/USDT"
+        )
+        assert str(orphan_row.get("originally_opened_by", "")) == "swing"
+        _bot_reports.clear()
+
     async def test_merged_snapshot_filters_orphan_when_wick_scalp_manages_side(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
         _bot_reports.clear()
@@ -2812,11 +2867,19 @@ class TestBuildMergedSnapshot:
 
 class TestWickScalps:
     def test_wick_scalps_no_bot(self):
-        from web.server import _wick_scalps
+        import web.server as ws
 
+        _bot_reports.clear()
+        ws._last_stable_snapshot = None
+        ws._last_stable_snapshot_ts = 0.0
         set_bot(None)  # type: ignore[arg-type]
-        result = _wick_scalps()
-        assert result == []
+        try:
+            result = ws._wick_scalps()
+            assert result == []
+        finally:
+            _bot_reports.clear()
+            ws._last_stable_snapshot = None
+            ws._last_stable_snapshot_ts = 0.0
 
 
 # ── News Endpoint ───────────────────────────────────────────────────────
@@ -3382,11 +3445,77 @@ class TestServerBranchCoverage:
         report_bot_snapshot("bad-payload")  # type: ignore[arg-type]
         assert _bot_reports == {}
 
+        # First heartbeat-only payload should not create a zero-state report.
+        report_bot_snapshot({"bot_id": "merge-bot"})
+        assert "merge-bot" not in _bot_reports
+        report_bot_snapshot({"bot_id": "merge-bot", "status": {}})
+        assert "merge-bot" not in _bot_reports
+
         report_bot_snapshot({"bot_id": "merge-bot", "status": {"running": True}})
         report_bot_snapshot({"bot_id": "merge-bot", "positions": [{"symbol": "BTC/USDT"}]})
         assert _bot_reports["merge-bot"]["status"]["running"] is True
         assert _bot_reports["merge-bot"]["positions"][0]["symbol"] == "BTC/USDT"
         _bot_reports.clear()
+
+    def test_build_merged_snapshot_keeps_last_stable_on_transient_empty(self):
+        import web.server as server_mod
+        from web.server import _build_merged_snapshot, report_bot_snapshot
+
+        _bot_reports.clear()
+        server_mod._last_stable_snapshot = None
+        server_mod._last_stable_snapshot_ts = 0.0
+
+        report_bot_snapshot(
+            {
+                "bot_id": "momentum",
+                "exchange": "BINANCE",
+                "status": {
+                    "running": True,
+                    "balance": 1234.0,
+                    "available_margin": 1000.0,
+                    "daily_pnl": 0.0,
+                    "daily_pnl_pct": 0.0,
+                    "total_growth_usd": 0.0,
+                    "total_growth_pct": 0.0,
+                    "profit_buffer_pct": 0.0,
+                    "uptime_seconds": 60,
+                    "manual_stop_active": False,
+                    "strategies_count": 1,
+                    "dynamic_strategies_count": 0,
+                    "trading_mode": "paper_live",
+                    "exchange_name": "BINANCE",
+                    "exchange_url": "",
+                    "tier": "building",
+                    "tier_progress_pct": 0,
+                    "daily_target_pct": 10,
+                },
+                "positions": [],
+                "wick_scalps": [],
+                "foreign_positions": [],
+                "logs": [],
+            }
+        )
+
+        hub = MagicMock()
+        hub.get_all_bot_enabled.return_value = {"momentum": True}
+        hub.get_open_trade_owner_rows.return_value = []
+        with patch("web.server._get_hub_db", return_value=hub):
+            stable = _build_merged_snapshot()
+        assert bool(stable["status"]["running"]) is True
+        assert float(stable["status"]["balance"]) == 1234.0
+
+        _bot_reports.clear()
+        hub_empty = MagicMock()
+        hub_empty.get_all_bot_enabled.return_value = {}
+        hub_empty.get_open_trade_owner_rows.return_value = []
+        with patch("web.server._get_hub_db", return_value=hub_empty):
+            flicker = _build_merged_snapshot()
+
+        assert bool(flicker["status"]["running"]) is True
+        assert float(flicker["status"]["balance"]) == 1234.0
+        _bot_reports.clear()
+        server_mod._last_stable_snapshot = None
+        server_mod._last_stable_snapshot_ts = 0.0
 
     @pytest.mark.asyncio
     async def test_positions_and_wicks_helpers_skip_invalid_rows(self):
@@ -3519,7 +3648,14 @@ class TestServerBranchCoverage:
                 "bot_id": "momentum",
                 "exchange": "BINANCE",
                 "exchange_balance": "bad-float",
-                "status": {"running": True, "manual_stop_active": True, "balance": 100.0, "available_margin": 50.0},
+                "status": {
+                    "running": True,
+                    "manual_stop_active": True,
+                    "exchange_access_halted": True,
+                    "exchange_access_reason": "Invalid API-key, IP, or permissions for action. (code -2015)",
+                    "balance": 100.0,
+                    "available_margin": 50.0,
+                },
                 "positions": ["bad-position"],
                 "wick_scalps": ["bad-wick"],
                 "foreign_positions": [
@@ -3532,6 +3668,8 @@ class TestServerBranchCoverage:
             _bot_reports["hub"] = {"bot_id": "hub", "status": "bad-status"}
             snap = _build_merged_snapshot()
         assert snap["status"]["manual_stop_active"] is True
+        assert snap["status"]["exchange_access_halted"] is True
+        assert snap["status"]["exchange_access_alert_exchange"] == "BINANCE"
         assert len(snap["positions"]) == 0
         assert len(snap["wick_scalps"]) == 0
         orphan_symbols = {o.get("symbol") for o in snap["orphan_positions"]}

@@ -162,6 +162,33 @@ class TestLowBalanceGuardSnapshotReliability:
         assert b._quick_positions_idle_poll_seconds == 10.0
 
 
+class TestExchangeAccessCircuitBreaker:
+    def test_is_exchange_access_loss_reason_detects_binance_key_or_ip_errors(self, bot):
+        assert bot._is_exchange_access_loss_reason("Invalid API-key, IP, or permissions for action. (code -2015)")
+        assert bot._is_exchange_access_loss_reason("API-key format invalid. (code -2014)")
+        assert bot._is_exchange_access_loss_reason("Permission denied")
+        assert not bot._is_exchange_access_loss_reason("Rate limit exceeded")
+
+    @pytest.mark.asyncio
+    async def test_handle_exchange_access_loss_halts_and_alerts(self, bot, tmp_path):
+        bot._hub_enabled = True
+        bot._enabled = True
+        bot.notifier.alert_exchange_access_lost = AsyncMock()
+        bot._disable_self_on_hub = AsyncMock()
+        with patch.object(type(bot.settings), "data_dir", new_callable=PropertyMock, return_value=str(tmp_path)):
+            await bot._handle_exchange_access_loss(
+                "Invalid API-key, IP, or permissions for action. (code -2015)",
+                "main_loop",
+            )
+
+        assert bot._exchange_access_halted is True
+        assert bot._hub_enabled is False
+        assert bot._enabled is False
+        assert (tmp_path / "STOP").exists()
+        bot.notifier.alert_exchange_access_lost.assert_awaited_once()
+        bot._disable_self_on_hub.assert_awaited_once()
+
+
 # ── add_strategy / add_custom_strategy ──────────────────────────────────────
 
 
@@ -759,8 +786,10 @@ class TestCloseAllAndWhaleAndDeployment:
             market_type="futures",
         )
         mock_exchange.fetch_positions = AsyncMock(return_value=[pos])
+        bot.orders.clear_symbol_protection_orders = AsyncMock(return_value=0)
         bot.orders.execute_signal = AsyncMock()
         await bot._close_all_positions("test reason")
+        bot.orders.clear_symbol_protection_orders.assert_awaited_once()
         bot.orders.execute_signal.assert_called_once()
         call_sig = bot.orders.execute_signal.call_args[0][0]
         assert call_sig.action == SignalAction.CLOSE
@@ -779,9 +808,59 @@ class TestCloseAllAndWhaleAndDeployment:
             market_type="futures",
         )
         mock_exchange.fetch_positions = AsyncMock(return_value=[pos])
+        bot.orders.clear_symbol_protection_orders = AsyncMock(return_value=0)
         bot.orders.execute_signal = AsyncMock()
         await bot._close_all_positions("test")
+        bot.orders.clear_symbol_protection_orders.assert_not_called()
         bot.orders.execute_signal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_close_all_positions_sequence_ladder_then_protection_then_close(self, bot, mock_exchange):
+        from core.models.order import OrderSide, Position
+
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.01,
+            entry_price=50_000.0,
+            current_price=50_000.0,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions = AsyncMock(return_value=[pos])
+        bot._open_trades["BTC/USDT"] = TradeRecord(
+            id=1,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="swing",
+            action="open",
+            opened_at="2026-03-06T00:00:00+00:00",
+            leverage=1,
+        )
+        bot._swing_entry_ladders["BTC/USDT"] = [{"entry_idx": 1, "status": "placed", "order_id": "lad-1"}]
+
+        steps: list[str] = []
+
+        async def _cancel_order(*_args, **_kwargs):
+            steps.append("ladder")
+            return MagicMock()
+
+        async def _clear_protection(*_args, **_kwargs):
+            steps.append("protection")
+            return 1
+
+        async def _execute_close(*_args, **_kwargs):
+            steps.append("close")
+            return None
+
+        mock_exchange.cancel_order = AsyncMock(side_effect=_cancel_order)
+        bot.orders.clear_symbol_protection_orders = AsyncMock(side_effect=_clear_protection)
+        bot.orders.execute_signal = AsyncMock(side_effect=_execute_close)
+        bot._is_swing_owner_bot = MagicMock(return_value=True)
+        bot._sync_swing_ladder_to_hub = AsyncMock()
+
+        await bot._close_all_positions("test reason")
+
+        assert steps == ["ladder", "protection", "close"]
 
     @pytest.mark.asyncio
     async def test_check_whale_positions_sends_alert_when_threshold_met(self, bot, mock_exchange):

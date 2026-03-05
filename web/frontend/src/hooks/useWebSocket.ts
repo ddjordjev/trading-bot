@@ -42,6 +42,9 @@ export interface BotStatus {
   total_growth_usd: number;
   uptime_seconds: number;
   manual_stop_active: boolean;
+  exchange_access_halted?: boolean;
+  exchange_access_alert_exchange?: string;
+  exchange_access_alert_message?: string;
   strategies_count: number;
   dynamic_strategies_count: number;
   profit_buffer_pct: number;
