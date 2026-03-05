@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import sqlite3
 import time
 from datetime import UTC, datetime
 
@@ -190,13 +189,11 @@ class MonitorService:
 
     @staticmethod
     def _is_retryable_db_error(exc: Exception) -> bool:
-        if not isinstance(exc, sqlite3.OperationalError):
-            return False
         msg = str(exc).lower()
         return "database is locked" in msg or "disk i/o error" in msg
 
     async def _persist_exchange_symbols_with_retry(self, fresh: dict[str, set[str]]) -> None:
-        """Persist exchange symbols with short retries on transient SQLite contention."""
+        """Persist exchange symbols with short retries on transient DB contention."""
         last_exc: Exception | None = None
         for attempt in range(6):
             try:
@@ -213,12 +210,9 @@ class MonitorService:
 
     @staticmethod
     def _persist_exchange_symbols_blocking(fresh: dict[str, set[str]]) -> None:
-        from config.settings import get_settings
         from db.hub_repository import make_hub_repository
-        from db.hub_store import HubDB
 
-        backend = str(get_settings().hub_db_backend or "sqlite").strip().lower()
-        db = make_hub_repository() if backend == "postgres" else HubDB()
+        db = make_hub_repository()
         try:
             db.connect()
             for ex_name, syms in fresh.items():
@@ -410,12 +404,7 @@ class MonitorService:
         try:
             from db.hub_repository import make_hub_repository
 
-            if str(self.settings.hub_db_backend or "sqlite").strip().lower() == "postgres":
-                db = make_hub_repository()
-            else:
-                from db.hub_store import HubDB
-
-                db = HubDB()
+            db = make_hub_repository()
             db.connect()
             cached = db.load_all_exchange_symbols()
             db.close()
@@ -435,7 +424,11 @@ class MonitorService:
 
     async def _fetch_exchange_symbols(self) -> None:
         """Fetch symbol lists from all supported exchanges via CCXT."""
-        import ccxt.async_support as ccxt
+        try:
+            import ccxt.async_support as ccxt
+        except ModuleNotFoundError as e:
+            logger.warning("CCXT unavailable while fetching exchange symbols: {}", e)
+            return
 
         preferred_market = "futures" if self.settings.futures_allowed else "spot"
         paper_live_mode = str(getattr(self.settings, "trading_mode", "") or "").lower() == "paper_live"
@@ -685,12 +678,7 @@ class MonitorService:
 
             from db.hub_repository import make_hub_repository
 
-            if str(self.settings.hub_db_backend or "sqlite").strip().lower() == "postgres":
-                hub = make_hub_repository(path=Path("data/hub.db"))
-            else:
-                from db.hub_store import HubDB
-
-                hub = HubDB(path=Path("data/hub.db"))
+            hub = make_hub_repository(path=Path("data/hub.db"))
             hub.connect()
             open_db_symbols = hub.get_open_trade_symbols()
             self._last_open_db_symbols = set(open_db_symbols)
@@ -1168,12 +1156,7 @@ class MonitorService:
 
             from db.hub_repository import make_hub_repository
 
-            if str(self.settings.hub_db_backend or "sqlite").strip().lower() == "postgres":
-                hub = make_hub_repository(path=Path("data/hub.db"))
-            else:
-                from db.hub_store import HubDB
-
-                hub = HubDB(path=Path("data/hub.db"))
+            hub = make_hub_repository(path=Path("data/hub.db"))
             hub.connect()
             open_db_symbols = hub.get_open_trade_symbols()
             self._last_open_db_symbols = set(open_db_symbols)

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import psycopg
 import pytest
 
 import db.hub_store_postgres as hub_store_postgres_mod
@@ -476,19 +476,18 @@ class TestHubDB:
         assert trades[0].leverage == 7
 
     def test_update_trade_close_updates_only_latest_duplicate_open(self, hub: HubDB):
-        for entry in (50000, 50500):
-            hub.insert_trade(
-                "momentum",
-                {
-                    "symbol": "BTC/USDT",
-                    "side": "long",
-                    "strategy": "rsi",
-                    "action": "open",
-                    "entry_price": entry,
-                    "amount": 0.01,
-                    "opened_at": "2026-02-20T10:00:00",
-                },
-            )
+        hub.insert_trade(
+            "momentum",
+            {
+                "symbol": "BTC/USDT",
+                "side": "long",
+                "strategy": "rsi",
+                "action": "open",
+                "entry_price": 50000,
+                "amount": 0.01,
+                "opened_at": "2026-02-20T10:00:00",
+            },
+        )
         updated = hub.update_trade_close(
             "momentum",
             "2026-02-20T10:00:00",
@@ -502,28 +501,57 @@ class TestHubDB:
         )
         assert updated is True
         rows = [t for t in hub.get_all_trades() if t.opened_at == "2026-02-20T10:00:00"]
-        assert len(rows) == 2
+        assert len(rows) == 1
         assert sum(1 for t in rows if t.closed_at == "2026-02-20T11:00:00") == 1
 
+    def test_update_trade_runtime_falls_back_to_open_symbol_when_opened_at_mismatch(self, hub: HubDB):
+        hub.insert_trade(
+            "momentum",
+            {
+                "symbol": "BTC/USDT",
+                "side": "long",
+                "strategy": "rsi",
+                "action": "open",
+                "entry_price": 50000,
+                "amount": 0.01,
+                "opened_at": "2026-02-20T10:00:00",
+            },
+        )
+        updated = hub.update_trade_runtime(
+            "momentum",
+            "2026-02-20T10:05:00",
+            {
+                "symbol": "BTC/USDT",
+                "planned_stop_loss": 49000,
+                "effective_stop_loss": 49100,
+                "stop_source": "bot",
+            },
+        )
+        assert updated is True
+        open_rows = hub.get_open_trades_for_bot("momentum")
+        assert len(open_rows) == 1
+        assert open_rows[0].planned_stop_loss == 49000
+        assert open_rows[0].effective_stop_loss == 49100
+        assert open_rows[0].stop_source == "bot"
+
     def test_cleanup_duplicate_trade_rows_keeps_latest(self, hub: HubDB):
-        for price in (50000, 50010):
-            hub.insert_trade(
-                "momentum",
-                {
-                    "symbol": "BTC/USDT",
-                    "side": "long",
-                    "strategy": "rsi",
-                    "action": "open",
-                    "entry_price": price,
-                    "amount": 0.01,
-                    "opened_at": "2026-02-20T10:00:00",
-                },
-            )
+        hub.insert_trade(
+            "momentum",
+            {
+                "symbol": "BTC/USDT",
+                "side": "long",
+                "strategy": "rsi",
+                "action": "open",
+                "entry_price": 50000,
+                "amount": 0.01,
+                "opened_at": "2026-02-20T10:00:00",
+            },
+        )
         deleted = hub.cleanup_duplicate_trade_rows()
-        assert deleted == 1
+        assert deleted == 0
         rows = [t for t in hub.get_all_trades() if t.opened_at == "2026-02-20T10:00:00"]
         assert len(rows) == 1
-        assert rows[0].entry_price == 50010
+        assert rows[0].entry_price == 50000
 
     def test_strategy_stats(self, hub: HubDB):
         for i in range(3):
@@ -596,6 +624,33 @@ class TestHubDB:
         )
         assert row1 == row2
         assert hub.trade_count() == 1
+
+    def test_insert_trade_open_conflict_when_other_bot_owns_symbol(self, hub: HubDB):
+        hub.insert_trade(
+            "bot1",
+            {"symbol": "A/USDT", "side": "l", "strategy": "s", "action": "open", "opened_at": "2026-01-01"},
+            request_key="rk-owner",
+        )
+        with pytest.raises(Exception, match="open_owner_conflict:A/USDT:bot1"):
+            hub.insert_trade(
+                "bot2",
+                {"symbol": "A/USDT", "side": "l", "strategy": "s", "action": "open", "opened_at": "2026-01-02"},
+                request_key="rk-other",
+            )
+
+    def test_insert_trade_open_same_owner_returns_existing_row(self, hub: HubDB):
+        row1 = hub.insert_trade(
+            "bot1",
+            {"symbol": "A/USDT", "side": "l", "strategy": "s", "action": "open", "opened_at": "2026-01-01"},
+            request_key="rk-owner-a",
+        )
+        row2 = hub.insert_trade(
+            "bot1",
+            {"symbol": "A/USDT", "side": "l", "strategy": "s", "action": "open", "opened_at": "2026-01-02"},
+            request_key="rk-owner-b",
+        )
+        assert row1 == row2
+        assert len(hub.get_open_trades_for_bot("bot1")) == 1
 
     def test_get_open_trades_for_bot(self, hub: HubDB):
         hub.insert_trade(
@@ -727,6 +782,23 @@ class TestHubDB:
         assert float(row["pnl_usd"]) == 10.0
         assert float(row["pnl_pct"]) == 1.67
         assert int(row["recovery_close"]) == 1
+
+    def test_replace_and_get_swing_entry_plan(self, hub: HubDB):
+        hub.replace_swing_entry_plan(
+            "swing",
+            "ETH/USDT",
+            "2026-03-06T00:00:00+00:00",
+            [
+                {"entry_idx": 1, "side": "long", "price": 2100.0, "amount": 0.2, "leverage": 5, "status": "placed"},
+                {"entry_idx": 2, "side": "long", "price": 2060.0, "amount": 0.24, "leverage": 5, "status": "planned"},
+            ],
+        )
+        rows = hub.get_swing_entry_plan("swing", "ETH/USDT", "2026-03-06T00:00:00+00:00")
+        assert len(rows) == 2
+        assert int(rows[0]["entry_idx"]) == 1
+        assert float(rows[1]["price"]) == 2060.0
+        hub.clear_swing_entry_plan("swing", "ETH/USDT", "2026-03-06T00:00:00+00:00")
+        assert hub.get_swing_entry_plan("swing", "ETH/USDT", "2026-03-06T00:00:00+00:00") == []
 
     def test_insert_exchange_equity_snapshot(self, hub: HubDB):
         hub.insert_exchange_equity_snapshot(
@@ -926,8 +998,12 @@ class TestPostgresCompatibility:
             def __init__(self):
                 self.rowcount = 2
                 self.executed: list[tuple[str, object]] = []
+                self._bot_config_returning_failed = False
 
             def execute(self, sql, params=()):
+                if "INSERT INTO bot_config" in sql and "RETURNING id" in sql and not self._bot_config_returning_failed:
+                    self._bot_config_returning_failed = True
+                    raise psycopg.errors.UndefinedColumn('column "id" does not exist')
                 self.executed.append((sql, params))
 
             def executemany(self, sql, params_seq):
@@ -956,6 +1032,11 @@ class TestPostgresCompatibility:
         conn = PgConnCompat("postgresql://example")
         c1 = conn.execute("INSERT INTO trades (symbol) VALUES (?)", ("BTC/USDT",))
         assert c1.lastrowid == 7
+        c_bot = conn.execute(
+            "INSERT INTO bot_config (bot_id, enabled) VALUES (?, ?) ON CONFLICT (bot_id) DO UPDATE SET enabled=excluded.enabled",
+            ("momentum", 1),
+        )
+        assert c_bot.lastrowid is None
         c2 = conn.execute("SELECT * FROM trades WHERE symbol=?", ("BTC/USDT",))
         assert c2.rowcount == 2
         assert c2.fetchone() == {"id": 7}
@@ -966,6 +1047,7 @@ class TestPostgresCompatibility:
         conn.rollback()
         conn.close()
         assert fake_conn.closed is True
+        assert any("INSERT INTO bot_config" in s for s, _ in fake_conn.cur.executed)
 
     def test_postgres_hubdb_connect_and_retry(self, monkeypatch, tmp_path):
         schema_file = tmp_path / "schema.sql"
@@ -983,7 +1065,7 @@ class TestPostgresCompatibility:
             def execute(self, _sql, _params):
                 self.calls += 1
                 if self.calls == 1:
-                    raise sqlite3.OperationalError("database is locked")
+                    raise RuntimeError("database is locked")
                 return MagicMock()
 
             def commit(self):

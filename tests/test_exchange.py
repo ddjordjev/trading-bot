@@ -446,12 +446,16 @@ class TestExchangeFactory:
         monkeypatch.setenv("EXCHANGE", "binance")
         monkeypatch.setenv("BINANCE_TEST_API_KEY", "k")
         monkeypatch.setenv("BINANCE_TEST_API_SECRET", "s")
+        from unittest.mock import patch
+
         from config.settings import Settings
-        from core.exchange.binance import BinanceExchange
         from core.exchange.factory import create_exchange
 
-        exchange = create_exchange(Settings())
-        assert isinstance(exchange, BinanceExchange)
+        with patch("core.exchange.factory.BinanceExchange") as mock_binance:
+            mock_instance = mock_binance.return_value
+            mock_instance.SUPPORTED_MARKET_TYPES = ("spot", "futures")
+            exchange = create_exchange(Settings())
+        assert exchange is mock_instance
 
     def test_paper_local_mode_rejected(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper_local")

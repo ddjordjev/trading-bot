@@ -2210,6 +2210,39 @@ class TestTickStrategyLoop:
         approved = bot.extreme_watcher.sync_watchlist.await_args.args[0]
         assert approved == {}
 
+    @pytest.mark.asyncio
+    async def test_confirm_symbol_missing_treats_empty_positions_without_ticker_as_unreliable(self, bot, mock_exchange):
+        mock_exchange.fetch_positions = AsyncMock(return_value=[])
+        mock_exchange.fetch_ticker = AsyncMock(side_effect=RuntimeError("temporary api failure"))
+
+        ok = await bot._confirm_symbol_missing_on_exchange("SOL/USDT")
+
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_confirm_symbol_missing_accepts_empty_positions_when_ticker_reachable(self, bot, mock_exchange):
+        mock_exchange.fetch_positions = AsyncMock(return_value=[])
+        mock_exchange.fetch_ticker = AsyncMock(return_value=MagicMock(last=123.45))
+
+        ok = await bot._confirm_symbol_missing_on_exchange("SOL/USDT")
+
+        assert ok is True
+
+    @pytest.mark.asyncio
+    async def test_reconcile_open_trades_auto_claims_recovery_hint_symbols(self, bot, mock_exchange):
+        bot.settings.trading_mode = "paper_live"
+        mock_exchange.fetch_positions = AsyncMock(
+            return_value=[
+                MagicMock(symbol="SOL/USDT", amount=1.0),
+                MagicMock(symbol="ETH/USDT", amount=1.0),
+            ]
+        )
+        bot._claim_orphan_position = AsyncMock(return_value=(True, "claimed"))
+
+        await bot._reconcile_open_trades([], "http://hub", "hedger", recovery_owner_hints={"SOL/USDT"})
+
+        bot._claim_orphan_position.assert_awaited_once_with("SOL/USDT", strategy="recovered_owner_claim")
+
 
 # ── start() non-multibot get_available_symbols exception ────────────────────
 
@@ -2667,3 +2700,141 @@ class TestHubAckRetry:
         kwargs = bot._push_trade_to_hub.await_args.kwargs
         assert kwargs["request_key"] == "rk1"
         assert kwargs["action_override"] == "update"
+
+
+class TestHubOwnershipHandshake:
+    @pytest.mark.asyncio
+    async def test_reserve_open_trade_with_hub_rejects_conflict_status(self, bot):
+        bot.settings.hub_url = "http://hub:9035"
+
+        class _Resp:
+            status = 200
+
+            async def json(self):
+                return {"status": "conflict", "owner_bot_id": "hedger"}
+
+            async def text(self):
+                return ""
+
+        class _PostCtx:
+            async def __aenter__(self):
+                return _Resp()
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class _Sess:
+            def post(self, *_args, **_kwargs):
+                return _PostCtx()
+
+        bot._hub_session = _Sess()
+        sig = Signal(
+            symbol="BTC/USDT",
+            action=SignalAction.BUY,
+            strength=0.8,
+            strategy="rsi",
+            reason="test",
+            suggested_price=50000,
+            market_type="futures",
+            leverage=5,
+        )
+        opened_at = await bot._reserve_open_trade_with_hub(sig)
+        assert opened_at == ""
+
+    @pytest.mark.asyncio
+    async def test_claim_orphan_position_rolls_back_when_hub_rejects_claim(self, bot, mock_exchange):
+        bot.settings.hub_url = "http://hub:9035"
+        mock_exchange.fetch_positions = AsyncMock(
+            return_value=[
+                MagicMock(
+                    symbol="FORM/USDT",
+                    amount=1.2,
+                    side="long",
+                    entry_price=0.12,
+                    leverage=3,
+                )
+            ]
+        )
+        bot._push_trade_to_hub = AsyncMock(return_value=("conflict", {"owner_bot_id": "hedger"}))
+        bot._rehydrate_recovered_position_state = AsyncMock(return_value=True)
+
+        ok, msg = await bot._claim_orphan_position("FORM/USDT", strategy="manual_claim")
+
+        assert ok is False
+        assert "ownership conflict" in msg.lower()
+        assert "FORM/USDT" not in bot._open_trades
+        bot._rehydrate_recovered_position_state.assert_not_called()
+
+
+class TestRecoveredPolicyNormalization:
+    @pytest.mark.asyncio
+    async def test_rehydrate_swing_owner_normalizes_to_swing_policy(self, bot):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot.settings.stop_loss_pct = 1.5
+        bot.settings.pullback_trail_buffer_pct = 4.0
+        bot.orders._sync_symbol_protection = AsyncMock(return_value=None)
+
+        rec = TradeRecord(
+            symbol="ETH/USDT",
+            side="long",
+            strategy="recovered_owner_claim",
+            action="open",
+            scale_mode="",
+            amount=1.0,
+            entry_price=100.0,
+            effective_stop_loss=99.0,  # too tight for swing; should be ignored
+            opened_at="2026-03-05T12:00:00+00:00",
+        )
+        pos = MagicMock(
+            symbol="ETH/USDT",
+            amount=1.0,
+            side="long",
+            entry_price=100.0,
+            current_price=102.0,
+            leverage=5,
+            market_type="futures",
+        )
+
+        ok = await bot._rehydrate_recovered_position_state("ETH/USDT", rec, pos)
+        assert ok is True
+        ts = bot.orders.trailing.get("ETH/USDT")
+        assert ts is not None
+        assert ts.trailing_mode == "pullback"
+        assert ts.pullback_buffer_pct >= 5.0
+        assert ts.current_stop <= 95.0
+        assert rec.scale_mode == "pyramid"
+
+    @pytest.mark.asyncio
+    async def test_rehydrate_non_swing_keeps_recovered_stop(self, bot):
+        bot.settings.bot_id = "momentum"
+        bot.settings.bot_style = "momentum"
+        bot.settings.stop_loss_pct = 1.5
+        bot.orders._sync_symbol_protection = AsyncMock(return_value=None)
+
+        rec = TradeRecord(
+            symbol="SOL/USDT",
+            side="long",
+            strategy="recovered_owner_claim",
+            action="open",
+            scale_mode="winners",
+            amount=1.0,
+            entry_price=100.0,
+            effective_stop_loss=99.0,
+            opened_at="2026-03-05T12:00:00+00:00",
+        )
+        pos = MagicMock(
+            symbol="SOL/USDT",
+            amount=1.0,
+            side="long",
+            entry_price=100.0,
+            current_price=101.0,
+            leverage=5,
+            market_type="futures",
+        )
+
+        ok = await bot._rehydrate_recovered_position_state("SOL/USDT", rec, pos)
+        assert ok is True
+        ts = bot.orders.trailing.get("SOL/USDT")
+        assert ts is not None
+        assert ts.current_stop == pytest.approx(99.0)

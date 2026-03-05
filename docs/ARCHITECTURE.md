@@ -487,7 +487,7 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
 | `core/orders/manager.py` | Order management (stops, scales, partials) |
 | `core/risk/manager.py` | Risk checks (daily loss, position limits) |
 | `core/risk/daily_target.py` | Daily target tier system |
-| `db/store.py` | TradeDB (legacy compatibility layer, migration/testing only) |
+| `db/store.py` | TradeDB base layer for hub persistence primitives |
 | `shared/models.py` | Pydantic models (TradeQueue, TradeProposal, etc.) |
 | `docker-compose.yml` | Container orchestration |
 

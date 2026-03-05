@@ -219,8 +219,8 @@ class Settings(BaseSettings):
     dashboard_token: str = ""  # set a secret token for remote access
     grafana_port: int = 3001
 
-    # Hub persistence backend
-    hub_db_backend: Literal["sqlite", "postgres"] = "postgres"
+    # Hub persistence backend (PostgreSQL only)
+    hub_db_backend: Literal["postgres"] = "postgres"
     hub_postgres_dsn: str = "postgresql://tradeborg:tradeborg@bot-hub-postgres:5432/trading_db"
     exchange_equity_snapshot_interval_seconds: int = 60  # hub DB snapshot cadence per exchange
 

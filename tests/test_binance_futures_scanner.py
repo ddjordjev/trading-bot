@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -11,27 +10,12 @@ from scanner.binance_futures import BinanceFuturesScanner
 
 
 class TestBinanceFuturesScanner:
-    def test_new_hub_db_uses_postgres_repository(self, tmp_path):
+    def test_new_hub_db_uses_hub_repository(self, tmp_path):
         scanner = BinanceFuturesScanner(db_path=tmp_path / "hub.db", enabled=False)
         sentinel = MagicMock()
-        settings = MagicMock()
-        settings.hub_db_backend = "postgres"
-        with (
-            patch("scanner.binance_futures.get_settings", return_value=settings),
-            patch("scanner.binance_futures.make_hub_repository", return_value=sentinel),
-        ):
+        with patch("scanner.binance_futures.make_hub_repository", return_value=sentinel):
             db = scanner._new_hub_db()
         assert db is sentinel
-
-    def test_new_hub_db_uses_sqlite_hubdb(self, tmp_path):
-        scanner = BinanceFuturesScanner(db_path=tmp_path / "hub.db", enabled=False)
-        settings = MagicMock()
-        settings.hub_db_backend = "sqlite"
-        with patch("scanner.binance_futures.get_settings", return_value=settings):
-            db = scanner._new_hub_db()
-        from db.hub_store import HubDB
-
-        assert isinstance(db, HubDB)
 
     def test_sample_at_or_before_empty_returns_cutoff_and_zero(self):
         """Guard against IndexError when sample lists are empty."""
@@ -176,11 +160,11 @@ class TestBinanceFuturesScanner:
         states = [{"symbol": "BTC/USDT", "last_price": 1.0}]
 
         db = MagicMock()
-        db.save_binance_snapshots.side_effect = [sqlite3.OperationalError("database is locked"), None]
+        db.save_binance_snapshots.side_effect = [RuntimeError("database is locked"), None]
         db.save_binance_symbol_states.return_value = None
         db.cleanup_binance_snapshots_before.return_value = 0
 
-        with patch("scanner.binance_futures.HubDB", return_value=db):
+        with patch("scanner.binance_futures.make_hub_repository", return_value=db):
             await scanner._persist_tick(rows, states, now)
 
         assert db.connect.call_count == 2

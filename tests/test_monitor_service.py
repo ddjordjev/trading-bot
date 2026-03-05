@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import sqlite3
+import sys
+import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -28,7 +29,7 @@ def mock_settings():
     s.cmc_poll_interval = 300
     s.coingecko_api_key = ""
     s.coingecko_poll_interval = 300
-    s.hub_db_backend = "sqlite"
+    s.hub_db_backend = "postgres"
     return s
 
 
@@ -78,6 +79,8 @@ def monitor(mock_settings, tmp_path):
 
                                                     svc = MonitorService(settings=mock_settings)
                                                     svc.state = mock_state
+                                                    svc.binance_scanner.start = AsyncMock()
+                                                    svc.binance_scanner.stop = AsyncMock()
                                                     return svc
 
 
@@ -97,6 +100,7 @@ async def test_start_starts_all_clients_and_enters_loop(monitor):
     monitor.gecko.start.assert_awaited_once()
     monitor.openclaw.start.assert_awaited_once()
     monitor.scanner.start.assert_awaited_once()
+    monitor.binance_scanner.start.assert_awaited_once()
     monitor._run_loop.assert_awaited_once()
     assert monitor._running is True
 
@@ -684,7 +688,9 @@ class TestExchangeSymbolFiltering:
         monitor.settings.futures_allowed = True
         monitor.settings.trading_mode = "paper_live"
 
-        with patch("ccxt.async_support.binance", FakeExchange):
+        fake_ccxt_async = types.SimpleNamespace(binance=FakeExchange)
+        fake_ccxt_pkg = types.SimpleNamespace(async_support=fake_ccxt_async)
+        with patch.dict(sys.modules, {"ccxt": fake_ccxt_pkg, "ccxt.async_support": fake_ccxt_async}):
             await monitor._fetch_exchange_symbols()
 
         assert monitor._exchange_symbols["BINANCE"] == {"ETH/USDT"}
@@ -750,9 +756,9 @@ class TestMonitorDbRetry:
         db = MagicMock()
         db.connect = MagicMock()
         db.close = MagicMock()
-        db.save_exchange_symbols.side_effect = [sqlite3.OperationalError("database is locked"), None]
+        db.save_exchange_symbols.side_effect = [RuntimeError("database is locked"), None]
 
-        with patch("db.hub_store.HubDB", return_value=db):
+        with patch("db.hub_repository.make_hub_repository", return_value=db):
             await monitor._persist_exchange_symbols_with_retry({"BINANCE": {"BTC/USDT"}})
 
         assert db.connect.call_count == 2
@@ -760,12 +766,7 @@ class TestMonitorDbRetry:
 
     def test_persist_exchange_symbols_blocking_uses_postgres_repo(self, monitor):
         db = MagicMock()
-        settings = MagicMock()
-        settings.hub_db_backend = "postgres"
-        with (
-            patch("config.settings.get_settings", return_value=settings),
-            patch("db.hub_repository.make_hub_repository", return_value=db),
-        ):
+        with patch("db.hub_repository.make_hub_repository", return_value=db):
             monitor._persist_exchange_symbols_blocking({"BINANCE": {"BTC/USDT"}})
         db.connect.assert_called_once()
         db.save_exchange_symbols.assert_called_once_with("BINANCE", {"BTC/USDT"})

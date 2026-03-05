@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -120,9 +119,7 @@ class OpenClawAdvisorService:
                 await asyncio.sleep(30)
 
     @staticmethod
-    def _is_retryable_sqlite_error(exc: Exception) -> bool:
-        if not isinstance(exc, sqlite3.OperationalError):
-            return False
+    def _is_retryable_db_error(exc: Exception) -> bool:
         msg = str(exc).lower()
         return "database is locked" in msg or "disk i/o error" in msg
 
@@ -131,9 +128,9 @@ class OpenClawAdvisorService:
         for attempt in range(4):
             try:
                 return self.db.insert_openclaw_daily_report(**kwargs)
-            except Exception as exc:  # defensive: sqlite + transient FS errors
+            except Exception as exc:  # defensive: transient DB/FS errors
                 last_exc = exc
-                if not self._is_retryable_sqlite_error(exc) or attempt == 3:
+                if not self._is_retryable_db_error(exc) or attempt == 3:
                     raise
                 await asyncio.sleep(0.6 * (attempt + 1))
         if last_exc:
@@ -149,12 +146,12 @@ class OpenClawAdvisorService:
                 try:
                     self.db.upsert_openclaw_suggestion(sug, report_id=report_id)
                     break
-                except Exception as exc:  # defensive: sqlite + transient FS errors
+                except Exception as exc:  # defensive: transient DB/FS errors
                     last_exc = exc
-                    if not self._is_retryable_sqlite_error(exc) or attempt == 3:
+                    if not self._is_retryable_db_error(exc) or attempt == 3:
                         raise
                     await asyncio.sleep(0.4 * (attempt + 1))
-            if last_exc and not self._is_retryable_sqlite_error(last_exc):
+            if last_exc and not self._is_retryable_db_error(last_exc):
                 raise last_exc
 
     async def _run_if_due(self, run_kind: str) -> None:

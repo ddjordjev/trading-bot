@@ -184,6 +184,9 @@ class TradingBot:
         self._last_runtime_sync: dict[str, tuple[float, float, str, str]] = {}
         self._runtime_missing_counts: dict[str, int] = {}
         self._pending_hub_acks: dict[str, dict[str, Any]] = {}
+        self._swing_entry_ladders: dict[str, list[dict[str, Any]]] = {}
+        self._swing_ladder_depth: int = 3
+        self._swing_ladder_total_levels: int = 10
         self._strategy_stats: dict[str, dict[str, Any]] = {}
         self._last_queue_exec_reason: str = ""
         self._last_known_cex_protection: dict[str, tuple[float, float]] = {}
@@ -1045,10 +1048,16 @@ class TradingBot:
             await self._check_daily_reset()
             return
 
-        # 2. Scale into positions (both WINNERS adds and PYRAMID DCA-downs)
-        scale_orders = await self.orders.try_scale_in()
-        if scale_orders:
-            logger.info("Scaled into {} position(s) this tick", len(scale_orders))
+        # 2. Scale into positions.
+        # Swing bot uses persisted "next-3" limit ladders instead of per-tick market DCA.
+        if self._is_swing_owner_bot():
+            for sym in list(self._open_trades.keys()):
+                with contextlib.suppress(Exception):
+                    await self._maintain_swing_entry_ladder(sym)
+        else:
+            scale_orders = await self.orders.try_scale_in()
+            if scale_orders:
+                logger.info("Scaled into {} position(s) this tick", len(scale_orders))
 
         await asyncio.sleep(0)
 
@@ -1488,6 +1497,12 @@ class TradingBot:
 
         try:
             opened = bool(await self._process_signal(sig, pyramid=True))
+            if opened:
+                rec = self._open_trades.get(proposal.symbol)
+                if rec is not None:
+                    ladder = self._build_default_swing_ladder(rec)
+                    self._swing_entry_ladders[proposal.symbol] = ladder
+                    await self._maintain_swing_entry_ladder(proposal.symbol)
             if not opened and not self._last_queue_exec_reason:
                 self._last_queue_exec_reason = "rejected_or_blocked"
             return opened
@@ -1606,7 +1621,23 @@ class TradingBot:
                 async with self._hub_session.post(url, json=payload) as resp:
                     if resp.status == 200:
                         body = await resp.json()
-                        return str(body.get("opened_at", "") or opened_at)
+                        status = str(body.get("status", "") or "").strip().lower()
+                        if status == "ok":
+                            return str(body.get("opened_at", "") or opened_at)
+                        if status == "conflict":
+                            owner = str(body.get("owner_bot_id", "") or "").strip()
+                            logger.warning(
+                                "Hub pre-open reserve conflict for {} (owner={})",
+                                sig.symbol,
+                                owner or "unknown",
+                            )
+                            return ""
+                        logger.warning(
+                            "Hub pre-open reserve returned non-ok status={} for {}",
+                            status or "<empty>",
+                            sig.symbol,
+                        )
+                        return ""
                     snippet = (await resp.text())[:200].strip()
                     if resp.status in {500, 503} and attempt < 2:
                         await asyncio.sleep(0.3 * float(attempt + 1))
@@ -1690,6 +1721,11 @@ class TradingBot:
             open_rec = self._open_trades.pop(order.symbol, None)
             target_rec = self._position_targets.pop(order.symbol, {})
             self._last_runtime_sync.pop(order.symbol, None)
+            self._swing_entry_ladders.pop(order.symbol, None)
+            if self._is_swing_owner_bot() and open_rec is not None:
+                task = asyncio.ensure_future(self._sync_swing_ladder_to_hub(order.symbol, open_rec, []))
+                self._hub_tasks.add(task)
+                task.add_done_callback(self._hub_tasks.discard)
             opened_at = open_rec.opened_at if open_rec else ""
             hold_minutes = 0.0
             if opened_at:
@@ -2263,11 +2299,11 @@ class TradingBot:
         record: TradeRecord,
         request_key: str = "",
         action_override: str | None = None,
-    ) -> None:
+    ) -> tuple[str, dict[str, Any]]:
         """Push a trade open/close event to the hub's DB via HTTP with idempotency key."""
         hub_url = self.settings.hub_url
         if not hub_url:
-            return
+            return ("disabled", {})
         target = hub_url
         if not request_key:
             request_key = uuid.uuid4().hex
@@ -2285,8 +2321,21 @@ class TradingBot:
             async with self._hub_session.post(url, json=payload) as resp:
                 if resp.status != 200:
                     logger.error("Hub trade push failed: {} (key={})", resp.status, request_key[:8])
+                    return ("http_error", {})
+                body = await resp.json()
+                status = str(body.get("status", "") or "").strip().lower()
+                if status == "conflict":
+                    self._pending_hub_acks.pop(request_key, None)
+                    logger.warning(
+                        "Hub trade push conflict action={} symbol={} owner={}",
+                        payload["action"],
+                        record.symbol,
+                        str(body.get("owner_bot_id", "") or "").strip() or "unknown",
+                    )
+                return (status or "unknown", body)
         except Exception as e:
             logger.error("Hub trade push error: {} (key={}, will retry)", e, request_key[:8])
+            return ("exception", {})
 
     async def _sync_runtime_trade_if_changed(self, symbol: str) -> None:
         rec = self._open_trades.get(symbol)
@@ -2318,6 +2367,160 @@ class TradingBot:
                 age_minutes = max(0.0, (time.time() - pos_opened_at.timestamp()) / 60)
         return age_minutes
 
+    def _is_swing_owner_bot(self) -> bool:
+        bot_id = str(self.settings.bot_id or "").strip().lower()
+        bot_style = str(self.settings.bot_style or "").strip().lower()
+        return bot_id == "swing" or bot_style == "swing"
+
+    def _build_default_swing_ladder(self, rec: TradeRecord) -> list[dict[str, Any]]:
+        """Build a denser, gentler DCA ladder for swing ownership."""
+        if rec.entry_price <= 0 or rec.amount <= 0:
+            return []
+        spacing_pct = max(1.0, float(self.settings.dca_interval_pct or 2.0))
+        growth = 1.2
+        levels: list[dict[str, Any]] = []
+        side = str(rec.side or "").strip().lower()
+        for idx in range(1, self._swing_ladder_total_levels + 1):
+            if side in {"short", "sell"}:
+                price = rec.entry_price * (1 + spacing_pct * idx / 100.0)
+            else:
+                price = rec.entry_price * (1 - spacing_pct * idx / 100.0)
+            if price <= 0:
+                continue
+            levels.append(
+                {
+                    "entry_idx": idx,
+                    "side": "short" if side in {"short", "sell"} else "long",
+                    "price": float(price),
+                    "amount": float(rec.amount * (growth ** (idx - 1))),
+                    "leverage": int(max(1, int(rec.leverage or self.settings.default_leverage))),
+                    "status": "planned",
+                    "order_id": "",
+                    "strategy": str(rec.strategy or "swing_ladder"),
+                    "created_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        return levels
+
+    async def _sync_swing_ladder_to_hub(self, symbol: str, rec: TradeRecord, entries: list[dict[str, Any]]) -> None:
+        hub_url = self.settings.hub_url
+        if not hub_url or not rec.opened_at:
+            return
+        if not self._hub_session:
+            self._hub_session = self._new_hub_session(timeout_seconds=5)
+        payload = {
+            "bot_id": self.settings.bot_id or "default",
+            "symbol": symbol,
+            "opened_at": rec.opened_at,
+            "entries": entries,
+        }
+        try:
+            async with self._hub_session.post(f"{hub_url.rstrip('/')}/internal/entry-plan/sync", json=payload) as resp:
+                if resp.status != 200:
+                    logger.warning("Hub swing ladder sync failed for {}: status={}", symbol, resp.status)
+        except Exception as e:
+            logger.warning("Hub swing ladder sync error for {}: {}", symbol, e)
+
+    async def _load_swing_ladder_from_hub(self, symbol: str, rec: TradeRecord) -> list[dict[str, Any]]:
+        hub_url = self.settings.hub_url
+        if not hub_url or not rec.opened_at:
+            return []
+        if not self._hub_session:
+            self._hub_session = self._new_hub_session(timeout_seconds=5)
+        try:
+            url = f"{hub_url.rstrip('/')}/internal/entry-plan/{self.settings.bot_id or 'default'}/{symbol}"
+            async with self._hub_session.get(url, params={"opened_at": rec.opened_at}) as resp:
+                if resp.status != 200:
+                    return []
+                body = await resp.json()
+                rows = body.get("entries", [])
+                return [dict(r) for r in rows] if isinstance(rows, list) else []
+        except Exception:
+            return []
+
+    async def _maintain_swing_entry_ladder(self, symbol: str) -> None:
+        if not self._is_swing_owner_bot():
+            return
+        rec = self._open_trades.get(symbol)
+        if rec is None or not rec.opened_at:
+            return
+        if symbol not in self._swing_entry_ladders:
+            loaded = await self._load_swing_ladder_from_hub(symbol, rec)
+            self._swing_entry_ladders[symbol] = loaded or self._build_default_swing_ladder(rec)
+
+        ladder = self._swing_entry_ladders.get(symbol, [])
+        if not ladder:
+            return
+
+        market_type = MarketType.FUTURES if self.settings.futures_allowed else MarketType.SPOT
+        side = str(rec.side or "").strip().lower()
+        order_side = OrderSide.SELL if side in {"short", "sell"} else OrderSide.BUY
+        open_orders = await self.exchange.fetch_open_orders(symbol, market_type=market_type)
+        open_by_id = {str(o.id or ""): o for o in open_orders if str(o.id or "").strip()}
+
+        active = 0
+        for item in ladder:
+            oid = str(item.get("order_id", "") or "")
+            status = str(item.get("status", "planned") or "planned")
+            if status == "filled":
+                continue
+            if oid and oid in open_by_id:
+                item["status"] = "placed"
+                active += 1
+                continue
+            if oid:
+                with contextlib.suppress(Exception):
+                    fetched = await self.exchange.fetch_order(oid, symbol, market_type=market_type)
+                    if (
+                        fetched.status in {OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED}
+                        and float(fetched.filled or 0) > 0
+                    ):
+                        item["status"] = "filled"
+                        sp = self.orders.scaler.get(symbol)
+                        if sp is not None:
+                            fill_px = float(fetched.average_price or fetched.price or item.get("price", 0.0) or 0.0)
+                            sp.record_add(float(fetched.filled or 0.0), fill_px)
+                        item["order_id"] = str(fetched.id or oid)
+                        continue
+                item["status"] = "planned"
+                item["order_id"] = ""
+
+        active = sum(1 for i in ladder if str(i.get("status", "")) == "placed")
+        for item in ladder:
+            if active >= self._swing_ladder_depth:
+                break
+            if str(item.get("status", "planned")) != "planned":
+                continue
+            price = float(item.get("price", 0.0) or 0.0)
+            amount = float(item.get("amount", 0.0) or 0.0)
+            leverage = int(item.get("leverage", rec.leverage or self.settings.default_leverage) or 1)
+            if price <= 0 or amount <= 0:
+                continue
+            try:
+                order = await self.exchange.place_order(
+                    symbol=symbol,
+                    side=order_side,
+                    order_type=OrderType.LIMIT,
+                    amount=amount,
+                    price=price,
+                    leverage=max(1, leverage),
+                    market_type=market_type,
+                )
+            except Exception as e:
+                logger.warning("Swing ladder place failed for {} idx={}: {}", symbol, item.get("entry_idx", 0), e)
+                continue
+            item["order_id"] = str(order.id or "")
+            if order.status in {OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED} and float(order.filled or 0) > 0:
+                item["status"] = "filled"
+                sp = self.orders.scaler.get(symbol)
+                if sp is not None:
+                    sp.record_add(float(order.filled or 0.0), float(order.average_price or order.price or price))
+            else:
+                item["status"] = "placed"
+                active += 1
+
+        await self._sync_swing_ladder_to_hub(symbol, rec, ladder)
+
     # ---- Hub state recovery & in-memory stats ----
 
     async def _recover_state_from_hub(self) -> None:
@@ -2330,11 +2533,24 @@ class TradingBot:
         bot_id = self.settings.bot_id or "default"
         if not self._hub_session:
             self._hub_session = self._new_hub_session(timeout_seconds=10)
+        recovery_owner_hints: set[str] = set()
+        try:
+            async with self._hub_session.get(f"{target.rstrip('/')}/internal/trades/{bot_id}/recovery-owners") as resp:
+                if resp.status == 200:
+                    payload = await resp.json()
+                    recovery_owner_hints = {str(sym or "").strip().upper() for sym in payload if str(sym or "").strip()}
+        except Exception as e:
+            logger.warning("Could not fetch recovery-owner hints from hub: {}", e)
         try:
             async with self._hub_session.get(f"{target.rstrip('/')}/internal/trades/{bot_id}/open") as resp:
                 if resp.status == 200:
                     open_trades = await resp.json()
-                    await self._reconcile_open_trades(open_trades, target, bot_id)
+                    await self._reconcile_open_trades(
+                        open_trades,
+                        target,
+                        bot_id,
+                        recovery_owner_hints=recovery_owner_hints,
+                    )
                 else:
                     logger.warning("Hub returned {} for open trades", resp.status)
         except Exception as e:
@@ -2356,8 +2572,15 @@ class TradingBot:
         # Runtime scaler/trailing state must not imply ownership.
         return set(self._open_trades.keys())
 
-    async def _reconcile_open_trades(self, hub_open: list[dict[str, Any]], hub_target: str, bot_id: str) -> None:
+    async def _reconcile_open_trades(
+        self,
+        hub_open: list[dict[str, Any]],
+        hub_target: str,
+        bot_id: str,
+        recovery_owner_hints: set[str] | None = None,
+    ) -> None:
         """Check each hub-reported open trade against the exchange. Recovery-close dead ones."""
+        recovery_owner_hints = recovery_owner_hints or set()
         if not hub_open:
             logger.info("Hub reports 0 open trades — clean start")
 
@@ -2430,6 +2653,18 @@ class TradingBot:
                     bot_id,
                     ", ".join(sorted(unknown)[:8]),
                 )
+            claimed = 0
+            for sym in unknown:
+                if sym not in recovery_owner_hints:
+                    continue
+                ok, msg = await self._claim_orphan_position(sym, strategy="recovered_owner_claim")
+                if ok:
+                    claimed += 1
+                    logger.info("Auto-claimed foreign position {} using recovery-owner hint", sym)
+                else:
+                    logger.warning("Auto-claim skipped for {} despite recovery-owner hint: {}", sym, msg)
+            if claimed:
+                logger.info("Auto-claimed {} foreign position(s) via recovery-owner hints", claimed)
 
     async def _rehydrate_recovered_position_state(self, symbol: str, rec: TradeRecord, pos: Any) -> bool:
         """Rebuild local scaler/trailing state for a recovered live exchange position."""
@@ -2459,7 +2694,25 @@ class TradingBot:
         leverage = int(max(1, round(lev_raw)))
         market_type = str(getattr(pos, "market_type", "") or "futures")
         strategy = str(rec.strategy or self._resolve_position_strategy(pos) or "recovered")
-        mode = ScaleMode.PYRAMID if str(rec.scale_mode or "").lower() == "pyramid" else ScaleMode.WINNERS
+        bot_id = str(getattr(self.settings, "bot_id", "") or "").strip().lower()
+        bot_style = str(getattr(self.settings, "bot_style", "") or "").strip().lower()
+        strategy_l = str(rec.strategy or "").strip().lower()
+        is_swing_owner = bot_style == "swing" or bot_id == "swing"
+        if is_swing_owner:
+            # Reclaimed positions must be normalized to swing policy immediately.
+            mode = ScaleMode.PYRAMID
+            initial_stop_pct = max(5.0, float(self.settings.stop_loss_pct))
+            trailing_mode = "pullback"
+            pullback_buffer_pct = max(5.0, float(getattr(self.settings, "pullback_trail_buffer_pct", 4.0) or 4.0))
+            keep_recovered_stop = False
+        else:
+            mode = ScaleMode.PYRAMID if str(rec.scale_mode or "").lower() == "pyramid" else ScaleMode.WINNERS
+            initial_stop_pct = max(0.5, float(self.settings.stop_loss_pct))
+            fast_profile = bot_id in {"extreme", "aggressive", "scalper"}
+            fast_strategy = strategy_l.startswith("extreme_") or "wick" in strategy_l
+            trailing_mode = "fast" if (fast_profile or fast_strategy) else "pullback"
+            pullback_buffer_pct = float(getattr(self.settings, "pullback_trail_buffer_pct", 4.0) or 4.0)
+            keep_recovered_stop = True
 
         self.orders.scaler.remove(symbol)
         sp = self.orders.scaler.create(
@@ -2474,6 +2727,7 @@ class TradingBot:
         sp.current_leverage = leverage
         sp.target_leverage = max(sp.target_leverage, leverage)
         sp.adds = int(getattr(rec, "dca_count", 0) or 0)
+        rec.scale_mode = mode.value
 
         self.orders.trailing.remove(symbol)
         position = Position(
@@ -2487,11 +2741,13 @@ class TradingBot:
         )
         ts = self.orders.trailing.register(
             position,
-            initial_stop_pct=max(0.5, float(self.settings.stop_loss_pct)),
+            initial_stop_pct=initial_stop_pct,
+            trailing_mode=trailing_mode,
+            pullback_buffer_pct=pullback_buffer_pct,
         )
 
         recovered_stop = float(rec.effective_stop_loss or rec.bot_stop_loss or 0.0)
-        if recovered_stop > 0:
+        if keep_recovered_stop and recovered_stop > 0:
             ts.current_stop = recovered_stop
             if order_side == OrderSide.BUY:
                 ts.breakeven_locked = recovered_stop >= entry
@@ -2589,7 +2845,16 @@ class TradingBot:
         self._open_trades[symbol] = rec
         self._position_targets.setdefault(symbol, {"planned_sl": 0.0, "tp1": 0.0, "tp2": 0.0})
 
-        await self._push_trade_to_hub(rec)
+        status, body = await self._push_trade_to_hub(rec)
+        if status != "ok":
+            self._open_trades.pop(symbol, None)
+            self._position_targets.pop(symbol, None)
+            self._last_runtime_sync.pop(symbol, None)
+            self._swing_entry_ladders.pop(symbol, None)
+            owner = str(body.get("owner_bot_id", "") or "").strip() if isinstance(body, dict) else ""
+            if status == "conflict":
+                return False, f"Hub ownership conflict for {symbol} (owner={owner or 'unknown'})"
+            return False, f"Hub did not accept claim for {symbol} (status={status})"
         ok = await self._rehydrate_recovered_position_state(symbol, rec, pos)
         if not ok:
             return False, f"Claimed {symbol} but failed to rehydrate runtime protection state"
@@ -2608,6 +2873,23 @@ class TradingBot:
             logger.warning("Runtime reconcile: targeted confirm failed for {}: {}", symbol, e)
             # Fail-safe: keep ownership when confirmation path is unavailable.
             return False
+
+        if not positions:
+            # Empty targeted response can happen during transient exchange/API issues.
+            # Require an additional successful ticker reachability check before treating
+            # this as a confirmed-missing position to avoid false recovery closes.
+            try:
+                market_type = MarketType.FUTURES if self.settings.futures_allowed else MarketType.SPOT
+                ticker = await self.exchange.fetch_ticker(symbol, market_type=market_type)
+                if float(getattr(ticker, "last", 0.0) or 0.0) <= 0:
+                    logger.warning(
+                        "Runtime reconcile: targeted confirm unreliable for {} (empty positions, invalid ticker)",
+                        symbol,
+                    )
+                    return False
+            except Exception as e:
+                logger.warning("Runtime reconcile: targeted confirm ticker check failed for {}: {}", symbol, e)
+                return False
 
         for pos in positions:
             pos_symbol = str(getattr(pos, "symbol", "") or "")
@@ -2667,6 +2949,7 @@ class TradingBot:
             rec = self._open_trades.pop(sym, None)
             self._position_targets.pop(sym, None)
             self._last_runtime_sync.pop(sym, None)
+            self._swing_entry_ladders.pop(sym, None)
             self._runtime_missing_counts.pop(sym, None)
             self.orders.scaler.remove(sym)
             self.orders.trailing.remove(sym)

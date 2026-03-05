@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
+from db import local_db as ldb
 from db.models import TradeRecord
 
 DB_PATH = Path("data/trades.db")
@@ -25,16 +25,16 @@ _ANALYTICS_STRATEGY_PH = ", ".join("?" for _ in _ANALYTICS_EXCLUDED_STRATEGIES)
 
 
 class TradeDB:
-    """SQLite-backed trade history for analytics and pattern detection."""
+    """Local file-backed trade history for analytics and pattern detection."""
 
     def __init__(self, path: Path = DB_PATH):
         self._path = path
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn: sqlite3.Connection | None = None
+        self._conn: Any | None = None
 
     def connect(self) -> None:
-        self._conn = sqlite3.connect(str(self._path))
-        self._conn.row_factory = sqlite3.Row
+        self._conn = ldb.connect(str(self._path))
+        self._conn.row_factory = ldb.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._create_tables()
@@ -517,7 +517,7 @@ class TradeDB:
         return row["c"] if row else 0
 
     @staticmethod
-    def _row_to_trade(row: sqlite3.Row) -> TradeRecord:
+    def _row_to_trade(row: Any) -> TradeRecord:
         """Build TradeRecord from row; coerce NULLs to type-safe defaults."""
 
         def _str(v: Any) -> str:

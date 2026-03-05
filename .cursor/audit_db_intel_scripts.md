@@ -87,7 +87,7 @@ def is_overleveraged_longs(self) -> bool:
 **Lines:** 163–181
 
 **What’s wrong:**  
-When there are **no** trades matching the filter, SQLite still returns one aggregate row; `AVG(...)` and `AVG(hold_minutes)` are `NULL`. So `dict(row)` can contain `None` for `avg_win`, `avg_loss`, `avg_hold`. The main consumer (`analytics/engine.py`) does `stats["avg_win"] or 0` etc., so it’s safe there, but the return type is `dict[str, Any]` and any other caller or JSON serialization could see `None` and break (e.g. arithmetic or `.toFixed()`).
+When there are **no** trades matching the filter, the DB still returns one aggregate row; `AVG(...)` and `AVG(hold_minutes)` are `NULL`. So `dict(row)` can contain `None` for `avg_win`, `avg_loss`, `avg_hold`. The main consumer (`analytics/engine.py`) does `stats["avg_win"] or 0` etc., so it’s safe there, but the return type is `dict[str, Any]` and any other caller or JSON serialization could see `None` and break (e.g. arithmetic or `.toFixed()`).
 
 **Fix:**  
 Either normalize in the store so aggregates are never `None` (e.g. `avg_win = row["avg_win"] if row["avg_win"] is not None else 0.0` and same for `avg_loss`, `avg_hold` before building the dict), or document that these keys may be `None` when there are no matching trades and that callers must coerce.

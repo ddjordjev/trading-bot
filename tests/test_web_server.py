@@ -696,6 +696,32 @@ class TestInternalReport:
         symbols = [t["symbol"] for t in trades]
         assert "ETH/USDT" in symbols
 
+    async def test_get_bot_recovery_owner_symbols(self, client):
+        await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "recover-owner-bot",
+                "action": "open",
+                "trade": {
+                    "symbol": "SOL/USDT",
+                    "side": "long",
+                    "strategy": "swing",
+                    "action": "open",
+                    "opened_at": "2026-01-10T00:00:00",
+                },
+                "request_key": "recover-owner-open-1",
+            },
+        )
+        await client.post(
+            "/internal/recovery-close",
+            json={"bot_id": "recover-owner-bot", "opened_at": "2026-01-10T00:00:00"},
+        )
+
+        r = await client.get("/internal/trades/recover-owner-bot/recovery-owners")
+        assert r.status_code == 200
+        symbols = r.json()
+        assert "SOL/USDT" in symbols
+
     async def test_get_bot_strategy_stats(self, client):
         for i in range(3):
             opened_at = f"2026-01-0{i + 1}T00:00:00"
@@ -993,6 +1019,37 @@ class TestInternalReport:
         body = r.json()
         assert body["status"] == "deferred"
         assert body["action"] == "update"
+
+    async def test_swing_entry_plan_sync_and_load(self, client):
+        sync = await client.post(
+            "/internal/entry-plan/sync",
+            json={
+                "bot_id": "swing",
+                "symbol": "ETH/USDT",
+                "opened_at": "2026-03-06T00:00:00+00:00",
+                "entries": [
+                    {"entry_idx": 1, "side": "long", "price": 2100.0, "amount": 0.2, "leverage": 5, "status": "placed"},
+                    {
+                        "entry_idx": 2,
+                        "side": "long",
+                        "price": 2060.0,
+                        "amount": 0.24,
+                        "leverage": 5,
+                        "status": "planned",
+                    },
+                ],
+            },
+        )
+        assert sync.status_code == 200
+        assert sync.json()["status"] == "ok"
+
+        read = await client.get(
+            "/internal/entry-plan/swing/ETH%2FUSDT", params={"opened_at": "2026-03-06T00:00:00+00:00"}
+        )
+        assert read.status_code == 200
+        body = read.json()
+        assert body["status"] == "ok"
+        assert len(body["entries"]) == 2
 
     async def test_recovery_close_missing_fields_returns_error(self, client):
         r = await client.post("/internal/recovery-close", json={"bot_id": "x"})
@@ -1310,6 +1367,61 @@ class TestInternalReport:
             if str(o.get("exchange_name", "")).upper() == "BINANCE" and str(o.get("symbol", "")).upper() == "BTC/USDT"
         )
         assert str(orphan_row.get("originally_opened_by", "")) == "extreme"
+        assert str(orphan_row.get("orphan_reason", "")) == "owner_not_running"
+        _bot_reports.clear()
+
+    async def test_merged_snapshot_uses_recent_recovery_owner_when_open_owner_missing(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports.clear()
+
+        base_status = {
+            "running": True,
+            "balance": 100.0,
+            "available_margin": 80.0,
+            "daily_pnl": 0.0,
+            "daily_pnl_pct": 0.0,
+            "total_growth_usd": 0.0,
+            "total_growth_pct": 0.0,
+            "profit_buffer_pct": 0.0,
+            "uptime_seconds": 10,
+            "manual_stop_active": False,
+            "strategies_count": 0,
+            "dynamic_strategies_count": 0,
+            "trading_mode": "paper_local",
+            "exchange_name": "BINANCE",
+            "exchange_url": "",
+            "tier": "building",
+            "tier_progress_pct": 0,
+            "daily_target_pct": 10,
+        }
+
+        report_bot_snapshot(
+            {
+                "bot_id": "hedger",
+                "exchange": "BINANCE",
+                "status": dict(base_status, exchange_name="BINANCE"),
+                "positions": [],
+                "foreign_positions": [{"symbol": "SOL/USDT", "side": "long", "detected_at": "2026-02-01T00:00:00Z"}],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+
+        hub = MagicMock()
+        hub.get_all_bot_enabled.return_value = {"hedger": True}
+        hub.get_open_trade_owner_rows.return_value = []
+        hub.get_recent_recovery_owner_rows.return_value = [{"bot_id": "swing", "symbol": "SOL/USDT"}]
+        with patch("web.server._get_hub_db", return_value=hub):
+            from web.server import _build_merged_snapshot
+
+            snap = _build_merged_snapshot()
+
+        orphan_row = next(
+            o
+            for o in snap["orphan_positions"]
+            if str(o.get("exchange_name", "")).upper() == "BINANCE" and str(o.get("symbol", "")).upper() == "SOL/USDT"
+        )
+        assert str(orphan_row.get("originally_opened_by", "")) == "swing"
         assert str(orphan_row.get("orphan_reason", "")) == "owner_not_running"
         _bot_reports.clear()
 
@@ -2049,7 +2161,7 @@ class TestDbExplorer:
             hub.insert_trade(
                 "test",
                 {
-                    "symbol": "BTC/USDT",
+                    "symbol": f"BTC{i}/USDT",
                     "side": "long",
                     "strategy": "rsi",
                     "action": "open",
@@ -2078,7 +2190,7 @@ class TestDbExplorer:
             hub.insert_trade(
                 "test",
                 {
-                    "symbol": "ETH/USDT",
+                    "symbol": f"ETH{i}/USDT",
                     "side": "long",
                     "strategy": "macd",
                     "action": "open",
@@ -2849,6 +2961,81 @@ class TestHubPushEndpoints:
         assert len(rows) == 1
         assert rows[0]["entry_price"] == 50200
         assert rows[0]["amount"] == 0.02
+
+    async def test_push_trade_open_conflict_when_symbol_owned_by_other_bot(self, client):
+        first = {
+            "bot_id": "hedger",
+            "action": "open",
+            "trade": {
+                "symbol": "BNB/USDT",
+                "side": "long",
+                "strategy": "manual_override",
+                "action": "open",
+                "entry_price": 610,
+                "amount": 0.2,
+                "leverage": 2,
+                "opened_at": "2026-02-20T09:00:00",
+            },
+        }
+        second = {
+            "bot_id": "scalper",
+            "action": "open",
+            "trade": {
+                "symbol": "BNB/USDT",
+                "side": "long",
+                "strategy": "manual_override",
+                "action": "open",
+                "entry_price": 611,
+                "amount": 0.2,
+                "leverage": 2,
+                "opened_at": "2026-02-20T09:05:00",
+            },
+        }
+        r1 = await client.post("/internal/trade", json=first)
+        assert r1.status_code == 200
+        assert r1.json()["status"] == "ok"
+        r2 = await client.post("/internal/trade", json=second)
+        assert r2.status_code == 200
+        payload = r2.json()
+        assert payload["status"] == "conflict"
+        assert payload["owner_bot_id"] == "hedger"
+        r_open_hedger = await client.get("/internal/trades/hedger/open")
+        assert len(r_open_hedger.json()) == 1
+        r_open_scalper = await client.get("/internal/trades/scalper/open")
+        assert len(r_open_scalper.json()) == 0
+
+    async def test_trade_reserve_conflict_when_symbol_owned_by_other_bot(self, client):
+        await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "hedger",
+                "action": "open",
+                "trade": {
+                    "symbol": "XRP/USDT",
+                    "side": "long",
+                    "strategy": "manual_override",
+                    "action": "open",
+                    "opened_at": "2026-02-20T10:00:00",
+                },
+            },
+        )
+        r = await client.post(
+            "/internal/trade-reserve",
+            json={
+                "bot_id": "scalper",
+                "trade": {
+                    "symbol": "XRP/USDT",
+                    "side": "long",
+                    "strategy": "manual_override",
+                    "opened_at": "2026-02-20T10:10:00",
+                },
+                "request_key": "reserve-conflict-key",
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "conflict"
+        assert body["owner_bot_id"] == "hedger"
 
     async def test_push_trade_close_updates_open_row(self, client):
         await client.post(

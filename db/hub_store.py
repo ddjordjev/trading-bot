@@ -11,15 +11,16 @@ Extends TradeDB with ``bot_id``, ``request_key`` (idempotency),
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
+from db import local_db as ldb
+from db.errors import DBIntegrityError
 from db.models import TradeRecord
 from db.store import TradeDB
 from shared.models import AnalyticsSnapshot
@@ -35,17 +36,17 @@ class HubDB(TradeDB):
         self._ack_buffer: dict[str, set[str]] = {}
 
     def connect(self) -> None:
-        last_exc: sqlite3.Error | None = None
+        last_exc: Exception | None = None
         for attempt in range(3):
             try:
-                self._conn = sqlite3.connect(str(self._path))
-                self._conn.row_factory = sqlite3.Row
+                self._conn = ldb.connect(str(self._path))
+                self._conn.row_factory = ldb.Row
                 self._conn.execute("PRAGMA journal_mode=WAL")
                 self._conn.execute("PRAGMA busy_timeout=30000")
                 # Validate DB before creating tables (catches malformed/not-a-db early)
                 self._conn.execute("PRAGMA quick_check").fetchone()
                 break
-            except sqlite3.Error as e:
+            except Exception as e:
                 last_exc = e
                 with suppress(Exception):
                     if self._conn is not None:
@@ -208,10 +209,33 @@ class HubDB(TradeDB):
             );
             CREATE INDEX IF NOT EXISTS idx_analytics_snapshots_updated_at
                 ON analytics_snapshots(updated_at);
+
+            CREATE TABLE IF NOT EXISTS swing_entry_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bot_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                opened_at TEXT NOT NULL,
+                entry_idx INTEGER NOT NULL DEFAULT 0,
+                side TEXT NOT NULL DEFAULT '',
+                price REAL NOT NULL DEFAULT 0,
+                amount REAL NOT NULL DEFAULT 0,
+                leverage INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'planned',
+                order_id TEXT NOT NULL DEFAULT '',
+                strategy TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_swing_entry_plan_unique
+                ON swing_entry_plans(bot_id, symbol, opened_at, entry_idx);
+            CREATE INDEX IF NOT EXISTS idx_swing_entry_plan_lookup
+                ON swing_entry_plans(bot_id, symbol, opened_at);
         """)
         self._ensure_bot_id_column()
         self._ensure_request_key_column()
         self._ensure_recovery_close_column()
+        self._cleanup_open_owner_conflicts()
+        self._ensure_single_open_owner_index()
 
     def _ensure_bot_id_column(self) -> None:
         assert self._conn
@@ -237,6 +261,37 @@ class HubDB(TradeDB):
         if "recovery_close" not in cols:
             self._conn.execute("ALTER TABLE trades ADD COLUMN recovery_close INTEGER DEFAULT 0")
             self._conn.commit()
+
+    def _cleanup_open_owner_conflicts(self) -> None:
+        """Keep a single open owner row per symbol (newest row wins)."""
+        assert self._conn
+        now_iso = datetime.now(UTC).isoformat()
+        self._conn.execute(
+            """
+            WITH ranked AS (
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY id DESC) AS rn
+                FROM trades
+                WHERE closed_at='' AND symbol!=''
+            )
+            UPDATE trades
+            SET closed_at=?,
+                close_source='ownership_conflict_cleanup',
+                close_reason='duplicate_owner_cleanup',
+                recovery_close=1
+            WHERE id IN (SELECT id FROM ranked WHERE rn > 1)
+            """,
+            (now_iso,),
+        )
+        self._conn.commit()
+
+    def _ensure_single_open_owner_index(self) -> None:
+        """Enforce one open ownership row per symbol."""
+        assert self._conn
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_open_owner_symbol ON trades(symbol) "
+            "WHERE closed_at='' AND symbol!=''"
+        )
+        self._conn.commit()
 
     # ---- Trade ingestion (hub-specific) ----
 
@@ -267,6 +322,21 @@ class HubDB(TradeDB):
             ).fetchone()
         return int(row["id"]) if row else None
 
+    def _latest_open_row_id_by_symbol(self, bot_id: str, symbol: str) -> int | None:
+        """Return newest unclosed trade row for bot+symbol ownership."""
+        assert self._conn
+        row = self._conn.execute(
+            """
+            SELECT id
+            FROM trades
+            WHERE bot_id=? AND symbol=? AND closed_at=''
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (bot_id, symbol),
+        ).fetchone()
+        return int(row["id"]) if row else None
+
     def _execute_write_with_lock_retry(
         self,
         sql: str,
@@ -274,29 +344,29 @@ class HubDB(TradeDB):
         *,
         retries: int = 3,
         base_sleep_seconds: float = 0.05,
-    ) -> sqlite3.Cursor:
-        """Run a write query with rollback + retry on transient SQLite lock contention."""
+    ) -> Any:
+        """Run a write query with rollback + retry on transient lock contention."""
         assert self._conn
-        last_exc: sqlite3.OperationalError | None = None
+        last_exc: Exception | None = None
         for attempt in range(retries):
             try:
                 cursor = self._conn.execute(sql, params)
                 self._conn.commit()
                 return cursor
-            except sqlite3.OperationalError as exc:
+            except Exception as exc:
                 last_exc = exc
                 msg = str(exc).lower()
                 if "database is locked" not in msg and "database table is locked" not in msg:
-                    with suppress(sqlite3.Error):
+                    with suppress(Exception):
                         self._conn.rollback()
                     raise
-                with suppress(sqlite3.Error):
+                with suppress(Exception):
                     self._conn.rollback()
                 if attempt >= retries - 1:
                     raise
                 sleep_for = base_sleep_seconds * float(attempt + 1)
                 logger.warning(
-                    "SQLite lock contention in HubDB write (attempt {}/{}), retrying in {:.2f}s",
+                    "DB lock contention in HubDB write (attempt {}/{}), retrying in {:.2f}s",
                     attempt + 1,
                     retries,
                     sleep_for,
@@ -304,7 +374,7 @@ class HubDB(TradeDB):
                 time.sleep(sleep_for)
         if last_exc is not None:
             raise last_exc
-        raise sqlite3.OperationalError("HubDB write failed without exception")
+        raise RuntimeError("HubDB write failed without exception")
 
     def insert_trade(self, bot_id: str, trade: dict[str, Any], request_key: str = "") -> int:
         """Insert a trade record pushed by a bot. Deduplicates by request_key."""
@@ -314,6 +384,23 @@ class HubDB(TradeDB):
             if existing:
                 self._mark_confirmed(bot_id, request_key)
                 return int(existing["id"])
+        symbol = str(trade.get("symbol", "") or "").strip()
+        action = str(trade.get("action", "") or "").strip().lower()
+        closed_at = str(trade.get("closed_at", "") or "").strip()
+        if action == "open" and symbol and not closed_at:
+            existing_open = self._conn.execute(
+                "SELECT id, bot_id FROM trades WHERE symbol=? AND closed_at='' ORDER BY id DESC LIMIT 1",
+                (symbol,),
+            ).fetchone()
+            if existing_open:
+                existing_owner = str(existing_open["bot_id"] or "")
+                if existing_owner != bot_id:
+                    if request_key:
+                        self._mark_confirmed(bot_id, request_key)
+                    raise DBIntegrityError(f"open_owner_conflict:{symbol}:{existing_owner}")
+                if request_key:
+                    self._mark_confirmed(bot_id, request_key)
+                return int(existing_open["id"])
 
         try:
             cursor = self._execute_write_with_lock_retry(
@@ -388,7 +475,7 @@ class HubDB(TradeDB):
                     int(trade.get("recovery_close", False)),
                 ),
             )
-        except sqlite3.IntegrityError:
+        except (DBIntegrityError, ldb.IntegrityError):
             # Idempotent race: another request committed this key first.
             if request_key:
                 existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
@@ -420,6 +507,8 @@ class HubDB(TradeDB):
         row_id = self._latest_open_row_id(bot_id, opened_at, str(data.get("symbol", "") or ""))
         if row_id is None:
             row_id = self._latest_open_row_id(bot_id, opened_at)
+        if row_id is None and str(data.get("symbol", "") or "").strip():
+            row_id = self._latest_open_row_id_by_symbol(bot_id, str(data.get("symbol", "") or ""))
         if row_id is None:
             return False
 
@@ -475,7 +564,7 @@ class HubDB(TradeDB):
                     row_id,
                 ),
             )
-        except sqlite3.IntegrityError:
+        except (DBIntegrityError, ldb.IntegrityError):
             if request_key:
                 existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
                 if existing:
@@ -485,7 +574,7 @@ class HubDB(TradeDB):
         updated = cursor.rowcount > 0
         if updated and request_key:
             self._mark_confirmed(bot_id, request_key)
-        return updated
+        return bool(updated)
 
     def update_trade_close(self, bot_id: str, opened_at: str, data: dict[str, Any], request_key: str = "") -> bool:
         """Update an open trade row with exit data (matched by bot_id + opened_at)."""
@@ -499,6 +588,8 @@ class HubDB(TradeDB):
         row_id = self._latest_open_row_id(bot_id, opened_at, str(data.get("symbol", "") or ""))
         if row_id is None:
             row_id = self._latest_open_row_id(bot_id, opened_at)
+        if row_id is None and str(data.get("symbol", "") or "").strip():
+            row_id = self._latest_open_row_id_by_symbol(bot_id, str(data.get("symbol", "") or ""))
         if row_id is None:
             return False
 
@@ -541,7 +632,7 @@ class HubDB(TradeDB):
                     row_id,
                 ),
             )
-        except sqlite3.IntegrityError:
+        except (DBIntegrityError, ldb.IntegrityError):
             if request_key:
                 existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
                 if existing:
@@ -559,7 +650,7 @@ class HubDB(TradeDB):
         updated = cursor.rowcount > 0
         if updated and request_key:
             self._mark_confirmed(bot_id, request_key)
-        return updated
+        return bool(updated)
 
     def update_trade_runtime(self, bot_id: str, opened_at: str, data: dict[str, Any], request_key: str = "") -> bool:
         """Update runtime SL/TP fields for an open trade row."""
@@ -573,6 +664,8 @@ class HubDB(TradeDB):
         row_id = self._latest_open_row_id(bot_id, opened_at, str(data.get("symbol", "") or ""))
         if row_id is None:
             row_id = self._latest_open_row_id(bot_id, opened_at)
+        if row_id is None and str(data.get("symbol", "") or "").strip():
+            row_id = self._latest_open_row_id_by_symbol(bot_id, str(data.get("symbol", "") or ""))
         if row_id is None:
             return False
 
@@ -609,7 +702,7 @@ class HubDB(TradeDB):
                     row_id,
                 ),
             )
-        except sqlite3.IntegrityError:
+        except (DBIntegrityError, ldb.IntegrityError):
             if request_key:
                 existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
                 if existing:
@@ -627,7 +720,7 @@ class HubDB(TradeDB):
         updated = cursor.rowcount > 0
         if updated and request_key:
             self._mark_confirmed(bot_id, request_key)
-        return updated
+        return bool(updated)
 
     def cancel_trade_reservation(self, bot_id: str, opened_at: str, request_key: str = "") -> bool:
         """Delete an unexecuted pre-open reservation row.
@@ -656,7 +749,7 @@ class HubDB(TradeDB):
         deleted = cursor.rowcount > 0
         if request_key and deleted:
             self._mark_confirmed(bot_id, request_key)
-        return deleted
+        return bool(deleted)
 
     def cleanup_non_executed_close_noise(self) -> int:
         """Delete close rows that represent failed pre-open flow, not executed trades."""
@@ -749,7 +842,7 @@ class HubDB(TradeDB):
             ),
         )
         self._conn.commit()
-        return cursor.rowcount > 0
+        return bool(cursor.rowcount > 0)
 
     def insert_exchange_equity_snapshot(
         self,
@@ -797,6 +890,51 @@ class HubDB(TradeDB):
             "SELECT id, bot_id, symbol FROM trades WHERE closed_at='' ORDER BY id DESC"
         ).fetchall()
         return [{"id": int(r["id"]), "bot_id": str(r["bot_id"] or ""), "symbol": str(r["symbol"] or "")} for r in rows]
+
+    def get_recent_recovery_owner_rows(self, lookback_hours: int = 24) -> list[dict[str, Any]]:
+        """Return recent recovery-closed owner rows as fallback ownership hints."""
+        assert self._conn
+        cutoff = (datetime.now(UTC) - timedelta(hours=max(1, int(lookback_hours)))).isoformat()
+        rows = self._conn.execute(
+            """
+            SELECT id, bot_id, symbol
+            FROM trades
+            WHERE closed_at != ''
+              AND closed_at >= ?
+              AND close_source = 'recovery'
+              AND close_reason LIKE ?
+            ORDER BY id DESC
+            """,
+            (cutoff, "missing_on_exchange%"),
+        ).fetchall()
+        return [{"id": int(r["id"]), "bot_id": str(r["bot_id"] or ""), "symbol": str(r["symbol"] or "")} for r in rows]
+
+    def get_recent_recovery_owner_symbols(self, bot_id: str, lookback_hours: int = 24) -> list[str]:
+        """Return symbols whose latest recovery owner is this bot."""
+        assert self._conn
+        bid = str(bot_id or "").strip().lower()
+        if not bid:
+            return []
+        cutoff = (datetime.now(UTC) - timedelta(hours=max(1, int(lookback_hours)))).isoformat()
+        rows = self._conn.execute(
+            """
+            SELECT symbol
+            FROM (
+                SELECT symbol, bot_id,
+                       ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY closed_at DESC, id DESC) AS rn
+                FROM trades
+                WHERE closed_at != ''
+                  AND closed_at >= ?
+                  AND close_source = 'recovery'
+                  AND close_reason LIKE ?
+                  AND symbol != ''
+            ) latest
+            WHERE rn = 1 AND bot_id = ?
+            ORDER BY symbol
+            """,
+            (cutoff, "missing_on_exchange%", bid),
+        ).fetchall()
+        return [str(r["symbol"] or "") for r in rows if str(r["symbol"] or "").strip()]
 
     def get_open_trades_for_bot(self, bot_id: str) -> list[TradeRecord]:
         """Return unclosed trades for a bot, deduped by symbol.
@@ -883,6 +1021,76 @@ class HubDB(TradeDB):
         if not row:
             return {"wins": 0, "losses": 0, "total_pnl": 0.0}
         return {"wins": row["wins"] or 0, "losses": row["losses"] or 0, "total_pnl": row["total_pnl"] or 0.0}
+
+    # ---- Swing entry ladder persistence ----
+
+    def replace_swing_entry_plan(
+        self,
+        bot_id: str,
+        symbol: str,
+        opened_at: str,
+        entries: list[dict[str, Any]],
+    ) -> None:
+        """Replace persisted ladder entries for one open trade."""
+        assert self._conn
+        bid = str(bot_id or "").strip().lower()
+        sym = str(symbol or "").strip().upper()
+        opened = str(opened_at or "").strip()
+        if not bid or not sym or not opened:
+            return
+        now_iso = datetime.now(UTC).isoformat()
+        self._conn.execute(
+            "DELETE FROM swing_entry_plans WHERE bot_id=? AND symbol=? AND opened_at=?",
+            (bid, sym, opened),
+        )
+        for item in entries:
+            self._conn.execute(
+                """
+                INSERT INTO swing_entry_plans (
+                    bot_id, symbol, opened_at, entry_idx, side, price, amount, leverage,
+                    status, order_id, strategy, updated_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    bid,
+                    sym,
+                    opened,
+                    int(item.get("entry_idx", 0) or 0),
+                    str(item.get("side", "") or ""),
+                    float(item.get("price", 0.0) or 0.0),
+                    float(item.get("amount", 0.0) or 0.0),
+                    int(item.get("leverage", 1) or 1),
+                    str(item.get("status", "planned") or "planned"),
+                    str(item.get("order_id", "") or ""),
+                    str(item.get("strategy", "") or ""),
+                    now_iso,
+                    str(item.get("created_at", now_iso) or now_iso),
+                ),
+            )
+        self._conn.commit()
+
+    def get_swing_entry_plan(self, bot_id: str, symbol: str, opened_at: str) -> list[dict[str, Any]]:
+        """Load persisted ladder entries for one open trade."""
+        assert self._conn
+        rows = self._conn.execute(
+            """
+            SELECT entry_idx, side, price, amount, leverage, status, order_id, strategy, updated_at, created_at
+            FROM swing_entry_plans
+            WHERE bot_id=? AND symbol=? AND opened_at=?
+            ORDER BY entry_idx ASC
+            """,
+            (str(bot_id or "").strip().lower(), str(symbol or "").strip().upper(), str(opened_at or "").strip()),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def clear_swing_entry_plan(self, bot_id: str, symbol: str, opened_at: str) -> None:
+        """Delete persisted ladder entries for one open trade."""
+        assert self._conn
+        self._conn.execute(
+            "DELETE FROM swing_entry_plans WHERE bot_id=? AND symbol=? AND opened_at=?",
+            (str(bot_id or "").strip().lower(), str(symbol or "").strip().upper(), str(opened_at or "").strip()),
+        )
+        self._conn.commit()
 
     # ---- Acknowledgment buffer ----
 
@@ -975,10 +1183,10 @@ class HubDB(TradeDB):
         )
         self._conn.commit()
 
-    def load_binance_snapshots_since(self, since_iso: str) -> list[sqlite3.Row]:
+    def load_binance_snapshots_since(self, since_iso: str) -> list[Any]:
         """Load scanner snapshots since a given ISO timestamp."""
         assert self._conn
-        return self._conn.execute(
+        rows = self._conn.execute(
             """
             SELECT timestamp, symbol, price, quote_volume, change_24h, funding_rate
             FROM cex_binance_snapshots
@@ -987,6 +1195,7 @@ class HubDB(TradeDB):
             """,
             (since_iso,),
         ).fetchall()
+        return list(rows)
 
     def cleanup_binance_snapshots_before(self, cutoff_iso: str) -> int:
         """Delete old scanner snapshots; returns deleted row count."""
@@ -1110,13 +1319,14 @@ class HubDB(TradeDB):
         )
         self._conn.commit()
 
-    def load_binance_symbol_states(self) -> list[sqlite3.Row]:
+    def load_binance_symbol_states(self) -> list[Any]:
         """Load all persisted one-row-per-symbol aggregate states."""
         assert self._conn
-        return self._conn.execute("SELECT * FROM cex_binance_symbol_state ORDER BY symbol ASC").fetchall()
+        rows = self._conn.execute("SELECT * FROM cex_binance_symbol_state ORDER BY symbol ASC").fetchall()
+        return list(rows)
 
     @property
-    def conn(self) -> sqlite3.Connection | None:
+    def conn(self) -> Any | None:
         return self._conn
 
     # ---- Analytics snapshot persistence ----

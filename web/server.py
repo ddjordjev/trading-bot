@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-import sqlite3
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -1206,18 +1205,18 @@ def _get_db_conn() -> Any:
 
 def _db_backend_for_conn(conn: Any) -> str:
     if conn is None:
-        return "sqlite"
-    if conn.__class__.__name__ == "PgConnCompat":
         return "postgres"
-    return str(get_settings().hub_db_backend or "sqlite").strip().lower()
+    if getattr(conn, "is_local_fallback", False):
+        return "local"
+    return "postgres"
 
 
 def _quote_ident(name: str, *, backend: str) -> str:
     if not _IDENT_RE.match(name):
         raise HTTPException(status_code=400, detail="invalid table name")
-    if backend == "postgres":
-        return f'"{name}"'
-    return f"[{name}]"
+    if backend == "local":
+        return f"[{name}]"
+    return f'"{name}"'
 
 
 def _get_db_tables() -> list[dict[str, Any]]:
@@ -1225,7 +1224,16 @@ def _get_db_tables() -> list[dict[str, Any]]:
     if not conn:
         return []
     backend = _db_backend_for_conn(conn)
-    if backend == "postgres":
+    if backend == "local":
+        rows = conn.execute(
+            """
+            SELECT name
+            FROM pragma_table_list
+            WHERE type='table'
+            ORDER BY name
+            """
+        ).fetchall()
+    else:
         rows = conn.execute(
             """
             SELECT table_name AS name
@@ -1233,10 +1241,6 @@ def _get_db_tables() -> list[dict[str, Any]]:
             WHERE table_schema='public'
             ORDER BY table_name
             """
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
         ).fetchall()
     result = []
     for r in rows:
@@ -1571,6 +1575,16 @@ def _build_merged_snapshot() -> dict[str, Any]:
             key = (exchange, symbol)
             if key not in ownership_by_key:
                 ownership_by_key[key] = owner_bot
+
+    recent_owner_rows_fn = getattr(hub, "get_recent_recovery_owner_rows", None)
+    if callable(recent_owner_rows_fn):
+        for row in recent_owner_rows_fn(24):
+            owner_bot = _normalize_bot_id(row.get("bot_id", ""))
+            symbol = _pair_symbol(row.get("symbol", ""))
+            if not owner_bot or not symbol:
+                continue
+            if symbol not in ownership_by_symbol:
+                ownership_by_symbol[symbol] = owner_bot
 
     latest_foreign_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for obs in foreign_observations:
@@ -1924,7 +1938,19 @@ async def reserve_trade_open(request: Request, _: str = Depends(verify_token)) -
     hub = _get_hub_db()
     try:
         hub.insert_trade(bot_id, reserve_trade, request_key=request_key)
-    except sqlite3.Error as e:
+    except Exception as e:
+        msg = str(e)
+        if msg.startswith("open_owner_conflict:"):
+            parts = msg.split(":", 2)
+            conflict_symbol = parts[1] if len(parts) > 1 else reserve_trade.get("symbol", "")
+            owner_bot = parts[2] if len(parts) > 2 else ""
+            return {
+                "status": "conflict",
+                "detail": "symbol already has open owner",
+                "symbol": conflict_symbol,
+                "owner_bot_id": owner_bot,
+                "request_key": request_key,
+            }
         logger.warning("Trade reserve failed for {} {}: {}", bot_id, reserve_trade.get("symbol", ""), e)
         raise HTTPException(status_code=503, detail=f"hub_db_unavailable: {e}") from e
     return {"status": "ok", "opened_at": opened_at, "request_key": request_key}
@@ -1974,7 +2000,20 @@ async def receive_trade(request: Request, _: str = Depends(verify_token)) -> dic
                 return {"status": "deferred", "action": action, "request_key": request_key}
         else:
             hub.insert_trade(bot_id, trade, request_key=request_key)
-    except sqlite3.Error as e:
+    except Exception as e:
+        msg = str(e)
+        if msg.startswith("open_owner_conflict:"):
+            parts = msg.split(":", 2)
+            conflict_symbol = parts[1] if len(parts) > 1 else str(trade.get("symbol", "") or "")
+            owner_bot = parts[2] if len(parts) > 2 else ""
+            return {
+                "status": "conflict",
+                "action": action,
+                "request_key": request_key,
+                "detail": "symbol already has open owner",
+                "symbol": conflict_symbol,
+                "owner_bot_id": owner_bot,
+            }
         logger.warning("Trade write failed action={} bot_id={}: {}", action, bot_id, e)
         raise HTTPException(status_code=503, detail=f"hub_db_unavailable: {e}") from e
 
@@ -1989,11 +2028,46 @@ async def get_bot_open_trades(bot_id: str, _: str = Depends(verify_token)) -> li
     return [t.model_dump() for t in trades]
 
 
+@app.get("/internal/trades/{bot_id}/recovery-owners")
+async def get_bot_recovery_owner_symbols(bot_id: str, _: str = Depends(verify_token)) -> list[str]:
+    """Return recent recovery-owner symbols for bot startup orphan re-attachment."""
+    hub = _get_hub_db()
+    return hub.get_recent_recovery_owner_symbols(_normalize_bot_id(bot_id), lookback_hours=24)
+
+
 @app.get("/internal/trades/{bot_id}/stats")
 async def get_bot_strategy_stats(bot_id: str, _: str = Depends(verify_token)) -> dict[str, dict[str, Any]]:
     """Return per-strategy stats for a bot, keyed by 'strategy:symbol'."""
     hub = _get_hub_db()
     return hub.get_all_strategy_stats_for_bot(_normalize_bot_id(bot_id))
+
+
+@app.post("/internal/entry-plan/sync")
+async def sync_swing_entry_plan(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
+    """Persist swing ladder entries for one open trade."""
+    data = await request.json()
+    bot_id = _normalize_bot_id(data.get("bot_id", ""))
+    symbol = _pair_symbol(data.get("symbol", ""))
+    opened_at = str(data.get("opened_at", "") or "").strip()
+    entries = data.get("entries", [])
+    if not bot_id or not symbol or not opened_at or not isinstance(entries, list):
+        return {"status": "error", "detail": "missing bot_id/symbol/opened_at/entries"}
+    hub = _get_hub_db()
+    hub.replace_swing_entry_plan(bot_id, symbol, opened_at, entries)
+    return {"status": "ok", "count": len(entries)}
+
+
+@app.get("/internal/entry-plan/{bot_id}/{symbol:path}")
+async def get_swing_entry_plan(
+    bot_id: str,
+    symbol: str,
+    opened_at: str,
+    _: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """Load persisted swing ladder entries for one open trade."""
+    hub = _get_hub_db()
+    entries = hub.get_swing_entry_plan(_normalize_bot_id(bot_id), _pair_symbol(symbol), str(opened_at or "").strip())
+    return {"status": "ok", "entries": entries}
 
 
 @app.post("/internal/recovery-close")

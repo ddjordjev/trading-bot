@@ -6,6 +6,15 @@ import { useEffect, useState } from "react";
 
 const ALLOWED_EXCHANGES = new Set(["BINANCE", "BYBIT"]);
 
+function buildExchangeSymbolUrl(symbol: string, exchange: string | undefined): string {
+  const ex = String(exchange || "").toUpperCase();
+  if (!symbol || !ex) return "";
+  const clean = symbol.replace("/", "").toUpperCase();
+  if (ex === "BINANCE") return `https://www.binance.com/en/futures/${clean}`;
+  if (ex === "BYBIT") return `https://www.bybit.com/trade/usdt/${clean}`;
+  return "";
+}
+
 interface Props {
   data: FullSnapshot | null;
   showBotColumn?: boolean;
@@ -63,7 +72,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
 
   const defaultAssignee = (orphan: any): string => {
     const original = String(orphan.originally_opened_by || "").trim();
-    if (original) return original;
+    if (original && bots.some((b) => b.bot_id === original)) return original;
     const ex = String(orphan.exchange_name || "").toUpperCase();
     const sameExchange = bots.filter((b) => b.exchange.toUpperCase() === ex);
     if (sameExchange.length > 0) return sameExchange[0].bot_id;
@@ -378,11 +387,23 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                 const originalOwner = String(o.originally_opened_by || "").trim();
                 const ownerRunning = o.owner_running === true;
                 const ownerOptionMissing = !!originalOwner && !bots.some((b) => b.bot_id === originalOwner);
-                const assignBlockedByOfflineOwner = !!originalOwner && !ownerRunning;
                 const reason = String(o.orphan_reason || "").trim() || "unknown";
                 return (
                   <tr key={key}>
-                    <td>{o.symbol}</td>
+                    <td>
+                      {buildExchangeSymbolUrl(String(o.symbol || ""), String(o.exchange_name || "")) ? (
+                        <a
+                          href={buildExchangeSymbolUrl(String(o.symbol || ""), String(o.exchange_name || ""))}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ color: "var(--blue)" }}
+                        >
+                          {o.symbol} ↗
+                        </a>
+                      ) : (
+                        <strong>{o.symbol}</strong>
+                      )}
+                    </td>
                     <td style={{ fontSize: "0.75rem", fontWeight: 500, textTransform: "uppercase", color: "var(--text-muted)" }}>{String(o.exchange_name || "—")}</td>
                     <td style={{ color: String(o.side || "").toLowerCase() === "long" ? "var(--green)" : "var(--red)" }}>{String(o.side || "").toUpperCase()}</td>
                     <td>{Number(o.amount || 0).toFixed(6)}</td>
@@ -400,7 +421,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                         style={{ minWidth: 120 }}
                       >
                         {ownerOptionMissing && (
-                          <option key={originalOwner} value={originalOwner}>
+                          <option key={originalOwner} value={originalOwner} disabled>
                             {originalOwner} (offline)
                           </option>
                         )}
@@ -415,8 +436,8 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                       <button
                         className="btn-primary"
                         style={{ marginRight: 6 }}
-                        disabled={!chosenBot || assignBlockedByOfflineOwner}
-                        title={assignBlockedByOfflineOwner ? "Owner bot is currently not running" : "Assign orphan to selected bot"}
+                        disabled={!chosenBot}
+                        title="Assign orphan to selected bot"
                         onClick={async () => {
                           const res = await postBody("/api/orphan/assign", {
                             symbol: o.symbol,

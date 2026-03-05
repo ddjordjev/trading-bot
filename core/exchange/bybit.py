@@ -5,7 +5,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-import ccxt.async_support as ccxt
 from loguru import logger
 
 from core.exchange.base import (
@@ -29,6 +28,14 @@ from core.models import (
     Ticker,
 )
 
+_CCXT_IMPORT_ERROR: ModuleNotFoundError | None = None
+try:
+    import ccxt.async_support as _ccxt
+except ModuleNotFoundError as exc:  # pragma: no cover - import-time environment issue
+    _ccxt = None
+    _CCXT_IMPORT_ERROR = exc
+ccxt: Any = _ccxt
+
 
 class BybitExchange(BaseExchange):
     """Bybit implementation via ccxt. Supports spot and USDT perpetual futures."""
@@ -38,6 +45,11 @@ class BybitExchange(BaseExchange):
 
     def __init__(self, api_key: str = "", api_secret: str = "", sandbox: bool = True):
         super().__init__(api_key, api_secret, sandbox)
+        if ccxt is None:
+            raise ModuleNotFoundError(
+                "ccxt import failed (missing optional dependency module). "
+                "Install a compatible ccxt build for this runtime."
+            ) from _CCXT_IMPORT_ERROR
         self._spot = ccxt.bybit(
             {
                 "apiKey": api_key,

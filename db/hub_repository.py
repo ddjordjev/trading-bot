@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Protocol
 
 from config.settings import get_settings
-from db.hub_store import HubDB
 from db.hub_store_postgres import PostgresHubDB
 
 
@@ -13,9 +12,6 @@ class HubRepository(Protocol):
     def close(self) -> None: ...
 
 
-def make_hub_repository(path: Path | None = None) -> HubDB | PostgresHubDB:
+def make_hub_repository(path: Path | None = None) -> PostgresHubDB:
     settings = get_settings()
-    backend = str(settings.hub_db_backend or "sqlite").strip().lower()
-    if backend == "postgres":
-        return PostgresHubDB(dsn=settings.hub_postgres_dsn)
-    return HubDB(path=path or Path("data/hub.db"))
+    return PostgresHubDB(dsn=settings.hub_postgres_dsn, path=path or Path("data/hub.db"))

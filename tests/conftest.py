@@ -12,7 +12,7 @@ def _isolate_settings(monkeypatch, tmp_path):
 
     monkeypatch.setenv("TRADING_MODE", "paper_local")
     monkeypatch.setenv("EXCHANGE", "bybit")
-    monkeypatch.setenv("HUB_DB_BACKEND", "sqlite")
+    monkeypatch.setenv("HUB_DB_BACKEND", "postgres")
     monkeypatch.delenv("BYBIT_API_KEY", raising=False)
     monkeypatch.delenv("BYBIT_API_SECRET", raising=False)
     get_settings.cache_clear()

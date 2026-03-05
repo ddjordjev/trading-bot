@@ -234,7 +234,7 @@ Trading bots are lightweight executors that consume proposals from the hub via H
   <tr><td><code>scanner/binance_futures.py</code></td><td>Binance futures scanner with incremental per-symbol horizons (1m..1y), DB-backed snapshots/state, primary CEX hot-mover stream</td></tr>
   <tr><td><code>notifications/notifier.py</code></td><td>Email alerts with bounded queue (liquidation, stops, daily summary, legendary ride)</td></tr>
   <tr><td><code>db/store.py</code></td><td>Legacy trade layer (migration/testing only — bots do not persist locally)</td></tr>
-  <tr><td><code>db/hub_store.py</code> + <code>db/hub_store_postgres.py</code></td><td>Hub persistence adapters — PostgreSQL primary runtime with compatibility adapter</td></tr>
+  <tr><td><code>db/hub_store.py</code> + <code>db/hub_store_postgres.py</code></td><td>Hub persistence adapters — PostgreSQL runtime stack</td></tr>
   <tr><td><code>db/models.py</code></td><td>TradeRecord, StrategyScore, PatternInsight, ModificationSuggestion</td></tr>
   <tr><td><code>analytics/engine.py</code></td><td>Pattern detection, strategy scoring, weight factors, modification suggestions</td></tr>
   <tr><td><code>hub_main.py</code></td><td>Hub entry point — FastAPI + Monitor + Analytics + daily report (NOT a TradingBot)</td></tr>

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import bisect
 import contextlib
-import sqlite3
 from collections import defaultdict, deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,9 +11,7 @@ from typing import Any
 import aiohttp
 from loguru import logger
 
-from config.settings import get_settings
 from db.hub_repository import make_hub_repository
-from db.hub_store import HubDB
 from scanner.trending import TrendingCoin
 
 
@@ -78,10 +75,7 @@ class BinanceFuturesScanner:
         self._binance_symbols = {s.upper().split(":")[0] for s in symbols}
 
     def _new_hub_db(self):
-        backend = str(get_settings().hub_db_backend or "sqlite").strip().lower()
-        if backend == "postgres":
-            return make_hub_repository(path=self._db_path)
-        return HubDB(path=self._db_path)
+        return make_hub_repository(path=self._db_path)
 
     @property
     def latest_scan(self) -> list[TrendingCoin]:
@@ -188,13 +182,11 @@ class BinanceFuturesScanner:
 
     @staticmethod
     def _is_retryable_db_error(exc: Exception) -> bool:
-        if not isinstance(exc, sqlite3.OperationalError):
-            return False
         msg = str(exc).lower()
         return "database is locked" in msg or "disk i/o error" in msg
 
     async def _persist_tick(self, rows: list[dict[str, Any]], state_rows: list[dict[str, Any]], now: datetime) -> None:
-        """Persist one scanner tick with short retries on transient SQLite contention."""
+        """Persist one scanner tick with short retries on transient DB contention."""
         last_exc: Exception | None = None
         for attempt in range(6):
             try:
@@ -264,7 +256,7 @@ class BinanceFuturesScanner:
         if rows:
             logger.info("Binance futures scanner restored {} symbol states", len(rows))
 
-    def _load_recent_history_blocking(self, since: str) -> list[sqlite3.Row]:
+    def _load_recent_history_blocking(self, since: str) -> list[Any]:
         db = self._new_hub_db()
         try:
             db.connect()
@@ -272,7 +264,7 @@ class BinanceFuturesScanner:
         finally:
             db.close()
 
-    def _load_symbol_states_blocking(self) -> list[sqlite3.Row]:
+    def _load_symbol_states_blocking(self) -> list[Any]:
         db = self._new_hub_db()
         try:
             db.connect()

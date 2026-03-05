@@ -185,3 +185,24 @@ CREATE TABLE IF NOT EXISTS analytics_snapshots (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_analytics_snapshots_updated_at ON analytics_snapshots(updated_at);
+
+CREATE TABLE IF NOT EXISTS swing_entry_plans (
+    id BIGSERIAL PRIMARY KEY,
+    bot_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    opened_at TEXT NOT NULL,
+    entry_idx INTEGER NOT NULL DEFAULT 0,
+    side TEXT NOT NULL DEFAULT '',
+    price DOUBLE PRECISION NOT NULL DEFAULT 0,
+    amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+    leverage INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'planned',
+    order_id TEXT NOT NULL DEFAULT '',
+    strategy TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_swing_entry_plan_unique
+    ON swing_entry_plans(bot_id, symbol, opened_at, entry_idx);
+CREATE INDEX IF NOT EXISTS idx_swing_entry_plan_lookup
+    ON swing_entry_plans(bot_id, symbol, opened_at);
