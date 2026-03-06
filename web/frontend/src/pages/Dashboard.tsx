@@ -3,6 +3,7 @@ import { postBody } from "../api/client";
 import { PositionRow } from "../components/PositionRow";
 import { LogViewer } from "../components/LogViewer";
 import { useEffect, useState } from "react";
+import { getBotLabel } from "../utils/botNames";
 
 const ALLOWED_EXCHANGES = new Set(["BINANCE", "BYBIT"]);
 
@@ -84,7 +85,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
 
   const resolveTargets = (action: string): string[] | null => {
     if (actionTarget === "-") {
-      const opts = visibleBots.map((b) => b.bot_id).join(", ");
+      const opts = visibleBots.map((b) => `${getBotLabel(b.bot_id)} (${b.bot_id})`).join(", ");
       const choice = prompt(`Which bot should "${action}" target?\nOptions: ${opts}, all`);
       if (!choice) return null;
       const picked = choice.trim().toLowerCase();
@@ -430,9 +431,11 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                     <td>{Number(o.amount || 0).toFixed(6)}</td>
                     <td>{Number(o.entry_price || 0).toFixed(Number(o.entry_price || 0) < 1 ? 6 : 2)}</td>
                     <td>{Number(o.current_price || 0).toFixed(Number(o.current_price || 0) < 1 ? 6 : 2)}</td>
-                    <td style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{String(o.detected_by_bot || "—")}</td>
+                    <td style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                      {String(o.detected_by_bot || "").trim() ? getBotLabel(String(o.detected_by_bot || "")) : "—"}
+                    </td>
                     <td style={{ fontSize: "0.75rem", color: ownerRunning ? "var(--text-muted)" : "var(--yellow)" }}>
-                      {originalOwner || "—"}
+                      {originalOwner ? getBotLabel(originalOwner) : "—"}
                     </td>
                     <td style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{reason}</td>
                     <td>
@@ -518,7 +521,11 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                 <tr key={`${(ws as any).bot_id || ""}:${ws.symbol}`}>
                   <td>{ws.symbol}</td>
                   {showBotColumn && <td style={{ fontSize: "0.75rem", fontWeight: 500, textTransform: "uppercase", color: "var(--text-muted)" }}>{(ws as any).exchange_name || "—"}</td>}
-                  {showBotColumn && <td style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)" }}>{(ws as any).bot_id || "—"}</td>}
+                  {showBotColumn && (
+                    <td style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)" }}>
+                      {(ws as any).bot_id ? getBotLabel(String((ws as any).bot_id)) : "—"}
+                    </td>
+                  )}
                   <td style={{ color: ws.scalp_side.toLowerCase() === "long" ? "var(--green)" : ws.scalp_side.toLowerCase() === "short" ? "var(--red)" : "var(--text)" }}>
                     {ws.scalp_side.toUpperCase()}
                   </td>

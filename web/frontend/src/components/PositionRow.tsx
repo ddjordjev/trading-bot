@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { PositionInfo } from "../hooks/useWebSocket";
 import { postBody } from "../api/client";
+import { getBotLabel } from "../utils/botNames";
 
 interface Props {
   position: PositionInfo & { bot_id?: string; exchange_name?: string };
@@ -118,7 +119,7 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
       {showBot && (
         <td>
           <span style={{ display: "block", fontSize: "0.75rem", fontWeight: 600, color: BOT_COLORS[botId] || "var(--text-muted)", textTransform: "uppercase" }}>
-            {botId || "—"}
+            {botId ? getBotLabel(botId) : "—"}
           </span>
           <span style={{ display: "block", fontSize: "0.7rem", fontWeight: 500, color: "var(--text-muted)", textTransform: "uppercase" }}>
             {strategy || "—"}

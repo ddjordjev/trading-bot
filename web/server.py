@@ -1360,6 +1360,11 @@ def report_bot_snapshot(data: dict[str, Any]) -> None:
     stamped = dict(data)
     stamped["bot_id"] = bot_id
     stamped["_reported_at"] = time.time()
+    if "exchange_balance" in stamped:
+        # Track when the raw exchange balance was actually observed.
+        # Quick hub-check heartbeats update _reported_at but may not carry a
+        # fresh exchange_balance value; recency must follow this marker.
+        stamped["_exchange_balance_reported_at"] = stamped["_reported_at"]
     existing = _bot_reports.get(bot_id)
     status_payload = stamped.get("status")
     has_full_status_payload = isinstance(status_payload, dict) and bool(status_payload)
@@ -1527,7 +1532,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
             first_status = s
 
         ex_bal_raw = rpt.get("exchange_balance", 0)
-        ex_reported_at = float(rpt.get("_reported_at", 0.0) or 0.0)
+        ex_reported_at = float(rpt.get("_exchange_balance_reported_at", 0.0) or 0.0)
         try:
             ex_bal = float(ex_bal_raw or 0.0)
         except (TypeError, ValueError):

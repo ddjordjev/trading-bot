@@ -1306,6 +1306,67 @@ class TestInternalReport:
         assert snap["exchange_balances"]["BINANCE"] == pytest.approx(5000.0)
         _bot_reports.clear()
 
+    async def test_merged_snapshot_ignores_heartbeat_recency_for_exchange_balance(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports.clear()
+        base_status = {
+            "running": True,
+            "balance": 0.0,
+            "available_margin": 0.0,
+            "daily_pnl": 0.0,
+            "daily_pnl_pct": 0.0,
+            "total_growth_usd": 0.0,
+            "total_growth_pct": 0.0,
+            "profit_buffer_pct": 0.0,
+            "uptime_seconds": 10,
+            "manual_stop_active": False,
+            "strategies_count": 0,
+            "dynamic_strategies_count": 0,
+            "trading_mode": "paper_local",
+            "exchange_name": "BINANCE",
+            "exchange_url": "",
+            "tier": "building",
+            "tier_progress_pct": 0,
+            "daily_target_pct": 10,
+        }
+
+        report_bot_snapshot(
+            {
+                "bot_id": "stale_high",
+                "exchange": "BINANCE",
+                "exchange_balance": 5200.0,
+                "status": dict(base_status),
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+        report_bot_snapshot(
+            {
+                "bot_id": "fresh_low",
+                "exchange": "BINANCE",
+                "exchange_balance": 5000.0,
+                "status": dict(base_status),
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+        # New heartbeat for stale_high must not make its old exchange_balance
+        # appear fresher than fresh_low's real balance snapshot.
+        report_bot_snapshot({"bot_id": "stale_high", "status": {"running": True}})
+
+        _bot_reports["stale_high"]["_exchange_balance_reported_at"] = 1.0
+        _bot_reports["stale_high"]["_reported_at"] = 3.0
+        _bot_reports["fresh_low"]["_exchange_balance_reported_at"] = 2.0
+        _bot_reports["fresh_low"]["_reported_at"] = 2.0
+        from web.server import _build_merged_snapshot
+
+        snap = _build_merged_snapshot()
+        assert snap["status"]["balance"] == pytest.approx(5000.0)
+        assert snap["exchange_balances"]["BINANCE"] == pytest.approx(5000.0)
+        _bot_reports.clear()
+
     async def test_merged_snapshot_orphans_use_exchange_symbol_side_keys(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
         _bot_reports.clear()

@@ -2025,9 +2025,18 @@ class TradingBot:
         # Serialize emergency flattening against stop/protection checks so we don't
         # place/replace protection orders while trying to close everything.
         async with self._stop_check_lock:
+            reason_l = str(reason or "").lower()
+            close_owned_only = "hub_disabled" in reason_l
+            owned_symbols: set[str] = set(self._open_trades.keys()) if close_owned_only else set()
             positions = await self.exchange.fetch_positions()
             for pos in positions:
                 if pos.amount <= 0:
+                    continue
+                if close_owned_only and pos.symbol not in owned_symbols:
+                    logger.info(
+                        "Skip {} close during hub-disabled wind-down: not bot-owned runtime trade",
+                        pos.symbol,
+                    )
                     continue
                 try:
                     market_type = (
@@ -2434,15 +2443,14 @@ class TradingBot:
             "projected": t.projected_balance,
         }
 
-        anchor_balance = self.exchange.get_balance_anchor("USDT")
-        if inspect.isawaitable(anchor_balance):
-            anchor_balance = await anchor_balance
-
         payload = {
             "bot_id": self.settings.bot_id or "default",
             "bot_style": self.settings.bot_style,
             "exchange": self.settings.exchange.upper(),
-            "exchange_balance": float(anchor_balance or self._raw_balance or 0.0),
+            # Dashboard equity is computed centrally as:
+            # free_balance + used_margin + unrealized_pnl.
+            # So this field must be FREE (remaining) balance only.
+            "exchange_balance": float(self._raw_balance or 0.0),
             "status": {
                 "running": self._running,
                 "trading_mode": self.settings.trading_mode,

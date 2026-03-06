@@ -838,6 +838,46 @@ class TestCloseAllAndWhaleAndDeployment:
         bot.orders.execute_signal.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_close_all_positions_hub_disabled_closes_only_owned_symbols(self, bot, mock_exchange):
+        from core.models.order import OrderSide, Position
+
+        bot._open_trades["BTC/USDT"] = TradeRecord(
+            id=1,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="swing",
+            action="open",
+            opened_at="2026-03-06T00:00:00+00:00",
+            leverage=1,
+        )
+        pos_owned = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.01,
+            entry_price=50_000.0,
+            current_price=50_000.0,
+            market_type="futures",
+        )
+        pos_not_owned = Position(
+            symbol="ETH/USDT",
+            side=OrderSide.BUY,
+            amount=0.1,
+            entry_price=3000.0,
+            current_price=3000.0,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions = AsyncMock(return_value=[pos_owned, pos_not_owned])
+        bot.orders.clear_symbol_protection_orders = AsyncMock(return_value=0)
+        bot.orders.execute_signal = AsyncMock()
+
+        await bot._close_all_positions("hub_disabled")
+
+        bot.orders.execute_signal.assert_called_once()
+        call_sig = bot.orders.execute_signal.call_args[0][0]
+        assert call_sig.action == SignalAction.CLOSE
+        assert call_sig.symbol == "BTC/USDT"
+
+    @pytest.mark.asyncio
     async def test_close_all_positions_sequence_ladder_then_protection_then_close(self, bot, mock_exchange):
         from core.models.order import OrderSide, Position
 
@@ -1507,6 +1547,18 @@ class TestReportDashboardSnapshot:
         payload = bot._post_to_hub.call_args[0][1]
         assert payload["positions"]
         assert payload["positions"][0]["age_minutes"] >= 35
+
+    @pytest.mark.asyncio
+    async def test_report_dashboard_snapshot_uses_free_balance_not_wallet_anchor(self, bot):
+        bot.settings.hub_url = "http://hub.example.com"
+        bot._post_to_hub = AsyncMock()
+        bot._raw_balance = 1200.0
+        bot.exchange.get_balance_anchor = AsyncMock(return_value=5000.0)
+
+        await bot._report_dashboard_snapshot([])
+
+        payload = bot._post_to_hub.call_args[0][1]
+        assert payload["exchange_balance"] == pytest.approx(1200.0)
 
     @pytest.mark.asyncio
     async def test_report_dashboard_snapshot_marks_unknown_strategy_as_dynamic(self, bot):

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { get, post } from "../api/client";
+import { getBotLabel } from "../utils/botNames";
 
 interface BotProfile {
   id: string;
@@ -93,7 +94,7 @@ export function BotProfiles() {
             >
               <div className="module-header">
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  <h3 style={{ margin: 0 }}>{p.display_name}</h3>
+                  <h3 style={{ margin: 0 }}>{getBotLabel(p.id)}</h3>
                   <span
                     style={{
                       fontSize: "0.65rem",

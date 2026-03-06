@@ -8,6 +8,7 @@ import { Strategies } from "./pages/Strategies";
 import { Analytics } from "./pages/Analytics";
 import { Monitoring } from "./pages/Monitoring";
 import { Settings } from "./pages/Settings";
+import { getBotLabel } from "./utils/botNames";
 
 const FALLBACK_EXCHANGES = ["BINANCE", "BYBIT"];
 const ALLOWED_EXCHANGES = new Set(FALLBACK_EXCHANGES);
@@ -16,12 +17,6 @@ const TABS = [
   "Dashboard", "Intel", "Scanner", "Strategies", "Analytics", "Monitoring", "Settings",
 ] as const;
 type Tab = typeof TABS[number];
-
-const LABEL_MAP: Record<string, string> = {
-  momentum: "Momentum",
-  meanrev: "Mean Reversion",
-  swing: "Swing",
-};
 
 export function App() {
   const [selected, setSelected] = useState("all");
@@ -34,7 +29,7 @@ export function App() {
     if (!snapshot?.bots) return [];
     return snapshot.bots.map((b) => ({
       bot_id: b.bot_id,
-      label: LABEL_MAP[b.bot_id] || b.bot_id.charAt(0).toUpperCase() + b.bot_id.slice(1),
+      label: getBotLabel(b.bot_id),
       exchange: (() => {
         const normalized = String(b.exchange || "").trim().toUpperCase();
         return ALLOWED_EXCHANGES.has(normalized) ? normalized : "";
