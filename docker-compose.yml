@@ -9,7 +9,11 @@ x-bot-common: &bot-common
     context: .
     dockerfile: Dockerfile.bot
   restart: unless-stopped
-  env_file: .env
+  env_file:
+    - path: .env
+      required: true
+    - path: ${RUNTIME_ENV_OVERRIDE_FILE:-.env.runtime.override}
+      required: false
   environment:
     - TZ=UTC
   command: python bot.py
@@ -30,7 +34,11 @@ services:
     image: postgres:16
     container_name: bot-hub-postgres
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: true
+      - path: ${RUNTIME_ENV_OVERRIDE_FILE:-.env.runtime.override}
+        required: false
     environment:
       - POSTGRES_USER=${HUB_POSTGRES_USER:-tradeborg}
       - POSTGRES_PASSWORD=${HUB_POSTGRES_PASSWORD:-tradeborg}
@@ -59,12 +67,14 @@ services:
     env_file:
       - path: .env
         required: true
+      - path: ${RUNTIME_ENV_OVERRIDE_FILE:-.env.runtime.override}
+        required: false
       - path: .env.openclaw.local
         required: false
     environment:
       - TZ=UTC
       - DASHBOARD_PORT=9035
-      - BOT_PROFILES_VISIBLE_IDS=extreme,hedger,indicators
+      - BOT_PROFILES_VISIBLE_IDS=${BOT_PROFILES_VISIBLE_IDS:-}
       - OPENCLAW_URL=http://openclaw-bridge:18080/intel
       - OPENCLAW_TIMEOUT_SECONDS=10
       - OPENCLAW_DAILY_REVIEW_ENABLED=true
@@ -98,6 +108,8 @@ services:
     env_file:
       - path: .env
         required: true
+      - path: ${RUNTIME_ENV_OVERRIDE_FILE:-.env.runtime.override}
+        required: false
       - path: .env.openclaw.local
         required: false
     environment:

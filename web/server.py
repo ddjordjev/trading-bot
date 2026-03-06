@@ -1149,13 +1149,15 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
         if not rpt:
             container_status = "idle"
         else:
-            running = bool(s.get("running"))
-            if running:
-                container_status = "running"
-            elif not enabled and positions:
+            # Disabled profiles should never display as "running" in the UI.
+            # If they still have positions, show winding_down; otherwise idle.
+            if not enabled and positions:
                 container_status = "winding_down"
-            else:
+            elif not enabled:
                 container_status = "idle"
+            else:
+                running = bool(s.get("running"))
+                container_status = "running" if running else "idle"
         summary = hub.get_bot_summary(p.id)
         exchange_name = str(rpt.get("exchange", "") or p.env_overrides.get("EXCHANGE", "") or "").strip().upper()
         balance_now: float | None
@@ -1216,6 +1218,9 @@ async def toggle_bot_profile(profile_id: str, _: str = Depends(verify_token)) ->
 
     if new_enabled:
         _write_activation_file(profile_id)
+    else:
+        # Drop stale in-memory snapshot so disabled cards don't show old runtime state.
+        _bot_reports.pop(profile_id, None)
 
     action = "Enabled" if new_enabled else "Disabled"
     nudge_ws()

@@ -3472,6 +3472,31 @@ class TestBotProfiles:
         finally:
             _bot_reports.clear()
 
+    async def test_profile_status_not_running_when_disabled_with_stale_running_snapshot(self, client, mock_bot):
+        set_bot(mock_bot)
+        hub = _get_hub_db()
+        hub.set_bot_enabled("indicators", False)
+        _bot_reports.clear()
+        report_bot_snapshot(
+            {
+                "bot_id": "indicators",
+                "exchange": "BINANCE",
+                "status": {"running": True, "available_margin": 800.0},
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+        try:
+            r = await client.get("/api/bot-profiles")
+            assert r.status_code == 200
+            data = r.json()
+            profile = next(p for p in data if p["id"] == "indicators")
+            assert profile["enabled"] is False
+            assert profile["container_status"] == "idle"
+        finally:
+            _bot_reports.clear()
+
     async def test_profile_status_idle_when_enabled_without_reports(self, client, mock_bot):
         set_bot(mock_bot)
         hub = _get_hub_db()

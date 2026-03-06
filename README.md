@@ -41,6 +41,24 @@ chmod +x scripts/deploy-digitalocean.sh
 ./scripts/deploy-digitalocean.sh
 ```
 
+### Environment-Specific Docker Commands
+
+Use the provided `Makefile` targets to avoid config bleed between local and prod:
+
+```bash
+# Local (paper/live dev defaults, full local profile visibility)
+make up-local
+make fresh-local
+make enable-all-local-bots
+
+# Prod (requires env/prod.compose.env + env/prod.runtime.env on target host)
+make up-prod
+```
+
+Notes:
+- Local dashboard should be on `http://localhost:9035`.
+- `http://localhost:9045` is often used by an SSH tunnel to a remote host.
+
 ## Configuration
 
 All config is via `.env` file (copy from `.env.example`). Key settings:
