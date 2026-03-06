@@ -139,3 +139,38 @@ Keep budgets conservative. The hub-managed version is the real solution.
    - High volatility = bigger moves = more profit potential.
    - Risk management limits *losses*, not *exposure to movement*.
    - Strategies should lean INTO volatility spikes, not shy away.
+
+---
+
+## Per-Bot Exchange Activation (No 20-Container Explosion)
+
+Goal: keep one container per bot profile (10 total), but activate each bot on a
+selected CEX at runtime (for example: `extreme -> bybit`, `indicators -> binance`).
+
+This avoids the profile-per-exchange multiplication (`10 profiles x 2 exchanges = 20 containers`)
+while preserving strict routing by bot identity and exchange.
+
+**Model:**
+- Keep static bot IDs (`extreme`, `hedger`, `indicators`, etc.)
+- Add `active_exchange` assignment in hub config/state per bot
+- Toggle endpoint accepts target exchange when enabling a bot
+- Bot starts from lean idle, reads assigned exchange, then connects only to that exchange
+- Proposal matching remains strict on `(bot_id, exchange)`
+
+**Why this is viable:**
+- No need to duplicate profiles/containers per exchange
+- Maintains current architecture: idle bots remain local-file activated, hub controls "what"
+- Keeps user mental model simple: "activate this bot on that CEX"
+
+**Operational guardrail (recommended):**
+- Block exchange reassignment while the bot has open positions (require flat first)
+- Reassignment is allowed when disabled and flat
+
+**Minimal implementation shape:**
+1. Persist `active_exchange` in hub DB config (per bot_id)
+2. Extend `/api/bot-profile/{id}/toggle` to accept optional `exchange`
+3. Include assigned exchange in hub->bot report payload
+4. Bot applies exchange assignment before `_full_start()`
+5. UI: exchange selector next to bot toggle
+
+**Status:** Parked design note. Revisit when enabling dual-CEX operation.
