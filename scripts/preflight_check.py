@@ -53,9 +53,13 @@ async def run_checks() -> bool:
         "binance": (settings.binance_api_key, settings.binance_api_secret),
         "bybit": (settings.bybit_api_key, settings.bybit_api_secret),
     }
-    api_key, api_secret = key_map.get(settings.exchange, ("", ""))
+    api_key, api_secret = key_map.get(settings.exchange_base, ("", ""))
     has_keys = bool(api_key and api_secret)
-    check(f"API keys for {settings.exchange}", has_keys, "set" if has_keys else "MISSING — set in .env")
+    check(
+        f"API keys for {settings.exchange_base}",
+        has_keys,
+        "set" if has_keys else "MISSING — set in .env",
+    )
 
     if not has_keys:
         print("\nCannot continue without API keys. Set them in .env first.")

@@ -152,7 +152,7 @@ class TradingBot:
         self.target = DailyTargetTracker(
             daily_target_pct=daily_target_pct,
             compound=True,
-            aggressive_mode=self.settings.is_paper_local(),
+            aggressive_mode=bool(self.settings.risk_env_multiplier > 1.0),
             bot_data_dir=Path(self.settings.data_dir),
         )
         self.market_filter = MarketQualityFilter(
@@ -234,7 +234,7 @@ class TradingBot:
         validator_key = (self.settings.bot_id or "").strip().lower()
         if validator_key not in VALIDATORS_BY_STYLE:
             validator_key = self.settings.bot_style
-        self._validator = get_validator(validator_key, paper_mode=self.settings.is_paper_local())
+        self._validator = get_validator(validator_key, paper_mode=bool(self.settings.risk_env_multiplier > 1.0))
 
     # -- Strategy Management --
 
@@ -318,33 +318,17 @@ class TradingBot:
         await self._full_start()
 
     async def _check_initial_activation(self) -> bool:
-        """Query the hub for this bot's enabled status before heavy init."""
-        from config.bot_profiles import PROFILES_BY_ID
+        """Use runtime config + local activation file before heavy init."""
+        from config.bot_profiles import PROFILES_BY_ID, is_default_enabled
 
         bot_id = self.settings.bot_id or "default"
         profile = PROFILES_BY_ID.get(bot_id)
-        if profile and profile.is_default:
+        if is_default_enabled(bot_id):
             return True
-
-        hub_url = self.settings.hub_url
-        if not hub_url:
+        if profile and profile.is_hub:
             return True
-
-        default = profile.is_default if profile else False
-        try:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=5),
-                headers=self._hub_auth_headers(),
-            ) as sess:
-                payload = {"bot_id": bot_id, "bot_style": self.settings.bot_style}
-                async with sess.post(f"{hub_url}/internal/report", json=payload) as resp:
-                    data = await resp.json()
-                    enabled = data.get("enabled", default)
-                    self._hub_enabled = enabled
-                    return enabled
-        except Exception:
-            logger.warning("Hub unreachable during activation check — defaulting to idle")
-            return False
+        activate_path = Path(self.settings.data_dir) / "activate"
+        return activate_path.exists()
 
     def _hub_auth_headers(self) -> dict[str, str]:
         token = str(getattr(self.settings, "dashboard_token", "") or "").strip()
@@ -476,16 +460,14 @@ class TradingBot:
         )
         if not self.settings.insufficient_balance_auto_disable:
             return
-        if str(self.settings.exchange).lower() != "bybit":
+        if self.settings.exchange_base != "bybit":
             return
         if burst_size < threshold:
             return
         if (now_ts - self._last_auto_disable_ts) < 300:
             return
         self._last_auto_disable_ts = now_ts
-        reason = (
-            f"auto-disabled: {burst_size} insufficient-balance errors in {window}s on {self.settings.exchange.upper()}"
-        )
+        reason = f"auto-disabled: {burst_size} insufficient-balance errors in {window}s on {self.settings.exchange_base.upper()}"
         await self._disable_self_on_hub(reason)
 
     async def _disable_self_on_hub(self, reason: str) -> None:
@@ -557,7 +539,7 @@ class TradingBot:
             "Exchange access loss detected [{}] for {} on {}: {}",
             context,
             self.settings.bot_id or "default",
-            str(self.settings.exchange).upper(),
+            self.settings.exchange_base.upper(),
             self._exchange_access_reason,
         )
         await self._report_critical_error_to_hub(
@@ -568,13 +550,13 @@ class TradingBot:
         )
 
         await self.notifier.alert_exchange_access_lost(
-            exchange=self.settings.exchange,
+            exchange=self.settings.exchange_base,
             bot_id=self.settings.bot_id or "default",
             reason=self._exchange_access_reason,
             context=context,
         )
         await self._disable_self_on_hub(
-            f"auto-disabled: exchange access lost ({str(self.settings.exchange).upper()}) [{context}]"
+            f"auto-disabled: exchange access lost ({self.settings.exchange_base.upper()}) [{context}]"
         )
 
     async def _lean_idle_loop(self) -> None:
@@ -599,12 +581,6 @@ class TradingBot:
                 break
             except Exception as e:
                 logger.warning("Lean idle error: {}", e)
-                await self._report_critical_error_to_hub(
-                    code="lean_idle_error",
-                    message=str(e),
-                    context="lean_idle_loop",
-                    severity="error",
-                )
                 await asyncio.sleep(10)
 
     async def _full_start(self) -> None:
@@ -635,7 +611,9 @@ class TradingBot:
             self._available_futures_symbols = {s.split(":")[0] for s in futures_syms}
             self._available_spot_symbols = set(spot_syms)
             self._available_symbols = set(self._available_futures_symbols) | set(self._available_spot_symbols)
-            logger.info("Published {} available symbols for {}", len(self._available_symbols), self.settings.exchange)
+            logger.info(
+                "Published {} available symbols for {}", len(self._available_symbols), self.settings.exchange_base
+            )
         except Exception as e:
             logger.warning("Could not publish exchange symbols: {}", e)
 
@@ -793,7 +771,7 @@ class TradingBot:
             payload: dict[str, Any] = {
                 "bot_id": self.settings.bot_id or "default",
                 "bot_style": self.settings.bot_style,
-                "exchange": self.settings.exchange.upper(),
+                "exchange": self.settings.exchange_base.upper(),
                 "open_symbols": list(self._open_trades.keys()),
                 "ready": self._entries_allowed(warmup_done),
                 "entries_paused_low_balance": self._low_balance_paused,
@@ -943,22 +921,12 @@ class TradingBot:
         return self._hub_enabled
 
     async def _idle_tick(self) -> None:
-        """Minimal tick when disabled — report IDLE status so hub sees us."""
-        status = BotDeploymentStatus(
-            bot_id=self.settings.bot_id or "default",
-            bot_style=self.settings.bot_style,
-            exchange=self.settings.exchange.upper(),
-            level=DeploymentLevel.IDLE,
-            open_positions=0,
-            max_positions=self.settings.effective_max_concurrent_positions,
-            capacity_pct=100.0,
-            daily_pnl_pct=0.0,
-            daily_tier="idle",
-            should_trade=False,
-            manual_stop=False,
-        )
-        self._last_bot_status = status
-        await self._report_dashboard_snapshot([])
+        """Strict idle mode: local activation-file watch only (no hub/CEX calls)."""
+        activate_path = Path(self.settings.data_dir) / "activate"
+        if activate_path.exists():
+            with contextlib.suppress(Exception):
+                activate_path.unlink(missing_ok=True)
+            self._hub_enabled = True
 
     async def _wind_down(self) -> None:
         """Close all positions before going idle."""
@@ -971,7 +939,7 @@ class TradingBot:
         status = BotDeploymentStatus(
             bot_id=self.settings.bot_id or "default",
             bot_style=self.settings.bot_style,
-            exchange=self.settings.exchange.upper(),
+            exchange=self.settings.exchange_base.upper(),
             level=DeploymentLevel.WINDING_DOWN,
             open_positions=len(active),
             max_positions=self.settings.effective_max_concurrent_positions,
@@ -1487,7 +1455,7 @@ class TradingBot:
             url = f"{hub_url.rstrip('/')}/internal/queue-update"
             payload = {
                 "bot_id": self.settings.bot_id or "default",
-                "exchange": self.settings.exchange.upper(),
+                "exchange": self.settings.exchange_base.upper(),
                 "proposal_id": proposal_id,
                 "action": action,
                 "reason": reason,
@@ -1608,7 +1576,7 @@ class TradingBot:
         stop loss, take profit targets, leverage ramp.  The bot places
         the initial entry and lets PYRAMID mode handle the rest.
         """
-        my_exchange = self.settings.exchange.upper()
+        my_exchange = self.settings.exchange_base.upper()
         self._last_queue_exec_reason = ""
         if my_exchange not in proposal.supported_exchanges:
             logger.debug("Swing skip {}: not on {}", proposal.symbol, my_exchange)
@@ -2285,7 +2253,7 @@ class TradingBot:
         status = BotDeploymentStatus(
             bot_id=self.settings.bot_id or "default",
             bot_style=self.settings.bot_style,
-            exchange=self.settings.exchange.upper(),
+            exchange=self.settings.exchange_base.upper(),
             level=level,
             open_positions=len(active),
             max_positions=self.settings.effective_max_concurrent_positions,
@@ -2446,7 +2414,7 @@ class TradingBot:
         payload = {
             "bot_id": self.settings.bot_id or "default",
             "bot_style": self.settings.bot_style,
-            "exchange": self.settings.exchange.upper(),
+            "exchange": self.settings.exchange_base.upper(),
             # Dashboard equity is computed centrally as:
             # free_balance + used_margin + unrealized_pnl.
             # So this field must be FREE (remaining) balance only.
@@ -2454,7 +2422,7 @@ class TradingBot:
             "status": {
                 "running": self._running,
                 "trading_mode": self.settings.trading_mode,
-                "exchange_name": self.settings.exchange.upper(),
+                "exchange_name": self.settings.exchange_base.upper(),
                 "exchange_url": self.settings.platform_url,
                 "balance": total_balance,
                 "available_margin": max(0.0, total_balance - margin_used),
@@ -2545,7 +2513,7 @@ class TradingBot:
 
         payload: dict[str, Any] = {
             "bot_id": self.settings.bot_id or "default",
-            "exchange": self.settings.exchange.upper(),
+            "exchange": self.settings.exchange_base.upper(),
             "severity": str(severity or "critical").strip().lower(),
             "code": str(code or "unknown").strip() or "unknown",
             "context": str(context or "runtime").strip() or "runtime",
@@ -2924,16 +2892,15 @@ class TradingBot:
             logger.info("Hub reports 0 open trades — clean start")
 
         exchange_positions: dict[str, Any] = {}
-        positions_fetch_ok = self.settings.is_paper_local()
-        if not self.settings.is_paper_local():
-            try:
-                positions = await self.exchange.fetch_positions()
-                for p in positions:
-                    if p.amount > 0:
-                        exchange_positions[p.symbol] = p
-                positions_fetch_ok = True
-            except Exception as e:
-                logger.warning("Could not fetch exchange positions for reconciliation: {}", e)
+        positions_fetch_ok = False
+        try:
+            positions = await self.exchange.fetch_positions()
+            for p in positions:
+                if p.amount > 0:
+                    exchange_positions[p.symbol] = p
+            positions_fetch_ok = True
+        except Exception as e:
+            logger.warning("Could not fetch exchange positions for reconciliation: {}", e)
 
         recovered = 0
         rehydrated = 0
@@ -2942,7 +2909,7 @@ class TradingBot:
             symbol = td.get("symbol", "")
             if not symbol:
                 continue
-            if self.settings.is_paper_local() or symbol in exchange_positions or (not positions_fetch_ok):
+            if symbol in exchange_positions or (not positions_fetch_ok):
                 rec = TradeRecord(**{k: v for k, v in td.items() if k in TradeRecord.model_fields})
                 self._open_trades[symbol] = rec
                 self._position_targets[symbol] = {
@@ -3274,8 +3241,6 @@ class TradingBot:
 
     async def _reconcile_runtime_open_trades(self, positions: list[Any]) -> None:
         """Keep local open-trade state aligned with live exchange positions."""
-        if self.settings.is_paper_local():
-            return
         for pos in positions:
             if float(getattr(pos, "amount", 0.0) or 0.0) <= 0:
                 continue
@@ -3787,7 +3752,7 @@ class TradingBot:
 
         open_symbols = set(self.orders.scaler.active_positions.keys())
         extreme_positions = sum(1 for s in self._active_signals if s.strategy.startswith("extreme_"))
-        my_exchange = self.settings.exchange.upper()
+        my_exchange = self.settings.exchange_base.upper()
         extreme_market_type = "futures" if self.settings.futures_allowed else "spot"
 
         for candidate in watchlist.candidates:

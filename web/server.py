@@ -359,7 +359,7 @@ async def get_status(_: str = Depends(verify_token)) -> BotStatus:
 @app.get("/api/bots", response_model=list[BotInstance])
 async def get_bots(_: str = Depends(verify_token)) -> list[BotInstance]:
     """List only enabled (non-hub) bot instances from in-memory reports."""
-    from config.bot_profiles import PROFILES_BY_ID
+    from config.bot_profiles import PROFILES_BY_ID, is_default_enabled
 
     bots: list[BotInstance] = []
     label_map = {"momentum": "Momentum", "meanrev": "Mean Reversion", "swing": "Swing"}
@@ -370,8 +370,12 @@ async def get_bots(_: str = Depends(verify_token)) -> list[BotInstance]:
         bid = _normalize_bot_id(rpt.get("bot_id", ""))
         if bid == "hub":
             continue
-        profile = PROFILES_BY_ID.get(bid)
-        if not enabled_map.get(bid, profile.is_default if profile else True):
+        default_enabled = is_default_enabled(bid) if bid in PROFILES_BY_ID else True
+        # Treat live-reported bots as visible unless hub explicitly disabled them.
+        enabled = bool(enabled_map.get(bid, True))
+        if bid in PROFILES_BY_ID and bid not in enabled_map:
+            enabled = default_enabled or bool(rpt.get("status", {}).get("running", False))
+        if not enabled:
             continue
         strat_names = [s.get("name", "") for s in rpt.get("strategies", [])]
         bots.append(
@@ -1129,7 +1133,7 @@ def _clear_openclaw_intel_cache() -> None:
 @app.get("/api/bot-profiles", response_model=list[BotProfileInfo])
 async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInfo]:
     """List all bot profiles with their hub-controlled status."""
-    from config.bot_profiles import ALL_PROFILES
+    from config.bot_profiles import ALL_PROFILES, is_default_enabled
 
     hub = _get_hub_db()
     enabled_map = hub.get_all_bot_enabled()
@@ -1142,7 +1146,7 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
             continue
         if visible_ids is not None and p.id not in visible_ids:
             continue
-        enabled = enabled_map.get(p.id, p.is_default)
+        enabled = enabled_map.get(p.id, is_default_enabled(p.id))
         rpt = _bot_reports.get(p.id, {})
         s = rpt.get("status", {})
         positions = rpt.get("positions", [])
@@ -1202,7 +1206,7 @@ async def toggle_bot_profile(profile_id: str, _: str = Depends(verify_token)) ->
     When enabling an idle bot, writes an activation file to the shared data
     volume so the bot can detect activation without hub communication.
     """
-    from config.bot_profiles import PROFILES_BY_ID
+    from config.bot_profiles import PROFILES_BY_ID, is_default_enabled
 
     profile = PROFILES_BY_ID.get(profile_id)
     if not profile:
@@ -1212,7 +1216,7 @@ async def toggle_bot_profile(profile_id: str, _: str = Depends(verify_token)) ->
         return ActionResponse(success=False, message="Hub bot cannot be toggled — it runs the dashboard")
 
     hub = _get_hub_db()
-    currently_enabled = hub.is_bot_enabled(profile_id)
+    currently_enabled = hub.is_bot_enabled(profile_id, default=is_default_enabled(profile_id))
     new_enabled = not currently_enabled
     hub.set_bot_enabled(profile_id, new_enabled)
 
@@ -1471,7 +1475,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
     Only includes enabled trading bots (skips hub and disabled/idle bots).
     """
-    from config.bot_profiles import ALL_PROFILES, PROFILES_BY_ID
+    from config.bot_profiles import ALL_PROFILES, PROFILES_BY_ID, is_default_enabled
 
     reports = [r for r in _bot_reports.values() if isinstance(r, dict)]
     hub = _get_hub_db()
@@ -1524,8 +1528,8 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
         if bid == "hub":
             continue
-        profile = PROFILES_BY_ID.get(bid)
-        if not enabled_map.get(bid, profile.is_default if profile else True):
+        default_enabled = is_default_enabled(bid) if bid in PROFILES_BY_ID else True
+        if not enabled_map.get(bid, default_enabled):
             continue
 
         if not first_status:
@@ -1894,10 +1898,9 @@ async def receive_bot_report(request: Request, _: str = Depends(verify_token)) -
         _maybe_record_exchange_equity_snapshot(data, hub)
     confirmed = hub.drain_confirmed_keys(bot_id) if bot_id else []
     if bot_id:
-        from config.bot_profiles import PROFILES_BY_ID
+        from config.bot_profiles import PROFILES_BY_ID, is_default_enabled
 
-        profile = PROFILES_BY_ID.get(bot_id)
-        default_enabled = profile.is_default if profile else True
+        default_enabled = is_default_enabled(bot_id) if bot_id in PROFILES_BY_ID else True
         enabled = hub.is_bot_enabled(bot_id, default=default_enabled)
     else:
         enabled = True

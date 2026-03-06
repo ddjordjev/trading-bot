@@ -153,7 +153,7 @@ class TestRiskManagerExtended:
     def test_drawdown_zone_paper_local_allows_weak(self, risk):
         risk.record_pnl(-200.0)
         sig = _sig(strength=0.5)
-        assert risk.check_signal(sig, 10000.0, []) is True  # paper_local = aggressive
+        assert risk.check_signal(sig, 10000.0, []) is False  # drawdown gate now applies uniformly
 
     def test_drawdown_zone_allows_strong(self, risk):
         risk.record_pnl(-200.0)
@@ -173,7 +173,7 @@ class TestRiskManagerExtended:
         risk.record_pnl(-10.0)
         risk.record_pnl(-10.0)
         risk.record_pnl(-10.0)
-        assert risk._in_cooldown is False  # threshold=999 in aggressive mode
+        assert risk._in_cooldown is True
 
 
 # ── TradeQueue (shared/models) ───────────────────────────────────────────────
@@ -291,7 +291,7 @@ class TestSettingsUrls:
     @pytest.fixture
     def settings(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper_local")
-        monkeypatch.setenv("EXCHANGE", "binance")
+        monkeypatch.setenv("EXCHANGE", "binance_testnet")
         return Settings(_env_file=None)
 
     def test_platform_url_binance_paper(self, settings):
@@ -337,14 +337,14 @@ class TestSettingsUrls:
         monkeypatch.setenv("TRADING_MODE", "paper_live")
         monkeypatch.setenv("EXCHANGE", "binance")
         s = Settings(_env_file=None)
-        s.binance_test_api_key = "test_key"
-        s.binance_test_api_secret = "test_secret"
+        s.binance_api_key = "test_key"
+        s.binance_api_secret = "test_secret"
         assert s.binance_api_key == "test_key"
         assert s.binance_api_secret == "test_secret"
 
     def test_binance_api_keys_paper_local_uses_test(self, settings):
-        settings.binance_test_api_key = "test_key"
-        settings.binance_test_api_secret = "test_secret"
+        settings.binance_api_key = "test_key"
+        settings.binance_api_secret = "test_secret"
         assert settings.binance_api_key == "test_key"
         assert settings.binance_api_secret == "test_secret"
 
@@ -373,8 +373,8 @@ class TestSettingsUrls:
         monkeypatch.setenv("TRADING_MODE", "paper_live")
         monkeypatch.setenv("EXCHANGE", "bybit")
         s = Settings(_env_file=None)
-        s.bybit_test_api_key = "bkey"
-        s.bybit_test_api_secret = "bsecret"
+        s.bybit_api_key = "bkey"
+        s.bybit_api_secret = "bsecret"
         assert s.bybit_api_key == "bkey"
         assert s.bybit_api_secret == "bsecret"
 
@@ -382,8 +382,8 @@ class TestSettingsUrls:
         monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "bybit")
         s = Settings(_env_file=None)
-        s.bybit_test_api_key = "btest"
-        s.bybit_test_api_secret = "btest_secret"
+        s.bybit_api_key = "btest"
+        s.bybit_api_secret = "btest_secret"
         assert s.bybit_api_key == "btest"
         assert s.bybit_api_secret == "btest_secret"
 

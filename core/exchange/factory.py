@@ -6,18 +6,15 @@ from config.settings import Settings
 from core.exchange.base import BaseExchange
 from core.exchange.binance import BinanceExchange
 from core.exchange.bybit import BybitExchange
-from core.exchange.paper import PaperExchange
 
 
 def create_exchange(settings: Settings) -> BaseExchange:
     """Factory that builds the right exchange client based on config.
 
-    Trading modes:
-      paper_local  — PaperExchange wrapper (local simulation, no orders hit exchange)
-      paper_live   — Real orders on exchange testnet (e.g. demo.binance.com)
-      live         — Real orders on production exchange
-
-    Both paper modes use testnet API keys. Live uses production keys.
+    Behavior is exchange-target driven:
+      EXCHANGE=binance/bybit           -> production endpoints
+      EXCHANGE=binance_testnet/_demo   -> sandbox endpoints
+      EXCHANGE=bybit_testnet           -> sandbox endpoints
     """
 
     # Centralized startup guard to prevent mixing test/prod credentials/URLs.
@@ -40,18 +37,16 @@ def create_exchange(settings: Settings) -> BaseExchange:
         ),
     }
 
-    entry = exchange_map.get(settings.exchange)
+    entry = exchange_map.get(settings.exchange_base)
     if not entry:
         raise ValueError(f"Unsupported exchange: {settings.exchange}. Supported: {', '.join(exchange_map)}")
 
     cls, kwargs = entry
-    sandbox = settings.is_paper_live() and cls.HAS_TESTNET
+    sandbox = bool(settings.exchange_is_sandbox and cls.HAS_TESTNET)
     real_exchange = cls(**kwargs, sandbox=sandbox)
 
     if sandbox:
-        logger.info("Testnet mode enabled for {} (testnet orders)", settings.exchange.upper())
-    elif settings.is_paper_local():
-        logger.info("Paper LOCAL: using production prices for {} (orders simulated locally)", settings.exchange.upper())
+        logger.info("Sandbox mode enabled for {} (testnet/demo orders)", settings.exchange_base.upper())
 
     wanted = set(settings.allowed_market_type_list)
     supported = set(real_exchange.SUPPORTED_MARKET_TYPES)
@@ -59,7 +54,7 @@ def create_exchange(settings: Settings) -> BaseExchange:
     if unsupported:
         logger.warning(
             "{} does not support: {}. Restricting to: {}",
-            settings.exchange.upper(),
+            settings.exchange_base.upper(),
             ", ".join(sorted(unsupported)),
             ", ".join(sorted(wanted & supported)) or "spot",
         )
@@ -67,29 +62,14 @@ def create_exchange(settings: Settings) -> BaseExchange:
         settings.allowed_market_types = ",".join(effective)
 
     logger.info(
-        "Exchange: {} | Mode: {} | Supported: {} | Allowed: {} | Testnet: {}",
-        settings.exchange.upper(),
-        settings.trading_mode,
+        "Exchange: {} | Sandbox: {} | Supported: {} | Allowed: {}",
+        settings.exchange_base.upper(),
+        bool(settings.exchange_is_sandbox),
         ", ".join(real_exchange.SUPPORTED_MARKET_TYPES),
         settings.allowed_market_types,
-        sandbox,
     )
 
-    if settings.is_paper_live() and not cls.HAS_TESTNET:
-        logger.warning(
-            "{} has no testnet — paper_live would trade real money. Falling back to paper_local.",
-            settings.exchange.upper(),
-        )
-        settings.trading_mode = "paper_local"
-
-    if settings.is_paper_local():
-        budget = 0.0 if settings.hub_only else (settings.session_budget if settings.session_budget > 0 else 10_000.0)
-        logger.info("Paper LOCAL: simulated balance ${:.2f} (no orders hit exchange)", budget)
-        return PaperExchange(real_exchange, starting_balance=budget)
-
-    if settings.is_paper_live():
-        logger.info("Paper LIVE: real orders on testnet (visible on exchange demo)")
-        if settings.session_budget > 0:
-            logger.info("Session budget cap: ${:.2f} (bot won't use more than this)", settings.session_budget)
+    if settings.exchange_is_sandbox and not cls.HAS_TESTNET:
+        raise ValueError(f"{settings.exchange_base.upper()} has no testnet support but sandbox target was requested.")
 
     return real_exchange

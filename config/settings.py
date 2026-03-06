@@ -10,7 +10,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    trading_mode: Literal["paper_local", "paper_live", "live"] = "paper_local"
+    trading_mode: str = "live"
+    # Execution behavior comes from EXCHANGE target; this label is metadata.
 
     # Multi-bot: each instance gets a unique ID and strategy filter.
     # When BOT_ID is set, state goes to data/{bot_id}/ instead of data/.
@@ -20,19 +21,15 @@ class Settings(BaseSettings):
     bot_style: str = "momentum"  # momentum / meanrev / swing — determines queue routing
     hub_only: bool = False  # True = dashboard/coordination only, no trading
 
-    exchange: str = "binance"
+    exchange: str = "binance_testnet"
 
-    # Binance — separate prod and testnet keys
-    binance_prod_api_key: str = ""
-    binance_prod_api_secret: str = ""
-    binance_test_api_key: str = ""
-    binance_test_api_secret: str = ""
-
-    # Bybit — separate prod and testnet keys
-    bybit_prod_api_key: str = ""
-    bybit_prod_api_secret: str = ""
-    bybit_test_api_key: str = ""
-    bybit_test_api_secret: str = ""
+    # Exchange credentials.
+    # Keep one variable name across environments; env override files provide
+    # mode-specific values (paper/testnet vs live/prod).
+    binance_api_key: str = ""
+    binance_api_secret: str = ""
+    bybit_api_key: str = ""
+    bybit_api_secret: str = ""
 
     # What market types the user wants to use. The factory auto-restricts
     # to what the exchange actually supports.
@@ -53,51 +50,34 @@ class Settings(BaseSettings):
     max_concurrent_positions: int = 5
     min_signal_strength: float = 0.4  # ignore weak signals entirely
     consecutive_loss_cooldown: int = 3  # pause after N consecutive losses
+    risk_env_multiplier: float = 1.0  # environment-level risk scaler (base risk * multiplier)
+    max_total_exposure_mult: float = 1.5
     min_tradeable_equity_usdt: float = 50.0  # pause new entries below this equity
     low_balance_recheck_seconds: int = 300  # when paused, re-check balance every 5 min
     insufficient_balance_burst_threshold: int = 8  # repeated insufficient-balance errors before auto-disable
     insufficient_balance_burst_window_seconds: int = 900  # burst window for auto-disable logic
     insufficient_balance_auto_disable: bool = True  # hub-disable bot on repeated insufficient-balance errors
 
-    # Paper risk overrides for local simulation.
-    # Position size override can also apply in paper_live to increase testnet
-    # capital usage without relaxing all other guardrails.
-    paper_risk_relaxed: bool = True
-    paper_max_position_size_pct: float = 30.0
-    paper_max_daily_loss_pct: float = 100.0
-    paper_max_concurrent_positions: int = 15
-    paper_min_signal_strength: float = 0.2
-    paper_consecutive_loss_cooldown: int = 999
-
     @property
     def effective_max_position_size_pct(self) -> float:
-        if self.is_paper_local() and self.paper_risk_relaxed:
-            return self.paper_max_position_size_pct
-        return self.max_position_size_pct
+        return max(0.01, float(self.max_position_size_pct) * max(0.01, float(self.risk_env_multiplier)))
 
     @property
     def effective_max_daily_loss_pct(self) -> float:
-        if self.is_paper_local() and self.paper_risk_relaxed:
-            return self.paper_max_daily_loss_pct
-        return self.max_daily_loss_pct
+        return max(0.01, float(self.max_daily_loss_pct) * max(0.01, float(self.risk_env_multiplier)))
 
     @property
     def effective_max_concurrent_positions(self) -> int:
-        if self.is_paper_local() and self.paper_risk_relaxed:
-            return self.paper_max_concurrent_positions
-        return self.max_concurrent_positions
+        return max(1, round(float(self.max_concurrent_positions) * max(0.01, float(self.risk_env_multiplier))))
 
     @property
     def effective_min_signal_strength(self) -> float:
-        if self.is_paper_local() and self.paper_risk_relaxed:
-            return self.paper_min_signal_strength
-        return self.min_signal_strength
+        # Higher env multiplier relaxes signal gate proportionally.
+        return max(0.01, min(1.0, float(self.min_signal_strength) / max(0.01, float(self.risk_env_multiplier))))
 
     @property
     def effective_consecutive_loss_cooldown(self) -> int:
-        if self.is_paper_local() and self.paper_risk_relaxed:
-            return self.paper_consecutive_loss_cooldown
-        return self.consecutive_loss_cooldown
+        return max(1, round(float(self.consecutive_loss_cooldown) / max(0.01, float(self.risk_env_multiplier))))
 
     # Tick intervals (seconds) — adaptive, fastest active tier wins
     tick_interval_scalp: int = 1  # quick_trade / wick scalp positions (aggressive monitoring)
@@ -227,8 +207,12 @@ class Settings(BaseSettings):
     # Hub URL — bots POST status snapshots here
     hub_url: str = ""
 
+    # Default-enabled profiles are runtime-configured via env override files.
+    # Use the same key name across environments and set different values per file.
+    bot_default_enabled_ids: str = ""
+
     # Exchange platform URL (for quick-link from the dashboard).
-    # Leave empty for auto-detection based on exchange + trading_mode.
+    # Leave empty for auto-detection based on exchange target + market type.
     exchange_platform_url: str = ""
 
     log_level: str = "INFO"
@@ -284,17 +268,16 @@ class Settings(BaseSettings):
         return market_type.lower() in self.allowed_market_type_list
 
     def is_paper(self) -> bool:
-        """True for both paper modes (local sim and testnet). Used for API key
-        selection (test keys) and safety checks."""
-        return self.trading_mode in ("paper_local", "paper_live")
+        """Compatibility shim; sandbox mode is considered paper."""
+        return bool(self.exchange_is_sandbox)
 
     def is_paper_local(self) -> bool:
-        """Local simulation via PaperExchange — no orders hit any exchange."""
-        return self.trading_mode == "paper_local"
+        """Legacy shim kept for test compatibility."""
+        return False
 
     def is_paper_live(self) -> bool:
-        """Real orders on exchange testnet (e.g. demo.binance.com)."""
-        return self.trading_mode == "paper_live"
+        """Legacy shim kept for test compatibility."""
+        return bool(self.exchange_is_sandbox)
 
     def cap_balance(self, raw_balance: float) -> float:
         """Apply session_budget cap. Returns raw_balance if no cap is set."""
@@ -324,9 +307,9 @@ class Settings(BaseSettings):
         """Base URL for the exchange trading UI."""
         if self.exchange_platform_url:
             return self.exchange_platform_url
-        mode = "paper" if self.is_paper() else "live"
+        mode = "paper" if self.exchange_is_sandbox else "live"
         mkt = "futures" if self.futures_allowed else "spot"
-        urls = self._PLATFORM_URLS.get(self.exchange, {})
+        urls = self._PLATFORM_URLS.get(self.exchange_base, {})
         return urls.get(f"{mode}_{mkt}", "")
 
     def symbol_platform_url(self, symbol: str, market_type: str = "") -> str:
@@ -336,31 +319,40 @@ class Settings(BaseSettings):
             return ""
         clean = symbol.replace("/", "")
         mkt = market_type or ("futures" if self.futures_allowed else "spot")
-        if self.exchange == "binance":
+        if self.exchange_base == "binance":
             if mkt == "futures":
                 return f"{base}/{clean}"
             return f"{base}/{clean.replace('USDT', '_USDT')}"
-        if self.exchange == "bybit":
+        if self.exchange_base == "bybit":
             return f"{base}/{clean}"
         return base
 
-    # ---- API key resolution (prod vs test) ----
+    @property
+    def exchange_base(self) -> str:
+        """Canonical exchange id used by adapters and hub contracts."""
+        raw = str(self.exchange or "").strip().lower()
+        if raw in {"binance", "binance_testnet", "binance_demo"}:
+            return "binance"
+        if raw in {"bybit", "bybit_testnet"}:
+            return "bybit"
+        return raw
 
     @property
-    def binance_api_key(self) -> str:
-        return self.binance_test_api_key if self.is_paper() else self.binance_prod_api_key
+    def exchange_is_sandbox(self) -> bool:
+        """Whether configured exchange target is a testnet/demo endpoint."""
+        raw = str(self.exchange or "").strip().lower()
+        return raw in {"binance_testnet", "binance_demo", "bybit_testnet"}
+
+    @staticmethod
+    def _parse_csv_ids(raw: str) -> set[str]:
+        return {part.strip().lower() for part in str(raw or "").split(",") if part.strip()}
 
     @property
-    def binance_api_secret(self) -> str:
-        return self.binance_test_api_secret if self.is_paper() else self.binance_prod_api_secret
+    def default_enabled_bot_ids(self) -> set[str]:
+        """Runtime-configured default enabled bot IDs."""
+        return self._parse_csv_ids(self.bot_default_enabled_ids)
 
-    @property
-    def bybit_api_key(self) -> str:
-        return self.bybit_test_api_key if self.is_paper() else self.bybit_prod_api_key
-
-    @property
-    def bybit_api_secret(self) -> str:
-        return self.bybit_test_api_secret if self.is_paper() else self.bybit_prod_api_secret
+    # ---- API keys ----
 
     @staticmethod
     def _url_looks_testnet(url: str) -> bool:
@@ -386,32 +378,21 @@ class Settings(BaseSettings):
         )
 
     def validate_startup_mode_guard(self) -> None:
-        """Centralized startup guard preventing test/prod mode mixing."""
-        mode = str(self.trading_mode or "").strip().lower()
-        exchange = str(self.exchange or "").strip().lower()
-
-        # Safety policy: test trading must use paper_live, not paper_local.
-        if mode == "paper_local":
-            raise ValueError("TRADING_MODE=paper_local is disabled by safety policy. Use TRADING_MODE=paper_live.")
+        """Validate startup config without mode-name branching."""
+        exchange = self.exchange_base
 
         if exchange in {"binance", "bybit"}:
-            if mode == "live":
-                if exchange == "binance" and (not self.binance_prod_api_key or not self.binance_prod_api_secret):
-                    raise ValueError("Live Binance requires BINANCE_PROD_API_KEY and BINANCE_PROD_API_SECRET.")
-                if exchange == "bybit" and (not self.bybit_prod_api_key or not self.bybit_prod_api_secret):
-                    raise ValueError("Live Bybit requires BYBIT_PROD_API_KEY and BYBIT_PROD_API_SECRET.")
-            else:
-                if exchange == "binance" and (not self.binance_test_api_key or not self.binance_test_api_secret):
-                    raise ValueError("Paper-live Binance requires BINANCE_TEST_API_KEY and BINANCE_TEST_API_SECRET.")
-                if exchange == "bybit" and (not self.bybit_test_api_key or not self.bybit_test_api_secret):
-                    raise ValueError("Paper-live Bybit requires BYBIT_TEST_API_KEY and BYBIT_TEST_API_SECRET.")
+            if exchange == "binance" and (not self.binance_api_key or not self.binance_api_secret):
+                raise ValueError("Binance requires BINANCE_API_KEY and BINANCE_API_SECRET.")
+            if exchange == "bybit" and (not self.bybit_api_key or not self.bybit_api_secret):
+                raise ValueError("Bybit requires BYBIT_API_KEY and BYBIT_API_SECRET.")
 
         custom_url = str(self.exchange_platform_url or "").strip()
         if custom_url:
-            if mode == "live" and self._url_looks_testnet(custom_url):
-                raise ValueError("Live mode cannot use testnet/demo EXCHANGE_PLATFORM_URL.")
-            if mode != "live" and self._url_looks_production(custom_url):
-                raise ValueError("Paper mode cannot use production EXCHANGE_PLATFORM_URL.")
+            if self.exchange_is_sandbox and self._url_looks_production(custom_url):
+                raise ValueError("Sandbox mode cannot use production EXCHANGE_PLATFORM_URL.")
+            if (not self.exchange_is_sandbox) and self._url_looks_testnet(custom_url):
+                raise ValueError("Production mode cannot use testnet/demo EXCHANGE_PLATFORM_URL.")
 
 
 @lru_cache

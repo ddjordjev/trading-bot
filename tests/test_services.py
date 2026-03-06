@@ -44,6 +44,8 @@ class TestMonitorService:
         s.binance_scanner_top_movers_count = 15
         s.binance_scanner_history_hours = 24
         s.binance_scanner_retention_days = 7
+        s.exchange_base = "binance"
+        s.exchange_is_sandbox = False
         return s
 
     @pytest.fixture

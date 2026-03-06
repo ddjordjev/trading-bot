@@ -1470,8 +1470,8 @@ class TestSubPositionClose:
         settings = Settings(
             trading_mode="paper_local",
             exchange="binance",
-            binance_test_api_key="k",
-            binance_test_api_secret="s",
+            binance_api_key="k",
+            binance_api_secret="s",
         )
         return OrderManager(exchange, risk, settings)
 

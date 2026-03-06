@@ -124,15 +124,16 @@ Each bot is configured via environment variables:
 - `HUB_URL` — always `http://bot-hub:9035`
 - Risk/leverage/tick overrides per profile
 
-**Active bots** (`is_default=True` in `config/bot_profiles.py`):
-extreme, momentum, indicators, meanrev, swing.
+**Default-enabled bots** are runtime-configured (not hardcoded in `BotProfile`):
+- `BOT_DEFAULT_ENABLED_IDS` (value comes from environment-specific runtime override files; local default: `extreme,momentum,indicators,meanrev,swing`, prod template: `indicators`)
 They connect to the exchange and trade proposals received from the hub
 queue. Bots do NOT register local strategies — all trade ideas originate
 from the hub's SignalGenerator. The bot validates and executes.
 
-**Idle bots** (`is_default=False`): hedger, scalper, fullstack, conservative,
-aggressive. They start in lean idle mode — no exchange connection,
-no hub communication. They check a local activation file
+**Idle bots** are any profiles not in the runtime default-enabled list
+(typically: hedger, scalper, fullstack, conservative, aggressive). They
+start in lean idle mode — no exchange connection, no hub communication.
+They check a local activation file
 (`data/{bot_id}/activate`) every 10s. The file is written by the hub's
 toggle endpoint when someone enables the bot via the dashboard. That's
 the only thing idle bots do — watch for that file. Nothing else.
@@ -431,13 +432,17 @@ When DB architecture changes, update and re-check these docs together in the sam
 
 ---
 
-## Trading Modes
+## Runtime Exchange Target
 
-| Mode | Exchange | Orders | Use case |
-|------|----------|--------|----------|
-| `paper_local` | PaperExchange (simulated) | Simulated locally | Pre-launch testing |
-| `paper_live` | Binance testnet | Real testnet orders | 10-day validation run |
-| `live` | Production exchange | Real money | NEVER without explicit approval |
+Use a single `EXCHANGE` variable to encode both venue and environment:
+
+| Value | Meaning |
+|------|---------|
+| `binance` | Binance production endpoints |
+| `binance_testnet` | Binance sandbox endpoints |
+| `binance_demo` | Binance demo endpoints |
+| `bybit` | Bybit production endpoints |
+| `bybit_testnet` | Bybit sandbox endpoints |
 
 ---
 

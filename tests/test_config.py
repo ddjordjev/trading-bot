@@ -10,7 +10,7 @@ class TestSettings:
     @pytest.fixture()
     def settings(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper_local")
-        monkeypatch.setenv("EXCHANGE", "bybit")
+        monkeypatch.setenv("EXCHANGE", "bybit_testnet")
         monkeypatch.setenv("BYBIT_API_KEY", "test-key")
         monkeypatch.setenv("BYBIT_API_SECRET", "test-secret")
         monkeypatch.setenv("NOTIFICATIONS_ENABLED", "liquidation,stop_loss,daily_summary")
@@ -69,48 +69,44 @@ class TestSettings:
         s = Settings()
         assert s.is_paper() is False
 
-    def test_startup_guard_rejects_paper_local(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper_local")
-        monkeypatch.setenv("EXCHANGE", "binance")
-        monkeypatch.setenv("BINANCE_TEST_API_KEY", "tk")
-        monkeypatch.setenv("BINANCE_TEST_API_SECRET", "ts")
+    def test_startup_guard_accepts_sandbox(self, monkeypatch):
+        monkeypatch.setenv("EXCHANGE", "binance_testnet")
+        monkeypatch.setenv("BINANCE_API_KEY", "tk")
+        monkeypatch.setenv("BINANCE_API_SECRET", "ts")
         from config.settings import Settings
 
         s = Settings()
-        with pytest.raises(ValueError, match="paper_local"):
-            s.validate_startup_mode_guard()
+        s.validate_startup_mode_guard()
 
     def test_startup_guard_rejects_live_with_testnet_url(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "live")
         monkeypatch.setenv("EXCHANGE", "bybit")
-        monkeypatch.setenv("BYBIT_PROD_API_KEY", "pk")
-        monkeypatch.setenv("BYBIT_PROD_API_SECRET", "ps")
+        monkeypatch.setenv("BYBIT_API_KEY", "pk")
+        monkeypatch.setenv("BYBIT_API_SECRET", "ps")
         monkeypatch.setenv("EXCHANGE_PLATFORM_URL", "https://testnet.bybit.com/trade/usdt")
         from config.settings import Settings
 
         s = Settings()
-        with pytest.raises(ValueError, match="testnet/demo"):
+        with pytest.raises(ValueError, match="Production mode"):
             s.validate_startup_mode_guard()
 
     def test_startup_guard_rejects_paper_live_with_prod_url(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper_live")
-        monkeypatch.setenv("EXCHANGE", "binance")
-        monkeypatch.setenv("BINANCE_TEST_API_KEY", "tk")
-        monkeypatch.setenv("BINANCE_TEST_API_SECRET", "ts")
+        monkeypatch.setenv("EXCHANGE", "binance_testnet")
+        monkeypatch.setenv("BINANCE_API_KEY", "tk")
+        monkeypatch.setenv("BINANCE_API_SECRET", "ts")
         monkeypatch.setenv("EXCHANGE_PLATFORM_URL", "https://www.binance.com/en/futures")
         from config.settings import Settings
 
         s = Settings()
-        with pytest.raises(ValueError, match="production EXCHANGE_PLATFORM_URL"):
+        with pytest.raises(ValueError, match="Sandbox mode"):
             s.validate_startup_mode_guard()
 
     def test_paper_live_keeps_live_like_position_risk(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper_live")
-        monkeypatch.setenv("EXCHANGE", "binance")
-        monkeypatch.setenv("BINANCE_TEST_API_KEY", "tk")
-        monkeypatch.setenv("BINANCE_TEST_API_SECRET", "ts")
+        monkeypatch.setenv("EXCHANGE", "binance_testnet")
+        monkeypatch.setenv("BINANCE_API_KEY", "tk")
+        monkeypatch.setenv("BINANCE_API_SECRET", "ts")
         monkeypatch.setenv("MAX_POSITION_SIZE_PCT", "5.0")
-        monkeypatch.setenv("PAPER_MAX_POSITION_SIZE_PCT", "30.0")
+        monkeypatch.setenv("RISK_ENV_MULTIPLIER", "1.0")
         from config.settings import Settings
 
         s = Settings()

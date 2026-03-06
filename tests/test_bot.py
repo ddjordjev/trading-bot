@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
@@ -102,7 +103,7 @@ class TestTradingBotInit:
             from bot import TradingBot
 
             TradingBot(settings=settings)
-        gv.assert_called_once_with("extreme", paper_mode=True)
+        gv.assert_called_once_with("extreme", paper_mode=False)
 
     def test_init_uses_indicators_validator_for_indicators_bot_id(self, settings, mock_exchange):
         settings.intel_enabled = False
@@ -115,7 +116,7 @@ class TestTradingBotInit:
             from bot import TradingBot
 
             TradingBot(settings=settings)
-        gv.assert_called_once_with("indicators", paper_mode=True)
+        gv.assert_called_once_with("indicators", paper_mode=False)
 
 
 class TestLowBalanceGuardSnapshotReliability:
@@ -2739,17 +2740,23 @@ class TestIdleMode:
         assert bot._check_enabled() is True
 
     @pytest.mark.asyncio
-    async def test_idle_tick_writes_idle_status(self, bot):
+    async def test_idle_tick_is_strictly_local_and_silent(self, bot):
         bot.settings.bot_id = "momentum"
-        bot.shared = MagicMock()
-        bot._report_dashboard_snapshot = AsyncMock()
+        bot._hub_enabled = False
+        bot.exchange.fetch_open_orders = AsyncMock()
+        activate_path = Path(bot.settings.data_dir) / "activate"
+        activate_path.parent.mkdir(parents=True, exist_ok=True)
+        activate_path.unlink(missing_ok=True)
 
         await bot._idle_tick()
 
-        assert bot._last_bot_status is not None
-        assert bot._last_bot_status.level.value == "idle"
-        assert bot._last_bot_status.should_trade is False
-        assert bot._last_bot_status.bot_id == "momentum"
+        assert bot._hub_enabled is False
+        bot.exchange.fetch_open_orders.assert_not_awaited()
+
+        activate_path.write_text("1")
+        await bot._idle_tick()
+        assert bot._hub_enabled is True
+        assert not activate_path.exists()
 
     @pytest.mark.asyncio
     async def test_wind_down_closes_positions(self, bot, mock_exchange):

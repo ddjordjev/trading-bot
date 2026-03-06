@@ -50,8 +50,9 @@ Optional: consult external `ai-memory` knowledge base for higher-level cross-pro
 
 ### Active and Idle Bots
 
-- Active by default: `extreme`, `momentum`, `indicators`, `meanrev`, `swing`
-- Idle by default: `hedger`, `scalper`, `fullstack`, `conservative`, `aggressive`
+- Default-enabled profiles are runtime-configured via one env key:
+  - `BOT_DEFAULT_ENABLED_IDS` (local default: `extreme,momentum,indicators,meanrev,swing`; prod template: `indicators`)
+- Profiles not included in the active list start idle: `hedger`, `scalper`, `fullstack`, `conservative`, `aggressive`
 - Idle activation file: `data/{bot_id}/activate`
 
 ### Exchanges and Services

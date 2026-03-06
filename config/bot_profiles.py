@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from config.settings import get_settings
+
 
 @dataclass
 class BotProfile:
@@ -55,7 +57,7 @@ ALL_PROFILES: list[BotProfile] = [
             "INITIAL_RISK_AMOUNT": "100",
             "TAKE_PROFIT_PCT": "8",
         },
-        is_default=True,
+        is_default=False,
     ),
     BotProfile(
         id="hedger",
@@ -77,7 +79,7 @@ ALL_PROFILES: list[BotProfile] = [
         description="Trend-following with compounding momentum and market-open volatility",
         style="momentum",
         strategies=["compound_momentum", "market_open_volatility"],
-        is_default=True,
+        is_default=False,
     ),
     BotProfile(
         id="indicators",
@@ -97,7 +99,7 @@ ALL_PROFILES: list[BotProfile] = [
             "TICK_INTERVAL_IDLE": "120",
             "TICK_INTERVAL_ACTIVE": "60",
         },
-        is_default=True,
+        is_default=False,
     ),
     BotProfile(
         id="swing",
@@ -110,7 +112,7 @@ ALL_PROFILES: list[BotProfile] = [
             "TICK_INTERVAL_IDLE": "600",
             "TICK_INTERVAL_ACTIVE": "300",
         },
-        is_default=True,
+        is_default=False,
     ),
     BotProfile(
         id="scalper",
@@ -180,3 +182,19 @@ ALL_PROFILES: list[BotProfile] = [
 ]
 
 PROFILES_BY_ID: dict[str, BotProfile] = {p.id: p for p in ALL_PROFILES}
+
+
+def runtime_default_enabled_ids() -> set[str]:
+    """Resolve default-enabled bot IDs from runtime config."""
+    return set(get_settings().default_enabled_bot_ids)
+
+
+def is_default_enabled(bot_id: str) -> bool:
+    """Return whether a profile should be enabled by default for current mode."""
+    normalized = str(bot_id or "").strip().lower()
+    if not normalized:
+        return False
+    profile = PROFILES_BY_ID.get(normalized)
+    if profile and profile.is_hub:
+        return True
+    return normalized in runtime_default_enabled_ids()

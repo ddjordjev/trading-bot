@@ -41,7 +41,7 @@ def test_example_env_secret_check_flags_non_placeholder_secret(tmp_path):
         "\n".join(
             [
                 "OPENCLAW_TOKEN=sk_live_abcdef123456789",
-                "BINANCE_PROD_API_SECRET=real_secret_value",
+                "BINANCE_API_SECRET=real_secret_value",
             ]
         )
         + "\n",

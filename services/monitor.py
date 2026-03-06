@@ -248,8 +248,25 @@ class MonitorService:
             try:
                 from hub.candle_fetcher import CandleFetcher
 
-                exchange_id = self.settings.exchange if hasattr(self.settings, "exchange") else "binance"
-                sandbox = self.settings.trading_mode in ("paper_live",)
+                exchange_target_raw = getattr(self.settings, "exchange", "binance")
+                exchange_target = (
+                    str(exchange_target_raw).strip().lower() if isinstance(exchange_target_raw, str) else "binance"
+                )
+                exchange_id_raw = getattr(self.settings, "exchange_base", None)
+                if isinstance(exchange_id_raw, str) and exchange_id_raw.strip():
+                    exchange_id = exchange_id_raw.strip().lower()
+                elif exchange_target.startswith("binance"):
+                    exchange_id = "binance"
+                elif exchange_target.startswith("bybit"):
+                    exchange_id = "bybit"
+                else:
+                    exchange_id = "binance"
+
+                sandbox_raw = getattr(self.settings, "exchange_is_sandbox", None)
+                if isinstance(sandbox_raw, bool):
+                    sandbox = sandbox_raw
+                else:
+                    sandbox = exchange_target in {"binance_testnet", "binance_demo", "bybit_testnet"}
                 market_type = "futures" if self.settings.futures_allowed else "spot"
                 self._candle_fetcher = CandleFetcher(exchange_id=exchange_id, sandbox=sandbox, market_type=market_type)
                 logger.info("Candle fetcher initialized: {} {} (sandbox={})", exchange_id, market_type, sandbox)
@@ -431,7 +448,7 @@ class MonitorService:
             return
 
         preferred_market = "futures" if self.settings.futures_allowed else "spot"
-        paper_live_mode = str(getattr(self.settings, "trading_mode", "") or "").lower() == "paper_live"
+        sandbox_target = bool(getattr(self.settings, "exchange_is_sandbox", False))
         fresh: dict[str, set[str]] = {}
         for exchange_id in self._SUPPORTED_EXCHANGES:
             cls = getattr(ccxt, exchange_id, None)
@@ -444,9 +461,9 @@ class MonitorService:
                 params["options"] = {"defaultType": "linear" if preferred_market == "futures" else "spot"}
             ex = cls(params)
             try:
-                # In paper_live, use exchange testnet markets where available so
+                # In sandbox targets, use exchange testnet markets where available so
                 # symbol availability reflects executable demo venues.
-                if paper_live_mode:
+                if sandbox_target:
                     try:
                         ex.set_sandbox_mode(True)
                     except Exception as e:
@@ -467,7 +484,7 @@ class MonitorService:
                             continue
                     symbols.add(raw_symbol.split(":")[0])
                 fresh[exchange_id.upper()] = symbols
-                if paper_live_mode:
+                if sandbox_target:
                     logger.info("Fetched {} symbols from {} TESTNET", len(symbols), exchange_id.upper())
                 else:
                     logger.info("Fetched {} symbols from {}", len(symbols), exchange_id.upper())

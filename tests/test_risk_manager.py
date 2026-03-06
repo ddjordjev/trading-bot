@@ -14,15 +14,16 @@ from core.risk.manager import RiskManager
 
 @pytest.fixture
 def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
-    monkeypatch.setenv("TRADING_MODE", "paper_local")
+    monkeypatch.setenv("TRADING_MODE", "aggressive-test")
     monkeypatch.setenv("EXCHANGE", "bybit")
     monkeypatch.setenv("MAX_POSITION_SIZE_PCT", "5.0")
-    monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")
+    monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "100.0")
     monkeypatch.setenv("STOP_LOSS_PCT", "2.0")
     monkeypatch.setenv("TAKE_PROFIT_PCT", "4.0")
-    monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "5")
-    monkeypatch.setenv("MIN_SIGNAL_STRENGTH", "0.4")
-    monkeypatch.setenv("CONSECUTIVE_LOSS_COOLDOWN", "3")
+    monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "15")
+    monkeypatch.setenv("MIN_SIGNAL_STRENGTH", "0.2")
+    monkeypatch.setenv("CONSECUTIVE_LOSS_COOLDOWN", "999")
+    monkeypatch.setenv("RISK_ENV_MULTIPLIER", "1.0")
     return Settings(_env_file=None)
 
 
@@ -44,7 +45,7 @@ def _signal(action=SignalAction.BUY, strength=0.7, price=100.0) -> Signal:
 
 
 class TestPaperLocalAggressive:
-    """Paper_local uses relaxed risk for bug-finding. Verify limits are wide open."""
+    """Environment-configured aggressive profile uses relaxed risk for bug-finding."""
 
     def test_daily_loss_does_not_block(self, risk: RiskManager):
         risk.record_pnl(-350.0)  # 3.5% loss — would block in live, not in paper_local
@@ -76,17 +77,16 @@ class TestPaperLocalAggressive:
 
 
 class TestPaperRelaxedDisabled:
-    """paper_local with PAPER_RISK_RELAXED=false should use prod params."""
+    """Strict profile uses conservative baseline params."""
 
     @pytest.fixture
     def strict_risk(self, monkeypatch: pytest.MonkeyPatch) -> RiskManager:
-        monkeypatch.setenv("TRADING_MODE", "paper_local")
         monkeypatch.setenv("EXCHANGE", "bybit")
-        monkeypatch.setenv("PAPER_RISK_RELAXED", "false")
         monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")
         monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "5")
         monkeypatch.setenv("MIN_SIGNAL_STRENGTH", "0.4")
         monkeypatch.setenv("CONSECUTIVE_LOSS_COOLDOWN", "3")
+        monkeypatch.setenv("RISK_ENV_MULTIPLIER", "1.0")
         s = Settings(_env_file=None)
         rm = RiskManager(s)
         rm.reset_daily(10000.0)
@@ -111,16 +111,16 @@ class TestPaperRelaxedDisabled:
 
 
 class TestConservativeMode:
-    """Non-paper modes enforce real risk limits."""
+    """Strict profile enforces conservative risk limits."""
 
     @pytest.fixture
     def live_risk(self, monkeypatch: pytest.MonkeyPatch) -> RiskManager:
-        monkeypatch.setenv("TRADING_MODE", "paper_live")
         monkeypatch.setenv("EXCHANGE", "bybit")
         monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")
         monkeypatch.setenv("MAX_CONCURRENT_POSITIONS", "5")
         monkeypatch.setenv("MIN_SIGNAL_STRENGTH", "0.4")
         monkeypatch.setenv("CONSECUTIVE_LOSS_COOLDOWN", "3")
+        monkeypatch.setenv("RISK_ENV_MULTIPLIER", "1.0")
         s = Settings(_env_file=None)
         rm = RiskManager(s)
         rm.reset_daily(10000.0)
@@ -189,9 +189,9 @@ class TestProfitBufferExpandsLimit:
 
     @pytest.fixture
     def live_risk(self, monkeypatch: pytest.MonkeyPatch) -> RiskManager:
-        monkeypatch.setenv("TRADING_MODE", "paper_live")
         monkeypatch.setenv("EXCHANGE", "bybit")
         monkeypatch.setenv("MAX_DAILY_LOSS_PCT", "3.0")
+        monkeypatch.setenv("RISK_ENV_MULTIPLIER", "1.0")
         s = Settings(_env_file=None)
         rm = RiskManager(s)
         rm.reset_daily(10000.0)

@@ -18,8 +18,8 @@ pytestmark = pytest.mark.integration
 async def ex():
     s = get_settings()
     exchange = BinanceExchange(
-        api_key=s.binance_test_api_key,
-        api_secret=s.binance_test_api_secret,
+        api_key=s.binance_api_key,
+        api_secret=s.binance_api_secret,
         sandbox=True,
     )
     exchange._futures.has["fetchCurrencies"] = False

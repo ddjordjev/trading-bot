@@ -444,8 +444,8 @@ class TestExchangeFactory:
     def test_paper_mode(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper_live")
         monkeypatch.setenv("EXCHANGE", "binance")
-        monkeypatch.setenv("BINANCE_TEST_API_KEY", "k")
-        monkeypatch.setenv("BINANCE_TEST_API_SECRET", "s")
+        monkeypatch.setenv("BINANCE_API_KEY", "k")
+        monkeypatch.setenv("BINANCE_API_SECRET", "s")
         from unittest.mock import patch
 
         from config.settings import Settings
@@ -457,16 +457,15 @@ class TestExchangeFactory:
             exchange = create_exchange(Settings())
         assert exchange is mock_instance
 
-    def test_paper_local_mode_rejected(self, monkeypatch):
-        monkeypatch.setenv("TRADING_MODE", "paper_local")
-        monkeypatch.setenv("EXCHANGE", "binance")
+    def test_sandbox_mode_uses_exchange_adapter(self, monkeypatch):
+        monkeypatch.setenv("EXCHANGE", "binance_testnet")
         monkeypatch.setenv("BINANCE_API_KEY", "k")
         monkeypatch.setenv("BINANCE_API_SECRET", "s")
         from config.settings import Settings
         from core.exchange.factory import create_exchange
 
-        with pytest.raises(ValueError, match="paper_local"):
-            create_exchange(Settings())
+        ex = create_exchange(Settings())
+        assert ex is not None
 
     def test_unsupported_exchange(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper_live")
