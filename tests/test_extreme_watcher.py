@@ -39,6 +39,7 @@ def settings() -> Settings:
 def mock_exchange() -> MagicMock:
     ex = MagicMock()
     ex.watch_ticker = AsyncMock()
+    ex.supports_ticker_ws = MagicMock(return_value=True)
     return ex
 
 
@@ -91,6 +92,12 @@ class TestSubscription:
         await watcher.subscribe("BTC/USDT", "bull", existing_position=True)
         ws = watcher._watched["BTC/USDT"]
         assert ws.is_existing_position is True
+
+    @pytest.mark.asyncio
+    async def test_subscribe_skips_when_ws_unsupported(self, watcher: ExtremeWatcher, mock_exchange: MagicMock) -> None:
+        mock_exchange.supports_ticker_ws.return_value = False
+        await watcher.subscribe("BTC/USDT", "bull")
+        assert watcher.active_count == 0
 
 
 class TestPatternDetection:

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
-from hub.state import HubState
+from hub.state import HubState, RejectionRecord
 from shared.models import (
     AnalyticsSnapshot,
     BotDeploymentStatus,
@@ -331,6 +333,26 @@ class TestHubStateTradeQueue:
         history = state.get_rejection_history()
         assert "BTC/USDT|m" in history
         assert history["BTC/USDT|m"].count == 1
+
+    def test_recent_rejection_defers_serve(self, state):
+        p = TradeProposal(
+            priority=SignalPriority.CRITICAL,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="m",
+            reason="r",
+            strength=0.8,
+            market_type="futures",
+            supported_exchanges=["BINANCE"],
+        )
+        q = TradeQueue()
+        q.add(p)
+        state.write_trade_queue(q)
+        state._rejections["BTC/USDT|m"] = RejectionRecord("validator:weak_momentum", datetime.now(UTC), count=2)
+
+        served = state.serve_proposal_to_bot("momentum", "bot1", "BINANCE")
+        assert served is None
+        assert state.read_trade_queue().proposals[0].is_locked
 
     def test_serve_blocks_locked_symbol(self, state):
         """When Bot A locks a ZRO/USDT proposal, Bot B cannot get any ZRO/USDT proposal."""

@@ -81,6 +81,8 @@ class BinanceExchange(BaseExchange):
                         api_urls[key] = url.replace("testnet.binancefuture.com", "demo-fapi.binance.com")
 
         self._watchers: list[asyncio.Task[None]] = []
+        self._balance_anchor: dict[str, float] = {}
+        self._unsupported_ticker_ws_symbols: set[str] = set()
 
     @property
     def name(self) -> str:
@@ -357,6 +359,7 @@ class BinanceExchange(BaseExchange):
     @timed("exchange.fetch_balance")
     async def fetch_balance(self) -> dict[str, float]:
         result: dict[str, float] = {}
+        self._balance_anchor = {}
         try:
             data = await self._spot.fetch_balance()
             for asset, info in data.items():
@@ -370,17 +373,30 @@ class BinanceExchange(BaseExchange):
         try:
             futures_data = await self._futures.fetch_balance()
             for asset, info in futures_data.items():
-                if isinstance(info, dict) and info.get("free", 0) > 0:
+                if isinstance(info, dict):
+                    free = float(info.get("free", 0.0) or 0.0)
+                    total = float(
+                        info.get("total", 0.0) or info.get("walletBalance", 0.0) or info.get("balance", 0.0) or 0.0
+                    )
                     # Do not add spot+futures free balances together for the same
                     # asset; they are separate wallets and summing inflates equity.
                     # Keep the larger free bucket as a conservative account anchor.
-                    result[asset] = max(result.get(asset, 0.0), float(info["free"]))
+                    if free > 0:
+                        result[asset] = max(result.get(asset, 0.0), free)
+                    if total > 0:
+                        self._balance_anchor[asset] = total
         except Exception:
             if self.sandbox:
                 logger.debug("Futures balance fetch failed in sandbox mode — skipping")
             else:
                 raise
         return {k: v for k, v in result.items() if v > 0}
+
+    def get_balance_anchor(self, asset: str = "USDT") -> float | None:
+        val = self._balance_anchor.get(str(asset or "").upper())
+        if val is None or val <= 0:
+            return None
+        return float(val)
 
     @timed("exchange.fetch_positions")
     async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
@@ -760,6 +776,8 @@ class BinanceExchange(BaseExchange):
 
     def supports_ticker_ws(self, symbol: str) -> bool:
         """Extreme watcher requirement: ticker WS must exist for this symbol."""
+        if symbol in self._unsupported_ticker_ws_symbols:
+            return False
         if not hasattr(self._futures, "watch_ticker"):
             return False
         try:
@@ -774,6 +792,7 @@ class BinanceExchange(BaseExchange):
             feed_name = "futures"
             supports_ws = hasattr(client, "watch_ticker")
             if not supports_ws:
+                self._unsupported_ticker_ws_symbols.add(symbol)
                 logger.warning("watchTicker not supported on {} for {} — unsubscribing watcher", feed_name, symbol)
                 return
             while True:
@@ -812,6 +831,7 @@ class BinanceExchange(BaseExchange):
                         logger.warning("Ticker symbol unavailable for {} — unsubscribing watcher", symbol)
                         break
                     if "not supported" in normalized:
+                        self._unsupported_ticker_ws_symbols.add(symbol)
                         logger.warning(
                             "watchTicker not supported on {} for {} — unsubscribing watcher", feed_name, symbol
                         )

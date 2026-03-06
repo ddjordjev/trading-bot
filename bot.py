@@ -189,6 +189,8 @@ class TradingBot:
         self._swing_ladder_total_levels: int = 10
         self._strategy_stats: dict[str, dict[str, Any]] = {}
         self._last_queue_exec_reason: str = ""
+        self._queue_reject_until: dict[str, float] = {}
+        self._queue_reject_count: dict[str, int] = {}
         self._last_known_cex_protection: dict[str, tuple[float, float]] = {}
         self._last_quick_protection_sync: dict[str, float] = {}
         self._quick_protection_sync_interval_secs: float = 10.0
@@ -220,6 +222,7 @@ class TradingBot:
         self._realized_pnl: float = 0.0
         self._enabled: bool = True  # hub-controlled enable flag
         self._hub_enabled: bool = True  # latest value from hub report response
+        self._trading_runtime_active: bool = False
         self._low_balance_paused: bool = False
         self._low_balance_pause_reason: str = ""
         self._last_low_balance_check_ts: float = 0.0
@@ -613,9 +616,16 @@ class TradingBot:
         await schedule.refresh_holidays()
         logger.info("Market schedule: {}", schedule.summary())
 
+        self._running = True
+        self._started_at = datetime.now(UTC)
+        await self._initialize_trading_runtime(reset_daily_state=True)
+        await self._run_loop()
+
+    async def _initialize_trading_runtime(self, *, reset_daily_state: bool) -> None:
+        """Bring exchange-bound runtime online (exchange/notifier/monitor/watchers)."""
         await self.exchange.connect()
 
-        self._available_symbols: set[str] = set()
+        self._available_symbols = set()
         self._available_spot_symbols = set()
         self._available_futures_symbols = set()
         try:
@@ -624,54 +634,77 @@ class TradingBot:
             # ccxt returns futures as "BTC/USDT:USDT"; normalize to "BTC/USDT"
             self._available_futures_symbols = {s.split(":")[0] for s in futures_syms}
             self._available_spot_symbols = set(spot_syms)
-            normalized = set(self._available_futures_symbols) | set(self._available_spot_symbols)
-            self._available_symbols = normalized
+            self._available_symbols = set(self._available_futures_symbols) | set(self._available_spot_symbols)
             logger.info("Published {} available symbols for {}", len(self._available_symbols), self.settings.exchange)
         except Exception as e:
             logger.warning("Could not publish exchange symbols: {}", e)
 
         await self.notifier.start()
+        self._trading_runtime_active = True
 
-        balance_map = await self.exchange.fetch_balance()
-        raw = balance_map.get("USDT", 0.0)
-        self._raw_balance = raw
-        balance = self.settings.cap_balance(raw)
-        self._session_start_balance = balance
-        self._realized_pnl = 0.0
-        self.risk.reset_daily(balance)
-        self.target.reset_day(balance)
+        if reset_daily_state:
+            balance_map = await self.exchange.fetch_balance()
+            raw = balance_map.get("USDT", 0.0)
+            self._raw_balance = raw
+            balance = self.settings.cap_balance(raw)
+            self._session_start_balance = balance
+            self._realized_pnl = 0.0
+            self.risk.reset_daily(balance)
+            self.target.reset_day(balance)
 
-        projected = self.target.projected_balance
-        if self.settings.session_budget > 0:
-            logger.info("Session budget: ${:.2f} (exchange has ${:.2f})", balance, raw)
-        logger.info("Starting balance: {:.2f} USDT", balance)
-        logger.info(
-            "Projections if target hit daily -> 1w: {:.0f} | 1mo: {:.0f} | 3mo: {:.0f}",
-            projected["1_week"],
-            projected["1_month"],
-            projected["3_months"],
-        )
+            projected = self.target.projected_balance
+            if self.settings.session_budget > 0:
+                logger.info("Session budget: ${:.2f} (exchange has ${:.2f})", balance, raw)
+            logger.info("Starting balance: {:.2f} USDT", balance)
+            logger.info(
+                "Projections if target hit daily -> 1w: {:.0f} | 1mo: {:.0f} | 3mo: {:.0f}",
+                projected["1_week"],
+                projected["1_month"],
+                projected["3_months"],
+            )
 
-        self._running = True
+        if self._running and (self._monitor_task is None or self._monitor_task.done()):
+            self._monitor_task = asyncio.create_task(self._fast_monitor_loop())
+
+    async def _teardown_trading_runtime(self, *, close_hub_session: bool, reason: str) -> None:
+        """Drop heavy runtime components so disabled bots stay low-memory."""
+        if self._monitor_task and not self._monitor_task.done():
+            self._monitor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._monitor_task
+        self._monitor_task = None
+
+        with contextlib.suppress(Exception):
+            await self.extreme_watcher.stop()
+        with contextlib.suppress(Exception):
+            await self.notifier.stop()
+        with contextlib.suppress(Exception):
+            await self.exchange.disconnect()
+
+        self._available_symbols.clear()
+        self._available_spot_symbols.clear()
+        self._available_futures_symbols.clear()
+        self._hub_proposal = None
+        self._last_quick_protection_sync.clear()
+        self._trading_runtime_active = False
+
+        if close_hub_session and self._hub_session:
+            with contextlib.suppress(Exception):
+                await self._hub_session.close()
+            self._hub_session = None
+        logger.info("Trading runtime torn down ({})", reason)
+
+    async def _resume_from_lean_idle(self) -> None:
+        """Reinitialize full runtime after a hub re-enable transition."""
+        await self._recover_state_from_hub()
         self._started_at = datetime.now(UTC)
-        self._monitor_task = asyncio.create_task(self._fast_monitor_loop())
-        await self._run_loop()
+        await self._initialize_trading_runtime(reset_daily_state=False)
 
     async def stop(self) -> None:
         logger.info("Shutting down...")
         logger.info("Final status: {}", self.target.status_report())
         self._running = False
-        if self._monitor_task and not self._monitor_task.done():
-            self._monitor_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._monitor_task
-            self._monitor_task = None
-        await self.extreme_watcher.stop()
-        await self.notifier.stop()
-        await self.exchange.disconnect()
-        if self._hub_session:
-            await self._hub_session.close()
-            self._hub_session = None
+        await self._teardown_trading_runtime(close_hub_session=True, reason="stop")
         logger.info("Bot stopped")
 
     _HUB_POLL_INTERVAL = 5  # seconds — queue check cadence between full ticks
@@ -689,6 +722,8 @@ class TradingBot:
 
                 if not was_enabled and self._enabled:
                     logger.info("Bot ENABLED by hub — resuming trading")
+                    if not self._trading_runtime_active:
+                        await self._resume_from_lean_idle()
 
                 if was_enabled and not self._enabled:
                     if self._exchange_access_halted:
@@ -696,6 +731,10 @@ class TradingBot:
                     else:
                         logger.info("Bot DISABLED by hub — winding down")
                         await self._wind_down()
+                    await self._teardown_trading_runtime(
+                        close_hub_session=False,
+                        reason="exchange_access_halt" if self._exchange_access_halted else "hub_disabled",
+                    )
 
                 if self._enabled:
                     t0 = time.perf_counter()
@@ -1334,6 +1373,33 @@ class TradingBot:
 
     MAX_QUEUE_EXECUTIONS_PER_TICK = 1
     _PENDING_HUB_ACKS_MAX = 200
+    _QUEUE_REJECT_BACKOFF_BASE_SECONDS = 45.0
+    _QUEUE_REJECT_BACKOFF_MAX_SECONDS = 300.0
+
+    @staticmethod
+    def _queue_cooldown_key(proposal: TradeProposal) -> str:
+        return f"{proposal.symbol}|{proposal.strategy}"
+
+    def _is_queue_reject_cooling_down(self, proposal: TradeProposal) -> bool:
+        key = self._queue_cooldown_key(proposal)
+        until = float(self._queue_reject_until.get(key, 0.0) or 0.0)
+        return until > time.monotonic()
+
+    def _record_queue_reject_backoff(self, proposal: TradeProposal, reason: str) -> None:
+        reason_l = str(reason or "").lower()
+        # Backoff only on expensive/noisy reject classes.
+        if not (
+            reason_l.startswith("validator:")
+            or reason_l == "price_fetch_failed"
+            or reason_l.startswith("failed_open:")
+            or reason_l.startswith("data fetch failed")
+        ):
+            return
+        key = self._queue_cooldown_key(proposal)
+        count = int(self._queue_reject_count.get(key, 0) or 0) + 1
+        self._queue_reject_count[key] = count
+        backoff = min(self._QUEUE_REJECT_BACKOFF_MAX_SECONDS, self._QUEUE_REJECT_BACKOFF_BASE_SECONDS * float(count))
+        self._queue_reject_until[key] = time.monotonic() + backoff
 
     async def _process_trade_queue(self) -> None:
         """Evaluate the single proposal served by the hub.
@@ -1347,6 +1413,10 @@ class TradingBot:
             return
 
         self._hub_proposal = None
+        if self._is_queue_reject_cooling_down(proposal):
+            self._last_queue_exec_reason = "cooldown_reject_backoff"
+            await self._report_queue_outcome(proposal.id, "rejected", self._last_queue_exec_reason)
+            return
 
         if self.target.manual_stop:
             await self._report_queue_outcome(proposal.id, "rejected", "manual_stop")
@@ -1390,10 +1460,14 @@ class TradingBot:
             ok = await self._execute_proposal(proposal, aggression)
 
         if ok:
+            ckey = self._queue_cooldown_key(proposal)
+            self._queue_reject_count.pop(ckey, None)
+            self._queue_reject_until.pop(ckey, None)
             await self._report_queue_outcome(proposal.id, "consumed")
             logger.info("Queue: executed {} [{}] via {}", proposal.symbol, proposal.priority.value, proposal.strategy)
         else:
             outcome_reason = self._last_queue_exec_reason or "execution_failed"
+            self._record_queue_reject_backoff(proposal, outcome_reason)
             await self._report_queue_outcome(proposal.id, "rejected", outcome_reason)
             await self._maybe_handle_insufficient_balance_outcome(outcome_reason)
             logger.warning(
@@ -1640,6 +1714,24 @@ class TradingBot:
         generator could recreate the proposal.
         """
         try:
+            if self._multibot and self.settings.hub_url and not str(opened_at_override or "").strip():
+                logger.error(
+                    "Invariant violation: missing opened_at reservation for open trade {} ({})",
+                    signal.symbol,
+                    signal.strategy,
+                )
+                task = asyncio.ensure_future(
+                    self._report_critical_error_to_hub(
+                        code="missing_opened_at_open",
+                        message=f"open trade missing opened_at reservation for {signal.symbol}",
+                        context="log_opened_trade",
+                        severity="critical",
+                        extra={"symbol": signal.symbol, "strategy": signal.strategy},
+                    )
+                )
+                self._hub_tasks.add(task)
+                task.add_done_callback(self._hub_tasks.discard)
+                return
             now = datetime.now(UTC)
             sp = self.orders.scaler.get(signal.symbol)
             ts = self.orders.trailing.get(signal.symbol)
@@ -1829,6 +1921,24 @@ class TradingBot:
                 self._hub_tasks.add(task)
                 task.add_done_callback(self._hub_tasks.discard)
             opened_at = open_rec.opened_at if open_rec else ""
+            if self._multibot and self.settings.hub_url and not str(opened_at or "").strip():
+                logger.error(
+                    "Invariant violation: close for {} without opened_at (reason={})",
+                    order.symbol,
+                    close_reason,
+                )
+                task = asyncio.ensure_future(
+                    self._report_critical_error_to_hub(
+                        code="missing_opened_at_close",
+                        message=f"close trade missing opened_at for {order.symbol}",
+                        context="log_closed_trade",
+                        severity="critical",
+                        extra={"symbol": order.symbol, "reason": close_reason},
+                    )
+                )
+                self._hub_tasks.add(task)
+                task.add_done_callback(self._hub_tasks.discard)
+                return
             hold_minutes = 0.0
             if opened_at:
                 try:
@@ -2324,11 +2434,15 @@ class TradingBot:
             "projected": t.projected_balance,
         }
 
+        anchor_balance = self.exchange.get_balance_anchor("USDT")
+        if inspect.isawaitable(anchor_balance):
+            anchor_balance = await anchor_balance
+
         payload = {
             "bot_id": self.settings.bot_id or "default",
             "bot_style": self.settings.bot_style,
             "exchange": self.settings.exchange.upper(),
-            "exchange_balance": self._raw_balance,
+            "exchange_balance": float(anchor_balance or self._raw_balance or 0.0),
             "status": {
                 "running": self._running,
                 "trading_mode": self.settings.trading_mode,
@@ -2483,6 +2597,15 @@ class TradingBot:
             "trade": record.model_dump(),
             "request_key": request_key,
         }
+        action_name = str(payload.get("action", "") or "").strip().lower()
+        opened_at = str((payload.get("trade", {}) or {}).get("opened_at", "") or "").strip()
+        if action_name in {"open", "close", "update", "cancel_reservation"} and not opened_at:
+            logger.error(
+                "Invariant violation: refusing hub trade push action={} symbol={} missing opened_at",
+                action_name,
+                record.symbol,
+            )
+            return ("invariant_error", {"detail": "missing_opened_at"})
         self._pending_hub_acks[request_key] = payload
         try:
             url = f"{target.rstrip('/')}/internal/trade"
@@ -2492,14 +2615,22 @@ class TradingBot:
                     return ("http_error", {})
                 body = await resp.json()
                 status = str(body.get("status", "") or "").strip().lower()
-                if status == "conflict":
+                if status in {"conflict", "ignored"}:
                     self._pending_hub_acks.pop(request_key, None)
-                    logger.warning(
-                        "Hub trade push conflict action={} symbol={} owner={}",
-                        payload["action"],
-                        record.symbol,
-                        str(body.get("owner_bot_id", "") or "").strip() or "unknown",
-                    )
+                    if status == "conflict":
+                        logger.warning(
+                            "Hub trade push conflict action={} symbol={} owner={}",
+                            payload["action"],
+                            record.symbol,
+                            str(body.get("owner_bot_id", "") or "").strip() or "unknown",
+                        )
+                    else:
+                        logger.warning(
+                            "Hub trade push ignored action={} symbol={} detail={}",
+                            payload["action"],
+                            record.symbol,
+                            str(body.get("detail", "") or "").strip() or "n/a",
+                        )
                 return (status or "unknown", body)
         except Exception as e:
             logger.error("Hub trade push error: {} (key={}, will retry)", e, request_key[:8])
@@ -2981,30 +3112,25 @@ class TradingBot:
 
         has_scaler = self.orders.scaler.get(symbol) is not None
         has_trailing = self.orders.trailing.get(symbol) is not None
+        has_runtime_state = has_scaler or has_trailing
         rec = self._open_trades.get(symbol)
-        is_managed = rec is not None
-        if not is_managed or (has_scaler and has_trailing):
+
+        # No ownership + no local runtime markers => foreign position, don't claim.
+        if rec is None and not has_runtime_state:
             return
 
+        # We had local runtime markers but lost ownership row. Reclaim ownership
+        # immediately so opened_at exists before any close/update event can fire.
         if rec is None:
-            side_raw = getattr(pos, "side", "")
-            side_txt = side_raw.value if hasattr(side_raw, "value") else str(side_raw or "")
-            side_l = side_txt.lower()
-            side = "long" if side_l in ("buy", "long") else "short"
-            strategy = self._resolve_position_strategy(pos) or "runtime_recovered"
-            rec = TradeRecord(
-                symbol=symbol,
-                side=side,
-                strategy=strategy,
-                action="open",
-                amount=float(getattr(pos, "amount", 0.0) or 0.0),
-                entry_price=float(getattr(pos, "entry_price", 0.0) or 0.0),
-                leverage=int(max(1, round(float(getattr(pos, "leverage", 1.0) or 1.0)))),
-                opened_at=datetime.now(UTC).isoformat(),
-            )
-            self._open_trades[symbol] = rec
-            self._position_targets.setdefault(symbol, {"planned_sl": 0.0, "tp1": 0.0, "tp2": 0.0})
-            logger.warning("Runtime adopted managed position {} from live exchange snapshot", symbol)
+            ok, msg = await self._claim_orphan_position(symbol, strategy="runtime_recovered")
+            if ok:
+                logger.warning("Runtime reclaimed missing ownership for {}", symbol)
+            else:
+                logger.error("Runtime could not reclaim missing ownership for {}: {}", symbol, msg)
+            return
+
+        if has_scaler and has_trailing:
+            return
 
         if await self._rehydrate_recovered_position_state(symbol, rec, pos):
             logger.info("Runtime rehydrated missing protection state for {}", symbol)
@@ -3042,6 +3168,46 @@ class TradingBot:
             signal_strength=0.5,
             opened_at=datetime.now(UTC).isoformat(),
         )
+        side = str(rec.side or "").strip().lower()
+
+        # Canonical lifecycle: claim must reserve ownership row before open update.
+        # This keeps one-row identity stable for later runtime/close updates.
+        hub_url = self.settings.hub_url
+        if hub_url:
+            if not self._hub_session:
+                self._hub_session = self._new_hub_session(timeout_seconds=5)
+            reserve_payload = {
+                "bot_id": self.settings.bot_id or "default",
+                "request_key": uuid.uuid4().hex,
+                "trade": {
+                    "symbol": symbol,
+                    "side": side,
+                    "strategy": strategy or "manual_claim",
+                    "action": "open",
+                    "opened_at": rec.opened_at,
+                    "market_regime": rec.market_regime,
+                    "fear_greed": rec.fear_greed,
+                    "daily_tier": rec.daily_tier,
+                    "daily_pnl_at_entry": rec.daily_pnl_at_entry,
+                    "signal_strength": rec.signal_strength,
+                },
+            }
+            try:
+                async with self._hub_session.post(
+                    f"{hub_url.rstrip('/')}/internal/trade-reserve",
+                    json=reserve_payload,
+                ) as resp:
+                    body = await resp.json() if resp.status == 200 else {}
+                    status = str(body.get("status", "") or "").strip().lower()
+                    if status == "conflict":
+                        owner = str(body.get("owner_bot_id", "") or "").strip()
+                        return False, f"Hub ownership conflict for {symbol} (owner={owner or 'unknown'})"
+                    if status != "ok":
+                        detail = str(body.get("detail", "") or "").strip() or f"http_{resp.status}"
+                        return False, f"Hub reserve failed for {symbol} ({detail})"
+            except Exception as e:
+                return False, f"Hub reserve error for {symbol}: {e}"
+
         self._open_trades[symbol] = rec
         self._position_targets.setdefault(symbol, {"planned_sl": 0.0, "tp1": 0.0, "tp2": 0.0})
 

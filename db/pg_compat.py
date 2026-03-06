@@ -67,7 +67,7 @@ class PgConnCompat:
         cur = self._conn.cursor()
         try:
             # Emulate lastrowid behavior for insert statements.
-            if lower.startswith("insert into") and "returning" not in lower:
+            if lower.startswith("insert into") and "returning" not in lower and "on conflict" not in lower:
                 rewritten = rewritten.rstrip().rstrip(";") + " RETURNING id"
                 try:
                     cur.execute(rewritten, params)

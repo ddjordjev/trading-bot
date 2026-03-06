@@ -9,6 +9,7 @@ import psycopg
 import pytest
 
 import db.hub_store_postgres as hub_store_postgres_mod
+from db.errors import DBIntegrityError
 from db.hub_store import HubDB
 from db.hub_store_postgres import PostgresHubDB
 from db.models import ModificationSuggestion, PatternInsight, StrategyScore, TradeRecord
@@ -410,6 +411,39 @@ class TestHubDB:
         updated = hub.update_trade_close("ghost", "2026-01-01T00:00:00", {"closed_at": "now"})
         assert updated is False
 
+    def test_insert_trade_open_rejects_missing_opened_at(self, hub: HubDB):
+        with pytest.raises(DBIntegrityError, match="missing_opened_at:open"):
+            hub.insert_trade(
+                "momentum",
+                {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "open",
+                    "entry_price": 50000,
+                    "amount": 0.01,
+                },
+            )
+
+    def test_insert_trade_open_rejects_missing_symbol(self, hub: HubDB):
+        with pytest.raises(DBIntegrityError, match="missing_symbol:open"):
+            hub.insert_trade(
+                "momentum",
+                {
+                    "symbol": "",
+                    "side": "long",
+                    "strategy": "rsi",
+                    "action": "open",
+                    "entry_price": 50000,
+                    "amount": 0.01,
+                    "opened_at": "2026-03-06T12:00:00",
+                },
+            )
+
+    def test_update_trade_close_rejects_missing_opened_at(self, hub: HubDB):
+        with pytest.raises(DBIntegrityError, match="missing_opened_at:close"):
+            hub.update_trade_close("momentum", "", {"closed_at": "2026-02-20T13:00:00"})
+
     def test_update_trade_runtime(self, hub: HubDB):
         hub.insert_trade(
             "momentum",
@@ -475,6 +509,35 @@ class TestHubDB:
         assert trades[0].amount == 0.02
         assert trades[0].leverage == 7
 
+    def test_update_trade_open_preserves_identity_fields_when_payload_partial(self, hub: HubDB):
+        hub.insert_trade(
+            "momentum",
+            {
+                "symbol": "KITE/USDT",
+                "side": "short",
+                "strategy": "extreme_mover",
+                "action": "open",
+                "entry_price": 0.30,
+                "amount": 1000,
+                "opened_at": "2026-03-06T11:00:00",
+            },
+        )
+        updated = hub.update_trade_open(
+            "momentum",
+            "2026-03-06T11:00:00",
+            {
+                "entry_price": 0.31,
+                "amount": 1200,
+            },
+        )
+        assert updated is True
+        trade = hub.get_all_trades()[0]
+        assert trade.symbol == "KITE/USDT"
+        assert trade.side == "short"
+        assert trade.strategy == "extreme_mover"
+        assert trade.entry_price == 0.31
+        assert trade.amount == 1200
+
     def test_update_trade_close_updates_only_latest_duplicate_open(self, hub: HubDB):
         hub.insert_trade(
             "momentum",
@@ -504,7 +567,7 @@ class TestHubDB:
         assert len(rows) == 1
         assert sum(1 for t in rows if t.closed_at == "2026-02-20T11:00:00") == 1
 
-    def test_update_trade_runtime_falls_back_to_open_symbol_when_opened_at_mismatch(self, hub: HubDB):
+    def test_update_trade_runtime_does_not_guess_by_symbol_when_opened_at_mismatch(self, hub: HubDB):
         hub.insert_trade(
             "momentum",
             {
@@ -527,12 +590,12 @@ class TestHubDB:
                 "stop_source": "bot",
             },
         )
-        assert updated is True
+        assert updated is False
         open_rows = hub.get_open_trades_for_bot("momentum")
         assert len(open_rows) == 1
-        assert open_rows[0].planned_stop_loss == 49000
-        assert open_rows[0].effective_stop_loss == 49100
-        assert open_rows[0].stop_source == "bot"
+        assert open_rows[0].planned_stop_loss == 0
+        assert open_rows[0].effective_stop_loss == 0
+        assert open_rows[0].stop_source == "none"
 
     def test_cleanup_duplicate_trade_rows_keeps_latest(self, hub: HubDB):
         hub.insert_trade(
@@ -562,6 +625,7 @@ class TestHubDB:
                     "side": "long",
                     "strategy": "rsi",
                     "action": "close",
+                    "opened_at": f"2026-02-20T0{8 + i}:00:00",
                     "pnl_usd": 10.0 if i < 2 else -5.0,
                     "pnl_pct": 1.0 if i < 2 else -0.5,
                     "is_winner": i < 2,
@@ -580,6 +644,7 @@ class TestHubDB:
                 "side": "long",
                 "strategy": "s",
                 "action": "close",
+                "opened_at": "2026-02-20T13:00:00",
                 "pnl_usd": 5,
                 "hour_utc": 14,
                 "is_winner": True,
@@ -676,6 +741,26 @@ class TestHubDB:
         assert len(open_trades) == 1
         assert open_trades[0].symbol == "BTC/USDT"
 
+    def test_connect_deletes_legacy_rows_missing_opened_at(self, tmp_path):
+        db_path = tmp_path / "hub_legacy.db"
+        hub = HubDB(path=db_path)
+        hub.connect()
+        assert hub.conn is not None
+        hub.conn.execute(
+            """
+            INSERT INTO trades (bot_id, symbol, side, strategy, action, opened_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("legacy", "OLD/USDT", "long", "legacy", "open", ""),
+        )
+        hub.conn.commit()
+        hub.close()
+
+        hub2 = HubDB(path=db_path)
+        hub2.connect()
+        rows = [t for t in hub2.get_all_trades() if t.symbol == "OLD/USDT"]
+        assert rows == []
+
     def test_get_strategy_stats_for_bot(self, hub: HubDB):
         for i in range(2):
             hub.insert_trade(
@@ -685,6 +770,7 @@ class TestHubDB:
                     "side": "l",
                     "strategy": "rsi",
                     "action": "close",
+                    "opened_at": f"2026-01-0{i + 1}T00:00:00",
                     "pnl_usd": 10,
                     "is_winner": True,
                     "closed_at": f"2026-01-0{i + 1}",
@@ -697,6 +783,7 @@ class TestHubDB:
                 "side": "l",
                 "strategy": "rsi",
                 "action": "close",
+                "opened_at": "2026-01-05T00:00:00",
                 "pnl_usd": -5,
                 "is_winner": False,
                 "closed_at": "2026-01-05",
@@ -714,6 +801,7 @@ class TestHubDB:
                 "side": "l",
                 "strategy": "rsi",
                 "action": "close",
+                "opened_at": "2026-01-01T00:00:00",
                 "pnl_usd": 10,
                 "is_winner": True,
                 "closed_at": "2026-01-01",
@@ -726,6 +814,7 @@ class TestHubDB:
                 "side": "l",
                 "strategy": "macd",
                 "action": "close",
+                "opened_at": "2026-01-02T00:00:00",
                 "pnl_usd": -3,
                 "is_winner": False,
                 "closed_at": "2026-01-02",

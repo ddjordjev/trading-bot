@@ -174,3 +174,36 @@ while preserving strict routing by bot identity and exchange.
 5. UI: exchange selector next to bot toggle
 
 **Status:** Parked design note. Revisit when enabling dual-CEX operation.
+
+---
+
+## Dynamic Monitoring Scope by Active Bots
+
+Current monitoring graphs often include all bot process series (or all deployed
+containers), even when only a subset is enabled for trading. This creates visual
+noise and can be misleading when validating live behavior.
+
+**Idea:** Make Monitoring panels automatically adapt to the currently active bot set.
+
+**What to filter dynamically:**
+- Process CPU/RSS lines only for bots currently enabled/running
+- Method call/error series only for active bots
+- Optional toggle to include idle/disabled bots for debugging
+
+**Desired behavior:**
+- Default view: "trading-active bots only"
+- Debug view: "all deployed bot containers"
+- If only one bot is active (e.g. `extreme`), charts should mostly show that bot
+  + hub/system baselines
+
+**Data source options:**
+1. Hub API (`/api/bot-profiles` + `/api/bots`) drives panel variable values
+2. Prometheus label filtering based on active bot IDs from hub state
+3. Frontend-level filtering for table/legend rendering (quick win)
+
+**Benefits:**
+- Cleaner signal during live ops
+- Faster detection of real regressions on active strategy
+- Less confusion between "container exists" vs "bot is actively trading"
+
+**Status:** Not started. Good quality-of-life upgrade for Monitoring UX.

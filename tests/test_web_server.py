@@ -13,6 +13,33 @@ from httpx import ASGITransport, AsyncClient
 
 from web.server import _ALLOWED_TABLES, _bot_reports, _get_hub_db, app, report_bot_snapshot, set_bot
 
+
+async def _reserve_open_trade(
+    client: AsyncClient,
+    *,
+    bot_id: str,
+    symbol: str,
+    side: str,
+    strategy: str,
+    opened_at: str,
+    request_key: str = "",
+) -> None:
+    payload: dict[str, object] = {
+        "bot_id": bot_id,
+        "trade": {
+            "symbol": symbol,
+            "side": side,
+            "strategy": strategy,
+            "opened_at": opened_at,
+        },
+    }
+    if request_key:
+        payload["request_key"] = request_key
+    r = await client.post("/internal/trade-reserve", json=payload)
+    assert r.status_code == 200
+    assert r.json().get("status") == "ok"
+
+
 # ── Fixtures ─────────────────────────────────────────────────────────
 
 
@@ -702,6 +729,15 @@ class TestInternalReport:
         assert r2.status_code == 200
 
     async def test_get_bot_open_trades(self, client):
+        await _reserve_open_trade(
+            client,
+            bot_id="open-test",
+            symbol="ETH/USDT",
+            side="long",
+            strategy="macd",
+            opened_at="2026-01-01T01:00:00",
+            request_key="open-reserve-1",
+        )
         payload = {
             "bot_id": "open-test",
             "action": "open",
@@ -722,6 +758,15 @@ class TestInternalReport:
         assert "ETH/USDT" in symbols
 
     async def test_get_bot_recovery_owner_symbols(self, client):
+        await _reserve_open_trade(
+            client,
+            bot_id="recover-owner-bot",
+            symbol="SOL/USDT",
+            side="long",
+            strategy="swing",
+            opened_at="2026-01-10T00:00:00",
+            request_key="recover-owner-reserve-1",
+        )
         await client.post(
             "/internal/trade",
             json={
@@ -750,6 +795,15 @@ class TestInternalReport:
     async def test_get_bot_strategy_stats(self, client):
         for i in range(3):
             opened_at = f"2026-01-0{i + 1}T00:00:00"
+            await _reserve_open_trade(
+                client,
+                bot_id="stats-bot",
+                symbol="BTC/USDT",
+                side="long",
+                strategy="rsi",
+                opened_at=opened_at,
+                request_key=f"stats-reserve-{i}",
+            )
             await client.post(
                 "/internal/trade",
                 json={
@@ -789,6 +843,15 @@ class TestInternalReport:
         assert len(stats) > 0
 
     async def test_recovery_close(self, client):
+        await _reserve_open_trade(
+            client,
+            bot_id="recover-bot",
+            symbol="SOL/USDT",
+            side="long",
+            strategy="grid",
+            opened_at="2026-01-05T00:00:00",
+            request_key="recover-reserve-1",
+        )
         await client.post(
             "/internal/trade",
             json={
@@ -815,6 +878,15 @@ class TestInternalReport:
         assert "SOL/USDT" not in symbols
 
     async def test_recovery_close_accepts_estimated_exit(self, client):
+        await _reserve_open_trade(
+            client,
+            bot_id="recover-est-bot",
+            symbol="ETH/USDT",
+            side="long",
+            strategy="rsi",
+            opened_at="2026-01-06T00:00:00",
+            request_key="recover-est-reserve-1",
+        )
         await client.post(
             "/internal/trade",
             json={
@@ -846,6 +918,15 @@ class TestInternalReport:
         assert r.json()["updated"] is True
 
     async def test_report_returns_confirmed_keys(self, client):
+        await _reserve_open_trade(
+            client,
+            bot_id="ack-bot",
+            symbol="BTC/USDT",
+            side="long",
+            strategy="rsi",
+            opened_at="2026-02-01T00:00:00",
+            request_key="ack-reserve-999",
+        )
         await client.post(
             "/internal/trade",
             json={
@@ -1044,6 +1125,26 @@ class TestInternalReport:
         body = r.json()
         assert body["status"] == "deferred"
         assert body["action"] == "update"
+
+    async def test_trade_open_returns_deferred_when_reservation_missing(self, client):
+        r = await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "defer-open-bot",
+                "action": "open",
+                "request_key": "defer-open-rk-1",
+                "trade": {
+                    "symbol": "BTC/USDT",
+                    "opened_at": "2099-01-01T00:00:00Z",
+                    "entry_price": 123.45,
+                    "amount": 1.0,
+                },
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "deferred"
+        assert body["action"] == "open"
 
     async def test_swing_entry_plan_sync_and_load(self, client):
         sync = await client.post(
@@ -3001,6 +3102,15 @@ class TestHubPushEndpoints:
     """Test /internal/trade endpoint."""
 
     async def test_push_trade_open(self, client):
+        await _reserve_open_trade(
+            client,
+            bot_id="momentum",
+            symbol="BTC/USDT",
+            side="long",
+            strategy="rsi",
+            opened_at="2026-02-20T10:00:00",
+            request_key="push-open-reserve-1",
+        )
         r = await client.post(
             "/internal/trade",
             json={
@@ -3022,6 +3132,15 @@ class TestHubPushEndpoints:
         assert r.json()["status"] == "ok"
 
     async def test_push_trade_open_second_call_updates_not_duplicates(self, client):
+        await _reserve_open_trade(
+            client,
+            bot_id="momentum",
+            symbol="BTC/USDT",
+            side="long",
+            strategy="rsi",
+            opened_at="2026-02-20T10:00:00",
+            request_key="push-open-reserve-2",
+        )
         payload = {
             "bot_id": "momentum",
             "action": "open",
@@ -3051,6 +3170,15 @@ class TestHubPushEndpoints:
         assert rows[0]["amount"] == 0.02
 
     async def test_push_trade_open_conflict_when_symbol_owned_by_other_bot(self, client):
+        await _reserve_open_trade(
+            client,
+            bot_id="hedger",
+            symbol="BNB/USDT",
+            side="long",
+            strategy="manual_override",
+            opened_at="2026-02-20T09:00:00",
+            request_key="conflict-reserve-1",
+        )
         first = {
             "bot_id": "hedger",
             "action": "open",
@@ -3065,24 +3193,22 @@ class TestHubPushEndpoints:
                 "opened_at": "2026-02-20T09:00:00",
             },
         }
-        second = {
-            "bot_id": "scalper",
-            "action": "open",
-            "trade": {
-                "symbol": "BNB/USDT",
-                "side": "long",
-                "strategy": "manual_override",
-                "action": "open",
-                "entry_price": 611,
-                "amount": 0.2,
-                "leverage": 2,
-                "opened_at": "2026-02-20T09:05:00",
-            },
-        }
         r1 = await client.post("/internal/trade", json=first)
         assert r1.status_code == 200
         assert r1.json()["status"] == "ok"
-        r2 = await client.post("/internal/trade", json=second)
+        r2 = await client.post(
+            "/internal/trade-reserve",
+            json={
+                "bot_id": "scalper",
+                "trade": {
+                    "symbol": "BNB/USDT",
+                    "side": "long",
+                    "strategy": "manual_override",
+                    "opened_at": "2026-02-20T09:05:00",
+                },
+                "request_key": "conflict-reserve-2",
+            },
+        )
         assert r2.status_code == 200
         payload = r2.json()
         assert payload["status"] == "conflict"
@@ -3093,6 +3219,15 @@ class TestHubPushEndpoints:
         assert len(r_open_scalper.json()) == 0
 
     async def test_trade_reserve_conflict_when_symbol_owned_by_other_bot(self, client):
+        await _reserve_open_trade(
+            client,
+            bot_id="hedger",
+            symbol="XRP/USDT",
+            side="long",
+            strategy="manual_override",
+            opened_at="2026-02-20T10:00:00",
+            request_key="reserve-preconflict-1",
+        )
         await client.post(
             "/internal/trade",
             json={
@@ -3227,6 +3362,36 @@ class TestHubPushEndpoints:
         assert r.status_code == 200
         assert r.json()["status"] == "deferred"
         assert r.json()["action"] == "close"
+
+    async def test_push_trade_close_without_opened_at_is_ignored(self, client):
+        before = await client.get("/api/db/table/trades?page=1&page_size=100")
+        assert before.status_code == 200
+        before_total = int(before.json().get("total", 0))
+
+        r = await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "momentum",
+                "action": "close",
+                "request_key": "rk-missing-opened-at",
+                "trade": {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "strategy": "manual_override",
+                    "action": "close",
+                    "closed_at": "2099-02-20T10:30:00",
+                    "exit_price": 51000,
+                },
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ignored"
+        assert body["detail"] == "missing_opened_at"
+
+        after = await client.get("/api/db/table/trades?page=1&page_size=100")
+        assert after.status_code == 200
+        assert int(after.json().get("total", 0)) == before_total
 
     async def test_cancel_reservation_deletes_preopen_row(self, client):
         await client.post(

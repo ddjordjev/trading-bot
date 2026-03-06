@@ -500,6 +500,50 @@ class TestOrderManagerProtectionCadence:
         assert om._protection_place_min_interval_secs == 2
 
 
+class TestOrderManagerAdaptiveSizing:
+    def test_resolve_initial_risk_amount_scales_down_for_small_balance(self, mock_exchange, mock_risk, settings):
+        s = settings.model_copy(deep=True)
+        s.initial_risk_amount = 100.0
+        s.max_position_size_pct = 5.0
+        om = OrderManager(mock_exchange, mock_risk, s)
+        # $50 balance with 5% cap -> $2.5 margin budget.
+        assert om._resolve_initial_risk_amount(balance=50.0, leverage=20) == pytest.approx(2.5)
+
+    def test_resolve_initial_risk_amount_keeps_configured_for_larger_balance(self, mock_exchange, mock_risk, settings):
+        s = settings.model_copy(deep=True)
+        s.initial_risk_amount = 50.0
+        s.max_position_size_pct = 5.0
+        om = OrderManager(mock_exchange, mock_risk, s)
+        # $10k balance with 5% cap allows more than configured; keep configured ceiling.
+        assert om._resolve_initial_risk_amount(balance=10_000.0, leverage=10) == pytest.approx(50.0)
+
+    def test_resolve_entry_leverage_caps_extreme_on_small_balance(self, mock_exchange, mock_risk, settings):
+        s = settings.model_copy(deep=True)
+        s.bot_id = "extreme"
+        om = OrderManager(mock_exchange, mock_risk, s)
+        signal = Signal(
+            symbol="WIF/USDT",
+            action=SignalAction.BUY,
+            strategy="extreme_mover",
+            suggested_price=1.0,
+            leverage=20,
+        )
+        assert om._resolve_entry_leverage(signal, target_leverage=20, balance=50.0) == 5
+
+    def test_resolve_entry_leverage_keeps_non_extreme_target(self, mock_exchange, mock_risk, settings):
+        s = settings.model_copy(deep=True)
+        s.bot_id = "momentum"
+        om = OrderManager(mock_exchange, mock_risk, s)
+        signal = Signal(
+            symbol="BTC/USDT",
+            action=SignalAction.BUY,
+            strategy="trending_momentum",
+            suggested_price=50_000.0,
+            leverage=20,
+        )
+        assert om._resolve_entry_leverage(signal, target_leverage=20, balance=50.0) == 20
+
+
 class TestOrderManagerExecuteSignal:
     async def test_execute_signal_hold_returns_none(self, order_manager):
         signal = Signal(
@@ -1547,6 +1591,49 @@ class TestSubPositionClose:
         closed = await order_manager.check_stops()
         assert any(o.id == "h1" for o in closed)
         assert order_manager.trailing.get("BTC/USDT") is not None  # main stop preserved
+
+    @pytest.mark.asyncio
+    async def test_check_stops_cleans_stale_state_when_close_has_no_position(self, order_manager):
+        order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.WINNERS,
+        )
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=0.1,
+            entry_price=50_000,
+            current_price=50_000,
+            leverage=10,
+            market_type="futures",
+        )
+        order_manager.trailing.register(pos, initial_stop_pct=0.001)
+
+        async def _fetch_positions(symbol: str | None = None):
+            if symbol:
+                return []
+            return [
+                Position(
+                    symbol="BTC/USDT",
+                    side=OrderSide.BUY,
+                    amount=0.1,
+                    entry_price=50_000,
+                    current_price=40_000,
+                    leverage=10,
+                    market_type="futures",
+                )
+            ]
+
+        order_manager.exchange.fetch_positions = AsyncMock(side_effect=_fetch_positions)
+        order_manager.exchange.fetch_balance = AsyncMock(return_value={"USDT": 10_000.0})
+
+        closed = await order_manager.check_stops()
+        assert closed == []
+        assert order_manager.trailing.get("BTC/USDT") is None
+        assert order_manager.scaler.get("BTC/USDT") is None
 
 
 # ── Stale loser detection & auto-cut ────────────────────────────────

@@ -109,6 +109,47 @@ class OrderManager:
             return max(0.05, pct) if pct > 0 else None
         return None
 
+    def _is_extreme_signal(self, signal: Signal) -> bool:
+        strategy = str(getattr(signal, "strategy", "") or "").strip().lower()
+        bot_id = str(getattr(self.settings, "bot_id", "") or "").strip().lower()
+        return bot_id == "extreme" or strategy.startswith("extreme_")
+
+    def _resolve_entry_leverage(self, signal: Signal, target_leverage: int, balance: float) -> int:
+        """Keep leverage realistic for small balances to avoid impossible entries."""
+        lev = max(1, int(target_leverage or 1))
+        if not self._is_extreme_signal(signal):
+            return lev
+        bal = max(0.0, float(balance or 0.0))
+        if bal <= 0:
+            return lev
+        # Scale leverage envelope with equity: $50 -> ~5x, $100 -> ~10x, $200+ -> up to configured target.
+        account_cap = max(2, int(bal // 10))
+        resolved = max(1, min(lev, account_cap))
+        if resolved != lev:
+            logger.info(
+                "Adaptive leverage on {}: {}x -> {}x (balance ${:.2f})",
+                signal.symbol,
+                lev,
+                resolved,
+                bal,
+            )
+        return resolved
+
+    def _resolve_initial_risk_amount(self, balance: float, leverage: int) -> float:
+        """Scale initial margin per entry down for smaller accounts."""
+        configured = max(0.0, float(getattr(self.settings, "initial_risk_amount", 0.0) or 0.0))
+        bal = max(0.0, float(balance or 0.0))
+        if configured <= 0 or bal <= 0:
+            return min(configured, bal)
+        # Never exceed risk budget implied by position-size policy.
+        max_position_pct = max(0.1, float(getattr(self.settings, "max_position_size_pct", 0.0) or 0.0))
+        pct_budget = bal * (max_position_pct / 100.0)
+        # Respect the configured notional ceiling for safety.
+        lev = max(1, int(leverage or 1))
+        notional_cap_budget = max(0.0, float(getattr(self.settings, "max_notional_position", 0.0) or 0.0)) / lev
+        adaptive = min(configured, pct_budget, notional_cap_budget if notional_cap_budget > 0 else configured, bal)
+        return max(0.0, adaptive)
+
     # ------------------------------------------------------------------ #
     #  Signal execution
     # ------------------------------------------------------------------ #
@@ -139,7 +180,11 @@ class OrderManager:
             logger.warning("No valid price for {} (got {!r}), skipping", signal.symbol, signal.suggested_price)
             return None
 
-        target_leverage = signal.leverage or self.settings.default_leverage
+        target_leverage = self._resolve_entry_leverage(
+            signal,
+            signal.leverage or self.settings.default_leverage,
+            balance,
+        )
         market_type = MarketType(signal.market_type) if signal.market_type else MarketType.SPOT
 
         side = OrderSide.BUY if signal.action == SignalAction.BUY else OrderSide.SELL
@@ -167,6 +212,7 @@ class OrderManager:
                 leverage=target_leverage,
                 mode=ScaleMode.PYRAMID,
             )
+            sp.initial_risk_amount = self._resolve_initial_risk_amount(balance, sp.initial_leverage)
             amount = sp.get_initial_amount(price)
             actual_leverage = sp.initial_leverage
             logger.info(
@@ -185,6 +231,7 @@ class OrderManager:
                 market_type=signal.market_type or "futures",
                 leverage=target_leverage,
             )
+            sp.initial_risk_amount = self._resolve_initial_risk_amount(balance, target_leverage)
             amount = sp.get_initial_amount(price)
             actual_leverage = target_leverage
             logger.info(
@@ -1503,6 +1550,16 @@ class OrderManager:
                 closed.append(order)
                 self.trailing.remove(key)
                 stopped_base_symbols.add(symbol)
+            else:
+                # Stop fired but no live position exists on exchange anymore.
+                # Drop stale local protection state to avoid repeated close loops.
+                self.trailing.remove(key)
+                if not key.endswith(":hedge") and not key.endswith(":wick"):
+                    self.trailing.remove(f"{symbol}:hedge")
+                    self.trailing.remove(f"{symbol}:wick")
+                    self.hedger.remove(symbol)
+                    self.wick_scalper.close(symbol)
+                    self.scaler.remove(symbol)
 
         active_symbols = {p.symbol for p in positions if p.amount > 0}
         for symbol, _state in list(self._protection_orders.items()):

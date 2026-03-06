@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
@@ -354,6 +355,28 @@ class TestLogClosedTrade:
         bot.orders.scaler.get = MagicMock(return_value=None)
         bot._log_closed_trade(order, "stop")
         assert "BTC/USDT" not in bot._whale_alerted
+
+    def test_log_closed_trade_missing_opened_at_reports_invariant_when_multibot(self, bot):
+        bot._multibot = True
+        bot.settings.hub_url = "http://hub.example.com"
+        bot._report_critical_error_to_hub = AsyncMock()
+        order = Order(
+            symbol="ETH/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.1,
+            price=3000.0,
+            average_price=3100.0,
+            filled=0.1,
+            status=OrderStatus.FILLED,
+            strategy="rsi",
+        )
+        bot.orders.scaler.get = MagicMock(return_value=None)
+        bot._open_trades.pop("ETH/USDT", None)
+
+        bot._log_closed_trade(order, "stop")
+
+        assert bot._hub_tasks
 
     @pytest.mark.asyncio
     async def test_log_opened_trade_stores_in_memory(self, bot):
@@ -1204,6 +1227,30 @@ class TestProcessTradeQueueRejectsAndUpdates:
 
         bot._report_queue_outcome.assert_called_once()
         assert bot._report_queue_outcome.call_args[0][2] == "manual_stop"
+        mock_exchange.fetch_positions.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_process_trade_queue_rejects_when_in_backoff_window(self, bot, mock_exchange):
+        from shared.models import SignalPriority, TradeProposal
+
+        p = TradeProposal(
+            priority=SignalPriority.CRITICAL,
+            symbol="BTC/USDT",
+            side="long",
+            strategy="m",
+            reason="r",
+            strength=0.9,
+            market_type="futures",
+            supported_exchanges=["BYBIT"],
+        )
+        bot._hub_proposal = p
+        bot._report_queue_outcome = AsyncMock()
+        bot._queue_reject_until[f"{p.symbol}|{p.strategy}"] = time.monotonic() + 120
+        mock_exchange.fetch_positions = AsyncMock(return_value=[])
+
+        await bot._process_trade_queue()
+
+        bot._report_queue_outcome.assert_called_once_with(p.id, "rejected", "cooldown_reject_backoff")
         mock_exchange.fetch_positions.assert_not_called()
 
     @pytest.mark.asyncio
@@ -2695,6 +2742,7 @@ class TestIdleMode:
         bot._tick = AsyncMock()
         bot._idle_tick = AsyncMock()
         bot._wind_down = AsyncMock()
+        bot._teardown_trading_runtime = AsyncMock()
         bot._update_tick_interval = MagicMock()
         bot._tick_interval = 0.01
 
@@ -2706,6 +2754,33 @@ class TestIdleMode:
             await bot._run_loop()
 
         bot._wind_down.assert_awaited_once()
+        bot._teardown_trading_runtime.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_run_loop_reenable_resumes_runtime(self, bot):
+        """When disabled bot gets enabled again, runtime should be reinitialized."""
+        bot._enabled = False
+        bot._running = True
+        bot._trading_runtime_active = False
+        bot._resume_from_lean_idle = AsyncMock()
+        bot._update_tick_interval = MagicMock()
+        bot._tick_interval = 0
+
+        async def _tick_once():
+            bot._running = False
+
+        bot._tick = AsyncMock(side_effect=_tick_once)
+        bot._idle_tick = AsyncMock()
+        bot._check_enabled = MagicMock(return_value=True)
+
+        with (
+            patch("bot.record_tick", create=True),
+            patch("bot.record_event_loop_lag", create=True),
+            patch("bot.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await bot._run_loop()
+
+        bot._resume_from_lean_idle.assert_awaited_once()
 
 
 class TestRuntimeReconcileStaleConfirmation:
@@ -2754,6 +2829,36 @@ class TestRuntimeReconcileStaleConfirmation:
         assert "BTC/USDT" not in bot._open_trades
 
 
+class TestEnsureManagedRuntimeState:
+    @pytest.mark.asyncio
+    async def test_reclaims_missing_ownership_when_runtime_markers_exist(self, bot):
+        pos = MagicMock()
+        pos.symbol = "SOL/USDT"
+        pos.amount = 1.0
+
+        bot.orders.scaler.get = MagicMock(return_value=object())
+        bot.orders.trailing.get = MagicMock(return_value=None)
+        bot._claim_orphan_position = AsyncMock(return_value=(True, "claimed"))
+
+        await bot._ensure_managed_position_runtime_state(pos)
+
+        bot._claim_orphan_position.assert_awaited_once_with("SOL/USDT", strategy="runtime_recovered")
+
+    @pytest.mark.asyncio
+    async def test_ignores_foreign_position_without_runtime_markers(self, bot):
+        pos = MagicMock()
+        pos.symbol = "ADA/USDT"
+        pos.amount = 2.0
+
+        bot.orders.scaler.get = MagicMock(return_value=None)
+        bot.orders.trailing.get = MagicMock(return_value=None)
+        bot._claim_orphan_position = AsyncMock(return_value=(True, "claimed"))
+
+        await bot._ensure_managed_position_runtime_state(pos)
+
+        bot._claim_orphan_position.assert_not_called()
+
+
 class TestHubAckRetry:
     @pytest.mark.asyncio
     async def test_retry_pending_hub_trades_preserves_action_override(self, bot):
@@ -2779,6 +2884,29 @@ class TestHubAckRetry:
         kwargs = bot._push_trade_to_hub.await_args.kwargs
         assert kwargs["request_key"] == "rk1"
         assert kwargs["action_override"] == "update"
+
+
+class TestPushTradeToHubInvariants:
+    @pytest.mark.asyncio
+    async def test_push_trade_to_hub_rejects_close_without_opened_at(self, bot):
+        bot.settings.hub_url = "http://hub.example.com"
+        bot._hub_session = MagicMock()
+        bot._hub_session.post = MagicMock()
+        rec = TradeRecord(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="rsi",
+            action="close",
+            opened_at="",
+            closed_at="2026-03-06T00:00:00+00:00",
+            exit_price=51000.0,
+        )
+
+        status, body = await bot._push_trade_to_hub(rec)
+
+        assert status == "invariant_error"
+        assert body.get("detail") == "missing_opened_at"
+        bot._hub_session.post.assert_not_called()
 
 
 class TestHubOwnershipHandshake:
@@ -2834,6 +2962,25 @@ class TestHubOwnershipHandshake:
                 )
             ]
         )
+
+        class _ReserveResp:
+            status = 200
+
+            async def json(self):
+                return {"status": "ok"}
+
+        class _ReserveCtx:
+            async def __aenter__(self):
+                return _ReserveResp()
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class _ReserveSess:
+            def post(self, *_args, **_kwargs):
+                return _ReserveCtx()
+
+        bot._hub_session = _ReserveSess()
         bot._push_trade_to_hub = AsyncMock(return_value=("conflict", {"owner_bot_id": "hedger"}))
         bot._rehydrate_recovered_position_state = AsyncMock(return_value=True)
 

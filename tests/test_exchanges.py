@@ -316,6 +316,18 @@ class TestBinanceExchange:
         assert bal["USDT"] == 10_000.0
 
     @pytest.mark.asyncio
+    async def test_fetch_balance_keeps_free_but_sets_wallet_anchor(self, binance):
+        binance._spot.fetch_balance = AsyncMock(return_value={"USDT": {"free": 1000.0, "total": 1000.0}})
+        binance._futures.fetch_balance = AsyncMock(
+            return_value={"USDT": {"free": 2795.0, "total": 4672.6589, "walletBalance": 4672.6589}}
+        )
+
+        bal = await binance.fetch_balance()
+
+        assert bal["USDT"] == pytest.approx(2795.0)
+        assert binance.get_balance_anchor("USDT") == pytest.approx(4672.6589)
+
+    @pytest.mark.asyncio
     async def test_fetch_positions_empty(self, binance):
         positions = await binance.fetch_positions()
         assert positions == []

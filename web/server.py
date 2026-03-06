@@ -2108,17 +2108,60 @@ async def receive_trade(request: Request, _: str = Depends(verify_token)) -> dic
     request_key = data.get("request_key", "")
     if not bot_id or not trade:
         return {"status": "error", "detail": "missing bot_id or trade"}
+    opened_at = str(trade.get("opened_at", "") or "").strip()
 
     hub = _get_hub_db()
     try:
-        if action == "cancel_reservation" and trade.get("opened_at"):
-            hub.cancel_trade_reservation(bot_id, trade["opened_at"], request_key=request_key)
-        elif action == "open" and trade.get("opened_at"):
-            updated = hub.update_trade_open(bot_id, trade["opened_at"], trade, request_key=request_key)
+        if action == "cancel_reservation":
+            if not opened_at:
+                logger.warning(
+                    "Ignoring cancel_reservation write for bot={} symbol={} (missing opened_at)",
+                    bot_id,
+                    trade.get("symbol", ""),
+                )
+                return {
+                    "status": "ignored",
+                    "action": action,
+                    "request_key": request_key,
+                    "detail": "missing_opened_at",
+                }
+            hub.cancel_trade_reservation(bot_id, opened_at, request_key=request_key)
+        elif action == "open":
+            if not opened_at:
+                logger.warning(
+                    "Ignoring open write for bot={} symbol={} (missing opened_at)",
+                    bot_id,
+                    trade.get("symbol", ""),
+                )
+                return {
+                    "status": "ignored",
+                    "action": action,
+                    "request_key": request_key,
+                    "detail": "missing_opened_at",
+                }
+            updated = hub.update_trade_open(bot_id, opened_at, trade, request_key=request_key)
             if not updated:
-                hub.insert_trade(bot_id, trade, request_key=request_key)
-        elif action == "close" and trade.get("opened_at"):
-            updated = hub.update_trade_close(bot_id, trade["opened_at"], trade, request_key=request_key)
+                logger.warning(
+                    "Deferred open write for bot={} opened_at={} symbol={} (reservation row missing)",
+                    bot_id,
+                    trade.get("opened_at", ""),
+                    trade.get("symbol", ""),
+                )
+                return {"status": "deferred", "action": action, "request_key": request_key}
+        elif action == "close":
+            if not opened_at:
+                logger.warning(
+                    "Ignoring close write for bot={} symbol={} (missing opened_at)",
+                    bot_id,
+                    trade.get("symbol", ""),
+                )
+                return {
+                    "status": "ignored",
+                    "action": action,
+                    "request_key": request_key,
+                    "detail": "missing_opened_at",
+                }
+            updated = hub.update_trade_close(bot_id, opened_at, trade, request_key=request_key)
             if not updated:
                 logger.warning(
                     "Deferred close write for bot={} opened_at={} symbol={} (open row missing)",
@@ -2127,8 +2170,20 @@ async def receive_trade(request: Request, _: str = Depends(verify_token)) -> dic
                     trade.get("symbol", ""),
                 )
                 return {"status": "deferred", "action": action, "request_key": request_key}
-        elif action == "update" and trade.get("opened_at"):
-            updated = hub.update_trade_runtime(bot_id, trade["opened_at"], trade, request_key=request_key)
+        elif action == "update":
+            if not opened_at:
+                logger.warning(
+                    "Ignoring runtime update for bot={} symbol={} (missing opened_at)",
+                    bot_id,
+                    trade.get("symbol", ""),
+                )
+                return {
+                    "status": "ignored",
+                    "action": action,
+                    "request_key": request_key,
+                    "detail": "missing_opened_at",
+                }
+            updated = hub.update_trade_runtime(bot_id, opened_at, trade, request_key=request_key)
             if not updated:
                 logger.warning(
                     "Deferred runtime update for bot={} opened_at={} symbol={} (open row missing)",

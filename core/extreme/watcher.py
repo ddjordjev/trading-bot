@@ -73,6 +73,9 @@ class ExtremeWatcher:
     async def subscribe(self, symbol: str, direction: str, *, existing_position: bool = False) -> None:
         if symbol in self._watched:
             return
+        if not self._exchange.supports_ticker_ws(symbol):
+            logger.info("Extreme WS skip {}: ticker stream unsupported", symbol)
+            return
 
         ws = WatchedSymbol(
             symbol=symbol,

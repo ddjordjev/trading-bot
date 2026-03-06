@@ -184,6 +184,10 @@ class BaseExchange(ABC):
         """Returns {asset: free_balance}."""
         ...
 
+    def get_balance_anchor(self, asset: str = "USDT") -> float | None:
+        """Optional account-level balance anchor for dashboard display."""
+        return None
+
     @abstractmethod
     async def fetch_positions(self, symbol: str | None = None) -> list[Position]: ...
 

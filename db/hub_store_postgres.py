@@ -33,6 +33,11 @@ class PostgresHubDB(HubDB):
             self._create_hub_tables()
         else:
             self._apply_schema()
+            self._sync_serial_sequences()
+            # Keep Postgres runtime aligned with hub invariants enforced by HubDB.
+            self._cleanup_rows_missing_opened_at()
+            self._cleanup_open_owner_conflicts()
+            self._ensure_single_open_owner_index()
         if not PostgresHubDB._did_log_connect_info:
             logger.info("PostgresHubDB connected")
             PostgresHubDB._did_log_connect_info = True
@@ -45,6 +50,32 @@ class PostgresHubDB(HubDB):
         script = _POSTGRES_SCHEMA_FILE.read_text()
         assert self._conn
         self._conn.executescript(script)
+
+    def _sync_serial_sequences(self) -> None:
+        """Keep serial sequences aligned to avoid duplicate key inserts on id PKs."""
+        assert self._conn
+        tables_with_serial_id = [
+            "trades",
+            "openclaw_daily_reports",
+            "openclaw_suggestions",
+            "exchange_equity_snapshots",
+            "analytics_snapshots",
+            "swing_entry_plans",
+        ]
+        for table in tables_with_serial_id:
+            try:
+                self._conn.execute(
+                    f"""
+                    SELECT setval(
+                        pg_get_serial_sequence('{table}', 'id'),
+                        COALESCE((SELECT MAX(id) FROM {table}), 1),
+                        COALESCE((SELECT MAX(id) FROM {table}), 0) > 0
+                    )
+                    """,
+                    (),
+                )
+            except Exception as exc:
+                logger.warning("Sequence sync skipped for {}: {}", table, exc)
 
     def _ensure_bot_id_column(self) -> None:
         assert self._conn

@@ -31,6 +31,13 @@ _HUB_DB_DEFAULT = Path("data/hub.db")
 class HubDB(TradeDB):
     """TradeDB extended with hub-specific tables and bot-centric queries."""
 
+    _REQUIRED_FIELDS_BY_ACTION: dict[str, tuple[str, ...]] = {
+        "open": ("bot_id", "opened_at"),
+        "close": ("bot_id", "opened_at"),
+        "update": ("bot_id", "opened_at"),
+        "cancel_reservation": ("bot_id", "opened_at"),
+    }
+
     def __init__(self, path: Path = _HUB_DB_DEFAULT):
         super().__init__(path=path)
         self._ack_buffer: dict[str, set[str]] = {}
@@ -234,6 +241,7 @@ class HubDB(TradeDB):
         self._ensure_bot_id_column()
         self._ensure_request_key_column()
         self._ensure_recovery_close_column()
+        self._cleanup_rows_missing_opened_at()
         self._cleanup_open_owner_conflicts()
         self._ensure_single_open_owner_index()
 
@@ -289,9 +297,29 @@ class HubDB(TradeDB):
         assert self._conn
         self._conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_open_owner_symbol ON trades(symbol) "
-            "WHERE closed_at='' AND symbol!=''"
+            "WHERE closed_at='' AND symbol!=''",
+            (),
         )
         self._conn.commit()
+
+    def _cleanup_rows_missing_opened_at(self) -> None:
+        """Delete legacy rows that violate opened_at identity invariant."""
+        assert self._conn
+        cursor = self._conn.execute("DELETE FROM trades WHERE TRIM(COALESCE(opened_at, '')) = ''", ())
+        deleted = int(cursor.rowcount or 0)
+        if deleted > 0:
+            logger.warning("Deleted {} legacy trade row(s) missing opened_at", deleted)
+            self._conn.commit()
+
+    def _require_trade_fields(self, action: str, values: dict[str, Any]) -> None:
+        """Reject writes missing required fields for the target action."""
+        action_l = str(action or "").strip().lower()
+        required = self._REQUIRED_FIELDS_BY_ACTION.get(action_l, ())
+        for field in required:
+            raw = values.get(field)
+            if str(raw or "").strip():
+                continue
+            raise DBIntegrityError(f"missing_{field}:{action_l}")
 
     # ---- Trade ingestion (hub-specific) ----
 
@@ -336,6 +364,20 @@ class HubDB(TradeDB):
             (bot_id, symbol),
         ).fetchone()
         return int(row["id"]) if row else None
+
+    @staticmethod
+    def _patch_value(data: dict[str, Any], key: str) -> Any:
+        """Return incoming patch value only when explicitly provided."""
+        return data.get(key)
+
+    @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        """Safely coerce optional flag-like payload values to int."""
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return int(value)
 
     def _execute_write_with_lock_retry(
         self,
@@ -386,6 +428,16 @@ class HubDB(TradeDB):
                 return int(existing["id"])
         symbol = str(trade.get("symbol", "") or "").strip()
         action = str(trade.get("action", "") or "").strip().lower()
+        opened_at = str(trade.get("opened_at", "") or "").strip()
+        self._require_trade_fields(
+            action,
+            {
+                "bot_id": bot_id,
+                "opened_at": opened_at,
+            },
+        )
+        if action == "open" and not symbol:
+            raise DBIntegrityError("missing_symbol:open")
         closed_at = str(trade.get("closed_at", "") or "").strip()
         if action == "open" and symbol and not closed_at:
             existing_open = self._conn.execute(
@@ -498,6 +550,13 @@ class HubDB(TradeDB):
     def update_trade_open(self, bot_id: str, opened_at: str, data: dict[str, Any], request_key: str = "") -> bool:
         """Upgrade an existing reservation/open row with actual fill details."""
         assert self._conn
+        self._require_trade_fields(
+            "open",
+            {
+                "bot_id": bot_id,
+                "opened_at": opened_at,
+            },
+        )
         if request_key:
             existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
             if existing:
@@ -507,8 +566,6 @@ class HubDB(TradeDB):
         row_id = self._latest_open_row_id(bot_id, opened_at, str(data.get("symbol", "") or ""))
         if row_id is None:
             row_id = self._latest_open_row_id(bot_id, opened_at)
-        if row_id is None and str(data.get("symbol", "") or "").strip():
-            row_id = self._latest_open_row_id_by_symbol(bot_id, str(data.get("symbol", "") or ""))
         if row_id is None:
             return False
 
@@ -516,49 +573,69 @@ class HubDB(TradeDB):
             cursor = self._execute_write_with_lock_retry(
                 """UPDATE trades SET
                 action='open',
-                symbol=?, side=?, strategy=?, scale_mode=?,
-                entry_price=?, amount=?, leverage=?,
-                market_regime=?, fear_greed=?, daily_tier=?, daily_pnl_at_entry=?,
-                signal_strength=?, hour_utc=?, day_of_week=?, volatility_pct=?,
-                planned_stop_loss=?, planned_tp1=?, planned_tp2=?,
-                exchange_stop_loss=?, exchange_take_profit=?,
-                bot_stop_loss=?, bot_take_profit=?,
-                effective_stop_loss=?, effective_take_profit=?,
-                stop_source=?, tp_source=?,
-                was_quick_trade=?, was_low_liquidity=?, dca_count=?, max_drawdown_pct=?,
+                symbol=COALESCE(NULLIF(?, ''), symbol),
+                side=COALESCE(NULLIF(?, ''), side),
+                strategy=COALESCE(NULLIF(?, ''), strategy),
+                scale_mode=COALESCE(NULLIF(?, ''), scale_mode),
+                entry_price=COALESCE(?, entry_price),
+                amount=COALESCE(?, amount),
+                leverage=COALESCE(?, leverage),
+                market_regime=COALESCE(NULLIF(?, ''), market_regime),
+                fear_greed=COALESCE(?, fear_greed),
+                daily_tier=COALESCE(NULLIF(?, ''), daily_tier),
+                daily_pnl_at_entry=COALESCE(?, daily_pnl_at_entry),
+                signal_strength=COALESCE(?, signal_strength),
+                hour_utc=COALESCE(?, hour_utc),
+                day_of_week=COALESCE(?, day_of_week),
+                volatility_pct=COALESCE(?, volatility_pct),
+                planned_stop_loss=COALESCE(?, planned_stop_loss),
+                planned_tp1=COALESCE(?, planned_tp1),
+                planned_tp2=COALESCE(?, planned_tp2),
+                exchange_stop_loss=COALESCE(?, exchange_stop_loss),
+                exchange_take_profit=COALESCE(?, exchange_take_profit),
+                bot_stop_loss=COALESCE(?, bot_stop_loss),
+                bot_take_profit=COALESCE(?, bot_take_profit),
+                effective_stop_loss=COALESCE(?, effective_stop_loss),
+                effective_take_profit=COALESCE(?, effective_take_profit),
+                stop_source=COALESCE(NULLIF(?, ''), stop_source),
+                tp_source=COALESCE(NULLIF(?, ''), tp_source),
+                was_quick_trade=COALESCE(?, was_quick_trade),
+                was_low_liquidity=COALESCE(?, was_low_liquidity),
+                dca_count=COALESCE(?, dca_count),
+                max_drawdown_pct=COALESCE(?, max_drawdown_pct),
                 request_key=CASE WHEN ?='' THEN request_key ELSE ? END
             WHERE id=?""",
                 (
-                    data.get("symbol", ""),
-                    data.get("side", ""),
-                    data.get("strategy", ""),
-                    data.get("scale_mode", ""),
-                    data.get("entry_price", 0),
-                    data.get("amount", 0),
-                    data.get("leverage", 1),
-                    data.get("market_regime", ""),
-                    data.get("fear_greed", 50),
-                    data.get("daily_tier", ""),
-                    data.get("daily_pnl_at_entry", 0),
-                    data.get("signal_strength", 0),
-                    data.get("hour_utc", 0),
-                    data.get("day_of_week", 0),
-                    data.get("volatility_pct", 0),
-                    data.get("planned_stop_loss", 0),
-                    data.get("planned_tp1", 0),
-                    data.get("planned_tp2", 0),
-                    data.get("exchange_stop_loss", 0),
-                    data.get("exchange_take_profit", 0),
-                    data.get("bot_stop_loss", 0),
-                    data.get("bot_take_profit", 0),
-                    data.get("effective_stop_loss", 0),
-                    data.get("effective_take_profit", 0),
-                    data.get("stop_source", "none"),
-                    data.get("tp_source", "none"),
-                    int(data.get("was_quick_trade", False)),
-                    int(data.get("was_low_liquidity", False)),
-                    data.get("dca_count", 0),
-                    data.get("max_drawdown_pct", 0),
+                    self._patch_value(data, "symbol"),
+                    self._patch_value(data, "side"),
+                    self._patch_value(data, "strategy"),
+                    self._patch_value(data, "scale_mode"),
+                    self._patch_value(data, "entry_price"),
+                    self._patch_value(data, "amount"),
+                    self._patch_value(data, "leverage"),
+                    self._patch_value(data, "market_regime"),
+                    self._patch_value(data, "fear_greed"),
+                    self._patch_value(data, "daily_tier"),
+                    self._patch_value(data, "daily_pnl_at_entry"),
+                    self._patch_value(data, "signal_strength"),
+                    self._patch_value(data, "hour_utc"),
+                    self._patch_value(data, "day_of_week"),
+                    self._patch_value(data, "volatility_pct"),
+                    self._patch_value(data, "planned_stop_loss"),
+                    self._patch_value(data, "planned_tp1"),
+                    self._patch_value(data, "planned_tp2"),
+                    self._patch_value(data, "exchange_stop_loss"),
+                    self._patch_value(data, "exchange_take_profit"),
+                    self._patch_value(data, "bot_stop_loss"),
+                    self._patch_value(data, "bot_take_profit"),
+                    self._patch_value(data, "effective_stop_loss"),
+                    self._patch_value(data, "effective_take_profit"),
+                    self._patch_value(data, "stop_source"),
+                    self._patch_value(data, "tp_source"),
+                    self._optional_int(data.get("was_quick_trade")),
+                    self._optional_int(data.get("was_low_liquidity")),
+                    self._patch_value(data, "dca_count"),
+                    self._patch_value(data, "max_drawdown_pct"),
                     request_key,
                     request_key,
                     row_id,
@@ -579,6 +656,7 @@ class HubDB(TradeDB):
     def update_trade_close(self, bot_id: str, opened_at: str, data: dict[str, Any], request_key: str = "") -> bool:
         """Update an open trade row with exit data (matched by bot_id + opened_at)."""
         assert self._conn
+        self._require_trade_fields("close", {"bot_id": bot_id, "opened_at": opened_at})
         if request_key:
             existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
             if existing:
@@ -588,45 +666,54 @@ class HubDB(TradeDB):
         row_id = self._latest_open_row_id(bot_id, opened_at, str(data.get("symbol", "") or ""))
         if row_id is None:
             row_id = self._latest_open_row_id(bot_id, opened_at)
-        if row_id is None and str(data.get("symbol", "") or "").strip():
-            row_id = self._latest_open_row_id_by_symbol(bot_id, str(data.get("symbol", "") or ""))
         if row_id is None:
             return False
 
         try:
             cursor = self._execute_write_with_lock_retry(
                 """UPDATE trades SET
-                action='close', exit_price=?, amount=?, leverage=?,
-                pnl_usd=?, pnl_pct=?, is_winner=?,
-                hold_minutes=?, dca_count=?, max_drawdown_pct=?,
-                closed_at=?,
-                effective_stop_loss=?, effective_take_profit=?,
-                stop_source=?, tp_source=?,
-                close_source=?, close_reason=?,
-                exchange_close_order_id=?, exchange_close_trade_id=?,
-                close_detected_at=?,
+                action='close',
+                exit_price=COALESCE(?, exit_price),
+                amount=COALESCE(?, amount),
+                leverage=COALESCE(?, leverage),
+                pnl_usd=COALESCE(?, pnl_usd),
+                pnl_pct=COALESCE(?, pnl_pct),
+                is_winner=COALESCE(?, is_winner),
+                hold_minutes=COALESCE(?, hold_minutes),
+                dca_count=COALESCE(?, dca_count),
+                max_drawdown_pct=COALESCE(?, max_drawdown_pct),
+                closed_at=COALESCE(NULLIF(?, ''), closed_at),
+                effective_stop_loss=COALESCE(?, effective_stop_loss),
+                effective_take_profit=COALESCE(?, effective_take_profit),
+                stop_source=COALESCE(NULLIF(?, ''), stop_source),
+                tp_source=COALESCE(NULLIF(?, ''), tp_source),
+                close_source=COALESCE(NULLIF(?, ''), close_source),
+                close_reason=COALESCE(NULLIF(?, ''), close_reason),
+                exchange_close_order_id=COALESCE(NULLIF(?, ''), exchange_close_order_id),
+                exchange_close_trade_id=COALESCE(NULLIF(?, ''), exchange_close_trade_id),
+                close_detected_at=COALESCE(NULLIF(?, ''), close_detected_at),
                 request_key=CASE WHEN ?='' THEN request_key ELSE ? END
             WHERE id=?""",
                 (
-                    data.get("exit_price", 0),
-                    data.get("amount", 0),
-                    data.get("leverage", 1),
-                    data.get("pnl_usd", 0),
-                    data.get("pnl_pct", 0),
-                    int(data.get("is_winner", False)),
-                    data.get("hold_minutes", 0),
-                    data.get("dca_count", 0),
-                    data.get("max_drawdown_pct", 0),
-                    data.get("closed_at", ""),
-                    data.get("effective_stop_loss", 0),
-                    data.get("effective_take_profit", 0),
-                    data.get("stop_source", "none"),
-                    data.get("tp_source", "none"),
-                    data.get("close_source", ""),
-                    data.get("close_reason", ""),
-                    data.get("exchange_close_order_id", ""),
-                    data.get("exchange_close_trade_id", ""),
-                    data.get("close_detected_at", ""),
+                    self._patch_value(data, "exit_price"),
+                    self._patch_value(data, "amount"),
+                    self._patch_value(data, "leverage"),
+                    self._patch_value(data, "pnl_usd"),
+                    self._patch_value(data, "pnl_pct"),
+                    self._optional_int(data.get("is_winner")),
+                    self._patch_value(data, "hold_minutes"),
+                    self._patch_value(data, "dca_count"),
+                    self._patch_value(data, "max_drawdown_pct"),
+                    self._patch_value(data, "closed_at"),
+                    self._patch_value(data, "effective_stop_loss"),
+                    self._patch_value(data, "effective_take_profit"),
+                    self._patch_value(data, "stop_source"),
+                    self._patch_value(data, "tp_source"),
+                    self._patch_value(data, "close_source"),
+                    self._patch_value(data, "close_reason"),
+                    self._patch_value(data, "exchange_close_order_id"),
+                    self._patch_value(data, "exchange_close_trade_id"),
+                    self._patch_value(data, "close_detected_at"),
                     request_key,
                     request_key,
                     row_id,
@@ -655,6 +742,7 @@ class HubDB(TradeDB):
     def update_trade_runtime(self, bot_id: str, opened_at: str, data: dict[str, Any], request_key: str = "") -> bool:
         """Update runtime SL/TP fields for an open trade row."""
         assert self._conn
+        self._require_trade_fields("update", {"bot_id": bot_id, "opened_at": opened_at})
         if request_key:
             existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
             if existing:
@@ -664,39 +752,37 @@ class HubDB(TradeDB):
         row_id = self._latest_open_row_id(bot_id, opened_at, str(data.get("symbol", "") or ""))
         if row_id is None:
             row_id = self._latest_open_row_id(bot_id, opened_at)
-        if row_id is None and str(data.get("symbol", "") or "").strip():
-            row_id = self._latest_open_row_id_by_symbol(bot_id, str(data.get("symbol", "") or ""))
         if row_id is None:
             return False
 
         try:
             cursor = self._execute_write_with_lock_retry(
                 """UPDATE trades SET
-                planned_stop_loss=?,
-                planned_tp1=?,
-                planned_tp2=?,
-                exchange_stop_loss=?,
-                exchange_take_profit=?,
-                bot_stop_loss=?,
-                bot_take_profit=?,
-                effective_stop_loss=?,
-                effective_take_profit=?,
-                stop_source=?,
-                tp_source=?,
+                planned_stop_loss=COALESCE(?, planned_stop_loss),
+                planned_tp1=COALESCE(?, planned_tp1),
+                planned_tp2=COALESCE(?, planned_tp2),
+                exchange_stop_loss=COALESCE(?, exchange_stop_loss),
+                exchange_take_profit=COALESCE(?, exchange_take_profit),
+                bot_stop_loss=COALESCE(?, bot_stop_loss),
+                bot_take_profit=COALESCE(?, bot_take_profit),
+                effective_stop_loss=COALESCE(?, effective_stop_loss),
+                effective_take_profit=COALESCE(?, effective_take_profit),
+                stop_source=COALESCE(NULLIF(?, ''), stop_source),
+                tp_source=COALESCE(NULLIF(?, ''), tp_source),
                 request_key=CASE WHEN ?='' THEN request_key ELSE ? END
             WHERE id=?""",
                 (
-                    data.get("planned_stop_loss", 0),
-                    data.get("planned_tp1", 0),
-                    data.get("planned_tp2", 0),
-                    data.get("exchange_stop_loss", 0),
-                    data.get("exchange_take_profit", 0),
-                    data.get("bot_stop_loss", 0),
-                    data.get("bot_take_profit", 0),
-                    data.get("effective_stop_loss", 0),
-                    data.get("effective_take_profit", 0),
-                    data.get("stop_source", "none"),
-                    data.get("tp_source", "none"),
+                    self._patch_value(data, "planned_stop_loss"),
+                    self._patch_value(data, "planned_tp1"),
+                    self._patch_value(data, "planned_tp2"),
+                    self._patch_value(data, "exchange_stop_loss"),
+                    self._patch_value(data, "exchange_take_profit"),
+                    self._patch_value(data, "bot_stop_loss"),
+                    self._patch_value(data, "bot_take_profit"),
+                    self._patch_value(data, "effective_stop_loss"),
+                    self._patch_value(data, "effective_take_profit"),
+                    self._patch_value(data, "stop_source"),
+                    self._patch_value(data, "tp_source"),
                     request_key,
                     request_key,
                     row_id,
@@ -729,6 +815,7 @@ class HubDB(TradeDB):
         (risk gate reject, open exception, or fill timeout).
         """
         assert self._conn
+        self._require_trade_fields("cancel_reservation", {"bot_id": bot_id, "opened_at": opened_at})
         if request_key:
             existing = self._conn.execute("SELECT id FROM trades WHERE request_key = ?", (request_key,)).fetchone()
             if existing:
@@ -1674,7 +1761,7 @@ class HubDB(TradeDB):
             FROM trades
             WHERE action='close' AND closed_at != '' AND recovery_close=0
             GROUP BY symbol
-            ORDER BY ABS(total_pnl_usd) DESC, trades DESC
+            ORDER BY ABS(COALESCE(SUM(pnl_usd), 0)) DESC, trades DESC
             LIMIT ?
             """,
             (limit,),

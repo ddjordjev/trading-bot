@@ -67,6 +67,9 @@ class RejectionRecord:
 
 
 class HubState:
+    _REJECT_COOLDOWN_BASE_SECONDS = 30
+    _REJECT_COOLDOWN_MAX_SECONDS = 300
+
     """In-memory state backend for the hub.
 
     Analytics snapshot is the one exception — it's persisted in hub.db on
@@ -285,6 +288,23 @@ class HubState:
         )
         if not picked:
             return None
+
+        rkey = f"{picked.symbol}|{picked.strategy}"
+        rejection = self._rejections.get(rkey)
+        if rejection:
+            cooldown = min(self._REJECT_COOLDOWN_MAX_SECONDS, self._REJECT_COOLDOWN_BASE_SECONDS * rejection.count)
+            age = (datetime.now(UTC) - rejection.timestamp).total_seconds()
+            if age < cooldown:
+                remaining = max(15, int(cooldown - age))
+                self._trade_queue.lock_proposal(picked.id, seconds=remaining)
+                logger.debug(
+                    "Deferring {} {} for {} (recent rejection: {}s left)",
+                    picked.symbol,
+                    picked.strategy,
+                    bot_id,
+                    remaining,
+                )
+                return None
 
         self._trade_queue.lock_proposal(picked.id, seconds=300)
         logger.info(
