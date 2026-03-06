@@ -29,8 +29,8 @@ This section is the source of truth for current CEX deployment/runtime settings 
   - use `http://localhost:9045`
   - persistent tunnel managed by LaunchAgent: `~/Library/LaunchAgents/com.tradeborg.ssh-tunnel.plist`
   - label: `com.tradeborg.ssh-tunnel`
-- Active trading profile: `extreme` only
-- Idle deployed profiles: `hedger`, `indicators` (containers running, profiles disabled)
+- Active trading profile: `indicators` only
+- Idle deployed profiles: `extreme`, `hedger` (containers running, profiles disabled)
 - Disabled & not deployed on prod (for now): `momentum`, `meanrev`, `swing`, `scalper`, `fullstack`, `conservative`, `aggressive`
 - Dashboard profile visibility allowlist: `BOT_PROFILES_VISIBLE_IDS=extreme,hedger,indicators`
 - Conservative runtime overrides:
@@ -49,13 +49,13 @@ This section is the source of truth for current CEX deployment/runtime settings 
   - rotation: `100 MB`
   - retention: `7 days`
 - Droplet reboot behavior (current production safety mode):
-  - stack does **not** auto-start after droplet restart
-  - Docker auto-start is intentionally disabled/masked on the droplet to allow manual incident recovery first
-  - expected state right after reboot: no trading containers running until explicitly started
+  - Docker daemon **does** auto-start after droplet restart (`docker`/`containerd` enabled)
+  - trading stack containers are set to restart policy `no` (no auto-start on reboot)
+  - expected state right after reboot: Docker is up, trading containers stay down until explicitly started
 - Image/runtime identifiers:
   - Compose project: `trading-bot`
   - Hub image: `trading-bot-bot-hub`
-  - Active bot image: `trading-bot-bot-extreme`
+  - Active bot image: `trading-bot-bot-indicators`
   - Postgres image: `postgres:16`
   - Monitoring images: `trading-bot-grafana`, `trading-bot-prometheus`, `trading-bot-loki`, `trading-bot-promtail`
 
@@ -192,4 +192,6 @@ When resuming this deployment in a new chat:
 - 2026-03-06: Live trading auth verified on DO. `bot-conservative` now connects in `TRADING_MODE=live` with Binance production (`sandbox=False`), market load succeeds, and the prior `-2015` error is resolved after IP whitelist update.
 - 2026-03-06: Runtime switched to `extreme` for live execution. Kept `hedger` and `indicators` deployed as idle (disabled in hub), and removed 7 non-target bot containers from prod to reduce CPU/RAM noise.
 - 2026-03-06: Bot Profiles UI/API now filtered to deployed IDs only (`extreme`, `hedger`, `indicators`) to avoid confusing non-deployed idle cards.
-- 2026-03-06: Production droplet set to manual-recovery mode: Docker auto-start on reboot is disabled/masked, so stack remains down after restart until we intentionally bring it up.
+- 2026-03-06: Runtime switched from `extreme` to `indicators` as the only enabled profile; `extreme` and `hedger` remain deployed but idle/disabled.
+- 2026-03-06: Reboot behavior updated: Docker auto-start re-enabled, but trading containers set to `restart=no` so stack does not auto-run after droplet restart.
+- 2026-03-06: Hub publish port on droplet is `9045` (mapped to container `9035`) to match the local SSH tunnel target `localhost:9045`.
