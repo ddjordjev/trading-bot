@@ -1,0 +1,39 @@
+---
+description: Mandatory startup context bootstrap for trading-bot
+alwaysApply: true
+---
+
+# Startup Context Bootstrap (Trading-Bot)
+
+Before any substantial reasoning, code edits, or shell execution:
+
+1. **Query/search ai-memory first** for related context.
+   - Run: `scripts/bootstrap_ai_memory.sh "<task summary>"`
+   - Goal: retrieve prior decisions, known pitfalls, and recent work state.
+   - If ai-memory is unavailable, output exactly:
+     `AI-MEMORY NOT AVAILABLE AND I'M NOT ABLE TO USE IT ATM`
+     then stop startup bootstrap and ask for direction.
+
+2. **Read required local docs next** (in this order):
+   - `docs/AI_CONTEXT.md`
+   - `docs/ARCHITECTURE.md`
+   - `docs/summary.html`
+   - `docs/DO_DEPLOYMENT_TRACKER.md`
+   - `docs/new_ideas.md`
+
+3. **Only after steps 1-2**, proceed with implementation/review/debugging.
+
+## Hard Rules
+
+- Do not skip ai-memory lookup when the task is non-trivial.
+- Do not skip required docs for new sessions or unclear context.
+- If ai-memory and docs conflict, treat repo docs as canonical for this codebase,
+  and report the conflict explicitly.
+
+## Required Startup Checklist Output
+
+Before implementation, provide exactly 3 bullets:
+
+- `ai-memory`: what was queried and top 1-2 relevant findings (or explicit unavailability).
+- `docs reviewed`: confirm all required docs were read.
+- `working assumptions`: concise assumptions to use for this task.

@@ -394,11 +394,15 @@ async def _start_services(state: HubState) -> None:
 
     monitor_task = asyncio.create_task(_monitor.start(), name="monitor")
     analytics_task = asyncio.create_task(_analytics.start(), name="analytics")
-    daily_task = asyncio.create_task(_daily_report_loop(), name="daily_report")
     openclaw_advisor_task = asyncio.create_task(_openclaw_advisor.start(), name="openclaw_advisor")
-    _background_tasks.extend([monitor_task, analytics_task, daily_task, openclaw_advisor_task])
+    _background_tasks.extend([monitor_task, analytics_task, openclaw_advisor_task])
 
-    logger.info("Hub services started: monitor + analytics + daily report + openclaw advisor")
+    if _notifier.is_enabled(NotificationType.DAILY_SUMMARY):
+        daily_task = asyncio.create_task(_daily_report_loop(), name="daily_report")
+        _background_tasks.append(daily_task)
+        logger.info("Hub services started: monitor + analytics + daily report + openclaw advisor")
+    else:
+        logger.info("Hub services started: monitor + analytics + openclaw advisor (daily report disabled)")
 
 
 async def _stop_services() -> None:

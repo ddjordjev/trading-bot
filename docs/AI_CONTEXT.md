@@ -13,10 +13,16 @@ Use this file as the default startup context for new chats.
 
 ## New Chat Startup Instruction
 
-Read `docs/AI_CONTEXT.md` first.  
-Read `docs/ARCHITECTURE.md` only if the task touches architecture or data flow.  
-Read `docs/summary.html` only when requirements history or deep human narrative is needed.
-Optional: consult external `ai-memory` knowledge base for higher-level cross-project context; treat this repo docs as canonical when conflicts appear.
+Query/search external `ai-memory` first via `scripts/bootstrap_ai_memory.sh "<task summary>"`.  
+Then read `docs/AI_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/summary.html`,
+`docs/DO_DEPLOYMENT_TRACKER.md`, and `docs/new_ideas.md` before substantial work.  
+If `ai-memory` is unavailable, explicitly report it before proceeding.  
+Treat this repo docs as canonical when conflicts appear.
+
+Before implementation, output a 3-bullet startup checklist:
+- `ai-memory` (query + key findings, or explicit unavailability)
+- `docs reviewed` (confirm required set)
+- `working assumptions` (for current task)
 
 ## One-Screen System Snapshot
 

@@ -1,0 +1,34 @@
+---
+description: Config source-of-truth rules — no inferred mode logic
+alwaysApply: true
+---
+
+# Config Source Of Truth
+
+## Hard Rules
+
+1. **Never infer behavior from mode labels.**
+   Do NOT branch business/runtime behavior on `TRADING_MODE` (or similar labels).
+   `TRADING_MODE` is metadata only unless the user explicitly says otherwise.
+
+2. **Use explicit config flags for behavior.**
+   If behavior must differ by environment, add one explicit setting key
+   (example: `SEND_DAILY_REPORT`) and read only that key in code.
+
+3. **Keep config names identical across environments.**
+   Use the same variable name in code and env files. Environment files may
+   set different values, but the key name must stay the same.
+
+4. **No hidden fallback heuristics.**
+   Do not reintroduce implicit checks like "if paper/sandbox then ...".
+   Runtime behavior must be directly controlled by explicit config values.
+
+5. **Environment defaults must be explicit in overrides.**
+   For any new behavior toggle, set values in:
+   - `env/local.runtime.env` (local/test intent)
+   - `env/prod.runtime.env.example` (prod intent)
+   - `.env.example` (safe baseline)
+
+6. **If a justified exception is required, report it clearly.**
+   Keep exception scope minimal and list it in the final message so the user
+   can approve or reject it.

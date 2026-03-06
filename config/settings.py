@@ -135,6 +135,7 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     notify_email: str = ""
     notifications_enabled: str = "liquidation,daily_summary"
+    send_daily_report: bool = False
 
     # Volatility
     spike_threshold_pct: float = 3.0

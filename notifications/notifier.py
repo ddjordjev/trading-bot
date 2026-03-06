@@ -34,6 +34,7 @@ class Notifier:
         self.smtp_password = settings.smtp_password
         self.notify_email = settings.notify_email
         self.enabled_types = set(settings.notification_list)
+        self._daily_summary_allowed = bool(getattr(settings, "send_daily_report", False))
         self._queue: asyncio.Queue[tuple[str, str, int]] = asyncio.Queue(maxsize=100)
         self._running = False
         self._background_tasks: list[asyncio.Task[None]] = []
@@ -43,6 +44,8 @@ class Notifier:
     def is_enabled(self, ntype: NotificationType) -> bool:
         if ntype in self.ALWAYS_ON:
             return True
+        if ntype == NotificationType.DAILY_SUMMARY and not self._daily_summary_allowed:
+            return False
         return ntype.value in self.enabled_types
 
     async def start(self) -> None:

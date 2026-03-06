@@ -10,7 +10,8 @@ from notifications.notifier import NotificationType, Notifier
 @pytest.fixture()
 def settings(monkeypatch):
     monkeypatch.setenv("TRADING_MODE", "paper_local")
-    monkeypatch.setenv("EXCHANGE", "bybit")
+    monkeypatch.setenv("EXCHANGE", "bybit_testnet")
+    monkeypatch.setenv("SEND_DAILY_REPORT", "false")
     monkeypatch.setenv("NOTIFICATIONS_ENABLED", "stop_loss,daily_summary")
     monkeypatch.setenv("SMTP_USER", "")
     monkeypatch.setenv("NOTIFY_EMAIL", "")
@@ -39,7 +40,19 @@ class TestNotifier:
 
     def test_is_enabled_configured(self, notifier):
         assert notifier.is_enabled(NotificationType.STOP_LOSS) is True
-        assert notifier.is_enabled(NotificationType.DAILY_SUMMARY) is True
+        assert notifier.is_enabled(NotificationType.DAILY_SUMMARY) is False
+
+    def test_daily_summary_enabled_in_live_prod(self, monkeypatch):
+        monkeypatch.setenv("TRADING_MODE", "live")
+        monkeypatch.setenv("EXCHANGE", "bybit")
+        monkeypatch.setenv("SEND_DAILY_REPORT", "true")
+        monkeypatch.setenv("NOTIFICATIONS_ENABLED", "daily_summary")
+        monkeypatch.setenv("SMTP_USER", "")
+        monkeypatch.setenv("NOTIFY_EMAIL", "")
+        from config.settings import Settings
+
+        n = Notifier(Settings())
+        assert n.is_enabled(NotificationType.DAILY_SUMMARY) is True
 
     def test_is_disabled(self, notifier):
         assert notifier.is_enabled(NotificationType.NEWS_ALERT) is False
