@@ -37,7 +37,7 @@ services:
       - POSTGRES_DB=${HUB_POSTGRES_DB:-trading_db}
       - TZ=UTC
     ports:
-      - "${HUB_POSTGRES_PORT:-5438}:5432"
+      - "127.0.0.1:${HUB_POSTGRES_PORT:-5438}:5432"
     volumes:
       - hub-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -64,6 +64,7 @@ services:
     environment:
       - TZ=UTC
       - DASHBOARD_PORT=9035
+      - BOT_PROFILES_VISIBLE_IDS=extreme,hedger,indicators
       - OPENCLAW_URL=http://openclaw-bridge:18080/intel
       - OPENCLAW_TIMEOUT_SECONDS=10
       - OPENCLAW_DAILY_REVIEW_ENABLED=true
@@ -71,7 +72,7 @@ services:
       - OPENCLAW_DAILY_REVIEW_FORCE_PAID=true
     command: python hub_main.py
     ports:
-      - "${DASHBOARD_PORT:-9035}:9035"
+      - "127.0.0.1:${DASHBOARD_PUBLISH_PORT:-9035}:9035"
     volumes:
       - ${HOST_DATA_DIR}:/app/data
       - ${HOST_LOGS_DIR}:/app/logs
@@ -278,10 +279,12 @@ services:
       - BOT_ID=conservative
       - BOT_STYLE=meanrev
       - EXCHANGE=binance
-      - DEFAULT_LEVERAGE=3
-      - MAX_POSITION_SIZE_PCT=3
+      - DEFAULT_LEVERAGE=2
+      - MAX_POSITION_SIZE_PCT=2
       - STOP_LOSS_PCT=1.0
-      - INITIAL_RISK_AMOUNT=20
+      - INITIAL_RISK_AMOUNT=5
+      - MAX_CONCURRENT_POSITIONS=1
+      - HEDGE_ENABLED=false
       - HUB_URL=http://bot-hub:9035
     healthcheck:
       test: ["CMD", "python", "-c", "print('ok')"]
@@ -397,7 +400,7 @@ services:
     container_name: trading-bot-grafana
     restart: unless-stopped
     ports:
-      - "${GRAFANA_PORT:-3001}:3000"
+      - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer

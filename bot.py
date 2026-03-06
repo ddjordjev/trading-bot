@@ -557,6 +557,12 @@ class TradingBot:
             str(self.settings.exchange).upper(),
             self._exchange_access_reason,
         )
+        await self._report_critical_error_to_hub(
+            code="exchange_access_lost",
+            message=self._exchange_access_reason,
+            context=context,
+            severity="critical",
+        )
 
         await self.notifier.alert_exchange_access_lost(
             exchange=self.settings.exchange,
@@ -590,6 +596,12 @@ class TradingBot:
                 break
             except Exception as e:
                 logger.warning("Lean idle error: {}", e)
+                await self._report_critical_error_to_hub(
+                    code="lean_idle_error",
+                    message=str(e),
+                    context="lean_idle_loop",
+                    severity="error",
+                )
                 await asyncio.sleep(10)
 
     async def _full_start(self) -> None:
@@ -709,6 +721,12 @@ class TradingBot:
                 break
             except Exception as e:
                 logger.exception("Error in main loop: {}", e)
+                await self._report_critical_error_to_hub(
+                    code="main_loop_exception",
+                    message=str(e),
+                    context="main_loop",
+                    severity="critical",
+                )
                 await self._handle_exchange_access_loss(str(e), "main_loop")
                 await asyncio.sleep(10)
 
@@ -2387,6 +2405,39 @@ class TradingBot:
             logger.error("Hub report error: {}", e, exc_info=True)
         self._retry_pending_hub_trades()
 
+    async def _report_critical_error_to_hub(
+        self,
+        *,
+        code: str,
+        message: str,
+        context: str,
+        severity: str = "critical",
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Push critical bot/runtime errors to hub for centralized dashboard visibility."""
+        hub_url = self.settings.hub_url
+        if not hub_url or not self._multibot:
+            return
+        if not self._hub_session:
+            self._hub_session = self._new_hub_session(timeout_seconds=10)
+
+        payload: dict[str, Any] = {
+            "bot_id": self.settings.bot_id or "default",
+            "exchange": self.settings.exchange.upper(),
+            "severity": str(severity or "critical").strip().lower(),
+            "code": str(code or "unknown").strip() or "unknown",
+            "context": str(context or "runtime").strip() or "runtime",
+            "message": str(message or "").strip()[:1200],
+            "extra": extra or {},
+        }
+        try:
+            url = f"{hub_url.rstrip('/')}/internal/bot-error"
+            async with self._hub_session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    logger.warning("Hub critical-error report failed: {}", resp.status)
+        except Exception as e:
+            logger.warning("Hub critical-error report exception: {}", e)
+
     async def _fetch_intel(self) -> None:
         """GET intel, analytics, and extreme watchlist from hub. Called once per full tick."""
         hub_url = self.settings.hub_url
@@ -3694,7 +3745,13 @@ def main() -> None:
 
     logger.remove()
     logger.add(sys.stderr, level=settings.log_level, diagnose=False)
-    logger.add("logs/bot_{time}.log", rotation="1 day", retention="30 days", level="DEBUG", diagnose=False)
+    logger.add(
+        "logs/bot_{time}.log",
+        rotation="100 MB",
+        retention="7 days",
+        level=settings.log_level,
+        diagnose=False,
+    )
 
     bot = TradingBot(settings, daily_target_pct=5.0)
 

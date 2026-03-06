@@ -85,7 +85,7 @@ ALL_PROFILES: list[BotProfile] = [
         description="Classic RSI and MACD crossover signals",
         style="momentum",
         strategies=["rsi", "macd"],
-        is_default=True,
+        is_default=False,
     ),
     BotProfile(
         id="meanrev",

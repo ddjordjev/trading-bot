@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import re
 import time
 from collections import deque
@@ -216,7 +217,7 @@ def _log_sink(message: object) -> None:
 
 
 def setup_log_capture() -> None:
-    logger.add(_log_sink, level="DEBUG", format="{message}")
+    logger.add(_log_sink, level=get_settings().log_level, format="{message}")
 
 
 def set_bot(bot: Any) -> None:
@@ -496,12 +497,16 @@ async def get_trending(_: str = Depends(verify_token)) -> list[TrendingCoinInfo]
 
 @app.get("/api/strategies", response_model=list[StrategyInfo])
 async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
+    from config.bot_profiles import PROFILES_BY_ID
+
     state_token = _strategies_state_token()
     cached = _cache_get("strategies", state_token)
     if cached is not None:
         return list(cached)
     grouped: dict[tuple[str, bool], StrategyInfo] = {}
     open_counts_by_strategy: dict[str, int] = {}
+    hub = _get_hub_db()
+    enabled_map = hub.get_all_bot_enabled()
 
     # Source 1: live bot reports (strategies currently running on connected bots)
     for rpt in _bot_reports.values():
@@ -566,6 +571,33 @@ async def get_strategies(_: str = Depends(verify_token)) -> list[StrategyInfo]:
                 g.applied_count = w.total_trades
                 g.success_count = round(w.win_rate * w.total_trades)
                 g.fail_count = w.total_trades - g.success_count
+
+    # Source 3: enabled/running profile definitions.
+    # This keeps Strategies page useful even when bots report empty strategy arrays.
+    settings = get_settings()
+    default_leverage = int(getattr(settings, "default_leverage", 10) or 10)
+    default_mode = str(getattr(settings, "default_scale_mode", "pyramid") or "pyramid")
+    for bid, rpt in _bot_reports.items():
+        profile = PROFILES_BY_ID.get(str(bid).strip())
+        if not profile or profile.is_hub:
+            continue
+        enabled = bool(enabled_map.get(profile.id, profile.is_default))
+        running = bool((rpt.get("status", {}) or {}).get("running", False))
+        if not enabled or not running:
+            continue
+        profile_leverage = int(profile.env_overrides.get("DEFAULT_LEVERAGE", default_leverage) or default_leverage)
+        profile_mode = str(profile.env_overrides.get("DEFAULT_SCALE_MODE", default_mode) or default_mode)
+        for strategy_name in profile.strategies:
+            key = (strategy_name, False)
+            if key not in grouped:
+                grouped[key] = StrategyInfo(
+                    name=strategy_name,
+                    symbol="",
+                    market_type="futures",
+                    leverage=profile_leverage,
+                    mode=profile_mode,
+                    is_dynamic=False,
+                )
 
     for g in grouped.values():
         g.open_now = open_counts_by_strategy.get(g.name, 0)
@@ -1101,10 +1133,14 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
 
     hub = _get_hub_db()
     enabled_map = hub.get_all_bot_enabled()
+    visible_ids_raw = str(os.getenv("BOT_PROFILES_VISIBLE_IDS", "") or "").strip()
+    visible_ids = {part.strip() for part in visible_ids_raw.split(",") if part.strip()} if visible_ids_raw else None
 
     result: list[BotProfileInfo] = []
     for p in ALL_PROFILES:
         if p.is_hub:
+            continue
+        if visible_ids is not None and p.id not in visible_ids:
             continue
         enabled = enabled_map.get(p.id, p.is_default)
         rpt = _bot_reports.get(p.id, {})
@@ -1908,6 +1944,55 @@ async def internal_disable_bot(request: Request, _: str = Depends(verify_token))
     logger.warning("Hub auto-disabled bot {} ({})", bot_id, reason or "no reason")
     nudge_ws()
     return {"status": "ok", "bot_id": bot_id, "enabled": False}
+
+
+@app.post("/internal/bot-error")
+async def internal_bot_error(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
+    """Receive critical/error bot events and surface them in hub logs/dashboard."""
+    try:
+        data = await request.json()
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+
+    bot_id = _normalize_bot_id(data.get("bot_id", ""))
+    exchange = str(data.get("exchange", "") or "").strip().upper() or "UNKNOWN"
+    severity = str(data.get("severity", "critical") or "critical").strip().lower()
+    code = str(data.get("code", "unknown") or "unknown").strip() or "unknown"
+    context = str(data.get("context", "runtime") or "runtime").strip() or "runtime"
+    message = str(data.get("message", "") or "").strip()[:1200]
+    extra = data.get("extra")
+    if not isinstance(extra, dict):
+        extra = {}
+
+    if not bot_id:
+        return {"status": "error", "detail": "missing bot_id"}
+    if not message:
+        return {"status": "error", "detail": "missing message"}
+
+    if severity == "warning":
+        logger.warning(
+            "BOT_EVENT [{}] {} {} [{}] {} | extra={}",
+            bot_id,
+            exchange,
+            code,
+            context,
+            message,
+            extra,
+        )
+    else:
+        logger.error(
+            "BOT_EVENT [{}] {} {} [{}] {} | extra={}",
+            bot_id,
+            exchange,
+            code,
+            context,
+            message,
+            extra,
+        )
+    nudge_ws()
+    return {"status": "ok"}
 
 
 @app.post("/internal/queue-update")

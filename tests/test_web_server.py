@@ -601,6 +601,31 @@ class TestGetStrategiesNoneStats:
         assert data[0]["open_now"] == 0
         _bot_reports.clear()
 
+    async def test_strategies_falls_back_to_enabled_running_profile_strategies(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        hub = _get_hub_db()
+        hub.set_bot_enabled("extreme", True)
+        _bot_reports.clear()
+        report_bot_snapshot(
+            {
+                "bot_id": "extreme",
+                "exchange": "BINANCE",
+                "status": {"running": True},
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+        try:
+            r = await client.get("/api/strategies")
+            assert r.status_code == 200
+            rows = r.json()
+            names = {row["name"] for row in rows}
+            assert "compound_momentum" in names
+            assert "market_open_volatility" in names
+        finally:
+            _bot_reports.clear()
+
 
 # ── POST /internal/report & merged snapshot ──────────────────────────
 
@@ -3262,6 +3287,32 @@ class TestHubPushEndpoints:
         assert body["bot_id"] == "aggressive"
         assert body["enabled"] is False
 
+    async def test_internal_bot_error_accepts_payload_and_logs(self, client):
+        with patch("web.server.logger.error") as error_spy:
+            r = await client.post(
+                "/internal/bot-error",
+                json={
+                    "bot_id": "conservative",
+                    "exchange": "BINANCE",
+                    "severity": "critical",
+                    "code": "exchange_access_lost",
+                    "context": "lean_idle_loop",
+                    "message": "Invalid API-key, IP, or permissions for action. -2015",
+                    "extra": {"market": "futures"},
+                },
+            )
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        assert error_spy.call_count == 1
+
+    async def test_internal_bot_error_requires_bot_id_and_message(self, client):
+        missing_bot = await client.post("/internal/bot-error", json={"message": "x"})
+        missing_message = await client.post("/internal/bot-error", json={"bot_id": "conservative"})
+        assert missing_bot.status_code == 200
+        assert missing_message.status_code == 200
+        assert missing_bot.json()["status"] == "error"
+        assert missing_message.json()["status"] == "error"
+
 
 # ── Bot Profiles ─────────────────────────────────────────────────────
 
@@ -3432,6 +3483,14 @@ class TestBotProfiles:
         profile = next(p for p in data if p["id"] == "extreme")
         assert profile["enabled"] is True
         assert profile["container_status"] == "idle"
+
+    async def test_list_profiles_respects_visibility_allowlist_env(self, client, mock_bot):
+        set_bot(mock_bot)
+        with patch.dict("os.environ", {"BOT_PROFILES_VISIBLE_IDS": "extreme,hedger,indicators"}):
+            r = await client.get("/api/bot-profiles")
+        assert r.status_code == 200
+        ids = [p["id"] for p in r.json()]
+        assert set(ids) == {"extreme", "hedger", "indicators"}
 
 
 # ── Branch Coverage Guards ─────────────────────────────────────────────

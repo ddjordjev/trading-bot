@@ -5,6 +5,12 @@ Owner: platform/docs
 
 Use this file as the default startup context for new chats.
 
+## Deployment Context
+
+- For live DigitalOcean runtime/deployment state, read `docs/DO_DEPLOYMENT_TRACKER.md`.
+- `trade-borg-cex` section is the source of truth for current CEX deployment settings.
+- `trade-borg-dex` section is reserved for the future DEX project.
+
 ## New Chat Startup Instruction
 
 Read `docs/AI_CONTEXT.md` first.  
