@@ -15,12 +15,12 @@ HASH_FILE="$(git rev-parse --git-dir)/.env_secrets_hash"
 [ -f "$ENV_FILE" ] || exit 0
 command -v gh &>/dev/null || exit 0
 
-current_hash=$( (grep -E '^(BINANCE_TEST_|BYBIT_TEST_|TRADING_MODE=|EXCHANGE=)' "$ENV_FILE" || true) | shasum -a 256 | cut -d' ' -f1)
+current_hash=$( (grep -E '^([A-Z0-9_]+_API_KEY|[A-Z0-9_]+_API_SECRET)=' "$ENV_FILE" || true) | shasum -a 256 | cut -d' ' -f1)
 previous_hash=""
 [ -f "$HASH_FILE" ] && previous_hash=$(cat "$HASH_FILE")
 
 if [ "$current_hash" != "$previous_hash" ]; then
-    echo "⟳ .env test keys changed — syncing to GitHub secrets..."
+    echo "⟳ .env API keys changed — syncing to GitHub secrets..."
     "$ROOT/scripts/run_session.sh" sync-secrets
     echo "$current_hash" > "$HASH_FILE"
 fi

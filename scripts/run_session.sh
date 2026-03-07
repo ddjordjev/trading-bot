@@ -26,13 +26,20 @@ cmd_openclaw_preflight() {
     "$ROOT/scripts/openclaw_preflight.sh"
 }
 
+cmd_materialize_local_secrets() {
+    log "Materializing local runtime secrets..."
+    "$ROOT/scripts/materialize_runtime_secrets.sh" local
+}
+
 cmd_build() {
+    cmd_materialize_local_secrets
     log "Building Docker images..."
     docker compose build
     log "Build complete."
 }
 
 cmd_start() {
+    cmd_materialize_local_secrets
     log "Starting all services..."
     docker compose up -d
     sleep 3
@@ -77,6 +84,7 @@ cmd_logs() {
 
 cmd_rebuild() {
     warn "Rebuilding and restarting..."
+    cmd_materialize_local_secrets
     docker compose build
     docker compose up -d
     sleep 3
@@ -135,14 +143,14 @@ case "${1:-help}" in
         while IFS='=' read -r key value; do
             [[ -z "$key" || "$key" == \#* ]] && continue
             case "$key" in
-                *_TEST_*|TRADING_MODE|EXCHANGE)
+                *_API_KEY|*_API_SECRET)
                     gh secret set "$key" --body "$value"
                     echo "  ✓ $key"
                     ((count++))
                     ;;
             esac
         done < "$ROOT/.env"
-        echo "Synced $count secrets from .env → GitHub"
+        echo "Synced $count exchange API secrets from .env → GitHub"
         ;;
     help|*)
         echo "Usage: $0 {preflight|openclaw-preflight|build|start|stop|status|logs|rebuild|snapshot|sync-secrets}"
@@ -156,6 +164,6 @@ case "${1:-help}" in
         echo "  logs [svc]   — Tail logs (default: bot-hub)"
         echo "  rebuild      — Rebuild images and restart"
         echo "  snapshot     — Save current state to docs/reports/"
-        echo "  sync-secrets — Sync test keys from .env to GitHub secrets"
+        echo "  sync-secrets — Sync exchange API secrets from .env to GitHub"
         ;;
 esac

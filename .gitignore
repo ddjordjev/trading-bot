@@ -2,6 +2,8 @@
 .env.openclaw.local
 env/prod.compose.env
 env/prod.runtime.env
+env/local.runtime.secrets.env
+env/prod.runtime.secrets.env
 __pycache__/
 *.pyc
 *.pyo
