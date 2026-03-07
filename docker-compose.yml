@@ -12,9 +12,9 @@ x-bot-common: &bot-common
   env_file:
     - path: .env
       required: true
-    - path: ${RUNTIME_ENV_OVERRIDE_FILE:-.env.runtime.override}
+    - path: ${RUNTIME_ENV_OVERRIDE_FILE}
       required: false
-    - path: ${RUNTIME_SECRETS_FILE:-.env.runtime.secrets}
+    - path: ${RUNTIME_SECRETS_FILE}
       required: false
   environment:
     - TZ=UTC
@@ -39,9 +39,9 @@ services:
     env_file:
       - path: .env
         required: true
-      - path: ${RUNTIME_ENV_OVERRIDE_FILE:-.env.runtime.override}
+      - path: ${RUNTIME_ENV_OVERRIDE_FILE}
         required: false
-      - path: ${RUNTIME_SECRETS_FILE:-.env.runtime.secrets}
+      - path: ${RUNTIME_SECRETS_FILE}
         required: false
     environment:
       - POSTGRES_USER=${HUB_POSTGRES_USER:-tradeborg}
@@ -71,9 +71,9 @@ services:
     env_file:
       - path: .env
         required: true
-      - path: ${RUNTIME_ENV_OVERRIDE_FILE:-.env.runtime.override}
+      - path: ${RUNTIME_ENV_OVERRIDE_FILE}
         required: false
-      - path: ${RUNTIME_SECRETS_FILE:-.env.runtime.secrets}
+      - path: ${RUNTIME_SECRETS_FILE}
         required: false
       - path: .env.openclaw.local
         required: false
@@ -114,9 +114,9 @@ services:
     env_file:
       - path: .env
         required: true
-      - path: ${RUNTIME_ENV_OVERRIDE_FILE:-.env.runtime.override}
+      - path: ${RUNTIME_ENV_OVERRIDE_FILE}
         required: false
-      - path: ${RUNTIME_SECRETS_FILE:-.env.runtime.secrets}
+      - path: ${RUNTIME_SECRETS_FILE}
         required: false
       - path: .env.openclaw.local
         required: false

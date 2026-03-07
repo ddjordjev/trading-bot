@@ -1,0 +1,25 @@
+---
+description: Enforce strict KISS and no unsolicited runtime actions
+alwaysApply: true
+---
+
+# Strict KISS Default
+
+Use the smallest possible change that solves the exact user request.
+
+## Core Behavior
+
+- Do only what the user explicitly asked for.
+- Do not add side refactors, extra improvements, or fallback mechanisms unless requested.
+- Keep implementation paths single and explicit; avoid "just in case" logic.
+- Touch only files required for the requested outcome.
+
+## Runtime Safety
+
+- Never run deploy/restart/toggle/runtime-changing commands unless the user explicitly asks.
+- For disruptive actions, show a one-line command preview and wait for confirmation.
+- If the user asks for inspection/status only, remain strictly read-only.
+
+## Decision Rule
+
+- If multiple valid approaches exist, stop and ask which one to use before implementing.
