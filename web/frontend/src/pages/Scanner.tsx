@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { get } from "../api/client";
+import { buildExchangeSymbolUrl } from "../utils/exchangeLinks";
 
 interface TrendingCoin {
   symbol: string;
@@ -25,19 +26,14 @@ interface TradeQueueItem {
   supported_exchanges: string[];
 }
 
-function buildExchangeSymbolUrl(symbol: string, exchange: string | undefined): string {
-  const ex = (exchange || "").toLowerCase();
-  if (!symbol || !ex) return "";
-  const clean = symbol.replace("/", "").toUpperCase();
-
-  if (ex === "binance") return `https://www.binance.com/en/futures/${clean}`;
-  if (ex === "bybit") return `https://www.bybit.com/trade/usdt/${clean}`;
-  return "";
+interface StatusLite {
+  trading_mode?: string;
 }
 
 export function Scanner() {
   const [coins, setCoins] = useState<TrendingCoin[]>([]);
   const [tradeQueue, setTradeQueue] = useState<TradeQueueItem[]>([]);
+  const [tradingMode, setTradingMode] = useState("live");
   const [loading, setLoading] = useState(true);
 
   const refresh = () => {
@@ -48,18 +44,27 @@ export function Scanner() {
     get<TradeQueueItem[]>("/api/trade-queue").then(setTradeQueue).catch(() => setTradeQueue([]));
   }, []);
 
+  const fetchStatus = useCallback(() => {
+    get<StatusLite>("/api/status")
+      .then((s) => setTradingMode(String(s?.trading_mode || "live")))
+      .catch(() => setTradingMode("live"));
+  }, []);
+
   useEffect(() => {
     const loadingGuard = window.setTimeout(() => setLoading(false), 8000);
     refresh();
     fetchTradeQueue();
+    fetchStatus();
     const coinIv = setInterval(refresh, 30000);
     const queueIv = setInterval(fetchTradeQueue, 5000);
+    const statusIv = setInterval(fetchStatus, 30000);
     return () => {
       window.clearTimeout(loadingGuard);
       clearInterval(coinIv);
       clearInterval(queueIv);
+      clearInterval(statusIv);
     };
-  }, [fetchTradeQueue]);
+  }, [fetchTradeQueue, fetchStatus]);
 
   if (loading) return <div className="empty-state">Loading...</div>;
 
@@ -89,7 +94,7 @@ export function Scanner() {
                     <td style={{ fontWeight: 600 }}>
                       {(() => {
                         const primaryExchange = (p.supported_exchanges || [])[0];
-                        const href = buildExchangeSymbolUrl(p.symbol, primaryExchange);
+                        const href = buildExchangeSymbolUrl(p.symbol, primaryExchange, tradingMode);
                         if (!href) return p.symbol;
                         return (
                           <a
@@ -145,7 +150,7 @@ export function Scanner() {
                 <td>
                   {c.source === "binance_scanner" ? (
                     <a
-                      href={buildExchangeSymbolUrl(c.symbol, "BINANCE")}
+                      href={buildExchangeSymbolUrl(c.symbol, "BINANCE", tradingMode)}
                       target="_blank"
                       rel="noopener noreferrer"
                       style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 700 }}

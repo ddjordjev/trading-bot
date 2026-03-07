@@ -1232,6 +1232,57 @@ class TestInternalReport:
         assert snap["exchange_balances"]["BINANCE"] == pytest.approx(5150.0)
         _bot_reports.clear()
 
+    async def test_merged_snapshot_prefers_exchange_wallet_balance_when_present(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports.clear()
+        report_bot_snapshot(
+            {
+                "bot_id": "m1",
+                "exchange": "BINANCE",
+                "exchange_balance": 5000.0,
+                "exchange_wallet_balance": 4993.23,
+                "status": {
+                    "running": True,
+                    "balance": 0.0,
+                    "available_margin": 4000.0,
+                    "daily_pnl": 0.0,
+                    "daily_pnl_pct": 0.0,
+                    "total_growth_usd": 0.0,
+                    "total_growth_pct": 0.0,
+                    "profit_buffer_pct": 0.0,
+                    "uptime_seconds": 10,
+                    "manual_stop_active": False,
+                    "strategies_count": 0,
+                    "dynamic_strategies_count": 0,
+                    "trading_mode": "paper_local",
+                    "exchange_name": "BINANCE",
+                    "exchange_url": "",
+                    "tier": "building",
+                    "tier_progress_pct": 0,
+                    "daily_target_pct": 10,
+                },
+                "positions": [
+                    {
+                        "symbol": "BTC/USDT",
+                        "exchange_name": "BINANCE",
+                        "notional_value": 1200.0,
+                        "leverage": 12,
+                        "pnl_usd": 50.0,
+                    }
+                ],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+        from web.server import _build_merged_snapshot
+
+        snap = _build_merged_snapshot()
+        # Wallet anchor should win over synthetic available+margin+uPnL.
+        assert snap["status"]["balance"] == pytest.approx(4993.23)
+        assert snap["status"]["available_margin"] == pytest.approx(5000.0)
+        assert snap["exchange_balances"]["BINANCE"] == pytest.approx(4993.23)
+        _bot_reports.clear()
+
     async def test_merged_snapshot_uses_latest_exchange_balance_not_high_watermark(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
         _bot_reports.clear()
@@ -1431,7 +1482,14 @@ class TestInternalReport:
                 "exchange": "BYBIT",
                 "status": dict(base_status, exchange_name="BYBIT"),
                 "positions": [],
-                "foreign_positions": [{"symbol": "BTC/USDT", "side": "long", "detected_at": "2026-02-01T00:02:00Z"}],
+                "foreign_positions": [
+                    {
+                        "symbol": "BTC/USDT",
+                        "side": "long",
+                        "trade_url": "https://testnet.bybit.com/trade/usdt/BTCUSDT",
+                        "detected_at": "2026-02-01T00:02:00Z",
+                    }
+                ],
                 "wick_scalps": [],
                 "strategies": [],
             }
@@ -1448,6 +1506,7 @@ class TestInternalReport:
         assert ("BYBIT", "BTC/USDT") in orphan_keys
         bybit_row = next(o for o in snap["orphan_positions"] if str(o.get("exchange_name", "")).upper() == "BYBIT")
         assert str(bybit_row.get("orphan_reason", "")) == "no_owner_record"
+        assert str(bybit_row.get("trade_url", "")) == "https://testnet.bybit.com/trade/usdt/BTCUSDT"
         _bot_reports.clear()
 
     async def test_merged_snapshot_normalizes_bot_id_for_owner_matching(self, client, mock_bot):
@@ -3668,7 +3727,7 @@ class TestBotProfiles:
             assert r.status_code == 200
             data = r.json()
             profile = next(p for p in data if p["id"] == "extreme")
-            assert profile["enabled"] is False
+            assert profile["enabled"] is True
             assert profile["container_status"] == "idle"
         finally:
             _bot_reports.clear()
@@ -3732,7 +3791,20 @@ class TestBotProfiles:
         assert r.status_code == 200
         data = r.json()
         profile = next(p for p in data if p["id"] == "extreme")
-        assert profile["enabled"] is False
+        assert profile["enabled"] is True
+        assert profile["container_status"] == "idle"
+
+    async def test_profile_status_keeps_manual_enable_without_pending_timeout(self, client, mock_bot):
+        set_bot(mock_bot)
+        hub = _get_hub_db()
+        hub.set_bot_enabled("aggressive", True)
+        _bot_reports.clear()
+
+        r = await client.get("/api/bot-profiles")
+        assert r.status_code == 200
+        data = r.json()
+        profile = next(p for p in data if p["id"] == "aggressive")
+        assert profile["enabled"] is True
         assert profile["container_status"] == "idle"
 
     async def test_profile_enable_grace_keeps_toggle_on_until_startup(self, client, mock_bot):

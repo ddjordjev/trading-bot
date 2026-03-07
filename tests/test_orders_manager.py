@@ -543,6 +543,22 @@ class TestOrderManagerAdaptiveSizing:
         )
         assert om._resolve_entry_leverage(signal, target_leverage=20, balance=50.0) == 20
 
+    def test_resolve_entry_leverage_uses_configured_extreme_envelope(self, mock_exchange, mock_risk, settings):
+        s = settings.model_copy(deep=True)
+        s.bot_id = "extreme"
+        s.extreme_leverage_balance_step_usdt = 20.0
+        s.extreme_leverage_min_cap = 3
+        om = OrderManager(mock_exchange, mock_risk, s)
+        signal = Signal(
+            symbol="WIF/USDT",
+            action=SignalAction.BUY,
+            strategy="extreme_mover",
+            suggested_price=1.0,
+            leverage=20,
+        )
+        # floor(50/20)=2 -> min cap 3 => final cap is 3x.
+        assert om._resolve_entry_leverage(signal, target_leverage=20, balance=50.0) == 3
+
 
 class TestOrderManagerExecuteSignal:
     async def test_execute_signal_hold_returns_none(self, order_manager):

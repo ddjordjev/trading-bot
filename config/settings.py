@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     default_leverage: int = 10
     # Cross mode is intentionally disabled for now; all futures trades use isolated.
     futures_margin_mode: Literal["isolated"] = "isolated"
+    # Adaptive leverage envelope for extreme signals on small accounts.
+    # account_cap = max(extreme_leverage_min_cap, floor(balance / extreme_leverage_balance_step_usdt))
+    extreme_leverage_balance_step_usdt: float = 10.0
+    extreme_leverage_min_cap: int = 2
 
     # Risk -- capital preservation first
     max_position_size_pct: float = 5.0

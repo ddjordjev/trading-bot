@@ -4,17 +4,9 @@ import { PositionRow } from "../components/PositionRow";
 import { LogViewer } from "../components/LogViewer";
 import { useEffect, useState } from "react";
 import { getBotLabel } from "../utils/botNames";
+import { buildExchangeSymbolUrl } from "../utils/exchangeLinks";
 
 const ALLOWED_EXCHANGES = new Set(["BINANCE", "BYBIT"]);
-
-function buildExchangeSymbolUrl(symbol: string, exchange: string | undefined): string {
-  const ex = String(exchange || "").toUpperCase();
-  if (!symbol || !ex) return "";
-  const clean = symbol.replace("/", "").toUpperCase();
-  if (ex === "BINANCE") return `https://www.binance.com/en/futures/${clean}`;
-  if (ex === "BYBIT") return `https://www.bybit.com/trade/usdt/${clean}`;
-  return "";
-}
 
 interface Props {
   data: FullSnapshot | null;
@@ -406,6 +398,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                 const key = `${String(o.exchange_name || "")}:${o.symbol}`;
                 const suggested = defaultAssignee(o);
                 const chosenBot = orphanAssignees[key] || suggested;
+                const orphanTradeUrl = String((o as any).trade_url || "");
                 const originalOwner = String(o.originally_opened_by || "").trim();
                 const ownerRunning = o.owner_running === true;
                 const ownerOptionMissing = !!originalOwner && !bots.some((b) => b.bot_id === originalOwner);
@@ -413,9 +406,9 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                 return (
                   <tr key={key}>
                     <td>
-                      {buildExchangeSymbolUrl(String(o.symbol || ""), String(o.exchange_name || "")) ? (
+                      {(orphanTradeUrl || buildExchangeSymbolUrl(String(o.symbol || ""), String(o.exchange_name || ""), str(s.trading_mode))) ? (
                         <a
-                          href={buildExchangeSymbolUrl(String(o.symbol || ""), String(o.exchange_name || ""))}
+                          href={orphanTradeUrl || buildExchangeSymbolUrl(String(o.symbol || ""), String(o.exchange_name || ""), str(s.trading_mode))}
                           target="_blank"
                           rel="noreferrer"
                           style={{ color: "var(--blue)" }}

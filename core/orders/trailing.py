@@ -137,18 +137,17 @@ class TrailingStop(BaseModel):
             if self.activated:
                 old = self.current_stop
                 if self.trailing_mode == "pullback":
-                    if self.structure_guard > 0:
-                        new_stop = price * (1 - max(0.5, self.pullback_buffer_pct) / 100)
-                        if self._move_long_stop(new_stop):
-                            logger.debug(
-                                "Pullback trail raised {}: {:.6f} -> {:.6f} (peak: {:.6f}, guard: {:.6f}, buffer={:.1f}%)",
-                                self.symbol,
-                                old,
-                                self.current_stop,
-                                price,
-                                self.structure_guard,
-                                self.pullback_buffer_pct,
-                            )
+                    new_stop = price * (1 - max(0.5, self.pullback_buffer_pct) / 100)
+                    if self._move_long_stop(new_stop):
+                        logger.debug(
+                            "Pullback trail raised {}: {:.6f} -> {:.6f} (peak: {:.6f}, guard: {:.6f}, buffer={:.1f}%)",
+                            self.symbol,
+                            old,
+                            self.current_stop,
+                            price,
+                            self.structure_guard,
+                            self.pullback_buffer_pct,
+                        )
                 else:
                     new_stop = price * (1 - self.trail_pct / 100)
                     if self._move_long_stop(new_stop):
@@ -237,18 +236,17 @@ class TrailingStop(BaseModel):
             if self.activated:
                 old = self.current_stop
                 if self.trailing_mode == "pullback":
-                    if self.structure_guard > 0:
-                        new_stop = price * (1 + max(0.5, self.pullback_buffer_pct) / 100)
-                        if self._move_short_stop(new_stop):
-                            logger.debug(
-                                "Pullback trail lowered {}: {:.6f} -> {:.6f} (peak: {:.6f}, guard: {:.6f}, buffer={:.1f}%)",
-                                self.symbol,
-                                old,
-                                self.current_stop,
-                                price,
-                                self.structure_guard,
-                                self.pullback_buffer_pct,
-                            )
+                    new_stop = price * (1 + max(0.5, self.pullback_buffer_pct) / 100)
+                    if self._move_short_stop(new_stop):
+                        logger.debug(
+                            "Pullback trail lowered {}: {:.6f} -> {:.6f} (peak: {:.6f}, guard: {:.6f}, buffer={:.1f}%)",
+                            self.symbol,
+                            old,
+                            self.current_stop,
+                            price,
+                            self.structure_guard,
+                            self.pullback_buffer_pct,
+                        )
                 else:
                     new_stop = price * (1 + self.trail_pct / 100)
                     if self._move_short_stop(new_stop):

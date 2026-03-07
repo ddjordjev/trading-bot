@@ -234,7 +234,8 @@ class BybitExchange(BaseExchange):
                 if isinstance(info, dict) and info.get("free", 0) > 0:
                     # Spot and derivatives are distinct wallets. Summing both free
                     # amounts for the same asset overstates available equity.
-                    result[asset] = max(result.get(asset, 0.0), float(info["free"]))
+                    # Prefer derivatives free balance for trading runtime state.
+                    result[asset] = float(info["free"])
         except Exception:
             pass
         return {k: v for k, v in result.items() if v > 0}

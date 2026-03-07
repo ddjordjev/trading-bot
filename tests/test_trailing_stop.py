@@ -277,6 +277,36 @@ class TestTrailingStopManagerKeys:
 
 
 class TestTrailingBehaviorGuards:
+    def test_pullback_mode_trails_without_structure_guard_long(self):
+        ts = TrailingStop(
+            symbol="ALT/USDT",
+            side=OrderSide.BUY,
+            entry_price=100.0,
+            initial_stop_pct=2.0,
+            trail_pct=1.0,
+            activation_pct=1.0,
+            trailing_mode="pullback",
+            pullback_buffer_pct=4.0,
+            structure_guard=0.0,
+        )
+        ts.update(105.0)
+        assert ts.current_stop > 100.0
+
+    def test_pullback_mode_trails_without_structure_guard_short(self):
+        ts = TrailingStop(
+            symbol="ALT/USDT",
+            side=OrderSide.SELL,
+            entry_price=100.0,
+            initial_stop_pct=2.0,
+            trail_pct=1.0,
+            activation_pct=1.0,
+            trailing_mode="pullback",
+            pullback_buffer_pct=4.0,
+            structure_guard=0.0,
+        )
+        ts.update(95.0)
+        assert ts.current_stop < 100.0
+
     def test_wick_tighten_requires_touch_then_reclaim(self):
         ts = TrailingStop(
             symbol="ALT/USDT",

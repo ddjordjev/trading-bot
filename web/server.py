@@ -68,6 +68,8 @@ _last_stable_snapshot: dict[str, Any] | None = None
 _last_stable_snapshot_ts: float = 0.0
 _pending_profile_enable_since: dict[str, float] = {}
 _PENDING_ENABLE_GRACE_SECS = 45.0
+_activation_nudge_since: dict[str, float] = {}
+_ACTIVATION_NUDGE_SECS = 15.0
 
 
 @dataclass(slots=True)
@@ -1149,7 +1151,8 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
             continue
         if visible_ids is not None and p.id not in visible_ids:
             continue
-        enabled = bool(enabled_map.get(p.id, is_default_enabled(p.id)))
+        default_enabled = is_default_enabled(p.id)
+        enabled = bool(enabled_map.get(p.id, default_enabled))
         rpt = _bot_reports.get(p.id, {})
         s = rpt.get("status", {})
         positions = rpt.get("positions", [])
@@ -1170,13 +1173,25 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
         pending_since = _pending_profile_enable_since.get(p.id)
         if container_status == "running":
             _pending_profile_enable_since.pop(p.id, None)
+            _activation_nudge_since.pop(p.id, None)
         elif enabled:
             pending_fresh = bool(pending_since and (now_ts - pending_since) < _PENDING_ENABLE_GRACE_SECS)
-            if not pending_fresh:
+            # Auto-disable only for stale enables initiated via this API session.
+            # We intentionally avoid forcing OFF historical persisted states here,
+            # because startup/warmup/report timing can otherwise disable healthy bots.
+            should_force_disable = pending_since is not None
+            if should_force_disable and not pending_fresh:
                 hub.set_bot_enabled(p.id, False)
                 enabled = False
                 enabled_map[p.id] = False
                 _pending_profile_enable_since.pop(p.id, None)
+            # Persisted enabled profiles can survive rebuilds without a fresh toggle.
+            # Re-emit activation marker while idle so bots can leave lean-idle mode.
+            if enabled and container_status == "idle":
+                last_nudge = _activation_nudge_since.get(p.id, 0.0)
+                if (now_ts - last_nudge) >= _ACTIVATION_NUDGE_SECS:
+                    _write_activation_file(p.id)
+                    _activation_nudge_since[p.id] = now_ts
         summary = hub.get_bot_summary(p.id)
         exchange_name = str(rpt.get("exchange", "") or p.env_overrides.get("EXCHANGE", "") or "").strip().upper()
         balance_now: float | None
@@ -1381,10 +1396,10 @@ def report_bot_snapshot(data: dict[str, Any]) -> None:
     stamped = dict(data)
     stamped["bot_id"] = bot_id
     stamped["_reported_at"] = time.time()
-    if "exchange_balance" in stamped:
+    if "exchange_balance" in stamped or "exchange_wallet_balance" in stamped:
         # Track when the raw exchange balance was actually observed.
         # Quick hub-check heartbeats update _reported_at but may not carry a
-        # fresh exchange_balance value; recency must follow this marker.
+        # fresh exchange balance values; recency must follow this marker.
         stamped["_exchange_balance_reported_at"] = stamped["_reported_at"]
     existing = _bot_reports.get(bot_id)
     status_payload = stamped.get("status")
@@ -1526,6 +1541,7 @@ def _build_merged_snapshot() -> dict[str, Any]:
     first_status: dict[str, Any] = {}
     exchange_balances: dict[str, float] = {}
     exchange_available: dict[str, float] = {}
+    exchange_wallet: dict[str, float] = {}
     exchange_report_ts: dict[str, float] = {}
     bot_running: dict[str, bool] = {}
     bot_exchange: dict[str, str] = {}
@@ -1557,11 +1573,16 @@ def _build_merged_snapshot() -> dict[str, Any]:
             first_status = s
 
         ex_bal_raw = rpt.get("exchange_balance", 0)
+        ex_wallet_raw = rpt.get("exchange_wallet_balance", 0)
         ex_reported_at = float(rpt.get("_exchange_balance_reported_at", 0.0) or 0.0)
         try:
             ex_bal = float(ex_bal_raw or 0.0)
         except (TypeError, ValueError):
             ex_bal = 0.0
+        try:
+            ex_wallet = float(ex_wallet_raw or 0.0)
+        except (TypeError, ValueError):
+            ex_wallet = 0.0
         if ex_name and ex_bal > 0:
             prev_ts = exchange_report_ts.get(ex_name, -1.0)
             if ex_reported_at >= prev_ts:
@@ -1569,6 +1590,8 @@ def _build_merged_snapshot() -> dict[str, Any]:
                 # Use the newest bot snapshot for this exchange to avoid stale
                 # high-watermark values when one bot report is old.
                 exchange_available[ex_name] = ex_bal
+                if ex_wallet > 0:
+                    exchange_wallet[ex_name] = ex_wallet
 
         total_balance += float(s.get("balance", 0) or 0)
         total_available += float(s.get("available_margin", 0) or 0)
@@ -1762,7 +1785,10 @@ def _build_merged_snapshot() -> dict[str, Any]:
             available = max(0.0, exchange_available.get(ex, 0.0))
             used = max(0.0, exchange_margin_used.get(ex, 0.0))
             upnl = exchange_unrealized.get(ex, 0.0)
-            exchange_equity[ex] = max(0.0, available + used + upnl)
+            # Prefer wallet anchor from exchange payload when available.
+            # Synthetic available+used+uPnL remains fallback for legacy reports.
+            wallet = float(exchange_wallet.get(ex, 0.0) or 0.0)
+            exchange_equity[ex] = wallet if wallet > 0 else max(0.0, available + used + upnl)
 
         real_balance = sum(exchange_equity.values())
         real_available = sum(max(0.0, v) for v in exchange_available.values())

@@ -910,6 +910,10 @@ class TradingBot:
                     "current_price": float(getattr(pos, "current_price", 0.0) or 0.0),
                     "leverage": int(max(1, round(float(getattr(pos, "leverage", 1.0) or 1.0)))),
                     "market_type": str(getattr(pos, "market_type", "") or "futures"),
+                    "trade_url": self.settings.symbol_platform_url(
+                        symbol,
+                        str(getattr(pos, "market_type", "") or "futures"),
+                    ),
                     "detected_at": observed_at,
                     "source": source,
                 }
@@ -2411,6 +2415,12 @@ class TradingBot:
             "projected": t.projected_balance,
         }
 
+        wallet_anchor_raw = self.exchange.get_balance_anchor("USDT")
+        try:
+            wallet_anchor = float(wallet_anchor_raw or 0.0)
+        except (TypeError, ValueError):
+            wallet_anchor = 0.0
+
         payload = {
             "bot_id": self.settings.bot_id or "default",
             "bot_style": self.settings.bot_style,
@@ -2419,6 +2429,9 @@ class TradingBot:
             # free_balance + used_margin + unrealized_pnl.
             # So this field must be FREE (remaining) balance only.
             "exchange_balance": float(self._raw_balance or 0.0),
+            # Futures wallet anchor from exchange (e.g. walletBalance/total) when available.
+            # Hub prefers this for account-level balance display to avoid free-balance drift.
+            "exchange_wallet_balance": wallet_anchor,
             "status": {
                 "running": self._running,
                 "trading_mode": self.settings.trading_mode,

@@ -328,6 +328,18 @@ class TestBinanceExchange:
         assert binance.get_balance_anchor("USDT") == pytest.approx(4672.6589)
 
     @pytest.mark.asyncio
+    async def test_fetch_balance_prefers_futures_free_over_larger_spot_free(self, binance):
+        binance._spot.fetch_balance = AsyncMock(return_value={"USDT": {"free": 4935.0, "total": 4935.0}})
+        binance._futures.fetch_balance = AsyncMock(
+            return_value={"USDT": {"free": 4895.0, "total": 4993.23, "walletBalance": 4993.23}}
+        )
+
+        bal = await binance.fetch_balance()
+
+        assert bal["USDT"] == pytest.approx(4895.0)
+        assert binance.get_balance_anchor("USDT") == pytest.approx(4993.23)
+
+    @pytest.mark.asyncio
     async def test_fetch_positions_empty(self, binance):
         positions = await binance.fetch_positions()
         assert positions == []
@@ -706,6 +718,15 @@ class TestBybitExchange:
         bal = await bybit.fetch_balance()
         assert "USDT" in bal
         assert bal["USDT"] == 5_000.0
+
+    @pytest.mark.asyncio
+    async def test_fetch_balance_prefers_futures_free_over_larger_spot_free(self, bybit):
+        bybit._spot.fetch_balance = AsyncMock(return_value={"USDT": {"free": 3000.0, "used": 0.0}})
+        bybit._futures.fetch_balance = AsyncMock(return_value={"USDT": {"free": 2500.0, "used": 0.0}})
+
+        bal = await bybit.fetch_balance()
+
+        assert bal["USDT"] == pytest.approx(2500.0)
 
     @pytest.mark.asyncio
     async def test_fetch_positions_short_side(self, bybit):

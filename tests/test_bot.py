@@ -1623,6 +1623,8 @@ class TestReportDashboardSnapshot:
         assert payload["positions"][0]["symbol"] == "BTC/USDT"
         assert payload["foreign_positions"]
         assert payload["foreign_positions"][0]["symbol"] == "ETH/USDT"
+        assert str(payload["foreign_positions"][0].get("trade_url", "")).startswith("http")
+        assert "exchange_wallet_balance" in payload
 
     def test_position_age_minutes_prefers_open_trade_timestamp(self, bot):
         opened_at = (datetime.now(UTC) - timedelta(minutes=25)).isoformat()

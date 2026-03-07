@@ -380,9 +380,10 @@ class BinanceExchange(BaseExchange):
                     )
                     # Do not add spot+futures free balances together for the same
                     # asset; they are separate wallets and summing inflates equity.
-                    # Keep the larger free bucket as a conservative account anchor.
+                    # For trading, prefer derivatives free balance as the runtime
+                    # account anchor instead of picking whichever wallet is larger.
                     if free > 0:
-                        result[asset] = max(result.get(asset, 0.0), free)
+                        result[asset] = free
                     if total > 0:
                         self._balance_anchor[asset] = total
         except Exception:

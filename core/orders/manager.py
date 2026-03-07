@@ -122,8 +122,13 @@ class OrderManager:
         bal = max(0.0, float(balance or 0.0))
         if bal <= 0:
             return lev
-        # Scale leverage envelope with equity: $50 -> ~5x, $100 -> ~10x, $200+ -> up to configured target.
-        account_cap = max(2, int(bal // 10))
+        # Scale leverage envelope with equity (config-driven): $50 -> ~5x, $100 -> ~10x by default.
+        balance_step = max(
+            1.0,
+            float(getattr(self.settings, "extreme_leverage_balance_step_usdt", 10.0) or 10.0),
+        )
+        min_cap = max(1, int(getattr(self.settings, "extreme_leverage_min_cap", 2) or 2))
+        account_cap = max(min_cap, int(bal // balance_step))
         resolved = max(1, min(lev, account_cap))
         if resolved != lev:
             logger.info(
