@@ -66,6 +66,8 @@ _hub_db: HubDB | PostgresHubDB | None = None
 _exchange_snapshot_last_ts: dict[str, float] = {}
 _last_stable_snapshot: dict[str, Any] | None = None
 _last_stable_snapshot_ts: float = 0.0
+_pending_profile_enable_since: dict[str, float] = {}
+_PENDING_ENABLE_GRACE_SECS = 45.0
 
 
 @dataclass(slots=True)
@@ -1141,12 +1143,13 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
     visible_ids = {part.strip() for part in visible_ids_raw.split(",") if part.strip()} if visible_ids_raw else None
 
     result: list[BotProfileInfo] = []
+    now_ts = time.time()
     for p in ALL_PROFILES:
         if p.is_hub:
             continue
         if visible_ids is not None and p.id not in visible_ids:
             continue
-        enabled = enabled_map.get(p.id, is_default_enabled(p.id))
+        enabled = bool(enabled_map.get(p.id, is_default_enabled(p.id)))
         rpt = _bot_reports.get(p.id, {})
         s = rpt.get("status", {})
         positions = rpt.get("positions", [])
@@ -1162,6 +1165,18 @@ async def get_bot_profiles(_: str = Depends(verify_token)) -> list[BotProfileInf
             else:
                 running = bool(s.get("running"))
                 container_status = "running" if running else "idle"
+        # Keep profile toggle state aligned with runtime reality:
+        # if a profile stays idle beyond activation grace, force-disable it.
+        pending_since = _pending_profile_enable_since.get(p.id)
+        if container_status == "running":
+            _pending_profile_enable_since.pop(p.id, None)
+        elif enabled:
+            pending_fresh = bool(pending_since and (now_ts - pending_since) < _PENDING_ENABLE_GRACE_SECS)
+            if not pending_fresh:
+                hub.set_bot_enabled(p.id, False)
+                enabled = False
+                enabled_map[p.id] = False
+                _pending_profile_enable_since.pop(p.id, None)
         summary = hub.get_bot_summary(p.id)
         exchange_name = str(rpt.get("exchange", "") or p.env_overrides.get("EXCHANGE", "") or "").strip().upper()
         balance_now: float | None
@@ -1222,9 +1237,11 @@ async def toggle_bot_profile(profile_id: str, _: str = Depends(verify_token)) ->
 
     if new_enabled:
         _write_activation_file(profile_id)
+        _pending_profile_enable_since[profile_id] = time.time()
     else:
         # Drop stale in-memory snapshot so disabled cards don't show old runtime state.
         _bot_reports.pop(profile_id, None)
+        _pending_profile_enable_since.pop(profile_id, None)
 
     action = "Enabled" if new_enabled else "Disabled"
     nudge_ws()
@@ -1385,6 +1402,10 @@ def report_bot_snapshot(data: dict[str, Any]) -> None:
     else:
         for key, value in stamped.items():
             existing[key] = value
+
+    status = stamped.get("status")
+    if isinstance(status, dict) and bool(status.get("running")):
+        _pending_profile_enable_since.pop(bot_id, None)
 
 
 def _maybe_record_exchange_equity_snapshot(data: dict[str, Any], hub: HubDB) -> None:

@@ -3668,7 +3668,7 @@ class TestBotProfiles:
             assert r.status_code == 200
             data = r.json()
             profile = next(p for p in data if p["id"] == "extreme")
-            assert profile["enabled"] is True
+            assert profile["enabled"] is False
             assert profile["container_status"] == "idle"
         finally:
             _bot_reports.clear()
@@ -3732,6 +3732,21 @@ class TestBotProfiles:
         assert r.status_code == 200
         data = r.json()
         profile = next(p for p in data if p["id"] == "extreme")
+        assert profile["enabled"] is False
+        assert profile["container_status"] == "idle"
+
+    async def test_profile_enable_grace_keeps_toggle_on_until_startup(self, client, mock_bot):
+        set_bot(mock_bot)
+        hub = _get_hub_db()
+        hub.set_bot_enabled("scalper", False)
+        _bot_reports.clear()
+        r = await client.post("/api/bot-profile/scalper/toggle")
+        assert r.status_code == 200
+        assert r.json()["success"] is True
+
+        r2 = await client.get("/api/bot-profiles")
+        assert r2.status_code == 200
+        profile = next(p for p in r2.json() if p["id"] == "scalper")
         assert profile["enabled"] is True
         assert profile["container_status"] == "idle"
 
