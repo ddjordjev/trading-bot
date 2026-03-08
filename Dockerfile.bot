@@ -11,10 +11,14 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+COPY scripts/docker-entrypoint-with-baked-secrets.sh /usr/local/bin/docker-entrypoint-with-baked-secrets.sh
+COPY env/prod.runtime.secrets.env /app/env/prod.runtime.secrets.env
 
 RUN mkdir -p logs data
+RUN chmod +x /usr/local/bin/docker-entrypoint-with-baked-secrets.sh
 
 ENV PYTHONUNBUFFERED=1
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint-with-baked-secrets.sh"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c "print('ok')" || exit 1

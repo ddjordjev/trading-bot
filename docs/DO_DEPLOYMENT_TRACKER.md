@@ -29,10 +29,12 @@ This section is the source of truth for current CEX deployment/runtime settings 
   - use `http://localhost:9045`
   - persistent tunnel managed by LaunchAgent: `~/Library/LaunchAgents/com.tradeborg.ssh-tunnel.plist`
   - label: `com.tradeborg.ssh-tunnel`
-- Active trading profile: `indicators` only
-- Idle deployed profiles: `extreme`, `hedger` (containers running, profiles disabled)
-- Disabled & not deployed on prod (for now): `momentum`, `meanrev`, `swing`, `scalper`, `fullstack`, `conservative`, `aggressive`
-- Dashboard profile visibility allowlist: `BOT_PROFILES_VISIBLE_IDS=extreme,hedger,indicators`
+  - deploy SSH key path is pinned in `env/prod.compose.env` via `DEPLOY_SSH_KEY_PATH`
+  - deploy host/user are pinned in `env/prod.compose.env` via `DEPLOY_DROPLET_HOST` and `DEPLOY_SSH_USER`
+- Active trading profiles: `extreme`
+- Idle deployed profiles: `hedger`, `indicators`, `swing` (containers running, profiles disabled)
+- Disabled & not deployed on prod (for now): `momentum`, `meanrev`, `scalper`, `fullstack`, `conservative`, `aggressive`
+- Dashboard profile visibility allowlist: `BOT_PROFILES_VISIBLE_IDS=extreme,hedger,indicators,swing`
 - Conservative runtime overrides:
   - `DEFAULT_LEVERAGE=2`
   - `MAX_POSITION_SIZE_PCT=2`
@@ -48,14 +50,19 @@ This section is the source of truth for current CEX deployment/runtime settings 
   - file level follows `LOG_LEVEL`
   - rotation: `100 MB`
   - retention: `7 days`
+- Secrets handling:
+  - production runtime secrets are baked into deployed bot/hub images during local prod build
+  - `env/prod.runtime.secrets.env` is not copied to the droplet during deploy
+  - local materialized `env/prod.runtime.secrets.env` is removed after successful deploy
 - Droplet reboot behavior (current production safety mode):
   - Docker daemon **does** auto-start after droplet restart (`docker`/`containerd` enabled)
   - trading stack containers are set to restart policy `no` (no auto-start on reboot)
   - expected state right after reboot: Docker is up, trading containers stay down until explicitly started
+  - deploy script re-applies `docker update --restart=no` after each prod `up` to prevent policy drift
 - Image/runtime identifiers:
   - Compose project: `trading-bot`
   - Hub image: `trading-bot-bot-hub`
-  - Active bot image: `trading-bot-bot-indicators`
+  - Active bot image: `trading-bot-bot-extreme`
   - Postgres image: `postgres:16`
   - Monitoring images: `trading-bot-grafana`, `trading-bot-prometheus`, `trading-bot-loki`, `trading-bot-promtail`
 
@@ -195,3 +202,6 @@ When resuming this deployment in a new chat:
 - 2026-03-06: Runtime switched from `extreme` to `indicators` as the only enabled profile; `extreme` and `hedger` remain deployed but idle/disabled.
 - 2026-03-06: Reboot behavior updated: Docker auto-start re-enabled, but trading containers set to `restart=no` so stack does not auto-run after droplet restart.
 - 2026-03-06: Hub publish port on droplet is `9045` (mapped to container `9035`) to match the local SSH tunnel target `localhost:9045`.
+- 2026-03-08: Deploy pipeline hardened after incident: per-image transfer/load, scoped 4-bot prod build/deploy (`extreme`, `hedger`, `indicators`, `swing`), non-target trade bot containers/images removed from DO.
+- 2026-03-08: Added pre-replacement image backups on DO under `/opt/trading-bot/.artifacts/pre-deploy-image-backups/` and local/remote cleanup discipline for deploy artifacts.
+- 2026-03-08: Restart policy re-validated on remaining prod containers (`restart=no`), and active profile set back to `extreme` only.

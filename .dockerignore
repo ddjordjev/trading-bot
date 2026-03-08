@@ -3,6 +3,7 @@
 .idea
 .cursor
 .venv
+.artifacts
 .env
 .env.*
 !.env.example

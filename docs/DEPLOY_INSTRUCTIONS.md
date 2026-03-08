@@ -78,9 +78,52 @@ Prefer:
 
 This script already:
 - validates required prod env files
+- runs local/remote disk-space preflight checks
 - materializes prod runtime secrets
+- bakes prod runtime secrets directly into deploy images
+- exports/uploads/loads images one-by-one (no single giant tarball)
+- backs up currently loaded `trading-bot-*` images on DO before loading new ones
+- builds/loads only the reduced prod set (hub + 4 bots + monitoring)
 - enforces compose env-file wiring
 - fails fast if runtime env files are not resolved in compose config
+- enforces `restart=no` on deployed containers after `up`
+- removes non-deployed trade bot containers/images from DO after deploy
+
+### DO image backup before replacement
+
+Before loading new images on DO, keep a rollbackable snapshot of currently loaded
+`trading-bot-*` images under `/opt/trading-bot/.artifacts/pre-deploy-image-backups/`.
+Use one timestamped folder per deploy:
+
+```bash
+cd /opt/trading-bot
+mkdir -p .artifacts/pre-deploy-image-backups/"$(date -u +%Y%m%dT%H%M%SZ)"
+backup_dir=".artifacts/pre-deploy-image-backups/$(ls -1t .artifacts/pre-deploy-image-backups | head -n1)"
+docker images --format '{{.Repository}}' | grep '^trading-bot-' | sort -u > "$backup_dir/images.txt"
+while IFS= read -r img; do
+  [ -z "$img" ] && continue
+  docker save "$img" | gzip > "$backup_dir/${img}.tar.gz"
+done < "$backup_dir/images.txt"
+```
+
+### Incident safeguards (2026-03-08)
+
+These safeguards were added after a failed deploy sequence:
+
+- **No monolithic image tarballs:** image transfer is per-image only.
+- **No accidental full-bot rebuilds:** build step is explicitly scoped to
+  `bot-hub`, `openclaw-bridge`, `bot-extreme`, `bot-hedger`,
+  `bot-indicators`, `bot-swing`, and monitoring.
+- **No overlapping deploy runs:** single-instance lock directory at
+  `/tmp/trading-bot-prod-deploy.lockdir`.
+- **SSH hang protection:** SSH uses `BatchMode=yes`, connect timeout, and
+  server-alive options to fail instead of hanging.
+- **Context contamination prevention:** `.artifacts/` must remain in
+  `.dockerignore` so deploy bundles are never copied into image build context.
+- **Disk pressure prevention:** local and remote free-space checks run before
+  build/upload/load.
+
+If any safeguard fails, stop and fix before retrying deploy.
 
 If running manually on the target host, use only:
 
