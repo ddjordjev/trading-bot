@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import patch
 
+import pandas as pd
+
 from core.models import Candle, SignalAction
 
 
@@ -408,3 +410,124 @@ class TestSetPositionState:
         s.set_position_state(True, "short")
         assert s._in_position
         assert s._position_side == "short"
+
+
+class TestStrategiesModuleAndBaseHelpers:
+    def test_get_all_strategies_merges_custom(self):
+        from strategies import get_all_strategies
+
+        with patch("strategies.load_custom_strategies", return_value={"custom_alpha": object}):
+            all_strategies = get_all_strategies()
+        assert "rsi" in all_strategies
+        assert "custom_alpha" in all_strategies
+
+    def test_base_latest_atr_pct_guards(self):
+        from strategies.rsi import RSIStrategy
+
+        s = RSIStrategy("BTC/USDT")
+        short_df = s.candles_to_df(_make_candles_flat(3))
+        assert s._latest_atr_pct(short_df) == 0.0
+
+        bad_price_candles = _make_candles_flat(40, price=100)
+        bad_price_candles[-1] = Candle(
+            timestamp=datetime.now(UTC),
+            open=0.0,
+            high=1.0,
+            low=0.0,
+            close=0.0,
+            volume=1000.0,
+        )
+        bad_df = s.candles_to_df(bad_price_candles)
+        assert s._latest_atr_pct(bad_df) == 0.0
+
+    def test_base_passes_crypto_market_filters_bounds(self):
+        from strategies.rsi import RSIStrategy
+
+        s = RSIStrategy("BTC/USDT")
+        candles = _make_candles_flat(40, price=100, volume=1000)
+        df = s.candles_to_df(candles)
+        assert s._passes_crypto_market_filters(df, min_quote_volume_usd=1_000_000_000) is False
+        assert s._passes_crypto_market_filters(df, min_atr_pct=10.0) is False
+
+
+class TestStrategyDeterministicSignalPaths:
+    def test_rsi_buy_and_sell_paths(self):
+        from strategies.rsi import RSIStrategy
+
+        candles = _make_candles_flat(80, price=100, volume=2000)
+        s = RSIStrategy("BTC/USDT", require_trend_alignment=False)
+        with patch.object(s, "_passes_crypto_market_filters", return_value=True):
+            with patch("strategies.rsi.ta.momentum.RSIIndicator") as rsi_cls:
+                rsi_cls.return_value.rsi.return_value = pd.Series([50.0] * 79 + [10.0])
+                buy_sig = s.analyze(candles)
+                assert buy_sig is not None and buy_sig.action == SignalAction.BUY
+                rsi_cls.return_value.rsi.return_value = pd.Series([50.0] * 79 + [95.0])
+                sell_sig = s.analyze(candles)
+                assert sell_sig is not None and sell_sig.action == SignalAction.SELL
+
+    def test_macd_buy_and_sell_paths(self):
+        from strategies.macd import MACDStrategy
+
+        candles = _make_candles_flat(260, price=100, volume=3000)
+        s = MACDStrategy("BTC/USDT", trend_ma_period=20, require_trend_alignment=False, histogram_min_atr_mult=0.0)
+        with (
+            patch.object(s, "_passes_crypto_market_filters", return_value=True),
+            patch.object(s, "_latest_atr_pct", return_value=1.0),
+            patch("strategies.macd.ta.trend.MACD") as macd_cls,
+        ):
+            macd_obj = macd_cls.return_value
+            macd_obj.macd_diff.return_value = pd.Series([0.0] * 258 + [-0.2, 0.3])
+            buy_sig = s.analyze(candles)
+            assert buy_sig is not None and buy_sig.action == SignalAction.BUY
+            macd_obj.macd_diff.return_value = pd.Series([0.0] * 258 + [0.2, -0.3])
+            sell_sig = s.analyze(candles)
+            assert sell_sig is not None and sell_sig.action == SignalAction.SELL
+
+    def test_bollinger_buy_and_sell_paths(self):
+        from strategies.bollinger import BollingerStrategy
+
+        buy_candles = _make_candles_flat(120, price=70, volume=5000)
+        sell_candles = _make_candles_flat(120, price=130, volume=5000)
+        s = BollingerStrategy("BTC/USDT", trend_ma_period=20, require_reversal_candle=False, volume_confirm_mult=0.0)
+        with (
+            patch.object(s, "_passes_crypto_market_filters", return_value=True),
+            patch("strategies.bollinger.ta.volatility.BollingerBands") as bb_cls,
+        ):
+            bb = bb_cls.return_value
+            bb.bollinger_hband.return_value = pd.Series([120.0] * 120)
+            bb.bollinger_lband.return_value = pd.Series([80.0] * 120)
+            buy_candles[-1] = _make_candle(79.0, volume=10_000, open_off=1)
+            buy_sig = s.analyze(buy_candles)
+            assert buy_sig is not None and buy_sig.action == SignalAction.BUY
+            sell_candles[-1] = _make_candle(121.0, volume=10_000, open_off=-1)
+            sell_sig = s.analyze(sell_candles)
+            assert sell_sig is not None and sell_sig.action == SignalAction.SELL
+
+    def test_swing_opportunity_crash_and_blowoff_paths(self):
+        from strategies.swing_opportunity import SwingOpportunityStrategy
+
+        s = SwingOpportunityStrategy(
+            "BTC/USDT",
+            require_reversal_candle=False,
+            crash_threshold_pct=15.0,
+            extreme_crash_pct=20.0,
+            capitulation_volume_mult=1.0,
+            ma_period=20,
+        )
+        crash_candles = _make_candles_flat(240, price=100, volume=1000)
+        # Create clear crash setup.
+        crash_candles[-1] = _make_candle(70.0, volume=5000, open_off=-1)
+        blowoff_candles = _make_candles_flat(240, price=100, volume=1000)
+        # Create clear blow-off setup.
+        blowoff_candles[-1] = _make_candle(140.0, volume=5000, open_off=1)
+        with (
+            patch.object(s, "_passes_crypto_market_filters", return_value=True),
+            patch("strategies.swing_opportunity.ta.momentum.RSIIndicator") as rsi_cls,
+        ):
+            rsi_cls.return_value.rsi.return_value = pd.Series([50.0] * 239 + [10.0])
+            crash_sig = s.analyze(crash_candles)
+            assert crash_sig is not None and crash_sig.action == SignalAction.BUY
+            s._cooldown_candles = 0
+            rsi_cls.return_value.rsi.return_value = pd.Series([50.0] * 239 + [90.0])
+            blow_sig = s.analyze(blowoff_candles)
+            assert blow_sig is not None and blow_sig.action == SignalAction.SELL

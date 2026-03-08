@@ -43,6 +43,7 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
   const botId = (p as any).bot_id || "";
   const exchangeName = (p as any).exchange_name || "";
   const strategy = (p.strategy || "").trim();
+  const isWickScalp = Boolean((p as any).is_wick_scalp);
   const stopSource = (p.stop_source || "").toLowerCase();
   const isCexActive = stopSource === "exchange";
   const isBotActive = stopSource === "bot";
@@ -122,7 +123,7 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
             {botId ? getBotLabel(botId) : "—"}
           </span>
           <span style={{ display: "block", fontSize: "0.7rem", fontWeight: 500, color: "var(--text-muted)", textTransform: "uppercase" }}>
-            {strategy || "—"}
+            {isWickScalp && botId ? `${getBotLabel(botId)} scalp` : (strategy || "—")}
           </span>
         </td>
       )}
@@ -240,34 +241,47 @@ export function PositionRow({ position: p, onAction, showBot = false, bulkAction
             <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
               <button
                 className="btn-danger"
-                title="Close this position at market."
+                title={isWickScalp ? "Close only this wick scalp sub-position." : "Close this position at market."}
                 disabled={!!loading}
-                onClick={() => act("close", () => postBody("/api/position/close", { symbol: p.symbol, bot_id: botId }))}
+                onClick={() =>
+                  act(
+                    "close",
+                    () =>
+                      postBody(
+                        isWickScalp ? "/api/wick-scalp/close" : "/api/position/close",
+                        { symbol: p.symbol, bot_id: botId },
+                      ),
+                  )
+                }
               >
                 {loading === "close" ? "..." : "Close"}
               </button>
-              <button
-                className="btn-warning"
-                title="Take profit: close 25% of this position at market."
-                style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
-                disabled={!!loading}
-                onClick={() =>
-                  act("tp25", () => postBody("/api/position/take-profit", { symbol: p.symbol, pct: 25, bot_id: botId }))
-                }
-              >
-                {loading === "tp25" ? "..." : "25%"}
-              </button>
-              <button
-                className="btn-primary"
-                title="Tighten trailing stop (move stop loss closer to current price)."
-                style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
-                disabled={!!loading}
-                onClick={() =>
-                  act("stop", () => postBody("/api/position/tighten-stop", { symbol: p.symbol, pct: 2, bot_id: botId }))
-                }
-              >
-                {loading === "stop" ? "..." : "Tighten"}
-              </button>
+              {!isWickScalp && (
+                <>
+                  <button
+                    className="btn-warning"
+                    title="Take profit: close 25% of this position at market."
+                    style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
+                    disabled={!!loading}
+                    onClick={() =>
+                      act("tp25", () => postBody("/api/position/take-profit", { symbol: p.symbol, pct: 25, bot_id: botId }))
+                    }
+                  >
+                    {loading === "tp25" ? "..." : "25%"}
+                  </button>
+                  <button
+                    className="btn-primary"
+                    title="Tighten trailing stop (move stop loss closer to current price)."
+                    style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem" }}
+                    disabled={!!loading}
+                    onClick={() =>
+                      act("stop", () => postBody("/api/position/tighten-stop", { symbol: p.symbol, pct: 2, bot_id: botId }))
+                    }
+                  >
+                    {loading === "stop" ? "..." : "Tighten"}
+                  </button>
+                </>
+              )}
             </div>
             {feedback && (
               <div style={{

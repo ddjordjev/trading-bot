@@ -5,6 +5,16 @@ export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR" || exit 1
+DC=(docker compose --env-file .env --env-file env/local.compose.env)
+
+if [ ! -f .env ] || [ ! -f env/local.compose.env ]; then
+  echo "ERROR: missing .env or env/local.compose.env for local watchdog runtime" >&2
+  exit 1
+fi
+if ! rg -q '^RUNTIME_ENV_OVERRIDE_FILE=' env/local.compose.env || ! rg -q '^RUNTIME_SECRETS_FILE=' env/local.compose.env; then
+  echo "ERROR: env/local.compose.env missing runtime file pointers" >&2
+  exit 1
+fi
 
 HOST_DATA_DIR="/Users/damirdjordjev/workspace/trading-bot-data"
 ACTION_LOG="$ROOT_DIR/logs/night-watch-actions.log"
@@ -21,16 +31,16 @@ log() {
 
 full_redeploy() {
   log "redeploy:start"
-  docker compose down
+  "${DC[@]}" down
   find "$HOST_DATA_DIR" \( -name "*.json" -o -name "*.lock" -o -name "activate" -o -name "STOP" -o -name "CLOSE_ALL" \) | xargs rm -f
-  docker compose build
-  docker compose up -d
+  "${DC[@]}" build
+  "${DC[@]}" up -d
   log "redeploy:done"
 }
 
 emit_heartbeat() {
   local ps_out healthy_count unhealthy_count exited_count restarting_count running_count
-  ps_out="$(docker compose ps 2>&1)"
+  ps_out="$("${DC[@]}" ps 2>&1)"
   healthy_count="$(printf "%s\n" "$ps_out" | rg -c "healthy" || true)"
   unhealthy_count="$(printf "%s\n" "$ps_out" | rg -c "unhealthy" || true)"
   exited_count="$(printf "%s\n" "$ps_out" | rg -c "Exit|Exited|dead" || true)"
@@ -48,7 +58,7 @@ while true; do
     last_heartbeat_epoch="$now_epoch"
   fi
 
-  ps_out="$(docker compose ps 2>&1)"
+  ps_out="$("${DC[@]}" ps 2>&1)"
   if printf "%s\n" "$ps_out" | rg -q "unhealthy|Exit|dead|Restarting"; then
     now_epoch="$(date +%s)"
     since_last=$((now_epoch - last_redeploy_epoch))

@@ -1,14 +1,16 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { BotProfiles } from "./BotProfiles";
 import { Modules } from "./Modules";
+import { RuntimeTuning } from "./RuntimeTuning";
 import { Summary } from "./Summary";
-import { setToken } from "../api/client";
+import { get, setToken } from "../api/client";
 
-type Section = "bots" | "modules" | "auth" | "about" | "summary";
+type Section = "bots" | "modules" | "runtimeTuning" | "auth" | "about" | "summary";
 
 const UPPER_LINKS: { id: Section; label: string }[] = [
   { id: "bots", label: "Bots" },
   { id: "modules", label: "Modules" },
+  { id: "runtimeTuning", label: "Runtime Tuning" },
   { id: "auth", label: "Authentication" },
 ];
 
@@ -81,13 +83,34 @@ function AuthSection() {
 }
 
 function AboutSection() {
-  const VERSION = "0.7.0";
+  const [version, setVersion] = useState("1.0.0");
   const BUILD_DATE = "2026-02-20";
   const REPO_URL = "https://github.com/ddjordjev/trading-bot";
+  const [deployCommit, setDeployCommit] = useState("unknown");
+  const shortCommit = deployCommit !== "unknown" ? deployCommit.slice(0, 8) : "unknown";
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const meta = await get<{ version?: string; deploy_commit?: string }>("/api/about");
+        const resolvedVersion = String(meta?.version || "").trim();
+        const commit = String(meta?.deploy_commit || "").trim();
+        if (alive && resolvedVersion) setVersion(resolvedVersion);
+        if (alive && commit) setDeployCommit(commit);
+      } catch {
+        // Keep About section resilient even if metadata endpoint is unavailable.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const rows: [string, string | ReactNode][] = [
     ["Name", "Trade Borg"],
-    ["Version", `v${VERSION}`],
+    ["Version", `v${version} (${shortCommit})`],
+    ["Deploy Commit", deployCommit],
     ["Build Date", BUILD_DATE],
     [
       "GitHub",
@@ -116,7 +139,7 @@ function AboutSection() {
           background: "var(--surface)", border: "1px solid var(--border)",
           borderRadius: "12px", fontSize: "0.75rem", color: "var(--accent)",
         }}>
-          v{VERSION}
+          v{version} ({shortCommit})
         </span>
       </div>
 
@@ -223,6 +246,7 @@ export function Settings() {
       <div style={{ flex: 1, minWidth: 0 }}>
         {section === "bots" && <BotProfiles key={renderKey} />}
         {section === "modules" && <Modules key={renderKey} />}
+        {section === "runtimeTuning" && <RuntimeTuning key={renderKey} />}
         {section === "auth" && <AuthSection />}
         {section === "about" && <AboutSection />}
         {section === "summary" && <Summary key={renderKey} />}

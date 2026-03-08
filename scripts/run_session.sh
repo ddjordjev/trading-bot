@@ -7,6 +7,27 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+DC=(docker compose --env-file .env --env-file env/local.compose.env)
+
+require_local_compose_env() {
+    if [ ! -f .env ]; then
+        err "Missing .env in project root."
+        exit 1
+    fi
+    if [ ! -f env/local.compose.env ]; then
+        err "Missing env/local.compose.env."
+        exit 1
+    fi
+    if ! rg -q '^RUNTIME_ENV_OVERRIDE_FILE=' env/local.compose.env; then
+        err "env/local.compose.env is missing RUNTIME_ENV_OVERRIDE_FILE."
+        exit 1
+    fi
+    if ! rg -q '^RUNTIME_SECRETS_FILE=' env/local.compose.env; then
+        err "env/local.compose.env is missing RUNTIME_SECRETS_FILE."
+        exit 1
+    fi
+}
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -32,18 +53,20 @@ cmd_materialize_local_secrets() {
 }
 
 cmd_build() {
+    require_local_compose_env
     cmd_materialize_local_secrets
     log "Building Docker images..."
-    docker compose build
+    "${DC[@]}" build
     log "Build complete."
 }
 
 cmd_start() {
+    require_local_compose_env
     cmd_materialize_local_secrets
     log "Starting all services..."
-    docker compose up -d
+    "${DC[@]}" up -d
     sleep 3
-    docker compose ps
+    "${DC[@]}" ps
     log "Dashboard: http://localhost:${DASHBOARD_PORT:-9035}"
     local exchange_url=""
     if [ -f .env ]; then
@@ -57,20 +80,22 @@ cmd_start() {
 }
 
 cmd_stop() {
+    require_local_compose_env
     warn "Stopping all services..."
-    docker compose down
+    "${DC[@]}" down
     log "All services stopped."
 }
 
 cmd_status() {
+    require_local_compose_env
     log "Service status:"
-    docker compose ps
+    "${DC[@]}" ps
     echo ""
     log "Recent hub log:"
-    docker compose logs --tail 10 bot-hub 2>/dev/null || warn "No logs yet"
+    "${DC[@]}" logs --tail 10 bot-hub 2>/dev/null || warn "No logs yet"
     echo ""
     log "Trade count:"
-    docker compose exec -T bot-hub python -c "
+    "${DC[@]}" exec -T bot-hub python -c "
 from db.hub_repository import make_hub_repository
 db = make_hub_repository(); db.connect()
 print(f'  Trades logged: {db.trade_count()}')
@@ -78,21 +103,24 @@ print(f'  Trades logged: {db.trade_count()}')
 }
 
 cmd_logs() {
+    require_local_compose_env
     local service="${1:-bot-hub}"
-    docker compose logs -f "$service"
+    "${DC[@]}" logs -f "$service"
 }
 
 cmd_rebuild() {
+    require_local_compose_env
     warn "Rebuilding and restarting..."
     cmd_materialize_local_secrets
-    docker compose build
-    docker compose up -d
+    "${DC[@]}" build
+    "${DC[@]}" up -d
     sleep 3
-    docker compose ps
+    "${DC[@]}" ps
     log "Rebuild complete."
 }
 
 cmd_snapshot() {
+    require_local_compose_env
     local ts=$(date -u +"%Y-%m-%d_%H%M")
     local file="docs/reports/snapshot_${ts}.md"
     log "Taking snapshot → $file"
@@ -103,17 +131,17 @@ cmd_snapshot() {
 
 ## Service Status
 \`\`\`
-$(docker compose ps 2>/dev/null || echo "Docker not running")
+$("${DC[@]}" ps 2>/dev/null || echo "Docker not running")
 \`\`\`
 
 ## Recent Logs (last 30 lines)
 \`\`\`
-$(docker compose logs --tail 30 bot-hub 2>/dev/null || echo "No logs")
+$("${DC[@]}" logs --tail 30 bot-hub 2>/dev/null || echo "No logs")
 \`\`\`
 
 ## Trade Database
 \`\`\`
-$(docker compose exec -T bot-hub python -c "
+$("${DC[@]}" exec -T bot-hub python -c "
 from db.hub_repository import make_hub_repository
 db = make_hub_repository(); db.connect()
 print(f'Total trades: {db.trade_count()}')

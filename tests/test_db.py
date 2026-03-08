@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -406,6 +407,54 @@ class TestHubDB:
         trades = hub.get_all_trades()
         assert trades[0].closed_at == "2026-02-20T13:00:00"
         assert trades[0].pnl_usd == 50.0
+
+    def test_update_trade_close_clears_swing_entry_plan_rows(self, hub: HubDB):
+        opened_at = "2026-02-20T11:00:00"
+        hub.insert_trade(
+            "swing",
+            {
+                "symbol": "SOL/USDT",
+                "side": "long",
+                "strategy": "swing_manual",
+                "action": "open",
+                "entry_price": 80.0,
+                "amount": 0.2,
+                "opened_at": opened_at,
+            },
+        )
+        hub.replace_swing_entry_plan(
+            "swing",
+            "SOL/USDT",
+            opened_at,
+            [
+                {
+                    "parent_plan_id": opened_at,
+                    "entry_idx": 1,
+                    "side": "long",
+                    "price": 80.0,
+                    "amount": 0.2,
+                    "leverage": 5,
+                    "status": "placed_on_cex",
+                }
+            ],
+        )
+        assert hub.get_swing_entry_plan("swing", "SOL/USDT", opened_at)
+
+        updated = hub.update_trade_close(
+            "swing",
+            opened_at,
+            {
+                "symbol": "SOL/USDT",
+                "exit_price": 79.0,
+                "amount": 0.2,
+                "pnl_usd": -0.2,
+                "pnl_pct": -0.25,
+                "is_winner": False,
+                "closed_at": "2026-02-20T11:05:00",
+            },
+        )
+        assert updated is True
+        assert hub.get_swing_entry_plan("swing", "SOL/USDT", opened_at) == []
 
     def test_update_trade_close_no_match(self, hub: HubDB):
         updated = hub.update_trade_close("ghost", "2026-01-01T00:00:00", {"closed_at": "now"})
@@ -872,22 +921,137 @@ class TestHubDB:
         assert float(row["pnl_pct"]) == 1.67
         assert int(row["recovery_close"]) == 1
 
+    def test_mark_recovery_close_clears_swing_entry_plan_rows(self, hub: HubDB):
+        opened_at = "2026-01-02T10:00:00"
+        hub.insert_trade(
+            "swing",
+            {
+                "symbol": "AVAX/USDT",
+                "side": "long",
+                "strategy": "swing_manual",
+                "action": "open",
+                "entry_price": 64.0,
+                "amount": 0.3,
+                "opened_at": opened_at,
+            },
+        )
+        hub.replace_swing_entry_plan(
+            "swing",
+            "AVAX/USDT",
+            opened_at,
+            [
+                {
+                    "parent_plan_id": opened_at,
+                    "entry_idx": 1,
+                    "side": "long",
+                    "price": 64.0,
+                    "amount": 0.3,
+                    "leverage": 5,
+                    "status": "placed_on_cex",
+                }
+            ],
+        )
+        assert hub.get_swing_entry_plan("swing", "AVAX/USDT", opened_at)
+
+        updated = hub.mark_recovery_close("swing", opened_at)
+        assert updated is True
+        assert hub.get_swing_entry_plan("swing", "AVAX/USDT", opened_at) == []
+
     def test_replace_and_get_swing_entry_plan(self, hub: HubDB):
         hub.replace_swing_entry_plan(
             "swing",
             "ETH/USDT",
             "2026-03-06T00:00:00+00:00",
             [
-                {"entry_idx": 1, "side": "long", "price": 2100.0, "amount": 0.2, "leverage": 5, "status": "placed"},
-                {"entry_idx": 2, "side": "long", "price": 2060.0, "amount": 0.24, "leverage": 5, "status": "planned"},
+                {
+                    "parent_plan_id": "plan_1",
+                    "entry_idx": 1,
+                    "side": "long",
+                    "price": 2100.0,
+                    "amount": 0.2,
+                    "leverage": 5,
+                    "status": "placed_on_cex",
+                },
+                {
+                    "parent_plan_id": "plan_1",
+                    "entry_idx": 2,
+                    "side": "long",
+                    "price": 2060.0,
+                    "amount": 0.24,
+                    "leverage": 5,
+                    "status": "planned",
+                },
             ],
         )
         rows = hub.get_swing_entry_plan("swing", "ETH/USDT", "2026-03-06T00:00:00+00:00")
         assert len(rows) == 2
+        assert str(rows[0]["parent_plan_id"]) == "plan_1"
         assert int(rows[0]["entry_idx"]) == 1
         assert float(rows[1]["price"]) == 2060.0
+        assert str(rows[0]["status"]) == "placed_on_cex"
         hub.clear_swing_entry_plan("swing", "ETH/USDT", "2026-03-06T00:00:00+00:00")
         assert hub.get_swing_entry_plan("swing", "ETH/USDT", "2026-03-06T00:00:00+00:00") == []
+
+    def test_swing_plans_plan_id_is_strict_not_null_without_default(self, hub: HubDB):
+        info = hub.conn.execute("PRAGMA table_info(swing_plans)").fetchall()
+        plan_id = next((row for row in info if row["name"] == "plan_id"), None)
+        assert plan_id is not None
+        assert int(plan_id["notnull"]) == 1
+        assert plan_id["dflt_value"] is None
+
+    def test_runtime_tuning_key_columns_are_strict_without_defaults(self, hub: HubDB):
+        info = hub.conn.execute("PRAGMA table_info(runtime_tuning)").fetchall()
+        bot_col = next((row for row in info if row["name"] == "bot_id"), None)
+        key_col = next((row for row in info if row["name"] == "key"), None)
+        value_col = next((row for row in info if row["name"] == "value_json"), None)
+        assert bot_col is not None and key_col is not None and value_col is not None
+        assert int(bot_col["notnull"]) == 1
+        assert int(key_col["notnull"]) == 1
+        assert int(value_col["notnull"]) == 1
+        assert bot_col["dflt_value"] is None
+        assert value_col["dflt_value"] is None
+
+    def test_create_and_list_manual_swing_plan(self, hub: HubDB):
+        plan = hub.create_manual_swing_plan(
+            bot_id="swing",
+            exchange="BINANCE",
+            symbol="BTC/USDT",
+            direction="long",
+            first_entry_price=50000.0,
+            last_entry_price=48000.0,
+            grid_count=4,
+            leverage=4,
+            margin_amount=40.0,
+            max_concurrent_limit_orders_on_cex=3,
+        )
+        assert str(plan["mode"]) == "swing_manual"
+        assert int(plan["grid_count"]) == 4
+        rows = hub.get_swing_entry_plan("swing", "BTC/USDT", str(plan["plan_id"]))
+        assert len(rows) == 4
+        assert all(str(r["mode"]) == "swing_manual" for r in rows)
+        listed = hub.list_swing_plans("swing", mode="swing_manual")
+        assert len(listed) == 1
+        assert listed[0]["symbol"] == "BTC/USDT"
+        assert int(listed[0]["planned_legs"]) == 4
+
+    def test_manual_swing_plan_state_update(self, hub: HubDB):
+        plan = hub.create_manual_swing_plan(
+            bot_id="swing",
+            exchange="BINANCE",
+            symbol="ETH/USDT",
+            direction="short",
+            first_entry_price=3100.0,
+            last_entry_price=3300.0,
+            grid_count=3,
+            leverage=3,
+            margin_amount=30.0,
+            max_concurrent_limit_orders_on_cex=2,
+        )
+        updated = hub.set_swing_plan_state("swing", "ETH/USDT", str(plan["plan_id"]), "cancel_requested")
+        assert updated == 1
+        loaded = hub.get_swing_plan("swing", "ETH/USDT", str(plan["plan_id"]))
+        assert loaded is not None
+        assert loaded["plan_state"] == "cancel_requested"
 
     def test_insert_exchange_equity_snapshot(self, hub: HubDB):
         hub.insert_exchange_equity_snapshot(
@@ -921,6 +1085,36 @@ class TestHubDB:
         keys = hub.drain_confirmed_keys("bot1")
         assert set(keys) == {"k1", "k2"}
         assert hub.drain_confirmed_keys("bot1") == []
+
+    def test_runtime_tuning_global_and_per_bot_merge(self, hub: HubDB):
+        hub.set_runtime_tuning("default_leverage", 6, bot_id="*")
+        hub.set_runtime_tuning("max_concurrent_positions", 3, bot_id="*")
+        hub.set_runtime_tuning("default_leverage", 9, bot_id="extreme")
+
+        global_values, global_rev = hub.get_runtime_tuning("")
+        assert global_values["default_leverage"] == 6
+        assert global_values["max_concurrent_positions"] == 3
+        assert isinstance(global_rev, str) and len(global_rev) == 16
+
+        bot_values, bot_rev = hub.get_runtime_tuning("extreme")
+        assert bot_values["default_leverage"] == 9
+        assert bot_values["max_concurrent_positions"] == 3
+        assert bot_rev != global_rev
+        overrides, overrides_rev = hub.get_runtime_tuning_overrides("extreme")
+        assert overrides["default_leverage"] == 9
+        assert "max_concurrent_positions" not in overrides
+        assert isinstance(overrides_rev, str) and len(overrides_rev) == 16
+
+    def test_runtime_tuning_delete_and_invalid_key(self, hub: HubDB):
+        hub.set_runtime_tuning("default_leverage", 7, bot_id="*")
+        hub.set_runtime_tuning("unknown_runtime_key", 123, bot_id="*")
+        values, _ = hub.get_runtime_tuning("")
+        assert values["default_leverage"] == 7
+        assert "unknown_runtime_key" not in values
+
+        hub.set_runtime_tuning("default_leverage", None, bot_id="*")
+        values_after_delete, _ = hub.get_runtime_tuning("")
+        assert "default_leverage" not in values_after_delete
 
     def test_recovery_close_excluded_from_stats(self, hub: HubDB):
         hub.insert_trade(
@@ -966,6 +1160,22 @@ class TestHubDB:
         rows = hub.get_original_trade_owner_rows()
         by_symbol = {str(r["symbol"]): str(r["bot_id"]) for r in rows}
         assert by_symbol.get("MATIC/USDT") == "swing"
+
+    def test_recent_closed_owner_symbols_returns_latest_owner_hint(self, hub: HubDB):
+        hub.insert_trade(
+            "extreme",
+            {
+                "symbol": "SOL/USDT",
+                "side": "long",
+                "strategy": "swing",
+                "action": "close",
+                "opened_at": "2026-01-01T10:00:00",
+                "closed_at": datetime.now(UTC).isoformat(),
+                "close_source": "exchange",
+            },
+        )
+        symbols = hub.get_recent_closed_owner_symbols("extreme", lookback_hours=48)
+        assert "SOL/USDT" in symbols
 
     def test_binance_snapshots_roundtrip(self, hub: HubDB):
         rows = [

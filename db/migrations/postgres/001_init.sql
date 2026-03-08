@@ -62,6 +62,36 @@ CREATE TABLE IF NOT EXISTS bot_config (
     enabled INTEGER NOT NULL DEFAULT 1
 );
 
+CREATE TABLE IF NOT EXISTS runtime_tuning (
+    bot_id TEXT NOT NULL CHECK(bot_id <> ''),
+    key TEXT NOT NULL CHECK(key <> ''),
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (bot_id, key)
+);
+
+DO $$
+BEGIN
+    ALTER TABLE runtime_tuning
+        ALTER COLUMN bot_id SET NOT NULL,
+        ALTER COLUMN bot_id DROP DEFAULT,
+        ALTER COLUMN key SET NOT NULL,
+        ALTER COLUMN value_json SET NOT NULL,
+        ALTER COLUMN value_json DROP DEFAULT;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'runtime_tuning_bot_id_nonempty'
+    ) THEN
+        ALTER TABLE runtime_tuning
+            ADD CONSTRAINT runtime_tuning_bot_id_nonempty CHECK (bot_id <> '');
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'runtime_tuning_key_nonempty'
+    ) THEN
+        ALTER TABLE runtime_tuning
+            ADD CONSTRAINT runtime_tuning_key_nonempty CHECK (key <> '');
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS exchange_symbols (
     exchange TEXT PRIMARY KEY,
     symbols TEXT NOT NULL,
@@ -186,11 +216,33 @@ CREATE TABLE IF NOT EXISTS analytics_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_analytics_snapshots_updated_at ON analytics_snapshots(updated_at);
 
-CREATE TABLE IF NOT EXISTS swing_entry_plans (
+CREATE TABLE IF NOT EXISTS swing_plans (
     id BIGSERIAL PRIMARY KEY,
+    plan_id TEXT NOT NULL UNIQUE CHECK(plan_id <> ''),
     bot_id TEXT NOT NULL,
     symbol TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'swing_auto',
+    exchange TEXT NOT NULL DEFAULT '',
+    direction TEXT NOT NULL DEFAULT '',
+    first_entry_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+    last_entry_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+    grid_count INTEGER NOT NULL DEFAULT 0,
+    leverage INTEGER NOT NULL DEFAULT 1,
+    margin_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+    max_concurrent_limit_orders_on_cex INTEGER NOT NULL DEFAULT 3,
+    plan_state TEXT NOT NULL DEFAULT 'active',
     opened_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_swing_plans_lookup
+    ON swing_plans(bot_id, symbol, plan_id);
+CREATE INDEX IF NOT EXISTS idx_swing_plans_mode_state
+    ON swing_plans(bot_id, mode, exchange, plan_state);
+
+CREATE TABLE IF NOT EXISTS swing_plan_entries (
+    id BIGSERIAL PRIMARY KEY,
+    plan_id TEXT NOT NULL CHECK(plan_id <> ''),
     entry_idx INTEGER NOT NULL DEFAULT 0,
     side TEXT NOT NULL DEFAULT '',
     price DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -200,9 +252,9 @@ CREATE TABLE IF NOT EXISTS swing_entry_plans (
     order_id TEXT NOT NULL DEFAULT '',
     strategy TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    UNIQUE(plan_id, entry_idx)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_swing_entry_plan_unique
-    ON swing_entry_plans(bot_id, symbol, opened_at, entry_idx);
-CREATE INDEX IF NOT EXISTS idx_swing_entry_plan_lookup
-    ON swing_entry_plans(bot_id, symbol, opened_at);
+CREATE INDEX IF NOT EXISTS idx_swing_plan_entries_plan
+    ON swing_plan_entries(plan_id, entry_idx);
+DROP TABLE IF EXISTS swing_entry_plans;

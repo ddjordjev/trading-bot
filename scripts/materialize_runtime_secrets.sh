@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build runtime secrets env files from local .env source-of-truth.
+# Build runtime secrets env files.
 #
 # Usage:
 #   ./scripts/materialize_runtime_secrets.sh local
@@ -9,18 +9,15 @@ set -euo pipefail
 #
 # Output:
 #   env/local.runtime.secrets.env or env/prod.runtime.secrets.env
+#
+# Behavior:
+# - Prefer existing mode-specific secrets files (source of truth).
+# - Fall back to legacy generation from .env BINANCE/BYBIT *_TEST/*_PROD keys.
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODE="${1:-}"
-SOURCE_ENV="$ROOT/.env"
-
 if [[ "$MODE" != "local" && "$MODE" != "prod" ]]; then
   echo "Usage: $0 {local|prod}"
-  exit 1
-fi
-
-if [[ ! -f "$SOURCE_ENV" ]]; then
-  echo "ERROR: missing $SOURCE_ENV"
   exit 1
 fi
 
@@ -44,9 +41,10 @@ if [[ ! -f "$RUNTIME_ENV" && "$MODE" == "local" ]]; then
 fi
 
 read_kv() {
-  local key="$1"
+  local file="$1"
+  local key="$2"
   local value
-  value="$(python3 - "$SOURCE_ENV" "$key" <<'PY'
+  value="$(python3 - "$file" "$key" <<'PY'
 import sys
 from pathlib import Path
 env_file = Path(sys.argv[1])
@@ -93,6 +91,66 @@ mask4() {
   fi
 }
 
+resolve_deploy_commit() {
+  local sha
+  sha="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+  if [[ -z "$sha" ]]; then
+    sha="unknown"
+  fi
+  printf "%s" "$sha"
+}
+
+stamp_deploy_commit() {
+  local file="$1"
+  local sha="$2"
+  python3 - "$file" "$sha" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+sha = sys.argv[2]
+lines = path.read_text().splitlines() if path.exists() else []
+out = []
+seen = False
+for line in lines:
+    s = line.strip()
+    if s.startswith("DEPLOY_COMMIT="):
+        out.append(f"DEPLOY_COMMIT={sha}")
+        seen = True
+    else:
+        out.append(line)
+if not seen:
+    out.append(f"DEPLOY_COMMIT={sha}")
+path.write_text("\n".join(out) + "\n")
+PY
+}
+
+DEPLOY_COMMIT_SHA="$(resolve_deploy_commit)"
+
+SOURCE_ENV="$ROOT/.env"
+if [[ -f "$OUTPUT_ENV" ]]; then
+  binance_key_existing="$(read_kv "$OUTPUT_ENV" "BINANCE_API_KEY")"
+  binance_secret_existing="$(read_kv "$OUTPUT_ENV" "BINANCE_API_SECRET")"
+  bybit_key_existing="$(read_kv "$OUTPUT_ENV" "BYBIT_API_KEY")"
+  bybit_secret_existing="$(read_kv "$OUTPUT_ENV" "BYBIT_API_SECRET")"
+  if [[ -n "$binance_key_existing" || -n "$binance_secret_existing" || -n "$bybit_key_existing" || -n "$bybit_secret_existing" ]]; then
+    stamp_deploy_commit "$OUTPUT_ENV" "$DEPLOY_COMMIT_SHA"
+    chmod 600 "$OUTPUT_ENV" || true
+    echo "Using existing secrets file: $OUTPUT_ENV"
+    echo "DEPLOY_COMMIT=$DEPLOY_COMMIT_SHA"
+    echo "BINANCE_API_KEY=$(mask4 "$binance_key_existing")"
+    echo "BINANCE_API_SECRET=$(mask4 "$binance_secret_existing")"
+    echo "BYBIT_API_KEY=$(mask4 "$bybit_key_existing")"
+    echo "BYBIT_API_SECRET=$(mask4 "$bybit_secret_existing")"
+    exit 0
+  fi
+fi
+
+if [[ ! -f "$SOURCE_ENV" ]]; then
+  echo "ERROR: missing $SOURCE_ENV and no usable $OUTPUT_ENV"
+  exit 1
+fi
+
 selected_exchange=""
 if [[ -f "$RUNTIME_ENV" ]]; then
   selected_exchange="$(read_runtime_exchange)"
@@ -113,10 +171,10 @@ elif [[ "$selected_base" == bybit* ]]; then
   selected_base="bybit"
 fi
 
-binance_key="$(read_kv "BINANCE_${SRC_SUFFIX}_API_KEY")"
-binance_secret="$(read_kv "BINANCE_${SRC_SUFFIX}_API_SECRET")"
-bybit_key="$(read_kv "BYBIT_${SRC_SUFFIX}_API_KEY")"
-bybit_secret="$(read_kv "BYBIT_${SRC_SUFFIX}_API_SECRET")"
+binance_key="$(read_kv "$SOURCE_ENV" "BINANCE_${SRC_SUFFIX}_API_KEY")"
+binance_secret="$(read_kv "$SOURCE_ENV" "BINANCE_${SRC_SUFFIX}_API_SECRET")"
+bybit_key="$(read_kv "$SOURCE_ENV" "BYBIT_${SRC_SUFFIX}_API_KEY")"
+bybit_secret="$(read_kv "$SOURCE_ENV" "BYBIT_${SRC_SUFFIX}_API_SECRET")"
 
 if [[ "$selected_base" == "binance" ]]; then
   if [[ -z "$binance_key" || -z "$binance_secret" ]]; then
@@ -139,9 +197,12 @@ fi
   echo "BYBIT_API_SECRET=$bybit_secret"
 } > "$OUTPUT_ENV"
 
+stamp_deploy_commit "$OUTPUT_ENV" "$DEPLOY_COMMIT_SHA"
+
 chmod 600 "$OUTPUT_ENV" || true
 
 echo "Generated: $OUTPUT_ENV"
+echo "DEPLOY_COMMIT=$DEPLOY_COMMIT_SHA"
 echo "EXCHANGE(base): $selected_base"
 echo "BINANCE_API_KEY=$(mask4 "$binance_key")"
 echo "BINANCE_API_SECRET=$(mask4 "$binance_secret")"

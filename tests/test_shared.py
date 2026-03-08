@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -15,6 +16,7 @@ from shared.models import (
     TrendingSnapshot,
     TVSymbolSnapshot,
 )
+from shared.runtime_tuning import normalize_runtime_tuning, runtime_tuning_revision
 from shared.state import SharedState
 
 # ── Shared Models ───────────────────────────────────────────────────
@@ -196,39 +198,11 @@ class TestSharedStateTradeQueue:
         assert len(data["proposals"]) == 1
         assert data["proposals"][0]["symbol"] == "SOL/USDT"
 
-    def test_apply_trade_queue_updates_removes_consumed(self, state):
-        from shared.models import SignalPriority, TradeProposal, TradeQueue
+    def test_write_bot_trade_queue_empty_bot_id_is_noop(self, state):
+        from shared.models import TradeQueue
 
-        q = TradeQueue()
-        p = TradeProposal(priority=SignalPriority.DAILY, symbol="BTC/USDT", side="long", strength=0.8)
-        q.add(p)
-        state.write_trade_queue(q)
-
-        state.apply_trade_queue_updates(consumed_ids=[p.id], rejected={})
-        updated = state.read_trade_queue()
-        assert updated.total == 0
-
-    def test_apply_trade_queue_updates_removes_rejected(self, state):
-        from shared.models import SignalPriority, TradeProposal, TradeQueue
-
-        q = TradeQueue()
-        p = TradeProposal(priority=SignalPriority.DAILY, symbol="ETH/USDT", side="short", strength=0.6)
-        q.add(p)
-        state.write_trade_queue(q)
-
-        state.apply_trade_queue_updates(consumed_ids=[], rejected={p.id: "risk limit"})
-        updated = state.read_trade_queue()
-        assert updated.total == 0
-
-    def test_apply_empty_updates_is_noop(self, state):
-        from shared.models import SignalPriority, TradeProposal, TradeQueue
-
-        q = TradeQueue()
-        q.add(TradeProposal(priority=SignalPriority.DAILY, symbol="X/USDT", side="long", strength=0.5))
-        state.write_trade_queue(q)
-        state.apply_trade_queue_updates(consumed_ids=[], rejected={})
-        updated = state.read_trade_queue()
-        assert updated.total == 1
+        state.write_bot_trade_queue("", TradeQueue())
+        assert not (state._data_dir / "trade_queue.json").exists()
 
 
 class TestSharedStateBotDiscovery:
@@ -277,6 +251,20 @@ class TestSharedStateIntelAge:
         state = SharedState(data_dir=tmp_path)
         path = tmp_path / "intel_state.json"
         path.write_text(json.dumps({"regime": "normal", "updated_at": ""}))
+        age = state.intel_age_seconds()
+        assert age > 999998
+
+    def test_intel_age_naive_timestamp_is_handled(self, tmp_path):
+        state = SharedState(data_dir=tmp_path)
+        path = tmp_path / "intel_state.json"
+        path.write_text(json.dumps({"regime": "normal", "updated_at": "2026-01-01T00:00:00"}))
+        age = state.intel_age_seconds()
+        assert age > 0
+
+    def test_intel_age_invalid_timestamp_returns_fallback(self, tmp_path):
+        state = SharedState(data_dir=tmp_path)
+        path = tmp_path / "intel_state.json"
+        path.write_text(json.dumps({"regime": "normal", "updated_at": "not-a-time"}))
         age = state.intel_age_seconds()
         assert age > 999998
 
@@ -374,3 +362,49 @@ class TestHubBotEnabled:
 
     def test_get_all_empty(self, hub):
         assert hub.get_all_bot_enabled() == {}
+
+
+class TestRuntimeTuningHelpers:
+    def test_normalize_runtime_tuning_casts_supported_values(self):
+        raw = {
+            "default_leverage": "7",
+            "max_position_size_pct": "2.5",
+            "max_concurrent_limit_orders_on_cex": "4",
+            "unknown_key": "ignore",
+        }
+        out = normalize_runtime_tuning(raw)
+        assert out["default_leverage"] == 7
+        assert out["max_position_size_pct"] == 2.5
+        assert out["max_concurrent_limit_orders_on_cex"] == 4
+        assert "unknown_key" not in out
+
+    def test_normalize_runtime_tuning_skips_none_and_invalid_cast(self):
+        raw = {
+            "default_leverage": None,
+            "max_concurrent_positions": "bad-int",
+            "stop_loss_pct": "1.5",
+        }
+        out = normalize_runtime_tuning(raw)
+        assert "default_leverage" not in out
+        assert "max_concurrent_positions" not in out
+        assert out["stop_loss_pct"] == 1.5
+
+    def test_runtime_tuning_revision_is_stable_and_order_independent(self):
+        a = {"default_leverage": 5, "stop_loss_pct": 1.2}
+        b = {"stop_loss_pct": 1.2, "default_leverage": 5}
+        ra = runtime_tuning_revision(a)
+        rb = runtime_tuning_revision(b)
+        assert ra == rb
+        assert isinstance(ra, str) and len(ra) == 16
+
+
+class TestSharedStateWriteFailures:
+    def test_write_cleans_temp_file_on_error(self, tmp_path):
+        state = SharedState(data_dir=tmp_path)
+        target = tmp_path / "bot_status.json"
+        before = set(tmp_path.iterdir())
+        with patch("shared.state.os.write", side_effect=OSError("disk err")):
+            with pytest.raises(OSError):
+                state._write(target, BotDeploymentStatus(bot_id="x"))
+        after = set(tmp_path.iterdir())
+        assert before == after

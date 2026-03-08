@@ -58,6 +58,10 @@ class ScaledPosition(BaseModel):
     phase: ScalePhase = ScalePhase.INITIAL
     adds: int = 0
     low_liquidity: bool = False
+    is_queue_trade: bool = False
+    post_add_defense_active: bool = False
+    post_add_defense_stop_pct: float = 2.0
+    post_add_rearm_chase_pct: float = 5.0
 
     # WINNERS mode conditions
     min_profit_to_add_pct: float = 1.0
@@ -137,6 +141,19 @@ class ScaledPosition(BaseModel):
 
         if self.mode == ScaleMode.PYRAMID:
             return self._should_add_pyramid(current_price)
+        return self._should_add_winners(current_price)
+
+    def should_add_on_profitable_pullback(self, current_price: float) -> bool:
+        """Check winner-style profitable pullback add readiness.
+
+        This is used by manager-side policy overlays where a position can stay
+        in PYRAMID mode for down-move adds but still optionally allow
+        profitable pullback adds under extra risk gates.
+        """
+        if self.phase == ScalePhase.GAMBLING:
+            return False
+        if not self.has_room_to_add:
+            return False
         return self._should_add_winners(current_price)
 
     def _should_add_winners(self, current_price: float) -> bool:
@@ -369,6 +386,7 @@ class PositionScaler:
         mode: ScaleMode = ScaleMode.WINNERS,
         dca_interval_pct: float = 2.0,
         dca_multiplier: float = 1.5,
+        is_queue_trade: bool = False,
     ) -> ScaledPosition:
 
         if mode == ScaleMode.PYRAMID:
@@ -385,6 +403,7 @@ class PositionScaler:
                 initial_risk_amount=self.initial_risk_amount,
                 max_notional=self.max_notional,
                 low_liquidity=low_liquidity,
+                is_queue_trade=is_queue_trade,
                 dca_interval_pct=dca_interval_pct,
                 dca_multiplier=dca_multiplier,
             )
@@ -401,6 +420,7 @@ class PositionScaler:
                 initial_risk_amount=self.initial_risk_amount,
                 max_notional=self.max_notional,
                 low_liquidity=low_liquidity,
+                is_queue_trade=is_queue_trade,
                 phase=ScalePhase.GAMBLING if low_liquidity else ScalePhase.INITIAL,
             )
 

@@ -174,6 +174,21 @@ class TestScaledPositionShouldAdd:
         sp.avg_entry_price = 0.1
         assert sp.should_add(0.11) is False
 
+    def test_should_add_on_profitable_pullback_uses_winner_rules(self, scaler):
+        sp = scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+        )
+        sp.min_profit_to_add_pct = 1.0
+        sp.current_size = 0.01
+        sp.avg_entry_price = 100.0
+        sp.last_add_price = 100.0
+        sp.peak_since_entry = 120.3
+        assert sp.should_add_on_profitable_pullback(120.0) is True
+
 
 class TestScaledPositionShouldLeverUp:
     def test_pyramid_lever_up_when_profit_above_threshold(self, scaler):
@@ -1201,6 +1216,7 @@ class TestOrderManagerTryLeverUpBranches:
 
     @pytest.mark.asyncio
     async def test_try_lever_up_locks_breakeven_when_breakeven_after_lever(self, order_manager, mock_exchange):
+        order_manager.settings.bot_id = "extreme"
         sp = order_manager.scaler.create(
             symbol="BTC/USDT",
             side="long",
@@ -1241,6 +1257,50 @@ class TestOrderManagerTryLeverUpBranches:
         ts = order_manager.trailing.get("BTC/USDT")
         assert ts is not None
         assert ts.breakeven_locked is True
+
+    @pytest.mark.asyncio
+    async def test_try_lever_up_non_extreme_does_not_force_breakeven_lock(self, order_manager, mock_exchange):
+        order_manager.settings.bot_id = "momentum"
+        sp = order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="test",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+        )
+        sp.adds = 1
+        sp.current_size = 0.001
+        sp.avg_entry_price = 50_000.0
+        sp.leverage_raised = False
+        sp.breakeven_after_lever = True
+        mock_exchange.fetch_positions.return_value = [
+            Position(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                amount=0.001,
+                entry_price=50_000.0,
+                current_price=50_750.0,
+                leverage=2,
+                market_type="futures",
+            ),
+        ]
+        mock_exchange.set_leverage = AsyncMock()
+        order_manager.trailing.register(
+            Position(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                amount=0.001,
+                entry_price=50_000.0,
+                current_price=50_000.0,
+                leverage=2,
+                market_type="futures",
+            ),
+        )
+        levered = await order_manager.try_lever_up()
+        assert "BTC/USDT" in levered
+        ts = order_manager.trailing.get("BTC/USDT")
+        assert ts is not None
+        assert ts.breakeven_locked is False
 
 
 class TestOrderManagerTryHedge:
@@ -1453,6 +1513,38 @@ class TestOrderManagerCheckStopsBranches:
         )
         closed = await order_manager.check_stops()
         assert len(closed) >= 1
+
+    @pytest.mark.asyncio
+    async def test_check_stops_does_not_crash_when_close_raises(self, order_manager, mock_exchange):
+        pos = Position(
+            symbol="DEGO/USDT",
+            side=OrderSide.BUY,
+            amount=100.0,
+            entry_price=0.5,
+            current_price=0.45,
+            leverage=20,
+            market_type="futures",
+        )
+        order_manager.trailing.register(
+            Position(
+                symbol="DEGO/USDT",
+                side=OrderSide.BUY,
+                amount=100.0,
+                entry_price=0.5,
+                current_price=0.45,
+                leverage=20,
+                market_type="futures",
+            ),
+            initial_stop_pct=1.0,
+        )
+        mock_exchange.fetch_positions.return_value = [pos]
+        mock_exchange.fetch_balance.return_value = {"USDT": 1000.0}
+        order_manager.execute_signal = AsyncMock(side_effect=Exception("binance -4131"))
+
+        closed = await order_manager.check_stops()
+
+        assert closed == []
+        assert order_manager.trailing.get("DEGO/USDT") is not None
 
 
 class TestOrderManagerLogTradeNoScaler:
@@ -1971,6 +2063,41 @@ class TestOrderManagerTryPartialTakeErrorPaths:
         assert taken == []
         assert "BTC/USDT" in order_manager._partial_take_cooldowns
 
+    @pytest.mark.asyncio
+    async def test_try_partial_take_min_notional_error_sets_long_cooldown(self, order_manager, mock_exchange):
+        sp = order_manager.scaler.create(
+            symbol="UB/USDT",
+            side="long",
+            strategy="test",
+            leverage=5,
+            mode=ScaleMode.PYRAMID,
+        )
+        sp.leverage_raised = True
+        sp.partial_taken = False
+        sp.current_size = 287.0
+        sp.avg_entry_price = 0.02
+
+        pos = Position(
+            symbol="UB/USDT",
+            side=OrderSide.BUY,
+            amount=287.0,
+            entry_price=0.02,
+            current_price=0.022,
+            leverage=5,
+            unrealized_pnl=2.0,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions.return_value = [pos]
+        mock_exchange.place_order.side_effect = Exception(
+            'binance {"code":-4164,"msg":"Order\'s notional must be no smaller than 5 (unless you choose reduce only)."}'
+        )
+
+        before = datetime.now(UTC)
+        taken = await order_manager.try_partial_take()
+        assert taken == []
+        assert "UB/USDT" in order_manager._partial_take_cooldowns
+        assert order_manager._partial_take_cooldowns["UB/USDT"] > before + timedelta(minutes=25)
+
 
 class TestOrderManagerTryHedgeErrorPaths:
     """Hedge: get_hedge_params None, order failed, cooldown."""
@@ -2372,6 +2499,255 @@ class TestOrderManagerTryScaleInEdgeCases:
         ts = order_manager.trailing.get("BTC/USDT")
         assert ts is not None
         assert ts.entry_price == 49_333.333333333336
+
+    @pytest.mark.asyncio
+    async def test_try_scale_in_adds_profitable_pullback_for_non_extreme_queue_trade(
+        self, order_manager, mock_exchange
+    ):
+        order_manager.settings.bot_id = "momentum"
+        sp = order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="ta_rsi",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+            is_queue_trade=True,
+        )
+        sp.current_size = 1.0
+        sp.avg_entry_price = 100.0
+        sp.last_add_price = 100.0
+        sp.peak_since_entry = 120.4
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=1.0,
+            entry_price=100.0,
+            current_price=120.0,
+            leverage=10,
+            market_type="futures",
+        )
+        order_manager.trailing.register(
+            Position(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                amount=1.0,
+                entry_price=100.0,
+                current_price=120.0,
+                leverage=10,
+                market_type="futures",
+            ),
+            initial_stop_pct=2.0,
+        )
+        ts = order_manager.trailing.get("BTC/USDT")
+        assert ts is not None
+        ts.breakeven_locked = True
+        ts.current_stop = 108.0
+
+        mock_exchange.fetch_positions.return_value = [pos]
+        mock_exchange.place_order.return_value = Order(
+            id="profit-add",
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.1,
+            status=OrderStatus.FILLED,
+            filled=0.1,
+            average_price=120.0,
+        )
+
+        added = await order_manager.try_scale_in()
+        assert len(added) == 1
+        ts_after = order_manager.trailing.get("BTC/USDT")
+        assert ts_after is not None
+        assert ts_after.current_stop == pytest.approx(117.6)
+        assert sp.post_add_defense_active is True
+
+    @pytest.mark.asyncio
+    async def test_try_scale_in_rearms_defense_to_five_pct_chase_when_safe(self, order_manager, mock_exchange):
+        order_manager.settings.bot_id = "momentum"
+        sp = order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="ta_rsi",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+            is_queue_trade=True,
+        )
+        sp.current_size = 1.0
+        sp.avg_entry_price = 100.0
+        sp.last_add_price = 100.0
+        sp.peak_since_entry = 120.4
+        pos_add = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=1.0,
+            entry_price=100.0,
+            current_price=120.0,
+            leverage=10,
+            market_type="futures",
+        )
+        order_manager.trailing.register(
+            Position(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                amount=1.0,
+                entry_price=100.0,
+                current_price=120.0,
+                leverage=10,
+                market_type="futures",
+            ),
+            initial_stop_pct=2.0,
+        )
+        ts = order_manager.trailing.get("BTC/USDT")
+        assert ts is not None
+        ts.breakeven_locked = True
+        ts.current_stop = 108.0
+
+        mock_exchange.fetch_positions.return_value = [pos_add]
+        mock_exchange.place_order.return_value = Order(
+            id="profit-add",
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.1,
+            status=OrderStatus.FILLED,
+            filled=0.1,
+            average_price=120.0,
+        )
+        first = await order_manager.try_scale_in()
+        assert len(first) == 1
+        assert sp.post_add_defense_active is True
+
+        # Block additional adds; only re-arm logic should run now.
+        sp.max_notional = sp.notional_value
+        pos_rearm = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=sp.current_size,
+            entry_price=sp.avg_entry_price,
+            current_price=140.0,
+            leverage=10,
+            market_type="futures",
+        )
+        mock_exchange.fetch_positions.return_value = [pos_rearm]
+        second = await order_manager.try_scale_in()
+        assert second == []
+        ts_after = order_manager.trailing.get("BTC/USDT")
+        assert ts_after is not None
+        assert ts_after.current_stop == pytest.approx(133.0)
+        assert sp.post_add_defense_active is False
+
+    @pytest.mark.asyncio
+    async def test_try_scale_in_adds_profitable_pullback_short_with_two_pct_defense(self, order_manager, mock_exchange):
+        order_manager.settings.bot_id = "momentum"
+        sp = order_manager.scaler.create(
+            symbol="ETH/USDT",
+            side="short",
+            strategy="ta_rsi",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+            is_queue_trade=True,
+        )
+        sp.current_size = 1.0
+        sp.avg_entry_price = 100.0
+        sp.last_add_price = 100.0
+        sp.peak_since_entry = 79.7
+        pos = Position(
+            symbol="ETH/USDT",
+            side=OrderSide.SELL,
+            amount=1.0,
+            entry_price=100.0,
+            current_price=80.0,
+            leverage=10,
+            market_type="futures",
+        )
+        order_manager.trailing.register(
+            Position(
+                symbol="ETH/USDT",
+                side=OrderSide.SELL,
+                amount=1.0,
+                entry_price=100.0,
+                current_price=80.0,
+                leverage=10,
+                market_type="futures",
+            ),
+            initial_stop_pct=2.0,
+        )
+        ts = order_manager.trailing.get("ETH/USDT")
+        assert ts is not None
+        ts.breakeven_locked = True
+        ts.current_stop = 90.0
+
+        mock_exchange.fetch_positions.return_value = [pos]
+        mock_exchange.place_order.return_value = Order(
+            id="profit-add-short",
+            symbol="ETH/USDT",
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            amount=0.1,
+            status=OrderStatus.FILLED,
+            filled=0.1,
+            average_price=80.0,
+        )
+
+        added = await order_manager.try_scale_in()
+        assert len(added) == 1
+        ts_after = order_manager.trailing.get("ETH/USDT")
+        assert ts_after is not None
+        assert ts_after.current_stop == pytest.approx(81.6)
+        assert sp.post_add_defense_active is True
+
+    @pytest.mark.asyncio
+    async def test_try_scale_in_skips_profitable_pullback_when_be_and_two_pct_defense_conflict(
+        self, order_manager, mock_exchange
+    ):
+        order_manager.settings.bot_id = "momentum"
+        sp = order_manager.scaler.create(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="ta_rsi",
+            leverage=10,
+            mode=ScaleMode.PYRAMID,
+            is_queue_trade=True,
+        )
+        sp.current_size = 1.0
+        sp.avg_entry_price = 100.0
+        sp.last_add_price = 100.0
+        sp.peak_since_entry = 101.4
+        pos = Position(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            amount=1.0,
+            entry_price=100.0,
+            current_price=101.0,
+            leverage=10,
+            market_type="futures",
+        )
+        order_manager.trailing.register(
+            Position(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                amount=1.0,
+                entry_price=100.0,
+                current_price=101.0,
+                leverage=10,
+                market_type="futures",
+            ),
+            initial_stop_pct=2.0,
+        )
+        ts = order_manager.trailing.get("BTC/USDT")
+        assert ts is not None
+        ts.breakeven_locked = True
+        ts.current_stop = 100.0
+
+        mock_exchange.fetch_positions.return_value = [pos]
+
+        added = await order_manager.try_scale_in()
+        assert added == []
+        mock_exchange.place_order.assert_not_called()
+        ts_after = order_manager.trailing.get("BTC/USDT")
+        assert ts_after is not None
+        assert ts_after.current_stop == pytest.approx(100.0)
 
 
 class TestOrderManagerTryLeverUpErrorPath:
@@ -2889,7 +3265,6 @@ class TestOrderManagerProtectionSync:
         assert order_manager._protection_orders["AVAX/USDT"]["sl_order_id"] == "sl-keep"
         mock_exchange.place_order.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_sync_normalizes_invalid_short_stop_trigger(self, order_manager, mock_exchange):
         pos = Position(
             symbol="PIPPIN/USDT",

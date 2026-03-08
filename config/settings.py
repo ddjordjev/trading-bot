@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    trading_mode: str = "live"
+    trading_mode: str
     # Execution behavior comes from EXCHANGE target; this label is metadata.
 
     # Multi-bot: each instance gets a unique ID and strategy filter.
@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     bot_style: str = "momentum"  # momentum / meanrev / swing — determines queue routing
     hub_only: bool = False  # True = dashboard/coordination only, no trading
 
-    exchange: str = "binance_testnet"
+    exchange: str
 
     # Exchange credentials.
     # Keep one variable name across environments; env override files provide
@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     allowed_market_types: str = "spot,futures"
 
     # 0 = no cap (use full exchange balance)
-    session_budget: float = 100.0
+    session_budget: float
 
     default_leverage: int = 10
     # Cross mode is intentionally disabled for now; all futures trades use isolated.
@@ -92,6 +92,11 @@ class Settings(BaseSettings):
     # Liquidity-aware scaling
     breakeven_lock_pct: float = 5.0  # move stop to entry once at this profit %
     pullback_trail_buffer_pct: float = 4.0  # non-aggressive trailing buffer below/above price (3-5% zone)
+    # Profitable-pullback add stop policy:
+    # - after add fill use a tighter temporary defense stop
+    # - re-arm wider chase stop once BE + chase constraints are feasible again
+    post_add_defense_stop_pct: float = 2.0
+    post_add_rearm_chase_pct: float = 5.0
     initial_risk_amount: float = 50.0  # fixed $ amount for the first entry
     max_notional_position: float = 100_000.0  # stop adding once leveraged position hits this
     min_profit_to_add_pct: float = 1.0  # must be +1% before adding to position
@@ -124,6 +129,7 @@ class Settings(BaseSettings):
     dca_multiplier: float = 1.5  # each DCA add is 1.5x the previous
     dca_profit_to_lever_pct: float = 1.0  # raise leverage once avg entry is +1%
     dca_partial_take_pct: float = 30.0  # take 30% off the table after lever-up
+    max_concurrent_limit_orders_on_cex: int = 3  # swing/manual ladder active limits on exchange
 
     # Hedging
     hedge_enabled: bool = True
@@ -276,10 +282,6 @@ class Settings(BaseSettings):
         """Compatibility shim; sandbox mode is considered paper."""
         return bool(self.exchange_is_sandbox)
 
-    def is_paper_local(self) -> bool:
-        """Legacy shim kept for test compatibility."""
-        return False
-
     def is_paper_live(self) -> bool:
         """Legacy shim kept for test compatibility."""
         return bool(self.exchange_is_sandbox)
@@ -402,4 +404,4 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings()  # type: ignore[call-arg]

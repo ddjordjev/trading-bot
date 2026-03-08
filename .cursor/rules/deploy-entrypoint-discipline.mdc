@@ -1,0 +1,50 @@
+---
+description: Enforce canonical deploy entrypoints and env-file wiring
+alwaysApply: true
+---
+
+# Deploy Entrypoint Discipline
+
+When the user message contains deploy intent (for example: `deploy`, `redeploy`,
+`rebuild`, `restart`, `run prod`, `run local`), stop and read
+`docs/DEPLOY_INSTRUCTIONS.md` first in the same turn before any deploy command.
+
+This applies to both local and production deployments.
+
+Never deploy with raw `docker compose up/down/build` commands unless
+`docs/DEPLOY_INSTRUCTIONS.md` explicitly instructs that exact command path.
+
+Use only canonical entrypoints that wire compose env files correctly:
+
+- Local deploy: `make up-local`, `make fresh-local`, `make ps-local`
+- Prod deploy: `make up-prod`, `make ps-prod` or `scripts/deploy-digitalocean.sh`
+- Local session ops: `scripts/run_session.sh start|rebuild|status`
+
+## Environment Selection Default
+
+- If the user says `deploy`/`redeploy`/`restart` without specifying environment,
+  treat it as **local deploy by default**.
+- Use production deploy entrypoints only when the user explicitly says
+  `prod`, `production`, or clearly references the production host.
+
+## Why
+
+`docker-compose.yml` references:
+
+- `${RUNTIME_ENV_OVERRIDE_FILE}`
+- `${RUNTIME_SECRETS_FILE}`
+
+If compose is started without `--env-file env/local.compose.env` or
+`--env-file env/prod.compose.env`, these variables are empty and runtime
+settings may not load (for example `TRADING_MODE`, `EXCHANGE`,
+`SESSION_BUDGET`), causing startup failures.
+
+## Hard Rule
+
+Before any deploy/restart, resolve compose config through the canonical
+entrypoint described in `docs/DEPLOY_INSTRUCTIONS.md` and ensure runtime files
+are present in resolved config.
+
+If a user asks for local deploy/restart, or gives an unspecified deploy intent,
+default to `make fresh-local` unless they explicitly ask for a quick no-build
+restart.

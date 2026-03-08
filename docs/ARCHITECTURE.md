@@ -527,6 +527,11 @@ activate via dashboard or `/api/bot-profile/{id}/toggle`.
 - **Don't add hub communication to idle bots.** Idle bots only watch a
   local activation file. No HTTP, no exchange, no nothing.
 
+- **Don't hardcode runtime defaults just to satisfy tooling.** Keep required
+  runtime settings strict in `config/settings.py` (for example `TRADING_MODE`,
+  `EXCHANGE`, `SESSION_BUDGET`). For tests/mypy ergonomics, provide test-only
+  env defaults in `tests/conftest.py` or dedicated test env files.
+
 ---
 
 ## Documentation Update Policy

@@ -7,6 +7,12 @@ from pydantic import ValidationError
 
 
 class TestSettings:
+    @pytest.fixture(autouse=True)
+    def required_runtime_env(self, monkeypatch):
+        monkeypatch.setenv("TRADING_MODE", "paper_live")
+        monkeypatch.setenv("EXCHANGE", "binance_testnet")
+        monkeypatch.setenv("SESSION_BUDGET", "100")
+
     @pytest.fixture()
     def settings(self, monkeypatch):
         monkeypatch.setenv("TRADING_MODE", "paper_local")

@@ -37,6 +37,17 @@ class RiskManager:
         self._winning_trades_today: int = 0
         self._losing_trades_today: int = 0
 
+    def reload_runtime_settings(self, settings: Settings) -> None:
+        self._settings = settings
+        self.max_position_pct = settings.effective_max_position_size_pct
+        self._base_max_daily_loss_pct = settings.effective_max_daily_loss_pct
+        self.default_stop_loss_pct = settings.stop_loss_pct
+        self.default_take_profit_pct = settings.take_profit_pct
+        self.max_concurrent = settings.effective_max_concurrent_positions
+        self.min_strength = settings.effective_min_signal_strength
+        self.loss_cooldown_threshold = settings.effective_consecutive_loss_cooldown
+        self.max_total_exposure_mult = float(settings.max_total_exposure_mult)
+
     def reset_daily(self, balance: float, profit_buffer_pct: float = 0.0) -> None:
         self._daily_pnl = 0.0
         self._day_start_balance = balance

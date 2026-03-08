@@ -168,11 +168,7 @@ class HubState:
                 return
             except Exception as e:
                 logger.warning("Failed to persist analytics to hub.db: {}", e)
-        try:
-            self._analytics_path.parent.mkdir(parents=True, exist_ok=True)
-            self._analytics_path.write_text(analytics.model_dump_json(indent=2))
-        except Exception as e:
-            logger.warning("Failed to persist fallback analytics to {}: {}", self._analytics_path, e)
+        logger.warning("Skipping analytics persistence because hub.db is unavailable")
 
     def _connect_hub_db(self) -> None:
         try:

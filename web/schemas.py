@@ -307,6 +307,13 @@ class PositionClaimBody(BaseModel):
     strategy: str = "manual_claim"
 
 
+class OrphanRecoverBody(BaseModel):
+    symbol: str
+    exchange: str = ""
+    bot_id: str = ""
+    strategy: str = "recovered_owner_claim"
+
+
 class PositionTakeProfitBody(BaseModel):
     symbol: str
     pct: float = 50.0
@@ -321,6 +328,31 @@ class PositionTightenStopBody(BaseModel):
 
 class BotActionBody(BaseModel):
     bot_id: str = ""
+
+
+class RuntimeTuningUpsertBody(BaseModel):
+    key: str
+    value: Any | None = None
+    bot_id: str = "*"
+
+
+class ManualSwingCreateBody(BaseModel):
+    exchange: str
+    symbol: str
+    direction: str
+    first_entry_price: float
+    last_entry_price: float
+    grid_count: int
+    leverage: int
+    margin_amount: float
+    max_concurrent_limit_orders_on_cex: int | None = None
+    bot_id: str = "swing"
+
+
+class ManualSwingCancelBody(BaseModel):
+    plan_id: str
+    symbol: str
+    bot_id: str = "swing"
 
 
 class BotProfileInfo(BaseModel):

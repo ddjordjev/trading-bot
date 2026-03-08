@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from config.settings import get_settings
+from shared.runtime_tuning import RUNTIME_TUNABLE_CASTERS, normalize_runtime_tuning, runtime_tuning_revision
 from web.auth import verify_token, verify_ws_token
 from web.schemas import (
     ActionResponse,
@@ -30,15 +31,19 @@ from web.schemas import (
     IntelSnapshot,
     LivePositionInfo,
     LogEntry,
+    ManualSwingCancelBody,
+    ManualSwingCreateBody,
     ModificationSuggestionInfo,
     ModuleStatus,
     NewsItemInfo,
+    OrphanRecoverBody,
     PatternInsightInfo,
     PositionClaimBody,
     PositionCloseBody,
     PositionInfo,
     PositionTakeProfitBody,
     PositionTightenStopBody,
+    RuntimeTuningUpsertBody,
     StrategyInfo,
     StrategyScoreInfo,
     SuggestionStatusBody,
@@ -303,8 +308,6 @@ def _intel_snapshot() -> IntelSnapshot | None:
     if _hub_state_ref is None:
         return None
     snap = _hub_state_ref.read_intel()
-    if not snap.sources_active:
-        return None
     return snap
 
 
@@ -358,6 +361,15 @@ async def metrics() -> Response:
 @app.get("/api/status", response_model=BotStatus)
 async def get_status(_: str = Depends(verify_token)) -> BotStatus:
     return _bot_status()
+
+
+@app.get("/api/about")
+async def get_about(_: str = Depends(verify_token)) -> dict[str, str]:
+    deploy_commit = str(os.getenv("DEPLOY_COMMIT", "")).strip() or str(os.getenv("GIT_COMMIT", "")).strip() or "unknown"
+    return {
+        "version": str(app.version or "unknown"),
+        "deploy_commit": deploy_commit,
+    }
 
 
 @app.get("/api/bots", response_model=list[BotInstance])
@@ -995,6 +1007,11 @@ async def close_position(body: PositionCloseBody, _: str = Depends(verify_token)
     return await _forward_to_bot(body.bot_id, "/api/position/close", {"symbol": body.symbol})
 
 
+@app.post("/api/wick-scalp/close", response_model=ActionResponse)
+async def close_wick_scalp(body: PositionCloseBody, _: str = Depends(verify_token)) -> ActionResponse:
+    return await _forward_to_bot(body.bot_id, "/api/wick-scalp/close", {"symbol": body.symbol})
+
+
 @app.post("/api/orphan/assign", response_model=ActionResponse)
 async def assign_orphan(body: PositionClaimBody, _: str = Depends(verify_token)) -> ActionResponse:
     return await _forward_to_bot(
@@ -1002,6 +1019,102 @@ async def assign_orphan(body: PositionClaimBody, _: str = Depends(verify_token))
         "/api/position/claim",
         {"symbol": body.symbol, "strategy": body.strategy},
     )
+
+
+def _normalize_exchange_key(value: Any) -> str:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+    if "_" in raw:
+        return raw.split("_", 1)[0]
+    return raw
+
+
+def _resolve_orphan_owner_bot(hub: HubDB | PostgresHubDB, symbol: str, exchange: str = "") -> tuple[str, str]:
+    """Resolve best bot owner hint for immediate orphan reclaim."""
+    symbol_key = _pair_symbol(symbol)
+    exchange_key = _normalize_exchange_key(exchange)
+    if not symbol_key:
+        return "", "missing_symbol"
+
+    from config.bot_profiles import ALL_PROFILES
+
+    bot_exchange: dict[str, str] = {}
+    for profile in ALL_PROFILES:
+        if profile.is_hub:
+            continue
+        bot_exchange[_normalize_bot_id(profile.id)] = _normalize_exchange_key(profile.env_overrides.get("EXCHANGE", ""))
+
+    def _exchange_matches(bot_id: str) -> bool:
+        if not exchange_key:
+            return True
+        return bot_exchange.get(bot_id, "") == exchange_key
+
+    candidates: list[str] = []
+    for row in hub.get_open_trade_owner_rows():
+        bot_id = _normalize_bot_id(row.get("bot_id", ""))
+        if _pair_symbol(row.get("symbol", "")) != symbol_key or not bot_id:
+            continue
+        if _exchange_matches(bot_id) and bot_id not in candidates:
+            candidates.append(bot_id)
+
+    original_rows_fn = getattr(hub, "get_original_trade_owner_rows", None)
+    if callable(original_rows_fn):
+        for row in original_rows_fn():
+            bot_id = _normalize_bot_id(row.get("bot_id", ""))
+            if _pair_symbol(row.get("symbol", "")) != symbol_key or not bot_id:
+                continue
+            if _exchange_matches(bot_id) and bot_id not in candidates:
+                candidates.append(bot_id)
+
+    recent_closed_rows_fn = getattr(hub, "get_recent_closed_owner_rows", None)
+    if callable(recent_closed_rows_fn):
+        rows = recent_closed_rows_fn(24)
+        if isinstance(rows, list):
+            for row in rows:
+                bot_id = _normalize_bot_id(row.get("bot_id", ""))
+                if _pair_symbol(row.get("symbol", "")) != symbol_key or not bot_id:
+                    continue
+                if _exchange_matches(bot_id) and bot_id not in candidates:
+                    candidates.append(bot_id)
+
+    recent_recovery_rows_fn = getattr(hub, "get_recent_recovery_owner_rows", None)
+    if callable(recent_recovery_rows_fn):
+        rows = recent_recovery_rows_fn(24)
+        if isinstance(rows, list):
+            for row in rows:
+                bot_id = _normalize_bot_id(row.get("bot_id", ""))
+                if _pair_symbol(row.get("symbol", "")) != symbol_key or not bot_id:
+                    continue
+                if _exchange_matches(bot_id) and bot_id not in candidates:
+                    candidates.append(bot_id)
+
+    for bot_id in candidates:
+        if bot_id in _bot_urls:
+            return bot_id, "resolved_registered"
+    if candidates:
+        return "", f"owner_hint_not_registered:{candidates[0]}"
+    return "", "owner_not_found"
+
+
+@app.post("/api/orphan/recover-now", response_model=ActionResponse)
+async def recover_orphan_now(body: OrphanRecoverBody, _: str = Depends(verify_token)) -> ActionResponse:
+    symbol = _pair_symbol(body.symbol)
+    if not symbol:
+        return ActionResponse(success=False, message="Missing symbol")
+    strategy = str(body.strategy or "recovered_owner_claim").strip() or "recovered_owner_claim"
+    explicit_bot = _normalize_bot_id(body.bot_id)
+    if explicit_bot:
+        return await _forward_to_bot(explicit_bot, "/api/position/claim", {"symbol": symbol, "strategy": strategy})
+
+    hub = _get_hub_db()
+    owner_bot, reason = _resolve_orphan_owner_bot(hub, symbol=symbol, exchange=body.exchange)
+    if not owner_bot:
+        if reason.startswith("owner_hint_not_registered:"):
+            hinted = reason.split(":", 1)[1]
+            return ActionResponse(success=False, message=f"Owner hint '{hinted}' is not registered")
+        return ActionResponse(success=False, message=f"No owner hint found for {symbol}")
+    return await _forward_to_bot(owner_bot, "/api/position/claim", {"symbol": symbol, "strategy": strategy})
 
 
 @app.post("/api/orphan/close", response_model=ActionResponse)
@@ -1032,14 +1145,20 @@ async def close_all(body: BotActionBody | None = None, _: str = Depends(verify_t
     if bid and bid != "all":
         stop_resp = await _forward_to_bot(bid, "/api/stop-trading", {})
         close_resp = await _forward_to_bot(bid, "/api/close-all", {})
+        # Close-all is a one-shot action; clear STOP immediately after forced close
+        # so the dashboard does not remain stuck in HALTED state.
+        _GLOBAL_STOP_FILE.unlink(missing_ok=True)
+        resume_result = await _broadcast_to_remote_bots("/api/resume-trading", {})
         ok = stop_resp.success and close_resp.success
-        msg = f"halt={stop_resp.message or 'ok'}; close={close_resp.message or 'ok'}"
+        msg = f"halt={stop_resp.message or 'ok'}; close={close_resp.message or 'ok'}; resume={resume_result or 'ok'}"
         nudge_ws()
         return ActionResponse(success=ok, message=msg)
     stop_result = await _broadcast_to_remote_bots("/api/stop-trading", {})
     close_result = await _broadcast_to_remote_bots("/api/close-all", {})
+    _GLOBAL_STOP_FILE.unlink(missing_ok=True)
+    resume_result = await _broadcast_to_remote_bots("/api/resume-trading", {})
     nudge_ws()
-    return ActionResponse(success=True, message=f"stop: {stop_result}; close: {close_result}")
+    return ActionResponse(success=True, message=f"stop: {stop_result}; close: {close_result}; resume: {resume_result}")
 
 
 _GLOBAL_STOP_FILE = Path("data/STOP")
@@ -1063,8 +1182,9 @@ async def resume_trading(body: BotActionBody | None = None, _: str = Depends(ver
     bid = (body.bot_id if body else "") or ""
     _GLOBAL_STOP_FILE.unlink(missing_ok=True)
     logger.info("Global STOP file removed — hub will resume serving proposals")
+    # STOP file is global, so resume must be broadcast globally as well.
     if bid and bid != "all":
-        return await _forward_to_bot(bid, "/api/resume-trading", {})
+        logger.info("Ignoring targeted resume for {} because STOP scope is global", bid)
     result = await _broadcast_to_remote_bots("/api/resume-trading", {})
     nudge_ws()
     return ActionResponse(success=True, message=result or "broadcast sent")
@@ -1263,6 +1383,297 @@ async def toggle_bot_profile(profile_id: str, _: str = Depends(verify_token)) ->
     return ActionResponse(success=True, message=f"{action} {profile.display_name}")
 
 
+def _runtime_tuning_baseline_values() -> dict[str, Any]:
+    settings = get_settings()
+    baseline: dict[str, Any] = {}
+    for key, caster in RUNTIME_TUNABLE_CASTERS.items():
+        if not hasattr(settings, key):
+            continue
+        raw = getattr(settings, key)
+        if raw is None:
+            continue
+        try:
+            baseline[key] = caster(raw)
+        except Exception:
+            continue
+    return normalize_runtime_tuning(baseline)
+
+
+def _effective_runtime_tuning_for_bot(bot_id: str) -> tuple[dict[str, Any], str]:
+    normalized_bot = _normalize_bot_id(bot_id)
+    hub = _get_hub_db()
+    overrides, _ = hub.get_runtime_tuning(normalized_bot)
+    effective = _runtime_tuning_baseline_values()
+    for key, value in overrides.items():
+        if key not in RUNTIME_TUNABLE_CASTERS:
+            continue
+        caster = RUNTIME_TUNABLE_CASTERS[key]
+        try:
+            effective[key] = caster(value)
+        except Exception:
+            continue
+    normalized = normalize_runtime_tuning(effective)
+    return normalized, runtime_tuning_revision(normalized)
+
+
+@app.get("/api/runtime-tuning")
+async def get_runtime_tuning(_: str = Depends(verify_token)) -> dict[str, Any]:
+    values, revision = _effective_runtime_tuning_for_bot("")
+    return {"bot_id": "*", "revision": revision, "values": values}
+
+
+@app.get("/api/runtime-tuning-keys")
+async def get_runtime_tuning_keys(_: str = Depends(verify_token)) -> dict[str, Any]:
+    keys = sorted(RUNTIME_TUNABLE_CASTERS.keys())
+    type_map: dict[str, str] = {}
+    for key, caster in RUNTIME_TUNABLE_CASTERS.items():
+        if caster is int:
+            type_map[key] = "int"
+        elif caster is float:
+            type_map[key] = "float"
+        else:
+            type_map[key] = "string"
+    return {"keys": keys, "types": type_map}
+
+
+@app.get("/api/runtime-tuning/{bot_id}")
+async def get_runtime_tuning_for_bot(bot_id: str, _: str = Depends(verify_token)) -> dict[str, Any]:
+    normalized_bot = _normalize_bot_id(bot_id)
+    if not normalized_bot:
+        raise HTTPException(status_code=400, detail="invalid bot_id")
+    values, revision = _effective_runtime_tuning_for_bot(normalized_bot)
+    return {"bot_id": normalized_bot, "revision": revision, "values": values}
+
+
+@app.get("/api/runtime-tuning-overrides/{bot_id}")
+async def get_runtime_tuning_overrides_for_bot(bot_id: str, _: str = Depends(verify_token)) -> dict[str, Any]:
+    hub = _get_hub_db()
+    normalized_bot = _normalize_bot_id(bot_id)
+    if not normalized_bot:
+        raise HTTPException(status_code=400, detail="invalid bot_id")
+    values, revision = hub.get_runtime_tuning_overrides(normalized_bot)
+    return {"bot_id": normalized_bot, "revision": revision, "values": values}
+
+
+@app.post("/api/runtime-tuning", response_model=ActionResponse)
+async def upsert_runtime_tuning(body: RuntimeTuningUpsertBody, _: str = Depends(verify_token)) -> ActionResponse:
+    hub = _get_hub_db()
+    key = str(body.key or "").strip()
+    if not key:
+        return ActionResponse(success=False, message="Missing key")
+    target_bot = str(body.bot_id or "*").strip().lower() or "*"
+    if target_bot != "*":
+        target_bot = _normalize_bot_id(target_bot)
+        if not target_bot:
+            return ActionResponse(success=False, message="Invalid bot_id")
+    hub.set_runtime_tuning(key=key, value=body.value, bot_id=target_bot)
+    values, revision = _effective_runtime_tuning_for_bot(target_bot if target_bot != "*" else "")
+    nudge_ws()
+    return ActionResponse(
+        success=True,
+        message=f"Runtime tuning saved ({target_bot}) rev={revision} keys={len(values)}",
+    )
+
+
+def _resolve_swing_manual_cex_cap(requested: int | None, bot_id: str) -> int:
+    if requested is not None:
+        return max(1, int(requested))
+    hub = _get_hub_db()
+    values, _ = hub.get_runtime_tuning(_normalize_bot_id(bot_id))
+    tuned = values.get("max_concurrent_limit_orders_on_cex")
+    if tuned is None:
+        return 3
+    try:
+        return max(1, int(tuned))
+    except Exception:
+        return 3
+
+
+async def _fetch_manual_swing_pair_price(exchange: str, symbol: str) -> float | None:
+    exchange_id = str(exchange or "").strip().lower()
+    pair = _pair_symbol(symbol)
+    if exchange_id not in {"binance", "bybit"} or not pair:
+        return None
+    try:
+        import ccxt.async_support as ccxt
+    except ModuleNotFoundError:
+        return None
+
+    cls = getattr(ccxt, exchange_id, None)
+    if cls is None:
+        return None
+
+    params: dict[str, Any] = {"enableRateLimit": True}
+    if exchange_id == "bybit":
+        params["options"] = {"defaultType": "linear"}
+    ex = cls(params)
+    try:
+        settings = get_settings()
+        if bool(getattr(settings, "exchange_is_sandbox", False)):
+            with contextlib.suppress(Exception):
+                ex.set_sandbox_mode(True)
+        await ex.load_markets()
+        futures_symbol = f"{pair}:USDT"
+        resolved = futures_symbol if futures_symbol in ex.markets else pair
+        ticker = await ex.fetch_ticker(resolved)
+        candidates = (
+            ticker.get("last"),
+            ticker.get("close"),
+            ticker.get("mark"),
+            ticker.get("bid"),
+            ticker.get("ask"),
+        )
+        for candidate in candidates:
+            try:
+                price = float(candidate)
+            except Exception:
+                continue
+            if price > 0:
+                return price
+        return None
+    except Exception:
+        return None
+    finally:
+        with contextlib.suppress(Exception):
+            await ex.close()
+
+
+@app.post("/api/manual-swing/plans")
+async def create_manual_swing_plan(body: ManualSwingCreateBody, _: str = Depends(verify_token)) -> dict[str, Any]:
+    bot_id = _normalize_bot_id(body.bot_id) or "swing"
+    symbol = _pair_symbol(body.symbol)
+    exchange = str(body.exchange or "").strip().upper()
+    direction = str(body.direction or "").strip().lower()
+    if direction not in {"long", "short"}:
+        return {"status": "error", "detail": "direction must be long|short"}
+    if not exchange or not symbol:
+        return {"status": "error", "detail": "missing exchange or symbol"}
+    grid_count = int(body.grid_count or 0)
+    if grid_count < 2:
+        return {"status": "error", "detail": "grid_count must be >= 2"}
+    first_entry_price = float(body.first_entry_price or 0.0)
+    last_entry_price = float(body.last_entry_price or 0.0)
+    if first_entry_price <= 0 or last_entry_price <= 0:
+        return {"status": "error", "detail": "entry prices must be > 0"}
+    leverage = max(1, int(body.leverage or 1))
+    margin_amount = float(body.margin_amount or 0.0)
+    if margin_amount <= 0:
+        return {"status": "error", "detail": "margin_amount must be > 0"}
+
+    cex_cap = _resolve_swing_manual_cex_cap(body.max_concurrent_limit_orders_on_cex, bot_id=bot_id)
+    hub = _get_hub_db()
+    existing_plans = hub.list_active_swing_manual_plans(bot_id, exchange)
+    duplicate = next((p for p in existing_plans if str(p.get("symbol", "")).strip().upper() == symbol), None)
+    if duplicate:
+        stale_plan_id = str(duplicate.get("plan_id", "") or "").strip()
+        stale_plan = hub.get_swing_plan(bot_id, symbol, stale_plan_id) if stale_plan_id else None
+        stale_created_at = ""
+        if stale_plan and isinstance(stale_plan.get("entries"), list) and stale_plan["entries"]:
+            stale_created_at = str(stale_plan["entries"][0].get("created_at", "") or "").strip()
+        stale_age_seconds = 0.0
+        if stale_created_at:
+            with contextlib.suppress(Exception):
+                stale_age_seconds = max(
+                    0.0, (datetime.now(UTC) - datetime.fromisoformat(stale_created_at)).total_seconds()
+                )
+        # Auto-heal stale blockers only when plan is not fresh and hub has no open
+        # trade for this symbol anymore (typical after manual stop/close session).
+        if stale_plan_id and stale_age_seconds >= 30.0 and symbol not in hub.get_open_trade_symbols():
+            hub.clear_swing_entry_plan(bot_id, symbol, stale_plan_id)
+            existing_plans = hub.list_active_swing_manual_plans(bot_id, exchange)
+            duplicate = next((p for p in existing_plans if str(p.get("symbol", "")).strip().upper() == symbol), None)
+    if duplicate:
+        return {
+            "status": "error",
+            "detail": f"active manual swing plan already exists for {symbol}",
+            "plan_id": str(duplicate.get("plan_id", "") or ""),
+        }
+    plan = hub.create_manual_swing_plan(
+        bot_id=bot_id,
+        exchange=exchange,
+        symbol=symbol,
+        direction=direction,
+        first_entry_price=first_entry_price,
+        last_entry_price=last_entry_price,
+        grid_count=grid_count,
+        leverage=leverage,
+        margin_amount=margin_amount,
+        max_concurrent_limit_orders_on_cex=cex_cap,
+    )
+    plan_id = str(plan.get("plan_id", "") or "").strip()
+    if not plan_id:
+        hub.clear_swing_entry_plan(bot_id, symbol, plan_id)
+        return {"status": "error", "detail": "plan creation failed: missing plan_id"}
+    first_leg = await _forward_to_bot(
+        bot_id,
+        "/api/swing/manual-plan/create",
+        {"symbol": symbol, "plan_id": plan_id},
+    )
+    if not first_leg.success:
+        hub.clear_swing_entry_plan(bot_id, symbol, plan_id)
+        nudge_ws()
+        return {
+            "status": "error",
+            "detail": first_leg.message or "first leg creation failed",
+        }
+    nudge_ws()
+    return {"status": "ok", "plan": plan}
+
+
+@app.get("/api/manual-swing/pairs")
+async def get_manual_swing_pairs(exchange: str, _: str = Depends(verify_token)) -> dict[str, Any]:
+    target_exchange = str(exchange or "").strip().upper()
+    if not target_exchange:
+        return {"status": "error", "detail": "missing exchange", "pairs": []}
+    hub = _get_hub_db()
+    try:
+        exchange_symbols = hub.load_all_exchange_symbols()
+    except Exception:
+        exchange_symbols = {}
+    pairs = sorted({_pair_symbol(sym) for sym in exchange_symbols.get(target_exchange, set()) if _pair_symbol(sym)})
+    return {"status": "ok", "exchange": target_exchange, "pairs": pairs}
+
+
+@app.get("/api/manual-swing/pair-price")
+async def get_manual_swing_pair_price(exchange: str, symbol: str, _: str = Depends(verify_token)) -> dict[str, Any]:
+    target_exchange = str(exchange or "").strip().upper()
+    target_symbol = _pair_symbol(symbol)
+    if not target_exchange or not target_symbol:
+        return {"status": "error", "detail": "missing exchange or symbol"}
+    price = await _fetch_manual_swing_pair_price(target_exchange, target_symbol)
+    if price is None:
+        return {"status": "error", "detail": "price unavailable", "exchange": target_exchange, "symbol": target_symbol}
+    return {"status": "ok", "exchange": target_exchange, "symbol": target_symbol, "price": price}
+
+
+@app.get("/api/manual-swing/plans")
+async def get_manual_swing_plans(bot_id: str = "swing", _: str = Depends(verify_token)) -> dict[str, Any]:
+    hub = _get_hub_db()
+    plans = hub.list_swing_plans(_normalize_bot_id(bot_id) or "swing", mode="swing_manual")
+    return {"status": "ok", "plans": plans}
+
+
+@app.post("/api/manual-swing/plans/cancel", response_model=ActionResponse)
+async def cancel_manual_swing_plan(body: ManualSwingCancelBody, _: str = Depends(verify_token)) -> ActionResponse:
+    plan_id = str(body.plan_id or "").strip()
+    symbol = _pair_symbol(body.symbol)
+    bot_id = _normalize_bot_id(body.bot_id) or "swing"
+    if not plan_id or not symbol:
+        return ActionResponse(success=False, message="Missing plan_id or symbol")
+    hub = _get_hub_db()
+    changed = hub.set_swing_plan_state(bot_id=bot_id, symbol=symbol, plan_id=plan_id, plan_state="cancel_requested")
+    if changed <= 0:
+        return ActionResponse(success=False, message=f"Manual swing plan not found: {symbol} ({plan_id})")
+    resp = await _forward_to_bot(bot_id, "/api/swing/manual-plan/cancel", {"symbol": symbol, "plan_id": plan_id})
+    nudge_ws()
+    if resp.success:
+        return ActionResponse(success=True, message=f"Cancel requested for {symbol} ({plan_id})")
+    return ActionResponse(
+        success=False,
+        message=f"Plan marked cancel_requested but bot forward failed: {resp.message}",
+    )
+
+
 def _write_activation_file(bot_id: str) -> None:
     """Write an activation marker file so an idle bot can detect activation locally."""
     activate_dir = Path("data") / bot_id
@@ -1283,10 +1694,6 @@ def _get_db_conn() -> Any:
 
 
 def _db_backend_for_conn(conn: Any) -> str:
-    if conn is None:
-        return "postgres"
-    if getattr(conn, "is_local_fallback", False):
-        return "local"
     return "postgres"
 
 
@@ -1440,12 +1847,22 @@ def _maybe_record_exchange_equity_snapshot(data: dict[str, Any], hub: HubDB) -> 
     if (now_ts - last_ts) < interval:
         return
 
-    available = float(data.get("exchange_balance", 0.0) or 0.0)
+    try:
+        available = float(data.get("exchange_balance", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        available = 0.0
+    try:
+        wallet = float(data.get("exchange_wallet_balance", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        wallet = 0.0
+    try:
+        unrealized_anchor = float(data.get("exchange_unrealized_pnl", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        unrealized_anchor = 0.0
+    wallet_plus_unrealized = bool(data.get("exchange_wallet_requires_unrealized_addition", False))
     positions = data.get("positions")
     if not isinstance(positions, list):
         positions = []
-    margin_used = 0.0
-    unrealized = 0.0
     open_positions = 0
     for p in positions:
         if not isinstance(p, dict):
@@ -1454,14 +1871,10 @@ def _maybe_record_exchange_equity_snapshot(data: dict[str, Any], hub: HubDB) -> 
         if amount <= 0:
             continue
         open_positions += 1
-        lev = max(float(p.get("leverage", 1.0) or 1.0), 1.0)
-        notional = float(p.get("notional_value", 0.0) or 0.0)
-        if notional <= 0:
-            current = float(p.get("current_price", 0.0) or 0.0)
-            notional = abs(amount) * current
-        margin_used += notional / lev
-        unrealized += float(p.get("pnl_usd", p.get("pnl", 0.0)) or 0.0)
-    estimated_equity = max(0.0, available + margin_used + unrealized)
+    if wallet > 0:
+        estimated_equity = (wallet + unrealized_anchor) if wallet_plus_unrealized else wallet
+    else:
+        estimated_equity = max(0.0, available)
     source_bot = _normalize_bot_id(data.get("bot_id", ""))
     hub.insert_exchange_equity_snapshot(
         exchange=exchange,
@@ -1542,6 +1955,8 @@ def _build_merged_snapshot() -> dict[str, Any]:
     exchange_balances: dict[str, float] = {}
     exchange_available: dict[str, float] = {}
     exchange_wallet: dict[str, float] = {}
+    exchange_unrealized: dict[str, float] = {}
+    exchange_wallet_needs_unrealized_add: dict[str, bool] = {}
     exchange_report_ts: dict[str, float] = {}
     bot_running: dict[str, bool] = {}
     bot_exchange: dict[str, str] = {}
@@ -1574,6 +1989,8 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
         ex_bal_raw = rpt.get("exchange_balance", 0)
         ex_wallet_raw = rpt.get("exchange_wallet_balance", 0)
+        ex_unreal_raw = rpt.get("exchange_unrealized_pnl", 0)
+        ex_wallet_add_unrealized = bool(rpt.get("exchange_wallet_requires_unrealized_addition", False))
         ex_reported_at = float(rpt.get("_exchange_balance_reported_at", 0.0) or 0.0)
         try:
             ex_bal = float(ex_bal_raw or 0.0)
@@ -1583,7 +2000,11 @@ def _build_merged_snapshot() -> dict[str, Any]:
             ex_wallet = float(ex_wallet_raw or 0.0)
         except (TypeError, ValueError):
             ex_wallet = 0.0
-        if ex_name and ex_bal > 0:
+        try:
+            ex_unreal = float(ex_unreal_raw or 0.0)
+        except (TypeError, ValueError):
+            ex_unreal = 0.0
+        if ex_name and (ex_bal > 0 or ex_wallet > 0):
             prev_ts = exchange_report_ts.get(ex_name, -1.0)
             if ex_reported_at >= prev_ts:
                 exchange_report_ts[ex_name] = ex_reported_at
@@ -1592,6 +2013,8 @@ def _build_merged_snapshot() -> dict[str, Any]:
                 exchange_available[ex_name] = ex_bal
                 if ex_wallet > 0:
                     exchange_wallet[ex_name] = ex_wallet
+                exchange_unrealized[ex_name] = ex_unreal
+                exchange_wallet_needs_unrealized_add[ex_name] = ex_wallet_add_unrealized
 
         total_balance += float(s.get("balance", 0) or 0)
         total_available += float(s.get("available_margin", 0) or 0)
@@ -1713,6 +2136,21 @@ def _build_merged_snapshot() -> dict[str, Any]:
             if symbol not in ownership_by_symbol:
                 ownership_by_symbol[symbol] = owner_bot
 
+    recent_closed_owner_rows_fn = getattr(hub, "get_recent_closed_owner_rows", None)
+    if callable(recent_closed_owner_rows_fn):
+        rows = recent_closed_owner_rows_fn(24)
+        if not isinstance(rows, list):
+            rows = []
+        for row in rows:
+            owner_bot = _normalize_bot_id(row.get("bot_id", ""))
+            symbol = _pair_symbol(row.get("symbol", ""))
+            if not owner_bot or not symbol:
+                continue
+            if symbol not in ownership_by_symbol:
+                ownership_by_symbol[symbol] = owner_bot
+            if symbol not in original_owner_by_symbol:
+                original_owner_by_symbol[symbol] = owner_bot
+
     latest_foreign_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for obs in foreign_observations:
         if not isinstance(obs, dict):
@@ -1751,48 +2189,54 @@ def _build_merged_snapshot() -> dict[str, Any]:
 
     intel = _intel_snapshot()
 
-    # When raw exchange balances are available, treat them as account-level
-    # anchors and compute dashboard equity from available + used margin + uPnL.
-    # Include both managed and orphan positions so equity does not oscillate
-    # when a position temporarily moves between those groups.
+    # When raw exchange balances are available, treat exchange-reported account
+    # balance as canonical (wallet anchor preferred, free balance fallback).
+    # Do not synthesize equity from local margin/uPnL math.
     if exchange_available:
-        exchange_margin_used: dict[str, float] = {}
-        exchange_unrealized: dict[str, float] = {}
-        all_live_rows = list(all_positions) + list(all_orphans)
-        for p in all_live_rows:
-            ex = str(p.get("exchange_name", "") or "")
-            if not ex:
-                continue
-            lev = max(float(p.get("leverage", 1) or 1), 1.0)
-            notional = float(p.get("notional_value", 0) or 0)
-            if notional <= 0:
-                amount = abs(float(p.get("amount", 0) or 0))
-                current_price = float(p.get("current_price", 0) or 0)
-                notional = amount * current_price
-            exchange_margin_used[ex] = exchange_margin_used.get(ex, 0.0) + (notional / lev)
-            upnl = float(p.get("pnl_usd", p.get("pnl", 0)) or 0)
-            if upnl == 0 and "entry_price" in p and "current_price" in p and "amount" in p:
-                entry = float(p.get("entry_price", 0) or 0)
-                current = float(p.get("current_price", 0) or 0)
-                amount = abs(float(p.get("amount", 0) or 0))
-                side = str(p.get("side", "") or "").lower()
-                if entry > 0 and amount > 0:
-                    upnl = (entry - current) * amount if side in {"sell", "short"} else (current - entry) * amount
-            exchange_unrealized[ex] = exchange_unrealized.get(ex, 0.0) + upnl
-
-        exchange_equity: dict[str, float] = {}
+        exchange_account_balance: dict[str, float] = {}
         for ex in exchange_available:
             available = max(0.0, exchange_available.get(ex, 0.0))
-            used = max(0.0, exchange_margin_used.get(ex, 0.0))
-            upnl = exchange_unrealized.get(ex, 0.0)
-            # Prefer wallet anchor from exchange payload when available.
-            # Synthetic available+used+uPnL remains fallback for legacy reports.
+            # Prefer exchange account balance + exchange unrealized PnL, matching
+            # the CEX account view (Balance + Unrealized PNL).
+            # Fall back to exchange free balance only for legacy reports.
             wallet = float(exchange_wallet.get(ex, 0.0) or 0.0)
-            exchange_equity[ex] = wallet if wallet > 0 else max(0.0, available + used + upnl)
+            unrealized = float(exchange_unrealized.get(ex, 0.0) or 0.0)
+            wallet_plus_unrealized = bool(exchange_wallet_needs_unrealized_add.get(ex, False))
+            if wallet > 0:
+                exchange_account_balance[ex] = (wallet + unrealized) if wallet_plus_unrealized else wallet
+            else:
+                exchange_account_balance[ex] = available
 
-        real_balance = sum(exchange_equity.values())
+        real_balance = sum(exchange_account_balance.values())
         real_available = sum(max(0.0, v) for v in exchange_available.values())
-        exchange_balances = exchange_equity
+        exchange_balances = exchange_account_balance
+        day_start_iso = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        baselines = {"inception": {}, "day_start": {}}
+        get_baselines = getattr(hub, "get_exchange_equity_baselines", None)
+        if callable(get_baselines):
+            with contextlib.suppress(Exception):
+                maybe = get_baselines(day_start_iso)
+                if isinstance(maybe, dict):
+                    baselines = maybe
+        inception_map = baselines.get("inception", {}) if isinstance(baselines, dict) else {}
+        day_start_map = baselines.get("day_start", {}) if isinstance(baselines, dict) else {}
+        total_daily_pnl = 0.0
+        total_daily_pnl_pct = 0.0
+        total_growth_usd = 0.0
+        total_growth_pct = 0.0
+        baseline_day_sum = 0.0
+        baseline_inception_sum = 0.0
+        for ex, curr in exchange_account_balance.items():
+            day_base = float(day_start_map.get(ex, curr) or curr)
+            inception_base = float(inception_map.get(ex, curr) or curr)
+            total_daily_pnl += curr - day_base
+            total_growth_usd += curr - inception_base
+            baseline_day_sum += day_base
+            baseline_inception_sum += inception_base
+        if baseline_day_sum > 0:
+            total_daily_pnl_pct = (total_daily_pnl / baseline_day_sum) * 100.0
+        if baseline_inception_sum > 0:
+            total_growth_pct = (total_growth_usd / baseline_inception_sum) * 100.0
     else:
         real_balance = total_balance
         real_available = max(0.0, total_available)
@@ -1939,10 +2383,14 @@ async def receive_bot_report(request: Request, _: str = Depends(verify_token)) -
     report_bot_snapshot(data)
     hub = _get_hub_db()
     if bot_id:
-        with contextlib.suppress(Exception):
+        try:
             _backfill_open_trade_ownership_from_report(bot_id, data, hub)
-    with contextlib.suppress(Exception):
+        except Exception as e:
+            logger.warning("Failed to backfill open trade ownership from report for {}: {}", bot_id, e)
+    try:
         _maybe_record_exchange_equity_snapshot(data, hub)
+    except Exception as e:
+        logger.warning("Failed to record exchange equity snapshot from report: {}", e)
     confirmed = hub.drain_confirmed_keys(bot_id) if bot_id else []
     if bot_id:
         from config.bot_profiles import PROFILES_BY_ID, is_default_enabled
@@ -1957,6 +2405,12 @@ async def receive_bot_report(request: Request, _: str = Depends(verify_token)) -
         "confirmed_keys": confirmed,
         "enabled": enabled,
     }
+    if bot_id:
+        bot_runtime_tuning, bot_runtime_tuning_rev = _effective_runtime_tuning_for_bot(bot_id)
+        requested_rev = str(data.get("runtime_tuning_rev", "") or "").strip()
+        if bot_runtime_tuning_rev != requested_rev:
+            response["runtime_tuning_rev"] = bot_runtime_tuning_rev
+            response["runtime_tuning"] = bot_runtime_tuning
 
     bot_ready = data.get("ready", False)
     if _GLOBAL_STOP_FILE.exists():
@@ -2158,11 +2612,14 @@ async def receive_trade(request: Request, _: str = Depends(verify_token)) -> dic
     """
     data = await request.json()
     bot_id = _normalize_bot_id(data.get("bot_id", ""))
-    action = data.get("action", "")
+    action = str(data.get("action", "") or "").strip().lower()
     trade = data.get("trade", {})
     request_key = data.get("request_key", "")
-    if not bot_id or not trade:
+    allowed_actions = {"open", "close", "update", "cancel_reservation"}
+    if not bot_id or not isinstance(trade, dict):
         return {"status": "error", "detail": "missing bot_id or trade"}
+    if action not in allowed_actions:
+        return {"status": "error", "detail": "invalid action"}
     opened_at = str(trade.get("opened_at", "") or "").strip()
 
     hub = _get_hub_db()
@@ -2247,8 +2704,6 @@ async def receive_trade(request: Request, _: str = Depends(verify_token)) -> dic
                     trade.get("symbol", ""),
                 )
                 return {"status": "deferred", "action": action, "request_key": request_key}
-        else:
-            hub.insert_trade(bot_id, trade, request_key=request_key)
     except Exception as e:
         msg = str(e)
         if msg.startswith("open_owner_conflict:"):
@@ -2279,9 +2734,15 @@ async def get_bot_open_trades(bot_id: str, _: str = Depends(verify_token)) -> li
 
 @app.get("/internal/trades/{bot_id}/recovery-owners")
 async def get_bot_recovery_owner_symbols(bot_id: str, _: str = Depends(verify_token)) -> list[str]:
-    """Return recent recovery-owner symbols for bot startup orphan re-attachment."""
+    """Return owner-hint symbols for bot startup orphan re-attachment."""
     hub = _get_hub_db()
-    return hub.get_recent_recovery_owner_symbols(_normalize_bot_id(bot_id), lookback_hours=24)
+    normalized_bot = _normalize_bot_id(bot_id)
+    recovery = set(hub.get_recent_recovery_owner_symbols(normalized_bot, lookback_hours=24))
+    recent_closed_fn = getattr(hub, "get_recent_closed_owner_symbols", None)
+    recent_closed: set[str] = set()
+    if callable(recent_closed_fn):
+        recent_closed = set(recent_closed_fn(normalized_bot, lookback_hours=24))
+    return sorted(recovery | recent_closed)
 
 
 @app.get("/internal/trades/{bot_id}/stats")
@@ -2301,6 +2762,10 @@ async def sync_swing_entry_plan(request: Request, _: str = Depends(verify_token)
     entries = data.get("entries", [])
     if not bot_id or not symbol or not opened_at or not isinstance(entries, list):
         return {"status": "error", "detail": "missing bot_id/symbol/opened_at/entries"}
+    if any(not isinstance(entry, dict) for entry in entries):
+        return {"status": "error", "detail": "entries must be objects"}
+    if any(not str(entry.get("parent_plan_id", "") or "").strip() for entry in entries):
+        return {"status": "error", "detail": "missing parent_plan_id"}
     hub = _get_hub_db()
     hub.replace_swing_entry_plan(bot_id, symbol, opened_at, entries)
     return {"status": "ok", "count": len(entries)}
@@ -2317,6 +2782,35 @@ async def get_swing_entry_plan(
     hub = _get_hub_db()
     entries = hub.get_swing_entry_plan(_normalize_bot_id(bot_id), _pair_symbol(symbol), str(opened_at or "").strip())
     return {"status": "ok", "entries": entries}
+
+
+@app.get("/internal/manual-swing/plans/{bot_id}")
+async def get_internal_manual_swing_plans(
+    bot_id: str,
+    exchange: str = "",
+    _: str = Depends(verify_token),
+) -> dict[str, Any]:
+    hub = _get_hub_db()
+    target_bot = _normalize_bot_id(bot_id) or "swing"
+    target_exchange = str(exchange or "").strip().upper()
+    if not target_exchange:
+        return {"status": "ok", "plans": []}
+    plans = hub.list_active_swing_manual_plans(target_bot, target_exchange)
+    return {"status": "ok", "plans": plans}
+
+
+@app.post("/internal/manual-swing/plan-state")
+async def set_internal_manual_swing_plan_state(request: Request, _: str = Depends(verify_token)) -> dict[str, Any]:
+    data = await request.json()
+    bot_id = _normalize_bot_id(data.get("bot_id", ""))
+    symbol = _pair_symbol(data.get("symbol", ""))
+    plan_id = str(data.get("plan_id", "") or "").strip()
+    plan_state = str(data.get("plan_state", "") or "").strip().lower()
+    if not bot_id or not symbol or not plan_id or not plan_state:
+        return {"status": "error", "detail": "missing bot_id/symbol/plan_id/plan_state"}
+    hub = _get_hub_db()
+    updated = hub.set_swing_plan_state(bot_id=bot_id, symbol=symbol, plan_id=plan_id, plan_state=plan_state)
+    return {"status": "ok", "updated": updated}
 
 
 @app.post("/internal/recovery-close")

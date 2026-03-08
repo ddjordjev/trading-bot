@@ -1,0 +1,23 @@
+---
+description: Execute commit commands directly with zero extra git exploration
+alwaysApply: true
+---
+
+# Commit Command Direct Execution
+
+When the user intent is explicitly to commit/push/deploy (for example: `commit`, `push`, `commit deploy`, `csp`, `cp`), execute the requested flow directly.
+
+## Hard rules
+
+1. Do not run exploratory git commands (`git status`, `git diff`, `git log`, `git branch`) before or during the commit command flow.
+2. Do only the git/deploy steps needed for the requested command.
+3. If the user says `stop`, halt immediately and do not run any further tool calls.
+4. Do not add side investigations unless the user explicitly asks for investigation.
+
+## Example
+
+- User says `commit deploy`:
+  - run required format/check step
+  - `git add -A && git commit ...`
+  - run canonical deploy entrypoint
+  - report completion briefly

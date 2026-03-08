@@ -60,7 +60,8 @@ class PostgresHubDB(HubDB):
             "openclaw_suggestions",
             "exchange_equity_snapshots",
             "analytics_snapshots",
-            "swing_entry_plans",
+            "swing_plans",
+            "swing_plan_entries",
         ]
         for table in tables_with_serial_id:
             try:

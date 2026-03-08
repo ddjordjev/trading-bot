@@ -55,6 +55,18 @@ make enable-all-local-bots
 make up-prod
 ```
 
+Do not use raw `docker compose up/down/build` for deploy flows. Use the Makefile
+or `scripts/deploy-digitalocean.sh` so runtime env pointers are wired correctly.
+See `docs/DEPLOY_INSTRUCTIONS.md` for the strict runbook.
+
+For local day-to-day operation you can also use:
+
+```bash
+./scripts/run_session.sh start
+./scripts/run_session.sh rebuild
+./scripts/run_session.sh status
+```
+
 Notes:
 - Local dashboard should be on `http://localhost:9035`.
 - `http://localhost:9045` is often used by an SSH tunnel to a remote host.

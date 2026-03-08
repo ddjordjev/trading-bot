@@ -24,6 +24,7 @@ from db.errors import DBIntegrityError
 from db.models import TradeRecord
 from db.store import TradeDB
 from shared.models import AnalyticsSnapshot
+from shared.runtime_tuning import normalize_runtime_tuning, runtime_tuning_revision
 
 _HUB_DB_DEFAULT = Path("data/hub.db")
 
@@ -41,6 +42,9 @@ class HubDB(TradeDB):
     def __init__(self, path: Path = _HUB_DB_DEFAULT):
         super().__init__(path=path)
         self._ack_buffer: dict[str, set[str]] = {}
+        self._runtime_tuning_rows: dict[tuple[str, str], Any] = {}
+        self._runtime_tuning_effective_cache: dict[str, tuple[dict[str, Any], str]] = {}
+        self._runtime_tuning_loaded: bool = False
 
     def connect(self) -> None:
         last_exc: Exception | None = None
@@ -88,6 +92,14 @@ class HubDB(TradeDB):
                 exchange TEXT PRIMARY KEY,
                 symbols TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS runtime_tuning (
+                bot_id TEXT NOT NULL CHECK(bot_id <> ''),
+                key TEXT NOT NULL CHECK(key <> ''),
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (bot_id, key)
             );
 
             CREATE TABLE IF NOT EXISTS cex_binance_snapshots (
@@ -217,11 +229,46 @@ class HubDB(TradeDB):
             CREATE INDEX IF NOT EXISTS idx_analytics_snapshots_updated_at
                 ON analytics_snapshots(updated_at);
 
-            CREATE TABLE IF NOT EXISTS swing_entry_plans (
+        """)
+        self._ensure_bot_id_column()
+        self._ensure_request_key_column()
+        self._ensure_recovery_close_column()
+        self._ensure_swing_plan_columns()
+        self._ensure_runtime_tuning_table_strict()
+        self._cleanup_rows_missing_opened_at()
+        self._cleanup_open_owner_conflicts()
+        self._ensure_single_open_owner_index()
+
+    def _ensure_swing_plan_columns(self) -> None:
+        assert self._conn
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS swing_plans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plan_id TEXT NOT NULL UNIQUE CHECK(plan_id <> ''),
                 bot_id TEXT NOT NULL,
                 symbol TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'swing_auto',
+                exchange TEXT NOT NULL DEFAULT '',
+                direction TEXT NOT NULL DEFAULT '',
+                first_entry_price REAL NOT NULL DEFAULT 0,
+                last_entry_price REAL NOT NULL DEFAULT 0,
+                grid_count INTEGER NOT NULL DEFAULT 0,
+                leverage INTEGER NOT NULL DEFAULT 1,
+                margin_amount REAL NOT NULL DEFAULT 0,
+                max_concurrent_limit_orders_on_cex INTEGER NOT NULL DEFAULT 3,
+                plan_state TEXT NOT NULL DEFAULT 'active',
                 opened_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_swing_plans_lookup
+                ON swing_plans(bot_id, symbol, plan_id);
+            CREATE INDEX IF NOT EXISTS idx_swing_plans_mode_state
+                ON swing_plans(bot_id, mode, exchange, plan_state);
+
+            CREATE TABLE IF NOT EXISTS swing_plan_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plan_id TEXT NOT NULL CHECK(plan_id <> ''),
                 entry_idx INTEGER NOT NULL DEFAULT 0,
                 side TEXT NOT NULL DEFAULT '',
                 price REAL NOT NULL DEFAULT 0,
@@ -231,19 +278,59 @@ class HubDB(TradeDB):
                 order_id TEXT NOT NULL DEFAULT '',
                 strategy TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                UNIQUE(plan_id, entry_idx)
             );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_swing_entry_plan_unique
-                ON swing_entry_plans(bot_id, symbol, opened_at, entry_idx);
-            CREATE INDEX IF NOT EXISTS idx_swing_entry_plan_lookup
-                ON swing_entry_plans(bot_id, symbol, opened_at);
+            CREATE INDEX IF NOT EXISTS idx_swing_plan_entries_plan
+                ON swing_plan_entries(plan_id, entry_idx);
+
+            DROP TABLE IF EXISTS swing_entry_plans;
         """)
-        self._ensure_bot_id_column()
-        self._ensure_request_key_column()
-        self._ensure_recovery_close_column()
-        self._cleanup_rows_missing_opened_at()
-        self._cleanup_open_owner_conflicts()
-        self._ensure_single_open_owner_index()
+        self._conn.commit()
+
+    def _ensure_runtime_tuning_table_strict(self) -> None:
+        """Enforce non-null/no-default key columns for runtime_tuning."""
+        assert self._conn
+        info_rows = self._conn.execute("PRAGMA table_info(runtime_tuning)").fetchall()
+        if not info_rows:
+            return
+        by_name = {str(r[1]): r for r in info_rows}
+        bot_col = by_name.get("bot_id")
+        key_col = by_name.get("key")
+        val_col = by_name.get("value_json")
+        if bot_col is None or key_col is None or val_col is None:
+            return
+        needs_rebuild = False
+        for col in (bot_col, key_col, val_col):
+            if int(col[3] or 0) == 0:
+                needs_rebuild = True
+                break
+        if bot_col[4] is not None or val_col[4] is not None:
+            needs_rebuild = True
+        if not needs_rebuild:
+            return
+        self._conn.executescript("""
+            BEGIN;
+            DROP TABLE IF EXISTS runtime_tuning_new;
+            CREATE TABLE runtime_tuning_new (
+                bot_id TEXT NOT NULL CHECK(bot_id <> ''),
+                key TEXT NOT NULL CHECK(key <> ''),
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (bot_id, key)
+            );
+            INSERT INTO runtime_tuning_new (bot_id, key, value_json, updated_at)
+            SELECT
+                COALESCE(NULLIF(bot_id, ''), '*') AS bot_id,
+                key,
+                COALESCE(value_json, 'null') AS value_json,
+                updated_at
+            FROM runtime_tuning
+            WHERE COALESCE(key, '') <> '';
+            DROP TABLE runtime_tuning;
+            ALTER TABLE runtime_tuning_new RENAME TO runtime_tuning;
+            COMMIT;
+        """)
 
     def _ensure_bot_id_column(self) -> None:
         assert self._conn
@@ -258,10 +345,10 @@ class HubDB(TradeDB):
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(trades)").fetchall()}
         if "request_key" not in cols:
             self._conn.execute("ALTER TABLE trades ADD COLUMN request_key TEXT DEFAULT ''")
-            self._conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_hub_reqkey ON trades(request_key) WHERE request_key != ''"
-            )
-            self._conn.commit()
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_hub_reqkey ON trades(request_key) WHERE request_key != ''"
+        )
+        self._conn.commit()
 
     def _ensure_recovery_close_column(self) -> None:
         assert self._conn
@@ -534,13 +621,6 @@ class HubDB(TradeDB):
                 if existing:
                     self._mark_confirmed(bot_id, request_key)
                     return int(existing["id"])
-                logger.warning(
-                    "insert_trade dedup race unresolved for request_key={} (bot_id={}) — accepting as idempotent",
-                    request_key,
-                    bot_id,
-                )
-                self._mark_confirmed(bot_id, request_key)
-                return 0
             raise
         row_id = cursor.lastrowid or 0
         if request_key:
@@ -725,16 +805,14 @@ class HubDB(TradeDB):
                 if existing:
                     self._mark_confirmed(bot_id, request_key)
                     return True
-                logger.warning(
-                    "update_trade_close dedup race unresolved for request_key={} (bot_id={}, opened_at={}) — accepting as idempotent",
-                    request_key,
-                    bot_id,
-                    opened_at,
-                )
-                self._mark_confirmed(bot_id, request_key)
-                return True
             raise
         updated = cursor.rowcount > 0
+        if updated:
+            self._clear_swing_plan_after_trade_close(
+                bot_id=bot_id,
+                opened_at=opened_at,
+                symbol_hint=str(data.get("symbol", "") or ""),
+            )
         if updated and request_key:
             self._mark_confirmed(bot_id, request_key)
         return bool(updated)
@@ -794,14 +872,6 @@ class HubDB(TradeDB):
                 if existing:
                     self._mark_confirmed(bot_id, request_key)
                     return True
-                logger.warning(
-                    "update_trade_runtime dedup race unresolved for request_key={} (bot_id={}, opened_at={}) — accepting as idempotent",
-                    request_key,
-                    bot_id,
-                    opened_at,
-                )
-                self._mark_confirmed(bot_id, request_key)
-                return True
             raise
         updated = cursor.rowcount > 0
         if updated and request_key:
@@ -929,7 +999,34 @@ class HubDB(TradeDB):
             ),
         )
         self._conn.commit()
-        return bool(cursor.rowcount > 0)
+        updated = bool(cursor.rowcount > 0)
+        if updated:
+            self._clear_swing_plan_after_trade_close(bot_id=bot_id, opened_at=opened_at, symbol_hint="")
+        return updated
+
+    def _clear_swing_plan_after_trade_close(self, bot_id: str, opened_at: str, symbol_hint: str = "") -> None:
+        """Delete runtime swing plan rows once the owning trade is closed."""
+        assert self._conn
+        opened = str(opened_at or "").strip()
+        bid = str(bot_id or "").strip().lower()
+        if not bid or not opened:
+            return
+        symbol = str(symbol_hint or "").strip().upper()
+        if not symbol:
+            row = self._conn.execute(
+                """
+                SELECT symbol
+                FROM trades
+                WHERE bot_id=? AND opened_at=?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (bid, opened),
+            ).fetchone()
+            symbol = str(row["symbol"] or "").strip().upper() if row else ""
+        if not symbol:
+            return
+        self.clear_swing_entry_plan(bid, symbol, opened)
 
     def insert_exchange_equity_snapshot(
         self,
@@ -962,6 +1059,54 @@ class HubDB(TradeDB):
         )
         self._conn.commit()
 
+    def get_exchange_equity_baselines(self, day_start_iso: str) -> dict[str, dict[str, float]]:
+        """Return per-exchange inception and day-start equity baselines.
+
+        Day-start baseline selection per exchange:
+        - Prefer latest snapshot at or before day_start_iso.
+        - Otherwise use first snapshot after day_start_iso.
+        - Otherwise fall back to inception snapshot.
+        """
+        assert self._conn
+        rows = self._conn.execute(
+            """
+            SELECT exchange, estimated_equity_usdt, created_at
+            FROM exchange_equity_snapshots
+            WHERE exchange != ''
+            ORDER BY exchange ASC, created_at ASC, id ASC
+            """
+        ).fetchall()
+
+        inception: dict[str, float] = {}
+        day_start: dict[str, float] = {}
+        before_cutoff: dict[str, float] = {}
+        after_cutoff_first: dict[str, float] = {}
+
+        cutoff = str(day_start_iso or "")
+        for r in rows:
+            ex = str(r["exchange"] or "").strip().upper()
+            if not ex:
+                continue
+            eq = float(r["estimated_equity_usdt"] or 0.0)
+            ts = str(r["created_at"] or "")
+            if ex not in inception:
+                inception[ex] = eq
+            if cutoff and ts <= cutoff:
+                before_cutoff[ex] = eq
+            elif ex not in after_cutoff_first:
+                after_cutoff_first[ex] = eq
+
+        exchanges = set(inception.keys()) | set(before_cutoff.keys()) | set(after_cutoff_first.keys())
+        for ex in exchanges:
+            if ex in before_cutoff:
+                day_start[ex] = before_cutoff[ex]
+            elif ex in after_cutoff_first:
+                day_start[ex] = after_cutoff_first[ex]
+            else:
+                day_start[ex] = inception.get(ex, 0.0)
+
+        return {"inception": inception, "day_start": day_start}
+
     # ---- Bot-centric queries ----
 
     def get_open_trade_symbols(self) -> set[str]:
@@ -979,7 +1124,7 @@ class HubDB(TradeDB):
         return [{"id": int(r["id"]), "bot_id": str(r["bot_id"] or ""), "symbol": str(r["symbol"] or "")} for r in rows]
 
     def get_original_trade_owner_rows(self) -> list[dict[str, Any]]:
-        """Return immutable original owner per symbol (first open row ever)."""
+        """Return immutable original owner per symbol (first trade row ever)."""
         assert self._conn
         rows = self._conn.execute(
             """
@@ -988,11 +1133,42 @@ class HubDB(TradeDB):
                 SELECT id, bot_id, symbol,
                        ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY id ASC) AS rn
                 FROM trades
-                WHERE action='open' AND symbol!='' AND bot_id!=''
+                WHERE symbol!='' AND bot_id!=''
             ) first_owner
             WHERE rn=1
             ORDER BY id ASC
             """
+        ).fetchall()
+        return [{"id": int(r["id"]), "bot_id": str(r["bot_id"] or ""), "symbol": str(r["symbol"] or "")} for r in rows]
+
+    def get_recent_closed_owner_rows(self, lookback_hours: int = 24) -> list[dict[str, Any]]:
+        """Return latest close-owner hints for symbols closed recently.
+
+        Used to recover ownership when a close was marked locally but the exchange
+        position is still live (or reappears). Excludes synthetic/non-executed
+        close reasons.
+        """
+        assert self._conn
+        cutoff = (datetime.now(UTC) - timedelta(hours=max(1, int(lookback_hours)))).isoformat()
+        rows = self._conn.execute(
+            """
+            SELECT id, bot_id, symbol
+            FROM (
+                SELECT id, bot_id, symbol,
+                       ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY closed_at DESC, id DESC) AS rn
+                FROM trades
+                WHERE action='close'
+                  AND closed_at != ''
+                  AND closed_at >= ?
+                  AND symbol != ''
+                  AND bot_id != ''
+                  AND COALESCE(close_source, '') NOT IN ('reservation_cancel', 'recovery')
+                  AND COALESCE(close_reason, '') NOT IN ('risk_or_gate', 'open_exception', 'failed_fill:pending')
+            ) latest
+            WHERE rn = 1
+            ORDER BY id DESC
+            """,
+            (cutoff,),
         ).fetchall()
         return [{"id": int(r["id"]), "bot_id": str(r["bot_id"] or ""), "symbol": str(r["symbol"] or "")} for r in rows]
 
@@ -1038,6 +1214,35 @@ class HubDB(TradeDB):
             ORDER BY symbol
             """,
             (cutoff, "missing_on_exchange%", bid),
+        ).fetchall()
+        return [str(r["symbol"] or "") for r in rows if str(r["symbol"] or "").strip()]
+
+    def get_recent_closed_owner_symbols(self, bot_id: str, lookback_hours: int = 24) -> list[str]:
+        """Return symbols whose latest close-owner hint maps to this bot."""
+        assert self._conn
+        bid = str(bot_id or "").strip().lower()
+        if not bid:
+            return []
+        cutoff = (datetime.now(UTC) - timedelta(hours=max(1, int(lookback_hours)))).isoformat()
+        rows = self._conn.execute(
+            """
+            SELECT symbol
+            FROM (
+                SELECT symbol, bot_id,
+                       ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY closed_at DESC, id DESC) AS rn
+                FROM trades
+                WHERE action='close'
+                  AND closed_at != ''
+                  AND closed_at >= ?
+                  AND symbol != ''
+                  AND bot_id != ''
+                  AND COALESCE(close_source, '') NOT IN ('reservation_cancel', 'recovery')
+                  AND COALESCE(close_reason, '') NOT IN ('risk_or_gate', 'open_exception', 'failed_fill:pending')
+            ) latest
+            WHERE rn = 1 AND bot_id = ?
+            ORDER BY symbol
+            """,
+            (cutoff, bid),
         ).fetchall()
         return [str(r["symbol"] or "") for r in rows if str(r["symbol"] or "").strip()]
 
@@ -1144,22 +1349,87 @@ class HubDB(TradeDB):
         if not bid or not sym or not opened:
             return
         now_iso = datetime.now(UTC).isoformat()
-        self._conn.execute(
-            "DELETE FROM swing_entry_plans WHERE bot_id=? AND symbol=? AND opened_at=?",
-            (bid, sym, opened),
+        if not entries:
+            self.clear_swing_entry_plan(bid, sym, opened)
+            return
+        first = entries[0]
+        plan_id = str(first.get("parent_plan_id", "") or "").strip()
+        if not plan_id:
+            raise DBIntegrityError("missing_parent_plan_id:swing_plan")
+        mode = str(first.get("mode", "swing_auto") or "swing_auto").strip().lower() or "swing_auto"
+        exchange = str(first.get("exchange", "") or "").strip().upper()
+        direction = "short" if str(first.get("side", "") or "").strip().lower() in {"short", "sell"} else "long"
+        first_entry_price = float(first.get("first_entry_price", 0.0) or 0.0)
+        last_entry_price = float(first.get("last_entry_price", 0.0) or 0.0)
+        grid_count = int(first.get("grid_count", 0) or 0)
+        leverage = int(first.get("leverage", 1) or 1)
+        margin_amount = float(first.get("margin_amount", 0.0) or 0.0)
+        plan_state = str(first.get("plan_state", "active") or "active").strip().lower() or "active"
+        cex_cap = int(first.get("max_concurrent_limit_orders_on_cex", 3) or 3)
+        existing = self._conn.execute(
+            "SELECT created_at FROM swing_plans WHERE plan_id=?",
+            (plan_id,),
+        ).fetchone()
+        created_at = (
+            str(existing["created_at"] or now_iso) if existing else str(first.get("created_at", now_iso) or now_iso)
         )
+        self._conn.execute(
+            """
+            INSERT INTO swing_plans (
+                plan_id, bot_id, symbol, mode, exchange, direction,
+                first_entry_price, last_entry_price, grid_count, leverage,
+                margin_amount, max_concurrent_limit_orders_on_cex, plan_state,
+                opened_at, updated_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(plan_id) DO UPDATE SET
+                bot_id=excluded.bot_id,
+                symbol=excluded.symbol,
+                mode=excluded.mode,
+                exchange=excluded.exchange,
+                direction=excluded.direction,
+                first_entry_price=excluded.first_entry_price,
+                last_entry_price=excluded.last_entry_price,
+                grid_count=excluded.grid_count,
+                leverage=excluded.leverage,
+                margin_amount=excluded.margin_amount,
+                max_concurrent_limit_orders_on_cex=excluded.max_concurrent_limit_orders_on_cex,
+                plan_state=excluded.plan_state,
+                opened_at=excluded.opened_at,
+                updated_at=excluded.updated_at
+            """,
+            (
+                plan_id,
+                bid,
+                sym,
+                mode,
+                exchange,
+                direction,
+                first_entry_price,
+                last_entry_price,
+                grid_count,
+                leverage,
+                margin_amount,
+                cex_cap,
+                plan_state,
+                opened,
+                now_iso,
+                created_at,
+            ),
+        )
+        self._conn.execute("DELETE FROM swing_plan_entries WHERE plan_id=?", (plan_id,))
         for item in entries:
+            parent_plan_id = str(item.get("parent_plan_id", "") or "").strip()
+            if not parent_plan_id:
+                raise DBIntegrityError("missing_parent_plan_id:swing_plan")
             self._conn.execute(
                 """
-                INSERT INTO swing_entry_plans (
-                    bot_id, symbol, opened_at, entry_idx, side, price, amount, leverage,
+                INSERT INTO swing_plan_entries (
+                    plan_id, entry_idx, side, price, amount, leverage,
                     status, order_id, strategy, updated_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    bid,
-                    sym,
-                    opened,
+                    plan_id,
                     int(item.get("entry_idx", 0) or 0),
                     str(item.get("side", "") or ""),
                     float(item.get("price", 0.0) or 0.0),
@@ -1179,10 +1449,16 @@ class HubDB(TradeDB):
         assert self._conn
         rows = self._conn.execute(
             """
-            SELECT entry_idx, side, price, amount, leverage, status, order_id, strategy, updated_at, created_at
-            FROM swing_entry_plans
-            WHERE bot_id=? AND symbol=? AND opened_at=?
-            ORDER BY entry_idx ASC
+            SELECT
+                p.plan_id AS parent_plan_id,
+                e.entry_idx, e.side, e.price, e.amount, e.leverage, e.status, e.order_id, e.strategy,
+                p.mode, p.exchange, p.first_entry_price, p.last_entry_price, p.grid_count,
+                p.margin_amount, p.plan_state, p.max_concurrent_limit_orders_on_cex,
+                e.updated_at, e.created_at
+            FROM swing_plans p
+            JOIN swing_plan_entries e ON e.plan_id = p.plan_id
+            WHERE p.bot_id=? AND p.symbol=? AND p.opened_at=?
+            ORDER BY e.entry_idx ASC
             """,
             (str(bot_id or "").strip().lower(), str(symbol or "").strip().upper(), str(opened_at or "").strip()),
         ).fetchall()
@@ -1191,11 +1467,209 @@ class HubDB(TradeDB):
     def clear_swing_entry_plan(self, bot_id: str, symbol: str, opened_at: str) -> None:
         """Delete persisted ladder entries for one open trade."""
         assert self._conn
+        bid = str(bot_id or "").strip().lower()
+        sym = str(symbol or "").strip().upper()
+        opened = str(opened_at or "").strip()
+        plan_rows = self._conn.execute(
+            "SELECT plan_id FROM swing_plans WHERE bot_id=? AND symbol=? AND opened_at=?",
+            (bid, sym, opened),
+        ).fetchall()
+        plan_ids = [str(r["plan_id"] or "").strip() for r in plan_rows if str(r["plan_id"] or "").strip()]
+        for pid in plan_ids:
+            self._conn.execute("DELETE FROM swing_plan_entries WHERE plan_id=?", (pid,))
         self._conn.execute(
-            "DELETE FROM swing_entry_plans WHERE bot_id=? AND symbol=? AND opened_at=?",
-            (str(bot_id or "").strip().lower(), str(symbol or "").strip().upper(), str(opened_at or "").strip()),
+            "DELETE FROM swing_plans WHERE bot_id=? AND symbol=? AND opened_at=?",
+            (bid, sym, opened),
         )
         self._conn.commit()
+
+    def create_manual_swing_plan(
+        self,
+        bot_id: str,
+        exchange: str,
+        symbol: str,
+        direction: str,
+        first_entry_price: float,
+        last_entry_price: float,
+        grid_count: int,
+        leverage: int,
+        margin_amount: float,
+        max_concurrent_limit_orders_on_cex: int,
+    ) -> dict[str, Any]:
+        """Create one manual swing plan with all grid legs persisted upfront."""
+        assert self._conn
+        bid = str(bot_id or "").strip().lower() or "swing"
+        ex = str(exchange or "").strip().upper()
+        sym = str(symbol or "").strip().upper()
+        side = "short" if str(direction or "").strip().lower() in {"short", "sell"} else "long"
+        first_px = float(first_entry_price or 0.0)
+        last_px = float(last_entry_price or 0.0)
+        legs = max(1, int(grid_count or 1))
+        lev = max(1, int(leverage or 1))
+        margin = max(0.0, float(margin_amount or 0.0))
+        cex_cap = max(1, int(max_concurrent_limit_orders_on_cex or 3))
+        plan_id = datetime.now(UTC).isoformat()
+        created_at = datetime.now(UTC).isoformat()
+        step = 0.0 if legs <= 1 else (last_px - first_px) / float(legs - 1)
+        per_leg_margin = margin / float(legs) if legs > 0 else 0.0
+
+        rows: list[dict[str, Any]] = []
+        for idx in range(1, legs + 1):
+            price = float(first_px + step * float(idx - 1))
+            amount = 0.0
+            if price > 0 and per_leg_margin > 0:
+                amount = (per_leg_margin * float(lev)) / price
+            rows.append(
+                {
+                    "parent_plan_id": plan_id,
+                    "entry_idx": idx,
+                    "side": side,
+                    "price": price,
+                    "amount": amount,
+                    "leverage": lev,
+                    "status": "planned",
+                    "order_id": "",
+                    "strategy": "swing_manual",
+                    "mode": "swing_manual",
+                    "exchange": ex,
+                    "first_entry_price": first_px,
+                    "last_entry_price": last_px,
+                    "grid_count": legs,
+                    "margin_amount": margin,
+                    "plan_state": "active",
+                    "max_concurrent_limit_orders_on_cex": cex_cap,
+                    "created_at": created_at,
+                }
+            )
+        self.replace_swing_entry_plan(bid, sym, plan_id, rows)
+        return {
+            "plan_id": plan_id,
+            "bot_id": bid,
+            "mode": "swing_manual",
+            "exchange": ex,
+            "symbol": sym,
+            "direction": side,
+            "first_entry_price": first_px,
+            "last_entry_price": last_px,
+            "grid_count": legs,
+            "leverage": lev,
+            "margin_amount": margin,
+            "max_concurrent_limit_orders_on_cex": cex_cap,
+            "plan_state": "active",
+            "entries": rows,
+        }
+
+    def list_swing_plans(self, bot_id: str, mode: str) -> list[dict[str, Any]]:
+        assert self._conn
+        rows = self._conn.execute(
+            """
+            SELECT
+                p.plan_id,
+                p.bot_id,
+                p.mode,
+                p.exchange,
+                p.symbol,
+                p.direction,
+                p.first_entry_price,
+                p.last_entry_price,
+                p.grid_count,
+                p.leverage,
+                p.margin_amount,
+                p.max_concurrent_limit_orders_on_cex,
+                p.plan_state,
+                p.created_at,
+                SUM(CASE WHEN e.status='planned' THEN 1 ELSE 0 END) AS planned_legs,
+                SUM(CASE WHEN e.status='placed_on_cex' THEN 1 ELSE 0 END) AS placed_legs,
+                SUM(CASE WHEN e.status='filled' THEN 1 ELSE 0 END) AS filled_legs,
+                SUM(CASE WHEN e.status='cancelled' THEN 1 ELSE 0 END) AS cancelled_legs,
+                SUM(CASE WHEN e.status='failed' THEN 1 ELSE 0 END) AS failed_legs
+            FROM swing_plans p
+            LEFT JOIN swing_plan_entries e ON e.plan_id=p.plan_id
+            WHERE p.bot_id=? AND p.mode=?
+            GROUP BY
+                p.plan_id, p.bot_id, p.mode, p.exchange, p.symbol, p.direction, p.first_entry_price,
+                p.last_entry_price, p.grid_count, p.leverage, p.margin_amount,
+                p.max_concurrent_limit_orders_on_cex, p.plan_state, p.created_at
+            ORDER BY p.created_at DESC
+            """,
+            (str(bot_id or "").strip().lower(), str(mode or "").strip().lower()),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_swing_plan(self, bot_id: str, symbol: str, plan_id: str) -> dict[str, Any] | None:
+        assert self._conn
+        entries = self.get_swing_entry_plan(bot_id, symbol, plan_id)
+        if not entries:
+            return None
+        hdr = self._conn.execute(
+            """
+            SELECT
+                plan_id, bot_id, mode, exchange, symbol, direction,
+                first_entry_price, last_entry_price, grid_count, leverage,
+                margin_amount, max_concurrent_limit_orders_on_cex, plan_state
+            FROM swing_plans
+            WHERE plan_id=? AND bot_id=? AND symbol=?
+            LIMIT 1
+            """,
+            (
+                str(plan_id or "").strip(),
+                str(bot_id or "").strip().lower(),
+                str(symbol or "").strip().upper(),
+            ),
+        ).fetchone()
+        if not hdr:
+            return None
+        return {
+            "plan_id": str(hdr["plan_id"] or ""),
+            "bot_id": str(hdr["bot_id"] or ""),
+            "mode": str(hdr["mode"] or ""),
+            "exchange": str(hdr["exchange"] or ""),
+            "symbol": str(hdr["symbol"] or ""),
+            "direction": str(hdr["direction"] or ""),
+            "first_entry_price": float(hdr["first_entry_price"] or 0.0),
+            "last_entry_price": float(hdr["last_entry_price"] or 0.0),
+            "grid_count": int(hdr["grid_count"] or 0),
+            "leverage": int(hdr["leverage"] or 1),
+            "margin_amount": float(hdr["margin_amount"] or 0.0),
+            "max_concurrent_limit_orders_on_cex": int(hdr["max_concurrent_limit_orders_on_cex"] or 3),
+            "plan_state": str(hdr["plan_state"] or "active"),
+            "entries": entries,
+        }
+
+    def set_swing_plan_state(self, bot_id: str, symbol: str, plan_id: str, plan_state: str) -> int:
+        assert self._conn
+        now_iso = datetime.now(UTC).isoformat()
+        cur = self._conn.execute(
+            """
+            UPDATE swing_plans
+            SET plan_state=?, updated_at=?
+            WHERE bot_id=? AND symbol=? AND (plan_id=? OR opened_at=?)
+            """,
+            (
+                str(plan_state or "").strip().lower() or "active",
+                now_iso,
+                str(bot_id or "").strip().lower(),
+                str(symbol or "").strip().upper(),
+                str(plan_id or "").strip(),
+                str(plan_id or "").strip(),
+            ),
+        )
+        self._conn.commit()
+        return int(cur.rowcount or 0)
+
+    def list_active_swing_manual_plans(self, bot_id: str, exchange: str) -> list[dict[str, Any]]:
+        assert self._conn
+        rows = self._conn.execute(
+            """
+            SELECT symbol, plan_id
+            FROM swing_plans
+            WHERE
+                bot_id=? AND mode='swing_manual' AND exchange=? AND plan_state='active'
+            ORDER BY created_at ASC
+            """,
+            (str(bot_id or "").strip().lower(), str(exchange or "").strip().upper()),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ---- Acknowledgment buffer ----
 
@@ -1230,6 +1704,96 @@ class HubDB(TradeDB):
         assert self._conn
         rows = self._conn.execute("SELECT bot_id, enabled FROM bot_config").fetchall()
         return {r["bot_id"]: bool(r["enabled"]) for r in rows}
+
+    # ---- Runtime tuning (global + per-bot) ----
+
+    def set_runtime_tuning(self, key: str, value: Any, bot_id: str = "*") -> None:
+        assert self._conn
+        normalized_key = str(key or "").strip()
+        target_bot = str(bot_id or "*").strip().lower() or "*"
+        if not normalized_key:
+            return
+        if value is None:
+            self._conn.execute(
+                "DELETE FROM runtime_tuning WHERE bot_id=? AND key=?",
+                (target_bot, normalized_key),
+            )
+            self._conn.commit()
+            self._runtime_tuning_rows.pop((target_bot, normalized_key), None)
+            self._runtime_tuning_effective_cache.clear()
+            return
+
+        normalized = normalize_runtime_tuning({normalized_key: value})
+        if normalized_key not in normalized:
+            return
+        normalized_value = normalized[normalized_key]
+        self._conn.execute(
+            "INSERT INTO runtime_tuning (bot_id, key, value_json, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(bot_id, key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
+            (
+                target_bot,
+                normalized_key,
+                json.dumps(normalized_value),
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+        self._conn.commit()
+        self._runtime_tuning_rows[(target_bot, normalized_key)] = normalized_value
+        self._runtime_tuning_effective_cache.clear()
+
+    def get_runtime_tuning(self, bot_id: str) -> tuple[dict[str, Any], str]:
+        target_bot = str(bot_id or "").strip().lower()
+        cached = self._runtime_tuning_effective_cache.get(target_bot)
+        if cached is not None:
+            return dict(cached[0]), cached[1]
+        self._ensure_runtime_tuning_loaded()
+        merged: dict[str, Any] = {}
+        for (row_bot, row_key), row_value in self._runtime_tuning_rows.items():
+            if row_bot == "*":
+                merged[row_key] = row_value
+        if target_bot:
+            for (row_bot, row_key), row_value in self._runtime_tuning_rows.items():
+                if row_bot == target_bot:
+                    merged[row_key] = row_value
+        normalized = normalize_runtime_tuning(merged)
+        rev = runtime_tuning_revision(normalized)
+        self._runtime_tuning_effective_cache[target_bot] = (dict(normalized), rev)
+        return normalized, rev
+
+    def get_runtime_tuning_overrides(self, bot_id: str) -> tuple[dict[str, Any], str]:
+        target_bot = str(bot_id or "").strip().lower()
+        if not target_bot:
+            return {}, runtime_tuning_revision({})
+        self._ensure_runtime_tuning_loaded()
+        overrides: dict[str, Any] = {}
+        for (row_bot, row_key), row_value in self._runtime_tuning_rows.items():
+            if row_bot == target_bot:
+                overrides[row_key] = row_value
+        normalized = normalize_runtime_tuning(overrides)
+        return normalized, runtime_tuning_revision(normalized)
+
+    def _ensure_runtime_tuning_loaded(self) -> None:
+        if self._runtime_tuning_loaded:
+            return
+        assert self._conn
+        rows = self._conn.execute("SELECT bot_id, key, value_json FROM runtime_tuning").fetchall()
+        loaded: dict[tuple[str, str], Any] = {}
+        for row in rows:
+            row_bot = str(row["bot_id"] or "*").strip().lower() or "*"
+            row_key = str(row["key"] or "").strip()
+            if not row_key:
+                continue
+            try:
+                row_value = json.loads(row["value_json"] or "null")
+            except Exception:
+                continue
+            normalized = normalize_runtime_tuning({row_key: row_value})
+            if row_key not in normalized:
+                continue
+            loaded[(row_bot, row_key)] = normalized[row_key]
+        self._runtime_tuning_rows = loaded
+        self._runtime_tuning_effective_cache.clear()
+        self._runtime_tuning_loaded = True
 
     # ---- Exchange symbols (hub fetches directly from exchanges) ----
 

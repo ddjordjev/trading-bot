@@ -10,6 +10,7 @@ from typing import Any
 from loguru import logger
 
 from config.settings import Settings
+from core.errors.error_mapper import map_exchange_error
 from core.exchange.base import BaseExchange
 from core.models import (
     Candle,
@@ -98,6 +99,16 @@ class OrderManager:
             return True
         return strategy.startswith("extreme_") or "wick" in strategy or strategy == "wick_scalp"
 
+    def reload_runtime_settings(self, settings: Settings) -> None:
+        self.settings = settings
+        self.trailing.default_initial_pct = settings.stop_loss_pct
+        self.trailing.default_trail_pct = max(0.5, settings.stop_loss_pct * 0.4)
+        self.trailing._base_trail_pct = self.trailing.default_trail_pct
+        self.trailing._base_breakeven_pct = settings.breakeven_lock_pct
+        self.trailing.breakeven_pct = settings.breakeven_lock_pct
+        self.scaler.initial_risk_amount = settings.initial_risk_amount
+        self.scaler.max_notional = settings.max_notional_position
+
     def _trail_pct_override_for_signal(self, signal: Signal, fast_trailing: bool) -> float | None:
         """Allow profile/strategy-specific fast-trailing tuning."""
         if not fast_trailing:
@@ -155,6 +166,107 @@ class OrderManager:
         adaptive = min(configured, pct_budget, notional_cap_budget if notional_cap_budget > 0 else configured, bal)
         return max(0.0, adaptive)
 
+    def _is_non_extreme_queue_trade(self, sp: ScaledPosition | None) -> bool:
+        if not sp:
+            return False
+        if not bool(getattr(sp, "is_queue_trade", False)):
+            return False
+        strategy = str(getattr(sp, "strategy", "") or "").strip().lower()
+        return not (self._is_extreme_bot or strategy.startswith("extreme_"))
+
+    @staticmethod
+    def _compute_margin_add_amount(
+        *,
+        position: Position,
+        leverage: int,
+        price: float,
+        margin_fraction: float,
+        room_notional: float,
+    ) -> float:
+        if price <= 0 or leverage <= 0 or margin_fraction <= 0:
+            return 0.0
+        current_notional = max(0.0, float(getattr(position, "notional_value", 0.0) or 0.0))
+        current_margin = current_notional / leverage
+        if current_margin <= 0:
+            return 0.0
+        add_margin = current_margin * margin_fraction
+        add_notional = min(room_notional, add_margin * leverage)
+        if add_notional <= 0:
+            return 0.0
+        return add_notional / price
+
+    @staticmethod
+    def _project_avg_entry(sp: ScaledPosition, add_amount: float, add_price: float) -> float:
+        if add_amount <= 0 or add_price <= 0:
+            return float(sp.avg_entry_price or 0.0)
+        current_size = float(sp.current_size or 0.0)
+        if current_size <= 0:
+            return add_price
+        total_cost = float(sp.avg_entry_price or 0.0) * current_size + add_price * add_amount
+        denom = current_size + add_amount
+        if denom <= 0:
+            return float(sp.avg_entry_price or 0.0)
+        return total_cost / denom
+
+    def _has_five_pct_chase_room(self, ts: Any, side: str, current_price: float, projected_entry: float) -> bool:
+        if current_price <= 0:
+            return False
+        chase_pct = max(0.5, float(getattr(self.settings, "post_add_rearm_chase_pct", 5.0) or 5.0))
+        current_stop = float(getattr(ts, "current_stop", 0.0) or 0.0)
+        be_locked = bool(getattr(ts, "breakeven_locked", False))
+        if side == "long":
+            chase_stop = current_price * (1 - chase_pct / 100.0)
+            if current_stop > chase_stop:
+                return False
+            return not (be_locked and projected_entry > chase_stop)
+        chase_stop = current_price * (1 + chase_pct / 100.0)
+        if current_stop < chase_stop:
+            return False
+        return not (be_locked and projected_entry < chase_stop)
+
+    def _has_two_pct_defense_room(self, ts: Any, side: str, current_price: float, projected_entry: float) -> bool:
+        if current_price <= 0:
+            return False
+        defense_pct = max(0.5, float(getattr(self.settings, "post_add_defense_stop_pct", 2.0) or 2.0))
+        be_locked = bool(getattr(ts, "breakeven_locked", False))
+        if side == "long":
+            defense_stop = current_price * (1 - defense_pct / 100.0)
+            return not (be_locked and projected_entry > defense_stop)
+        defense_stop = current_price * (1 + defense_pct / 100.0)
+        return not (be_locked and projected_entry < defense_stop)
+
+    def _apply_five_pct_chase_stop(self, ts: Any, side: str, current_price: float, projected_entry: float) -> bool:
+        if current_price <= 0:
+            return False
+        chase_pct = max(0.5, float(getattr(self.settings, "post_add_rearm_chase_pct", 5.0) or 5.0))
+        be_locked = bool(getattr(ts, "breakeven_locked", False))
+        if side == "long":
+            chase_stop = current_price * (1 - chase_pct / 100.0)
+            if be_locked:
+                if projected_entry > chase_stop:
+                    return False
+                return bool(ts._move_long_stop(max(projected_entry, chase_stop)))
+            return bool(ts._move_long_stop(chase_stop))
+        chase_stop = current_price * (1 + chase_pct / 100.0)
+        if be_locked:
+            if projected_entry < chase_stop:
+                return False
+            return bool(ts._move_short_stop(min(projected_entry, chase_stop)))
+        return bool(ts._move_short_stop(chase_stop))
+
+    def _apply_two_pct_defense_stop(self, ts: Any, side: str, current_price: float, projected_entry: float) -> bool:
+        if current_price <= 0:
+            return False
+        defense_pct = max(0.5, float(getattr(self.settings, "post_add_defense_stop_pct", 2.0) or 2.0))
+        be_locked = bool(getattr(ts, "breakeven_locked", False))
+        if side == "long":
+            defense_stop = current_price * (1 - defense_pct / 100.0)
+            target = max(projected_entry, defense_stop) if be_locked else defense_stop
+            return bool(ts._move_long_stop(target))
+        defense_stop = current_price * (1 + defense_pct / 100.0)
+        target = min(projected_entry, defense_stop) if be_locked else defense_stop
+        return bool(ts._move_short_stop(target))
+
     # ------------------------------------------------------------------ #
     #  Signal execution
     # ------------------------------------------------------------------ #
@@ -204,6 +316,7 @@ class OrderManager:
                 market_type=signal.market_type or "futures",
                 leverage=target_leverage,
                 low_liquidity=True,
+                is_queue_trade=signal.reason.startswith("[QUEUE/"),
             )
             actual_leverage = target_leverage
             logger.info("LOW-LIQ gambling bet on {} | ${:.0f} | size: {:.6f}", signal.symbol, amount * price, amount)
@@ -216,6 +329,7 @@ class OrderManager:
                 market_type=signal.market_type or "futures",
                 leverage=target_leverage,
                 mode=ScaleMode.PYRAMID,
+                is_queue_trade=signal.reason.startswith("[QUEUE/"),
             )
             sp.initial_risk_amount = self._resolve_initial_risk_amount(balance, sp.initial_leverage)
             amount = sp.get_initial_amount(price)
@@ -235,6 +349,7 @@ class OrderManager:
                 strategy=signal.strategy,
                 market_type=signal.market_type or "futures",
                 leverage=target_leverage,
+                is_queue_trade=signal.reason.startswith("[QUEUE/"),
             )
             sp.initial_risk_amount = self._resolve_initial_risk_amount(balance, target_leverage)
             amount = sp.get_initial_amount(price)
@@ -540,6 +655,7 @@ class OrderManager:
                 if str(state.get("sl_order_id", "") or "") == order_id:
                     state.pop("sl_order_id", None)
                     state.pop("sl_price", None)
+                    state.pop("sl_amount", None)
                 if str(state.get("tp_order_id", "") or "") == order_id:
                     state.pop("tp_order_id", None)
                     state.pop("tp_price", None)
@@ -645,6 +761,7 @@ class OrderManager:
         state = self._protection_orders.setdefault(symbol, {})
         sl_order_id = str(state.get("sl_order_id", "") or "")
         sl_price = float(state.get("sl_price", 0.0) or 0.0)
+        sl_amount = float(state.get("sl_amount", 0.0) or 0.0)
         sl_replaced_or_created = False
         logger.debug(
             "Protection sync {}: side={} amount={:.6f} bot_stop={:.6f} prev_sl_id={} prev_sl={:.6f}",
@@ -684,8 +801,11 @@ class OrderManager:
                     sl_order_id = ""
                 else:
                     fetched_stop = float(getattr(sl_order, "stop_price", 0.0) or 0.0)
+                    fetched_amount = float(getattr(sl_order, "amount", 0.0) or 0.0)
                     if fetched_stop > 0:
                         sl_price = fetched_stop
+                    if fetched_amount > 0:
+                        sl_amount = fetched_amount
             except Exception as e:
                 logger.debug(
                     "Protection sync {}: SL id-verify miss for {} ({}), attempting open-order fallback",
@@ -708,6 +828,7 @@ class OrderManager:
                         )
                         sl_order_id = fallback.id
                         sl_price = fallback_price
+                        sl_amount = float(getattr(fallback, "amount", 0.0) or 0.0)
                     else:
                         logger.warning(
                             "Protection sync {}: no fallback SL order found after id-verify miss; will recreate",
@@ -726,6 +847,7 @@ class OrderManager:
                 sl_order_id = str(adopted.id or "")
                 adopted_order_id = sl_order_id
                 sl_price = float(adopted.stop_price or 0.0)
+                sl_amount = float(getattr(adopted, "amount", 0.0) or 0.0)
                 logger.debug(
                     "Protection sync {}: adopted existing side-matched SL order {} @ {:.6f}",
                     symbol,
@@ -750,7 +872,7 @@ class OrderManager:
                 for duplicate_id in duplicate_ids:
                     await self._cancel_protection_order(duplicate_id, symbol, market_type)
 
-        should_replace = bool(
+        sl_price_mismatch = bool(
             sl_order_id
             and self._is_meaningful_price_change(
                 sl_price,
@@ -758,6 +880,8 @@ class OrderManager:
                 min_delta_pct=self._protection_alignment_tolerance_pct,
             )
         )
+        sl_amount_mismatch = bool(sl_order_id and sl_amount > 0 and abs(sl_amount - amount) > max(1e-9, amount * 0.02))
+        should_replace = sl_price_mismatch or sl_amount_mismatch
         if should_replace:
             last_replace_at = state.get("sl_last_replace_at")
             if isinstance(last_replace_at, datetime):
@@ -773,11 +897,15 @@ class OrderManager:
 
         if should_replace:
             logger.debug(
-                "Protection sync {}: replacing SL order {} due to price change {:.6f} -> {:.6f}",
+                "Protection sync {}: replacing SL order {} (price_mismatch={} amount_mismatch={}) {:.6f}->{:.6f} amount {:.6f}->{:.6f}",
                 symbol,
                 sl_order_id,
+                sl_price_mismatch,
+                sl_amount_mismatch,
                 sl_price,
                 exchange_stop,
+                sl_amount,
+                amount,
             )
             await self._cancel_protection_order(sl_order_id, symbol, market_type)
             sl_order_id = ""
@@ -830,10 +958,13 @@ class OrderManager:
         state["sl_order_id"] = sl_order_id
         if sl_replaced_or_created:
             state["sl_price"] = exchange_stop
+            state["sl_amount"] = amount
         elif sl_price > 0:
             # Keep the last confirmed exchange SL price when no replacement
             # happened, so diff checks compare CEX vs bot target correctly.
             state["sl_price"] = sl_price
+            if sl_amount > 0:
+                state["sl_amount"] = sl_amount
 
         if not self._is_extreme_bot:
             tp_order_id = str(state.get("tp_order_id", "") or "")
@@ -923,6 +1054,68 @@ class OrderManager:
         positions = await self.exchange.fetch_positions()
         prices = {p.symbol: p.current_price for p in positions}
         to_add = self.scaler.get_symbols_to_add(prices)
+        selected_symbols = {sym for sym, _ in to_add}
+        profit_pullback_adds: set[str] = set()
+
+        # Re-arm profitable-pullback defense mode back to 5% chase only when safe.
+        for pos in positions:
+            symbol = str(getattr(pos, "symbol", "") or "")
+            if not symbol:
+                continue
+            sp = self.scaler.get(symbol)
+            if not self._is_non_extreme_queue_trade(sp):
+                continue
+            if sp is None or not bool(getattr(sp, "post_add_defense_active", False)):
+                continue
+            ts = self.trailing.get(symbol)
+            if not ts:
+                continue
+            price = prices.get(symbol, 0.0)
+            projected_entry = float(sp.avg_entry_price or 0.0)
+            if self._has_five_pct_chase_room(ts, sp.side, price, projected_entry):
+                moved = self._apply_five_pct_chase_stop(ts, sp.side, price, projected_entry)
+                if moved:
+                    sp.post_add_defense_active = False
+                    logger.info("Post-add defense OFF for {}: re-armed 5% chase stop", symbol)
+                continue
+            self._apply_two_pct_defense_stop(ts, sp.side, price, projected_entry)
+
+        for pos in positions:
+            symbol = str(getattr(pos, "symbol", "") or "")
+            if not symbol or symbol in selected_symbols:
+                continue
+            sp = self.scaler.get(symbol)
+            if not self._is_non_extreme_queue_trade(sp):
+                continue
+            if sp is None or sp.mode != ScaleMode.PYRAMID:
+                continue
+            price = prices.get(symbol, 0.0)
+            if price <= 0 or not sp.should_add_on_profitable_pullback(price):
+                continue
+            ts = self.trailing.get(symbol)
+            if not ts or not bool(getattr(ts, "breakeven_locked", False)):
+                # Profit pullback adds are allowed only after BE lock.
+                continue
+            room_notional = max(0.0, float(sp.max_notional) - float(sp.notional_value))
+            add_amount = self._compute_margin_add_amount(
+                position=pos,
+                leverage=max(1, int(sp.current_leverage or 1)),
+                price=price,
+                margin_fraction=0.10,
+                room_notional=room_notional,
+            )
+            if add_amount <= 0:
+                continue
+            projected_entry = self._project_avg_entry(sp, add_amount, price)
+            if not self._has_two_pct_defense_room(ts, sp.side, price, projected_entry):
+                logger.info(
+                    "Skip profitable pullback add on {}: cannot keep BE + 2% post-add defense stop policy",
+                    symbol,
+                )
+                continue
+            to_add.append((symbol, add_amount))
+            selected_symbols.add(symbol)
+            profit_pullback_adds.add(symbol)
 
         for symbol, amount in to_add:
             if len(added) >= self.MAX_DCA_ADDS_PER_TICK:
@@ -936,8 +1129,8 @@ class OrderManager:
             if not sp:
                 continue
 
-            pos = next((p for p in positions if p.symbol == symbol), None)
-            if not pos:
+            pos_match: Position | None = next((p for p in positions if p.symbol == symbol), None)
+            if not pos_match:
                 continue
 
             side = OrderSide.BUY if sp.side == "long" else OrderSide.SELL
@@ -950,7 +1143,7 @@ class OrderManager:
                 symbol,
                 sp.adds + 1,
                 amount,
-                pos.pnl_pct,
+                pos_match.pnl_pct,
                 sp.avg_entry_price,
             )
 
@@ -981,6 +1174,14 @@ class OrderManager:
                 ts = self.trailing.get(symbol)
                 if ts:
                     ts.entry_price = sp.avg_entry_price
+                    if symbol in profit_pullback_adds:
+                        projected_entry = float(sp.avg_entry_price or 0.0)
+                        sp.post_add_defense_active = True
+                        if not self._apply_two_pct_defense_stop(ts, sp.side, pos_match.current_price, projected_entry):
+                            logger.warning(
+                                "Profitable pullback add on {} filled but 2% post-add defense/BE stop could not be re-applied",
+                                symbol,
+                            )
                     logger.info("Updated trail entry for {} to avg: {:.6f}", symbol, sp.avg_entry_price)
 
                 added.append(order)
@@ -1025,7 +1226,9 @@ class OrderManager:
 
                 # Lock break-even on the trailing stop
                 ts = self.trailing.get(symbol)
-                if ts and sp.breakeven_after_lever:
+                sp_strategy = str(getattr(sp, "strategy", "") or "").strip().lower()
+                should_force_be = self._is_extreme_bot or sp_strategy.startswith("extreme_")
+                if ts and sp.breakeven_after_lever and should_force_be:
                     ts.breakeven_locked = True
                     ts.current_stop = sp.avg_entry_price
                     logger.info(
@@ -1058,8 +1261,10 @@ class OrderManager:
         to_take = self.scaler.get_symbols_for_partial_take(prices, profit_taking_aggression)
         for symbol, amount in to_take:
             cd = self._partial_take_cooldowns.get(symbol)
-            if cd and (datetime.now(UTC) - cd).total_seconds() < self._ORDER_COOLDOWN_SECS:
+            if cd and datetime.now(UTC) < cd:
                 continue
+            if cd:
+                self._partial_take_cooldowns.pop(symbol, None)
 
             sp = self.scaler.get(symbol)
             if not sp:
@@ -1086,14 +1291,31 @@ class OrderManager:
                 pos.pnl_pct,
             )
 
-            order = await self.exchange.place_order(
-                symbol=symbol,
-                side=close_side,
-                order_type=OrderType.MARKET,
-                amount=amount,
-                leverage=sp.current_leverage,
-                market_type=market_type,
-            )
+            try:
+                order = await self.exchange.place_order(
+                    symbol=symbol,
+                    side=close_side,
+                    order_type=OrderType.MARKET,
+                    amount=amount,
+                    leverage=sp.current_leverage,
+                    market_type=market_type,
+                )
+            except Exception as e:
+                decision = map_exchange_error(e)
+                if not decision.retryable:
+                    self._partial_take_cooldowns[symbol] = datetime.now(UTC) + timedelta(
+                        seconds=max(60, int(decision.cooldown_seconds))
+                    )
+                    logger.warning(
+                        "PARTIAL TAKE skipped on {} [{}]: {} cooldown={}s | error={}",
+                        symbol,
+                        decision.code,
+                        decision.reason,
+                        decision.cooldown_seconds,
+                        e,
+                    )
+                    continue
+                raise
 
             if order.status == OrderStatus.FILLED:
                 self._partial_take_cooldowns.pop(symbol, None)
@@ -1114,7 +1336,7 @@ class OrderManager:
                 )
                 taken.append(order)
             else:
-                self._partial_take_cooldowns[symbol] = datetime.now(UTC)
+                self._partial_take_cooldowns[symbol] = datetime.now(UTC) + timedelta(seconds=self._ORDER_COOLDOWN_SECS)
 
         return taken
 
@@ -1528,38 +1750,53 @@ class OrderManager:
             logger.info("Stop triggered for {}{}{} (reason: {})", key, pnl_info, liq_tag, reason)
 
             order: Order | None = None
+            close_failed = False
 
-            if key.endswith(":hedge"):
-                symbol = key.rsplit(":", 1)[0]
-                order = await self._close_sub_position(symbol, self.hedger, "hedge")
-            elif key.endswith(":wick"):
-                symbol = key.rsplit(":", 1)[0]
-                order = await self._close_sub_position_wick(symbol)
-            else:
-                symbol = key
-                signal = Signal(
-                    symbol=symbol,
-                    action=SignalAction.CLOSE,
-                    strategy="trailing_stop",
-                    reason=reason,
-                    market_type="futures",
-                )
-                order = await self.execute_signal(signal)
-                if order:
-                    self.trailing.remove(f"{symbol}:hedge")
-                    self.trailing.remove(f"{symbol}:wick")
-                    self.hedger.remove(symbol)
-                    self.wick_scalper.close(symbol)
+            try:
+                if key.endswith(":hedge"):
+                    symbol = key.rsplit(":", 1)[0]
+                    order = await self._close_sub_position(symbol, self.hedger, "hedge")
+                elif key.endswith(":wick"):
+                    symbol = key.rsplit(":", 1)[0]
+                    order = await self._close_sub_position_wick(symbol)
+                else:
+                    symbol = key
+                    signal = Signal(
+                        symbol=symbol,
+                        action=SignalAction.CLOSE,
+                        strategy="trailing_stop",
+                        reason=reason,
+                        market_type="futures",
+                    )
+                    order = await self.execute_signal(signal)
+                    if order:
+                        self.trailing.remove(f"{symbol}:hedge")
+                        self.trailing.remove(f"{symbol}:wick")
+                        self.hedger.remove(symbol)
+                        self.wick_scalper.close(symbol)
+            except Exception as e:
+                logger.error("Stop close failed for {} (reason: {}): {}", key, reason, e)
+                close_failed = True
+
+            if close_failed:
+                continue
 
             if order:
                 closed.append(order)
                 self.trailing.remove(key)
                 stopped_base_symbols.add(symbol)
             else:
-                # Stop fired but no live position exists on exchange anymore.
-                # Drop stale local protection state to avoid repeated close loops.
+                # Stop fired but close returned no order. Confirm once more that
+                # the symbol is truly flat before dropping local protection state.
                 self.trailing.remove(key)
                 if not key.endswith(":hedge") and not key.endswith(":wick"):
+                    confirm_positions = await self.exchange.fetch_positions(symbol)
+                    if any(float(getattr(p, "amount", 0.0) or 0.0) > 0 for p in confirm_positions):
+                        logger.warning(
+                            "Stop close returned no order for {} but position still exists; keeping local state",
+                            symbol,
+                        )
+                        continue
                     self.trailing.remove(f"{symbol}:hedge")
                     self.trailing.remove(f"{symbol}:wick")
                     self.hedger.remove(symbol)
@@ -1595,7 +1832,11 @@ class OrderManager:
                     reason="liquidation_risk",
                     market_type=pos.market_type,
                 )
-                order = await self.execute_signal(signal)
+                try:
+                    order = await self.execute_signal(signal)
+                except Exception as e:
+                    logger.error("Liquidation close failed for {}: {}", pos.symbol, e)
+                    continue
                 if order:
                     closed.append(order)
                     self.trailing.remove(pos.symbol)

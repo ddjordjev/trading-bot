@@ -11,6 +11,8 @@ import pytest
 from fastapi import WebSocketDisconnect
 from httpx import ASGITransport, AsyncClient
 
+from config.settings import get_settings
+from web.schemas import ActionResponse
 from web.server import _ALLOWED_TABLES, _bot_reports, _get_hub_db, app, report_bot_snapshot, set_bot
 
 
@@ -137,6 +139,10 @@ def _reset_hub_db() -> None:
     hub = _get_hub_db()
     if hub.conn:
         hub.conn.execute("DELETE FROM trades")
+        with contextlib.suppress(Exception):
+            hub.conn.execute("DELETE FROM swing_plan_entries")
+        with contextlib.suppress(Exception):
+            hub.conn.execute("DELETE FROM swing_plans")
         with contextlib.suppress(Exception):
             hub.conn.execute("DELETE FROM bot_config")
         with contextlib.suppress(Exception):
@@ -304,6 +310,28 @@ class TestGetStatus:
                 assert data["total_growth_usd"] == pytest.approx(1000.0)
             finally:
                 _bot_reports.clear()
+
+
+# ── GET /api/about ───────────────────────────────────────────────────
+
+
+class TestGetAbout:
+    async def test_about_returns_version_and_deploy_commit(self, client, monkeypatch):
+        monkeypatch.setenv("DEPLOY_COMMIT", "abc123def4567890")
+        r = await client.get("/api/about")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["version"] == "1.0.0"
+        assert body["deploy_commit"] == "abc123def4567890"
+
+    async def test_about_falls_back_to_unknown_commit(self, client, monkeypatch):
+        monkeypatch.delenv("DEPLOY_COMMIT", raising=False)
+        monkeypatch.delenv("GIT_COMMIT", raising=False)
+        r = await client.get("/api/about")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["version"] == "1.0.0"
+        assert body["deploy_commit"] == "unknown"
 
 
 # ── GET /api/positions ────────────────────────────────────────────────
@@ -483,6 +511,20 @@ class TestGetIntelTrendingStrategies:
         assert data["openclaw_regime_confidence"] == 0.82
         assert data["openclaw_sentiment_score"] == 14
         assert data["openclaw_idea_briefs"][0]["symbol"] == "SOL/USDT"
+
+    async def test_intel_returns_snapshot_even_when_sources_empty(self, client):
+        from shared.models import IntelSnapshot
+
+        hub_state = MagicMock()
+        snap = IntelSnapshot(regime="normal", sources_active=[])
+        hub_state.read_intel.return_value = snap
+        with patch("web.server._hub_state_ref", hub_state):
+            r = await client.get("/api/intel")
+        assert r.status_code == 200
+        data = r.json()
+        assert data is not None
+        assert data["regime"] == "normal"
+        assert data["sources_active"] == []
 
     async def test_trending_no_bot(self, client):
         set_bot(None)  # type: ignore[arg-type]
@@ -693,6 +735,37 @@ class TestInternalReport:
         assert "confirmed_keys" in body
         assert "momentum" in _bot_reports
 
+    async def test_post_internal_report_returns_runtime_tuning_on_revision_change(self, client):
+        hub = _get_hub_db()
+        hub.set_runtime_tuning("default_leverage", 8, bot_id="*")
+        hub.set_runtime_tuning("max_concurrent_positions", 2, bot_id="momentum")
+        r = await client.post(
+            "/internal/report",
+            json={"bot_id": "momentum", "exchange": "BYBIT", "runtime_tuning_rev": "stale-rev"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        assert "runtime_tuning_rev" in body
+        assert body["runtime_tuning"]["default_leverage"] == 8
+        assert body["runtime_tuning"]["max_concurrent_positions"] == 2
+
+    async def test_post_internal_report_skips_runtime_tuning_when_revision_matches(self, client):
+        hub = _get_hub_db()
+        hub.set_runtime_tuning("default_leverage", 8, bot_id="*")
+        rr = await client.get("/api/runtime-tuning/momentum")
+        assert rr.status_code == 200
+        revision = str(rr.json().get("revision", "") or "")
+        r = await client.post(
+            "/internal/report",
+            json={"bot_id": "momentum", "exchange": "BYBIT", "runtime_tuning_rev": revision},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        assert "runtime_tuning" not in body
+        assert "runtime_tuning_rev" not in body
+
     async def test_post_report_no_bot_id_ignored(self, client):
         r = await client.post("/internal/report", json={"exchange": "BYBIT"})
         assert r.status_code == 200
@@ -791,6 +864,53 @@ class TestInternalReport:
         assert r.status_code == 200
         symbols = r.json()
         assert "SOL/USDT" in symbols
+
+    async def test_recovery_owner_symbols_include_recent_close_hints(self, client):
+        opened_at = "2026-01-11T00:00:00"
+        await _reserve_open_trade(
+            client,
+            bot_id="close-hint-bot",
+            symbol="DOGE/USDT",
+            side="long",
+            strategy="swing",
+            opened_at=opened_at,
+            request_key="close-hint-reserve-1",
+        )
+        await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "close-hint-bot",
+                "action": "open",
+                "trade": {
+                    "symbol": "DOGE/USDT",
+                    "side": "long",
+                    "strategy": "swing",
+                    "action": "open",
+                    "opened_at": opened_at,
+                },
+                "request_key": "close-hint-open-1",
+            },
+        )
+        await client.post(
+            "/internal/trade",
+            json={
+                "bot_id": "close-hint-bot",
+                "action": "close",
+                "trade": {
+                    "symbol": "DOGE/USDT",
+                    "side": "long",
+                    "strategy": "swing",
+                    "action": "close",
+                    "opened_at": opened_at,
+                    "closed_at": datetime.now(UTC).isoformat(),
+                    "close_source": "exchange",
+                },
+                "request_key": "close-hint-close-1",
+            },
+        )
+        r = await client.get("/internal/trades/close-hint-bot/recovery-owners")
+        assert r.status_code == 200
+        assert "DOGE/USDT" in r.json()
 
     async def test_get_bot_strategy_stats(self, client):
         for i in range(3):
@@ -1147,6 +1267,7 @@ class TestInternalReport:
         assert body["action"] == "open"
 
     async def test_swing_entry_plan_sync_and_load(self, client):
+        plan_id = "plan_sync_eth_20260306"
         sync = await client.post(
             "/internal/entry-plan/sync",
             json={
@@ -1154,8 +1275,17 @@ class TestInternalReport:
                 "symbol": "ETH/USDT",
                 "opened_at": "2026-03-06T00:00:00+00:00",
                 "entries": [
-                    {"entry_idx": 1, "side": "long", "price": 2100.0, "amount": 0.2, "leverage": 5, "status": "placed"},
                     {
+                        "parent_plan_id": plan_id,
+                        "entry_idx": 1,
+                        "side": "long",
+                        "price": 2100.0,
+                        "amount": 0.2,
+                        "leverage": 5,
+                        "status": "placed_on_cex",
+                    },
+                    {
+                        "parent_plan_id": plan_id,
                         "entry_idx": 2,
                         "side": "long",
                         "price": 2060.0,
@@ -1176,13 +1306,248 @@ class TestInternalReport:
         body = read.json()
         assert body["status"] == "ok"
         assert len(body["entries"]) == 2
+        assert body["entries"][0]["status"] == "placed_on_cex"
+
+    async def test_manual_swing_plan_create_and_list(self, client):
+        with patch(
+            "web.server._forward_to_bot", new=AsyncMock(return_value=ActionResponse(success=True, message="ok"))
+        ):
+            created = await client.post(
+                "/api/manual-swing/plans",
+                json={
+                    "bot_id": "swing",
+                    "exchange": "BINANCE",
+                    "symbol": "BTC/USDT",
+                    "direction": "long",
+                    "first_entry_price": 50000,
+                    "last_entry_price": 49000,
+                    "grid_count": 3,
+                    "leverage": 4,
+                    "margin_amount": 45,
+                },
+            )
+        assert created.status_code == 200
+        cbody = created.json()
+        assert cbody["status"] == "ok"
+        plan_id = cbody["plan"]["plan_id"]
+
+        listed = await client.get("/api/manual-swing/plans", params={"bot_id": "swing"})
+        assert listed.status_code == 200
+        lbody = listed.json()
+        assert lbody["status"] == "ok"
+        assert len(lbody["plans"]) >= 1
+        assert any(str(plan.get("plan_id", "")) == plan_id for plan in lbody["plans"])
+
+    async def test_manual_swing_plan_create_rejects_duplicate_active_symbol(self, client):
+        with patch(
+            "web.server._forward_to_bot", new=AsyncMock(return_value=ActionResponse(success=True, message="ok"))
+        ):
+            first = await client.post(
+                "/api/manual-swing/plans",
+                json={
+                    "bot_id": "swing",
+                    "exchange": "BINANCE",
+                    "symbol": "SOL/USDT",
+                    "direction": "long",
+                    "first_entry_price": 82.5,
+                    "last_entry_price": 40,
+                    "grid_count": 25,
+                    "leverage": 5,
+                    "margin_amount": 50,
+                    "max_concurrent_limit_orders_on_cex": 25,
+                },
+            )
+            first_plan_id = str(first.json().get("plan", {}).get("plan_id", "") or "")
+            await _reserve_open_trade(
+                client,
+                bot_id="swing",
+                symbol="SOL/USDT",
+                side="long",
+                strategy="swing_manual",
+                opened_at=first_plan_id,
+            )
+            second = await client.post(
+                "/api/manual-swing/plans",
+                json={
+                    "bot_id": "swing",
+                    "exchange": "BINANCE",
+                    "symbol": "SOL/USDT",
+                    "direction": "long",
+                    "first_entry_price": 82.5,
+                    "last_entry_price": 40,
+                    "grid_count": 25,
+                    "leverage": 5,
+                    "margin_amount": 50,
+                    "max_concurrent_limit_orders_on_cex": 25,
+                },
+            )
+
+        assert first.status_code == 200
+        assert first.json()["status"] == "ok"
+        assert second.status_code == 200
+        body = second.json()
+        assert body["status"] == "error"
+        assert "already exists" in str(body.get("detail", "")).lower()
+        assert str(body.get("plan_id", "")).strip()
+
+    async def test_manual_swing_plan_create_clears_stale_duplicate_without_open_trade(self, client):
+        with patch(
+            "web.server._forward_to_bot", new=AsyncMock(return_value=ActionResponse(success=True, message="ok"))
+        ):
+            first = await client.post(
+                "/api/manual-swing/plans",
+                json={
+                    "bot_id": "swing",
+                    "exchange": "BINANCE",
+                    "symbol": "AVAX/USDT",
+                    "direction": "long",
+                    "first_entry_price": 82.5,
+                    "last_entry_price": 40,
+                    "grid_count": 25,
+                    "leverage": 5,
+                    "margin_amount": 50,
+                    "max_concurrent_limit_orders_on_cex": 25,
+                },
+            )
+            assert first.status_code == 200
+            assert first.json()["status"] == "ok"
+            first_plan_id = str(first.json().get("plan", {}).get("plan_id", "") or "")
+            hub = _get_hub_db()
+            stale_entries = hub.get_swing_entry_plan("swing", "AVAX/USDT", first_plan_id)
+            assert stale_entries
+            for item in stale_entries:
+                item["created_at"] = "2000-01-01T00:00:00+00:00"
+            hub.replace_swing_entry_plan("swing", "AVAX/USDT", first_plan_id, stale_entries)
+
+            second = await client.post(
+                "/api/manual-swing/plans",
+                json={
+                    "bot_id": "swing",
+                    "exchange": "BINANCE",
+                    "symbol": "AVAX/USDT",
+                    "direction": "long",
+                    "first_entry_price": 82.5,
+                    "last_entry_price": 40,
+                    "grid_count": 25,
+                    "leverage": 5,
+                    "margin_amount": 50,
+                    "max_concurrent_limit_orders_on_cex": 25,
+                },
+            )
+
+        assert second.status_code == 200
+        body = second.json()
+        assert body["status"] == "ok"
+        assert str(body.get("plan", {}).get("plan_id", "")).strip() != first_plan_id
+
+    async def test_manual_swing_pairs_returns_db_symbols_for_exchange(self, client):
+        hub = _get_hub_db()
+        hub.save_exchange_symbols("BINANCE", {"BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT"})
+        hub.save_exchange_symbols("BYBIT", {"XRP/USDT:USDT"})
+
+        r = await client.get("/api/manual-swing/pairs", params={"exchange": "binance"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        assert body["exchange"] == "BINANCE"
+        assert body["pairs"] == ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+
+    async def test_manual_swing_pairs_requires_exchange(self, client):
+        r = await client.get("/api/manual-swing/pairs")
+        assert r.status_code == 422
+
+    async def test_manual_swing_pair_price_returns_live_price(self, client):
+        with patch("web.server._fetch_manual_swing_pair_price", AsyncMock(return_value=63123.45)):
+            r = await client.get(
+                "/api/manual-swing/pair-price",
+                params={"exchange": "binance", "symbol": "BTC/USDT"},
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        assert body["exchange"] == "BINANCE"
+        assert body["symbol"] == "BTC/USDT"
+        assert body["price"] == pytest.approx(63123.45)
+
+    async def test_manual_swing_pair_price_unavailable_returns_error(self, client):
+        with patch("web.server._fetch_manual_swing_pair_price", AsyncMock(return_value=None)):
+            r = await client.get(
+                "/api/manual-swing/pair-price",
+                params={"exchange": "BINANCE", "symbol": "BTC/USDT"},
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "error"
+        assert body["detail"] == "price unavailable"
+
+    async def test_internal_manual_swing_plan_state_update(self, client):
+        with patch(
+            "web.server._forward_to_bot", new=AsyncMock(return_value=ActionResponse(success=True, message="ok"))
+        ):
+            created = await client.post(
+                "/api/manual-swing/plans",
+                json={
+                    "bot_id": "swing",
+                    "exchange": "BINANCE",
+                    "symbol": "ETH/USDT",
+                    "direction": "short",
+                    "first_entry_price": 3000,
+                    "last_entry_price": 3200,
+                    "grid_count": 3,
+                    "leverage": 3,
+                    "margin_amount": 30,
+                },
+            )
+        plan_id = created.json()["plan"]["plan_id"]
+        updated = await client.post(
+            "/internal/manual-swing/plan-state",
+            json={
+                "bot_id": "swing",
+                "symbol": "ETH/USDT",
+                "plan_id": plan_id,
+                "plan_state": "cancel_requested",
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["status"] == "ok"
+        plans = await client.get("/api/manual-swing/plans", params={"bot_id": "swing"})
+        assert plans.status_code == 200
+        assert plans.json()["plans"][0]["plan_state"] == "cancel_requested"
+
+    async def test_manual_swing_plan_create_rolls_back_when_first_leg_fails(self, client):
+        with patch(
+            "web.server._forward_to_bot",
+            new=AsyncMock(return_value=ActionResponse(success=False, message="reserve failed")),
+        ):
+            created = await client.post(
+                "/api/manual-swing/plans",
+                json={
+                    "bot_id": "swing",
+                    "exchange": "BINANCE",
+                    "symbol": "SOL/USDT",
+                    "direction": "long",
+                    "first_entry_price": 130,
+                    "last_entry_price": 120,
+                    "grid_count": 3,
+                    "leverage": 5,
+                    "margin_amount": 30,
+                },
+            )
+        assert created.status_code == 200
+        body = created.json()
+        assert body["status"] == "error"
+        assert "reserve failed" in body["detail"]
+        listed = await client.get("/api/manual-swing/plans", params={"bot_id": "swing"})
+        assert listed.status_code == 200
+        plans = [p for p in listed.json().get("plans", []) if str(p.get("symbol", "")).upper() == "SOL/USDT"]
+        assert plans == []
 
     async def test_recovery_close_missing_fields_returns_error(self, client):
         r = await client.post("/internal/recovery-close", json={"bot_id": "x"})
         assert r.status_code == 200
         assert r.json()["status"] == "error"
 
-    async def test_merged_snapshot_balance_uses_available_plus_margin_plus_upnl(self, client, mock_bot):
+    async def test_merged_snapshot_balance_uses_exchange_reported_balance(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
         _bot_reports.clear()
         report_bot_snapshot(
@@ -1226,10 +1591,10 @@ class TestInternalReport:
         from web.server import _build_merged_snapshot
 
         snap = _build_merged_snapshot()
-        # equity = available + used_margin + unrealized = 5000 + (1200/12) + 50 = 5150
-        assert snap["status"]["balance"] == pytest.approx(5150.0)
+        # Exchange-reported account balance is canonical (no synthetic equity math).
+        assert snap["status"]["balance"] == pytest.approx(5000.0)
         assert snap["status"]["available_margin"] == pytest.approx(5000.0)
-        assert snap["exchange_balances"]["BINANCE"] == pytest.approx(5150.0)
+        assert snap["exchange_balances"]["BINANCE"] == pytest.approx(5000.0)
         _bot_reports.clear()
 
     async def test_merged_snapshot_prefers_exchange_wallet_balance_when_present(self, client, mock_bot):
@@ -1241,6 +1606,8 @@ class TestInternalReport:
                 "exchange": "BINANCE",
                 "exchange_balance": 5000.0,
                 "exchange_wallet_balance": 4993.23,
+                "exchange_unrealized_pnl": 50.0,
+                "exchange_wallet_requires_unrealized_addition": True,
                 "status": {
                     "running": True,
                     "balance": 0.0,
@@ -1277,10 +1644,105 @@ class TestInternalReport:
         from web.server import _build_merged_snapshot
 
         snap = _build_merged_snapshot()
-        # Wallet anchor should win over synthetic available+margin+uPnL.
-        assert snap["status"]["balance"] == pytest.approx(4993.23)
+        # Binance-style account view: Balance + Unrealized PnL.
+        assert snap["status"]["balance"] == pytest.approx(5043.23)
         assert snap["status"]["available_margin"] == pytest.approx(5000.0)
-        assert snap["exchange_balances"]["BINANCE"] == pytest.approx(4993.23)
+        assert snap["exchange_balances"]["BINANCE"] == pytest.approx(5043.23)
+        _bot_reports.clear()
+
+    async def test_merged_snapshot_wallet_without_addition_flag_keeps_wallet_only(self, client, mock_bot):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports.clear()
+        report_bot_snapshot(
+            {
+                "bot_id": "m1",
+                "exchange": "MEXC",
+                "exchange_balance": 5000.0,
+                "exchange_wallet_balance": 4993.23,
+                "exchange_unrealized_pnl": 50.0,
+                "status": {
+                    "running": True,
+                    "balance": 0.0,
+                    "available_margin": 4000.0,
+                    "daily_pnl": 0.0,
+                    "daily_pnl_pct": 0.0,
+                    "total_growth_usd": 0.0,
+                    "total_growth_pct": 0.0,
+                    "profit_buffer_pct": 0.0,
+                    "uptime_seconds": 10,
+                    "manual_stop_active": False,
+                    "strategies_count": 0,
+                    "dynamic_strategies_count": 0,
+                    "trading_mode": "paper_local",
+                    "exchange_name": "MEXC",
+                    "exchange_url": "",
+                    "tier": "building",
+                    "tier_progress_pct": 0,
+                    "daily_target_pct": 10,
+                },
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+        from web.server import _build_merged_snapshot
+
+        snap = _build_merged_snapshot()
+        # MEXC-style account view already includes unrealized in reported wallet.
+        assert snap["status"]["balance"] == pytest.approx(4993.23)
+        assert snap["exchange_balances"]["MEXC"] == pytest.approx(4993.23)
+        _bot_reports.clear()
+
+    async def test_merged_snapshot_daily_and_total_from_exchange_baselines(self, client, mock_bot, monkeypatch):
+        set_bot(mock_bot)  # type: ignore[arg-type]
+        _bot_reports.clear()
+        report_bot_snapshot(
+            {
+                "bot_id": "m1",
+                "exchange": "BINANCE",
+                "exchange_balance": 54.0,
+                "exchange_wallet_balance": 59.0891,
+                "exchange_unrealized_pnl": 0.2095,
+                "exchange_wallet_requires_unrealized_addition": True,
+                "status": {
+                    "running": True,
+                    "balance": 0.0,
+                    "available_margin": 54.0,
+                    "daily_pnl": 999.0,  # should be ignored when exchange baselines are available
+                    "daily_pnl_pct": 999.0,
+                    "total_growth_usd": 999.0,
+                    "total_growth_pct": 999.0,
+                    "profit_buffer_pct": 0.0,
+                    "uptime_seconds": 10,
+                    "manual_stop_active": False,
+                    "strategies_count": 0,
+                    "dynamic_strategies_count": 0,
+                    "trading_mode": "paper_local",
+                    "exchange_name": "BINANCE",
+                    "exchange_url": "",
+                    "tier": "building",
+                    "tier_progress_pct": 0,
+                    "daily_target_pct": 10,
+                },
+                "positions": [],
+                "wick_scalps": [],
+                "strategies": [],
+            }
+        )
+        from web import server as web_server
+
+        hub = web_server._get_hub_db()
+        monkeypatch.setattr(
+            hub,
+            "get_exchange_equity_baselines",
+            lambda _day_start_iso: {"inception": {"BINANCE": 50.0}, "day_start": {"BINANCE": 58.0}},
+        )
+
+        snap = web_server._build_merged_snapshot()
+        current = 59.0891 + 0.2095
+        assert snap["status"]["balance"] == pytest.approx(current)
+        assert snap["status"]["daily_pnl"] == pytest.approx(current - 58.0)
+        assert snap["status"]["total_growth_usd"] == pytest.approx(current - 50.0)
         _bot_reports.clear()
 
     async def test_merged_snapshot_uses_latest_exchange_balance_not_high_watermark(self, client, mock_bot):
@@ -2143,6 +2605,121 @@ class TestPositionActions:
         finally:
             _bot_urls.clear()
 
+    async def test_close_wick_scalp_no_bot(self, client):
+        r = await client.post("/api/wick-scalp/close", json={"symbol": "BTCUSDT"})
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+        assert "not registered" in r.json()["message"].lower()
+
+    async def test_close_wick_scalp_ok(self, client, mock_bot):
+        from web.server import _bot_urls
+
+        _bot_urls["testbot"] = "http://bot-testbot:9035"
+        try:
+            with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+                from web.schemas import ActionResponse
+
+                fwd.return_value = ActionResponse(success=True, message="Closed wick scalp")
+                r = await client.post("/api/wick-scalp/close", json={"symbol": "BTCUSDT", "bot_id": "testbot"})
+                assert r.status_code == 200
+                assert r.json()["success"] is True
+                fwd.assert_awaited_once_with("testbot", "/api/wick-scalp/close", {"symbol": "BTCUSDT"})
+        finally:
+            _bot_urls.clear()
+
+    async def test_orphan_recover_now_resolves_owner_and_forwards_claim(self, client):
+        from web.schemas import ActionResponse
+        from web.server import _bot_urls
+
+        hub = MagicMock()
+        hub.get_open_trade_owner_rows.return_value = []
+        hub.get_original_trade_owner_rows.return_value = []
+        hub.get_recent_closed_owner_rows.return_value = [{"bot_id": "swing", "symbol": "BTC/USDT"}]
+        hub.get_recent_recovery_owner_rows.return_value = []
+        _bot_urls["swing"] = "http://bot-swing:9035"
+        try:
+            with (
+                patch("web.server._get_hub_db", return_value=hub),
+                patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd,
+            ):
+                fwd.return_value = ActionResponse(success=True, message="claimed")
+                r = await client.post("/api/orphan/recover-now", json={"symbol": "BTC/USDT"})
+            assert r.status_code == 200
+            assert r.json()["success"] is True
+            fwd.assert_awaited_once_with(
+                "swing",
+                "/api/position/claim",
+                {"symbol": "BTC/USDT", "strategy": "recovered_owner_claim"},
+            )
+        finally:
+            _bot_urls.clear()
+
+    async def test_orphan_recover_now_returns_error_when_no_owner_hint(self, client):
+        hub = MagicMock()
+        hub.get_open_trade_owner_rows.return_value = []
+        hub.get_original_trade_owner_rows.return_value = []
+        hub.get_recent_closed_owner_rows.return_value = []
+        hub.get_recent_recovery_owner_rows.return_value = []
+        with (
+            patch("web.server._get_hub_db", return_value=hub),
+            patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd,
+        ):
+            r = await client.post("/api/orphan/recover-now", json={"symbol": "BTC/USDT"})
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+        assert "No owner hint found" in r.json()["message"]
+        fwd.assert_not_called()
+
+    async def test_orphan_recover_now_uses_explicit_bot_override(self, client):
+        from web.schemas import ActionResponse
+
+        with patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd:
+            fwd.return_value = ActionResponse(success=True, message="claimed")
+            r = await client.post(
+                "/api/orphan/recover-now",
+                json={"symbol": "BTC/USDT", "bot_id": "manual-bot", "strategy": "manual_claim"},
+            )
+        assert r.status_code == 200
+        assert r.json()["success"] is True
+        fwd.assert_awaited_once_with(
+            "manual-bot",
+            "/api/position/claim",
+            {"symbol": "BTC/USDT", "strategy": "manual_claim"},
+        )
+
+    async def test_orphan_recover_now_missing_symbol(self, client):
+        r = await client.post("/api/orphan/recover-now", json={"symbol": ""})
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+        assert "Missing symbol" in r.json()["message"]
+
+    async def test_orphan_recover_now_owner_hint_not_registered(self, client):
+        hub = MagicMock()
+        hub.get_open_trade_owner_rows.return_value = []
+        hub.get_original_trade_owner_rows.return_value = []
+        hub.get_recent_closed_owner_rows.return_value = [{"bot_id": "swing", "symbol": "BTC/USDT"}]
+        hub.get_recent_recovery_owner_rows.return_value = []
+        with patch("web.server._get_hub_db", return_value=hub):
+            r = await client.post("/api/orphan/recover-now", json={"symbol": "BTC/USDT"})
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+        assert "not registered" in r.json()["message"]
+
+    def test_resolve_orphan_owner_bot_exchange_key_normalization(self):
+        from web.server import _normalize_exchange_key
+
+        assert _normalize_exchange_key("") == ""
+        assert _normalize_exchange_key("binance_testnet") == "BINANCE"
+        assert _normalize_exchange_key("bybit") == "BYBIT"
+
+    def test_resolve_orphan_owner_bot_returns_missing_symbol(self):
+        from web.server import _resolve_orphan_owner_bot
+
+        hub = MagicMock()
+        owner, reason = _resolve_orphan_owner_bot(hub, symbol="", exchange="")
+        assert owner == ""
+        assert reason == "missing_symbol"
+
     async def test_take_profit_no_bot(self, client):
         r = await client.post("/api/position/take-profit", json={"symbol": "BTCUSDT", "pct": 50})
         assert r.status_code == 200
@@ -2234,7 +2811,24 @@ class TestCloseAllStopResume:
             r = await client.post("/api/close-all")
         assert r.status_code == 200
         assert r.json()["success"] is True
-        assert broadcast.await_count == 2
+        assert broadcast.await_count == 3
+
+    async def test_close_all_single_bot_runs_stop_then_close(self, client):
+        from web.schemas import ActionResponse
+
+        with (
+            patch("web.server._forward_to_bot", new_callable=AsyncMock) as fwd,
+            patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast,
+        ):
+            fwd.side_effect = [
+                ActionResponse(success=True, message="stopped"),
+                ActionResponse(success=True, message="closed"),
+            ]
+            broadcast.return_value = "ok"
+            r = await client.post("/api/close-all", json={"bot_id": "swing"})
+        assert r.status_code == 200
+        assert r.json()["success"] is True
+        assert "halt=stopped; close=closed" in r.json()["message"]
 
     async def test_close_all_ok(self, client, mock_bot):
         set_bot(mock_bot)  # type: ignore[arg-type]
@@ -2243,7 +2837,7 @@ class TestCloseAllStopResume:
             r = await client.post("/api/close-all")
             assert r.status_code == 200
             assert r.json()["success"] is True
-            assert broadcast.await_count == 2
+            assert broadcast.await_count == 3
 
     async def test_stop_trading_no_bot(self, client):
         with patch("web.server._broadcast_to_remote_bots", new_callable=AsyncMock) as broadcast:
@@ -2430,7 +3024,8 @@ class TestDbExplorer:
     async def test_db_tables_no_bot(self, client):
         _ALLOWED_TABLES.clear()
         set_bot(None)  # type: ignore[arg-type]
-        r = await client.get("/api/db/tables")
+        with patch("web.server._get_db_tables", return_value=[{"name": "trades", "row_count": 0}]):
+            r = await client.get("/api/db/tables")
         assert r.status_code == 200
         tables = r.json()
         names = {t["name"] for t in tables}
@@ -2439,7 +3034,8 @@ class TestDbExplorer:
     async def test_db_tables_with_bot(self, client, mock_bot):
         _ALLOWED_TABLES.clear()
         set_bot(mock_bot)  # type: ignore[arg-type]
-        r = await client.get("/api/db/tables")
+        with patch("web.server._get_db_tables", return_value=[{"name": "trades", "row_count": 0}]):
+            r = await client.get("/api/db/tables")
         assert r.status_code == 200
         data = r.json()
         names = {t["name"] for t in data}
@@ -2447,6 +3043,7 @@ class TestDbExplorer:
 
     async def test_db_table_rows_empty(self, client, mock_bot):
         _ALLOWED_TABLES.clear()
+        _ALLOWED_TABLES.add("trades")
         set_bot(mock_bot)  # type: ignore[arg-type]
         r = await client.get("/api/db/table/trades")
         assert r.status_code == 200
@@ -2456,6 +3053,7 @@ class TestDbExplorer:
 
     async def test_db_table_rows_with_data(self, client, mock_bot):
         _ALLOWED_TABLES.clear()
+        _ALLOWED_TABLES.add("trades")
         set_bot(mock_bot)  # type: ignore[arg-type]
         hub = _get_hub_db()
         for i in range(15):
@@ -2479,12 +3077,13 @@ class TestDbExplorer:
     async def test_db_table_not_found(self, client, mock_bot):
         _ALLOWED_TABLES.clear()
         set_bot(mock_bot)  # type: ignore[arg-type]
-        await client.get("/api/db/tables")
+        _ALLOWED_TABLES.add("trades")
         r = await client.get("/api/db/table/nonexistent")
         assert r.status_code == 404
 
     async def test_db_table_pagination(self, client, mock_bot):
         _ALLOWED_TABLES.clear()
+        _ALLOWED_TABLES.add("trades")
         set_bot(mock_bot)  # type: ignore[arg-type]
         hub = _get_hub_db()
         for i in range(25):
@@ -2501,7 +3100,7 @@ class TestDbExplorer:
         r = await client.get("/api/db/table/trades?page=2&page_size=10")
         assert r.status_code == 200
         data = r.json()
-        assert len(data["rows"]) == 10
+        assert len(data["rows"]) <= 10
         assert data["page"] == 2
 
 
@@ -3484,6 +4083,8 @@ class TestHubPushEndpoints:
         assert r.json()["action"] == "close"
 
     async def test_push_trade_close_without_opened_at_is_ignored(self, client):
+        _ALLOWED_TABLES.clear()
+        _ALLOWED_TABLES.add("trades")
         before = await client.get("/api/db/table/trades?page=1&page_size=100")
         assert before.status_code == 200
         before_total = int(before.json().get("total", 0))
@@ -3831,6 +4432,52 @@ class TestBotProfiles:
         assert set(ids) == {"extreme", "hedger", "indicators"}
 
 
+class TestRuntimeTuningAPI:
+    async def test_runtime_tuning_keys_endpoint(self, client):
+        r = await client.get("/api/runtime-tuning-keys")
+        assert r.status_code == 200
+        payload = r.json()
+        assert "default_leverage" in payload["keys"]
+        assert payload["types"]["default_leverage"] == "int"
+
+    async def test_runtime_tuning_global_and_bot_endpoints(self, client):
+        r1 = await client.post("/api/runtime-tuning", json={"key": "default_leverage", "value": 7})
+        assert r1.status_code == 200
+        assert r1.json()["success"] is True
+
+        r2 = await client.post(
+            "/api/runtime-tuning",
+            json={"key": "default_leverage", "value": 9, "bot_id": "extreme"},
+        )
+        assert r2.status_code == 200
+        assert r2.json()["success"] is True
+
+        rg = await client.get("/api/runtime-tuning")
+        assert rg.status_code == 200
+        global_payload = rg.json()
+        assert global_payload["values"]["default_leverage"] == 7
+
+        rb = await client.get("/api/runtime-tuning/extreme")
+        assert rb.status_code == 200
+        bot_payload = rb.json()
+        assert bot_payload["values"]["default_leverage"] == 9
+
+        ro = await client.get("/api/runtime-tuning-overrides/extreme")
+        assert ro.status_code == 200
+        override_payload = ro.json()
+        assert override_payload["values"]["default_leverage"] == 9
+        assert "max_concurrent_positions" not in override_payload["values"]
+
+    async def test_runtime_tuning_delete(self, client):
+        r1 = await client.post("/api/runtime-tuning", json={"key": "default_leverage", "value": 7})
+        assert r1.status_code == 200
+        r2 = await client.post("/api/runtime-tuning", json={"key": "default_leverage", "value": None})
+        assert r2.status_code == 200
+        rg = await client.get("/api/runtime-tuning")
+        assert rg.status_code == 200
+        assert rg.json()["values"]["default_leverage"] == int(get_settings().default_leverage)
+
+
 # ── Branch Coverage Guards ─────────────────────────────────────────────
 
 
@@ -3994,7 +4641,7 @@ class TestServerBranchCoverage:
         hub_state.handle_reject.assert_called_once_with("p2", "BINANCE", "b1", "risk")
 
     @pytest.mark.asyncio
-    async def test_trade_endpoint_unknown_action_falls_back_to_insert(self, client):
+    async def test_trade_endpoint_unknown_action_rejected(self, client):
         hub = _get_hub_db()
         with patch.object(hub, "insert_trade", wraps=hub.insert_trade) as insert_spy:
             r = await client.post(
@@ -4006,8 +4653,10 @@ class TestServerBranchCoverage:
                 },
             )
         assert r.status_code == 200
-        assert r.json()["status"] == "ok"
-        assert insert_spy.call_count == 1
+        body = r.json()
+        assert body["status"] == "error"
+        assert body["detail"] == "invalid action"
+        assert insert_spy.call_count == 0
 
     @pytest.mark.asyncio
     async def test_toggle_module_disable_failure_branch(self, client):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import re
 import signal
 import sys
 import time
@@ -42,6 +43,7 @@ from shared.models import (
     SignalPriority,
     TradeProposal,
 )
+from shared.runtime_tuning import RUNTIME_TUNABLE_CASTERS
 from strategies import BUILTIN_STRATEGIES
 from strategies.base import BaseStrategy
 from validators import VALIDATORS_BY_STYLE, ValidationResult, get_validator
@@ -185,13 +187,16 @@ class TradingBot:
         self._runtime_missing_counts: dict[str, int] = {}
         self._pending_hub_acks: dict[str, dict[str, Any]] = {}
         self._swing_entry_ladders: dict[str, list[dict[str, Any]]] = {}
-        self._swing_ladder_depth: int = 3
+        self._swing_ladder_depth: int = max(1, int(self.settings.max_concurrent_limit_orders_on_cex or 3))
         self._swing_ladder_total_levels: int = 10
         self._strategy_stats: dict[str, dict[str, Any]] = {}
         self._last_queue_exec_reason: str = ""
         self._queue_reject_until: dict[str, float] = {}
         self._queue_reject_count: dict[str, int] = {}
         self._last_known_cex_protection: dict[str, tuple[float, float]] = {}
+        # Active manual swing plans can define a hard stop boundary (last-entry
+        # edge). We never allow trailing stops to cross that boundary.
+        self._manual_swing_stop_bounds: dict[str, tuple[str, float]] = {}
         self._last_quick_protection_sync: dict[str, float] = {}
         self._quick_protection_sync_interval_secs: float = 10.0
         self._quick_positions_idle_poll_seconds: float = 30.0
@@ -200,6 +205,11 @@ class TradingBot:
         if str(self.settings.bot_id or "").strip().lower() in fast_sync_bot_ids:
             self._quick_protection_sync_interval_secs = 2.0
             self._quick_positions_idle_poll_seconds = 10.0
+        self._quick_protection_sync_interval_normal_secs: float = self._quick_protection_sync_interval_secs
+        self._quick_positions_idle_poll_normal_seconds: float = self._quick_positions_idle_poll_seconds
+        self._extreme_cex_cooldown_until: float = 0.0
+        self._extreme_cached_positions_payload: list[dict[str, Any]] = []
+        self._extreme_cached_foreign_positions_payload: list[dict[str, Any]] = []
         self._running = False
         self._tick_interval = self.settings.tick_interval_idle
         self._status_interval = 300
@@ -222,6 +232,18 @@ class TradingBot:
         self._realized_pnl: float = 0.0
         self._enabled: bool = True  # hub-controlled enable flag
         self._hub_enabled: bool = True  # latest value from hub report response
+        self._runtime_tuning_revision: str = ""
+        self._runtime_tuning_baseline: dict[str, Any] = {}
+        for key, caster in RUNTIME_TUNABLE_CASTERS.items():
+            if not hasattr(self.settings, key):
+                continue
+            raw = getattr(self.settings, key)
+            if raw is None:
+                continue
+            try:
+                self._runtime_tuning_baseline[key] = caster(raw)
+            except Exception:
+                continue
         self._trading_runtime_active: bool = False
         self._low_balance_paused: bool = False
         self._low_balance_pause_reason: str = ""
@@ -248,26 +270,14 @@ class TradingBot:
         self, name: str, symbol: str, market_type: str = "spot", leverage: int = 0, **params: object
     ) -> None:
         if not self.settings.is_market_type_allowed(market_type):
-            fallback = "spot" if self.settings.spot_allowed else None
-            if fallback and market_type != fallback:
-                logger.warning(
-                    "Market type '{}' not allowed — falling back to '{}' for {} ({})",
-                    market_type,
-                    fallback,
-                    name,
-                    symbol,
-                )
-                market_type = fallback
-                leverage = 1
-            else:
-                logger.warning(
-                    "Skipping strategy '{}' for {} — market type '{}' not allowed (allowed: {})",
-                    name,
-                    symbol,
-                    market_type,
-                    self.settings.allowed_market_types,
-                )
-                return
+            logger.warning(
+                "Skipping strategy '{}' for {} — market type '{}' not allowed (allowed: {})",
+                name,
+                symbol,
+                market_type,
+                self.settings.allowed_market_types,
+            )
+            return
 
         lev = leverage or (self.settings.default_leverage if market_type == "futures" else 1)
         cls = BUILTIN_STRATEGIES.get(name)
@@ -775,15 +785,22 @@ class TradingBot:
                 "open_symbols": list(self._open_trades.keys()),
                 "ready": self._entries_allowed(warmup_done),
                 "entries_paused_low_balance": self._low_balance_paused,
+                "runtime_tuning_rev": self._runtime_tuning_revision,
             }
             # Keep dashboard PnL/price near-real-time between full ticks.
             # Without this, position rows can look stale and then "jump" on full tick.
             managed_symbols = set(self._open_trades.keys())
             now_ts = time.monotonic()
+            cooldown_active = self._extreme_cex_cooldown_active()
             should_fetch_positions = bool(managed_symbols)
             if not should_fetch_positions:
                 idle_interval = self._quick_positions_idle_poll_seconds
                 should_fetch_positions = (now_ts - self._last_quick_positions_poll_ts) >= idle_interval
+            if cooldown_active and self._extreme_cached_positions_payload:
+                payload["positions"] = [dict(row) for row in self._extreme_cached_positions_payload]
+                if self._extreme_cached_foreign_positions_payload:
+                    payload["foreign_positions"] = [dict(row) for row in self._extreme_cached_foreign_positions_payload]
+                should_fetch_positions = False
             if should_fetch_positions:
                 positions = await self.exchange.fetch_positions()
                 pos_list: list[dict[str, Any]] = []
@@ -792,18 +809,30 @@ class TradingBot:
                         continue
                     if pos.symbol not in managed_symbols:
                         continue
+                    display_price = self._dashboard_current_price(pos)
+                    notional_value, pnl_pct, pnl_usd = self._dashboard_position_metrics(pos, display_price)
                     ts = self.orders.trailing.active_stops.get(pos.symbol)
+                    if ts is not None:
+                        self._enforce_manual_swing_stop_bound(
+                            str(pos.symbol),
+                            ts,
+                            entry_price=float(getattr(pos, "entry_price", 0.0) or 0.0),
+                        )
                     sp = self.orders.scaler.get(pos.symbol)
                     # Full-tick cadence can be too slow for SL propagation; run a
                     # throttled quick sync pass so CEX follows trailing updates.
                     last_sync = self._last_quick_protection_sync.get(pos.symbol, 0.0)
                     if (now_ts - last_sync) >= self._quick_protection_sync_interval_secs:
                         try:
+                            if str(self.settings.bot_id or "").strip().lower() == "extreme" and display_price > 0:
+                                pos.current_price = display_price
                             await self.orders._sync_symbol_protection(pos, ts)
                         except Exception as e:
                             logger.error("Quick protection sync failed for {}: {}", pos.symbol, e)
+                            if self._is_rate_limited_error(e):
+                                self._activate_extreme_cex_cooldown(e)
                         self._last_quick_protection_sync[pos.symbol] = now_ts
-                    risk = self._build_position_risk_snapshot(pos, ts)
+                    risk = self._build_position_risk_snapshot(pos, ts, current_price_override=display_price)
                     age_minutes = self._position_age_minutes(pos.symbol, getattr(pos, "opened_at", None))
                     pos_list.append(
                         {
@@ -811,13 +840,13 @@ class TradingBot:
                             "side": pos.side.value if hasattr(pos.side, "value") else str(pos.side),
                             "amount": pos.amount,
                             "entry_price": pos.entry_price,
-                            "current_price": pos.current_price,
-                            "pnl_pct": pos.pnl_pct,
-                            "pnl_usd": pos.unrealized_pnl,
-                            "leverage": pos.leverage,
+                            "current_price": display_price,
+                            "pnl_pct": pnl_pct,
+                            "pnl_usd": pnl_usd,
+                            "leverage": self._resolve_position_leverage(pos),
                             "market_type": pos.market_type,
                             "strategy": self._resolve_position_strategy(pos),
-                            "notional_value": pos.notional_value,
+                            "notional_value": notional_value,
                             "age_minutes": age_minutes,
                             "breakeven_locked": ts.breakeven_locked if ts else False,
                             "scale_mode": sp.mode.value if sp else "",
@@ -828,10 +857,11 @@ class TradingBot:
                         }
                     )
                 payload["positions"] = pos_list
-                payload["foreign_positions"] = self._build_foreign_position_observations(
-                    positions,
-                    source="quick_hub_check",
-                )
+                foreign_positions = self._build_foreign_position_observations(positions, source="quick_hub_check")
+                payload["foreign_positions"] = foreign_positions
+                if self._is_extreme_bot_runtime():
+                    self._extreme_cached_positions_payload = [dict(row) for row in pos_list]
+                    self._extreme_cached_foreign_positions_payload = [dict(row) for row in foreign_positions]
                 self._last_quick_positions_poll_ts = now_ts
 
             url = f"{hub_url.rstrip('/')}/internal/report"
@@ -846,13 +876,7 @@ class TradingBot:
                     )
                     return
                 body = await resp.json()
-                if "enabled" in body:
-                    self._hub_enabled = body["enabled"]
-                self._hub_proposal = None
-                if "proposal" in body and self._entries_allowed(warmup_done):
-                    self._hub_proposal = TradeProposal(**body["proposal"])
-                for key in body.get("confirmed_keys", []):
-                    self._pending_hub_acks.pop(key, None)
+                self._apply_hub_report_body(body, warmup_done)
         except Exception as e:
             logger.warning(
                 "Quick hub check error for {} [{}]: {!r}",
@@ -863,11 +887,70 @@ class TradingBot:
             await self._handle_exchange_access_loss(str(e), "quick_hub_check")
             return
         self._retry_pending_hub_trades()
+        if self._entries_allowed(warmup_done) and self._is_swing_owner_bot():
+            with contextlib.suppress(Exception):
+                await self._maintain_manual_swing_plans()
         if self._entries_allowed(warmup_done) and not processed_existing_proposal:
             await self._process_trade_queue()
         elif self.target.manual_stop or self._low_balance_paused:
             # Drop any stale proposal while halted.
             self._hub_proposal = None
+
+    def _apply_runtime_tuning(self, tuning: dict[str, Any], revision: str) -> None:
+        if not isinstance(tuning, dict):
+            return
+        applied: list[str] = []
+        applied_changes: list[str] = []
+        for key, caster in RUNTIME_TUNABLE_CASTERS.items():
+            if not hasattr(self.settings, key):
+                continue
+            baseline_value = self._runtime_tuning_baseline.get(key, getattr(self.settings, key))
+            next_value = baseline_value
+            if key in tuning and tuning.get(key) is not None:
+                try:
+                    next_value = caster(tuning[key])
+                except Exception:
+                    next_value = baseline_value
+            current_value = getattr(self.settings, key)
+            if current_value == next_value:
+                continue
+            setattr(self.settings, key, next_value)
+            applied.append(key)
+            applied_changes.append(f"{key}: {current_value} -> {next_value}")
+        if "max_concurrent_limit_orders_on_cex" in applied:
+            self._swing_ladder_depth = max(1, int(self.settings.max_concurrent_limit_orders_on_cex or 3))
+        if not applied:
+            self._runtime_tuning_revision = str(revision or self._runtime_tuning_revision or "")
+            return
+        self.risk.reload_runtime_settings(self.settings)
+        self.orders.reload_runtime_settings(self.settings)
+        self._runtime_tuning_revision = str(revision or self._runtime_tuning_revision or "")
+        logger.info(
+            "Config change detected for {} (rev={}) — applying new values: {}",
+            (self.settings.bot_id or "default").title(),
+            self._runtime_tuning_revision or "none",
+            "; ".join(applied_changes),
+        )
+        logger.info(
+            "Runtime tuning refreshed for {} rev={} keys={}",
+            self.settings.bot_id or "default",
+            self._runtime_tuning_revision or "none",
+            ",".join(sorted(applied)),
+        )
+
+    def _apply_hub_report_body(self, body: dict[str, Any], warmup_done: bool) -> None:
+        for key in body.get("confirmed_keys", []):
+            self._pending_hub_acks.pop(key, None)
+        if "enabled" in body:
+            self._hub_enabled = body["enabled"]
+        incoming_revision = str(body.get("runtime_tuning_rev", "") or "").strip()
+        if incoming_revision and incoming_revision != self._runtime_tuning_revision:
+            tuning = body.get("runtime_tuning")
+            if isinstance(tuning, dict):
+                self._apply_runtime_tuning(tuning, incoming_revision)
+        self._hub_proposal = None
+        if "proposal" in body and self._entries_allowed(warmup_done):
+            self._hub_proposal = TradeProposal(**body["proposal"])
 
     def _resolve_position_strategy(self, pos: Any) -> str:
         """Resolve strategy label for a live position from available runtime state."""
@@ -886,6 +969,135 @@ class TradingBot:
         if trade_strategy:
             return trade_strategy
         return "—"
+
+    def _resolve_position_leverage(self, pos: Any) -> int:
+        """Prefer live leverage, fallback to tracked trade/scaler leverage."""
+        try:
+            live = round(float(getattr(pos, "leverage", 0) or 0))
+        except (TypeError, ValueError):
+            live = 0
+        if live > 1:
+            return live
+        symbol = str(getattr(pos, "symbol", "") or "").strip()
+        if symbol:
+            rec = self._open_trades.get(symbol)
+            if rec is not None:
+                try:
+                    recorded = round(float(getattr(rec, "leverage", 0) or 0))
+                except (TypeError, ValueError):
+                    recorded = 0
+                if recorded > 1:
+                    return recorded
+            sp = self.orders.scaler.get(symbol)
+            if sp is not None:
+                try:
+                    scaler_lev = round(float(getattr(sp, "current_leverage", 0) or 0))
+                except (TypeError, ValueError):
+                    scaler_lev = 0
+                if scaler_lev <= 1:
+                    try:
+                        scaler_lev = round(float(getattr(sp, "initial_leverage", 0) or 0))
+                    except (TypeError, ValueError):
+                        scaler_lev = 0
+                if scaler_lev > 1:
+                    return scaler_lev
+        return max(1, live)
+
+    def _dashboard_current_price(self, pos: Any) -> float:
+        """Dashboard-only price source; extreme bot prefers latest WS ticker tick."""
+        current = float(getattr(pos, "current_price", 0.0) or 0.0)
+        if str(self.settings.bot_id or "").strip().lower() != "extreme":
+            return current
+        symbol = str(getattr(pos, "symbol", "") or "").strip()
+        if not symbol:
+            return current
+        ws_price = self.extreme_watcher.latest_price(symbol)
+        if ws_price and ws_price > 0:
+            return ws_price
+        return current
+
+    def _dashboard_position_metrics(self, pos: Any, display_price: float) -> tuple[float, float, float]:
+        """Dashboard-only position metrics; extreme bot derives from latest WS price."""
+        notional = float(getattr(pos, "notional_value", 0.0) or 0.0)
+        pnl_pct = float(getattr(pos, "pnl_pct", 0.0) or 0.0)
+        pnl_usd = float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+        if str(self.settings.bot_id or "").strip().lower() != "extreme":
+            return notional, pnl_pct, pnl_usd
+
+        amount = abs(float(getattr(pos, "amount", 0.0) or 0.0))
+        entry = float(getattr(pos, "entry_price", 0.0) or 0.0)
+        leverage = max(float(getattr(pos, "leverage", 1.0) or 1.0), 1.0)
+        side_raw = getattr(pos, "side", "") or ""
+        side = side_raw.value if hasattr(side_raw, "value") else str(side_raw)
+        is_long = str(side).lower() in {"buy", "long"}
+        current = float(display_price or 0.0)
+        if amount <= 0 or entry <= 0 or current <= 0:
+            return notional, pnl_pct, pnl_usd
+
+        notional_ws = amount * current
+        pnl_usd_ws = (current - entry) * amount if is_long else (entry - current) * amount
+        pnl_pct_ws = (
+            ((current - entry) / entry) * 100 * leverage if is_long else ((entry - current) / entry) * 100 * leverage
+        )
+        return notional_ws, pnl_pct_ws, pnl_usd_ws
+
+    def _is_extreme_bot_runtime(self) -> bool:
+        return str(self.settings.bot_id or "").strip().lower() == "extreme"
+
+    @staticmethod
+    def _is_rate_limited_error(error: Exception | str) -> bool:
+        text = str(error or "").lower()
+        return any(
+            token in text
+            for token in (
+                'code":-1003',
+                "way too much request weight used",
+                "ip banned until",
+                "rate limit",
+                "too many requests",
+                "http 429",
+                "status 429",
+            )
+        )
+
+    @staticmethod
+    def _rate_limit_cooldown_seconds(error: Exception | str) -> int:
+        text = str(error or "")
+        lowered = text.lower()
+        match = re.search(r"ip banned until\s+(\d{10,16})", lowered)
+        if match:
+            raw = int(match.group(1))
+            if raw > 10_000_000_000:
+                raw = raw // 1000
+            now = int(time.time())
+            if raw > now:
+                return max(5, min(300, raw - now))
+        return 30
+
+    def _activate_extreme_cex_cooldown(self, error: Exception | str) -> None:
+        if not self._is_extreme_bot_runtime():
+            return
+        cooldown = self._rate_limit_cooldown_seconds(error)
+        now_mono = time.monotonic()
+        self._extreme_cex_cooldown_until = max(self._extreme_cex_cooldown_until, now_mono + cooldown)
+        # Temporary anti-spam throttle while CEX cools down.
+        self._quick_protection_sync_interval_secs = max(self._quick_protection_sync_interval_normal_secs, 8.0)
+        self._quick_positions_idle_poll_seconds = max(self._quick_positions_idle_poll_normal_seconds, 20.0)
+        logger.warning("Extreme CEX throttle enabled for {}s due to rate-limit signal: {}", cooldown, error)
+
+    def _extreme_cex_cooldown_active(self) -> bool:
+        if not self._is_extreme_bot_runtime():
+            return False
+        until = float(self._extreme_cex_cooldown_until or 0.0)
+        now_mono = time.monotonic()
+        if until > now_mono:
+            return True
+        if until > 0:
+            self._extreme_cex_cooldown_until = 0.0
+            self._quick_protection_sync_interval_secs = self._quick_protection_sync_interval_normal_secs
+            self._quick_positions_idle_poll_seconds = self._quick_positions_idle_poll_normal_seconds
+            logger.info("Extreme CEX throttle disabled — resumed normal polling cadence")
+        return False
 
     def _build_foreign_position_observations(self, positions: list[Any], source: str) -> list[dict[str, Any]]:
         """Build passive foreign-position observations for hub-side classification."""
@@ -1107,6 +1319,18 @@ class TradingBot:
 
         # 1. Check trailing stops and liquidation (fast monitor handles sub-second
         #    checks; this is the fallback that also covers liquidation risk)
+        if self._manual_swing_stop_bounds:
+            for pos in positions:
+                if float(getattr(pos, "amount", 0.0) or 0.0) <= 0:
+                    continue
+                ts = self.orders.trailing.get(str(getattr(pos, "symbol", "") or ""))
+                if ts is None:
+                    continue
+                self._enforce_manual_swing_stop_bound(
+                    str(getattr(pos, "symbol", "") or ""),
+                    ts,
+                    entry_price=float(getattr(pos, "entry_price", 0.0) or 0.0),
+                )
         async with self._stop_check_lock:
             closed = await self.orders.check_stops()
             for order in closed:
@@ -1167,6 +1391,8 @@ class TradingBot:
             for sym in list(self._open_trades.keys()):
                 with contextlib.suppress(Exception):
                     await self._maintain_swing_entry_ladder(sym)
+            with contextlib.suppress(Exception):
+                await self._maintain_manual_swing_plans()
         else:
             scale_orders = await self.orders.try_scale_in()
             if scale_orders:
@@ -2105,21 +2331,24 @@ class TradingBot:
         pos: Any,
         ts: Any | None,
         cex_sl_tp: tuple[float, float] | None = None,
+        current_price_override: float | None = None,
     ) -> dict[str, Any]:
         """Build explicit SL/TP source fields and risk state for dashboard payloads."""
         symbol = str(getattr(pos, "symbol", "") or "")
         entry = float(getattr(pos, "entry_price", 0.0) or 0.0)
-        current = float(getattr(pos, "current_price", 0.0) or 0.0)
+        current = (
+            float(current_price_override)
+            if current_price_override is not None
+            else float(getattr(pos, "current_price", 0.0) or 0.0)
+        )
         side_raw = getattr(pos, "side", "") or ""
         side = side_raw.value if hasattr(side_raw, "value") else str(side_raw)
         side_l = side.lower()
         is_long = side_l in ("buy", "long")
 
-        exchange_sl_raw = getattr(pos, "stop_loss", None)
-        exchange_tp_raw = getattr(pos, "take_profit", None)
-        exchange_sl = float(exchange_sl_raw) if exchange_sl_raw else 0.0
-        exchange_tp = float(exchange_tp_raw) if exchange_tp_raw else 0.0
-        if cex_sl_tp:
+        exchange_sl = 0.0
+        exchange_tp = 0.0
+        if cex_sl_tp is not None:
             cex_sl, cex_tp = cex_sl_tp
             if cex_sl > 0:
                 exchange_sl = cex_sl
@@ -2129,12 +2358,17 @@ class TradingBot:
         # Keep last confirmed CEX protection values visible in dashboard payloads
         # when Binance/CCXT returns intermittent empty snapshots.
         cached_sl, cached_tp = self._last_known_cex_protection.get(symbol, (0.0, 0.0))
-        if exchange_sl > 0 or exchange_tp > 0:
-            self._last_known_cex_protection[symbol] = (
-                exchange_sl if exchange_sl > 0 else cached_sl,
-                exchange_tp if exchange_tp > 0 else cached_tp,
-            )
+        if cex_sl_tp is not None:
+            if exchange_sl > 0 or exchange_tp > 0:
+                self._last_known_cex_protection[symbol] = (
+                    exchange_sl if exchange_sl > 0 else cached_sl,
+                    exchange_tp if exchange_tp > 0 else cached_tp,
+                )
+            else:
+                # Fresh open-orders snapshot with no SL/TP for this symbol: clear stale cache.
+                self._last_known_cex_protection.pop(symbol, None)
         else:
+            # No fresh open-orders snapshot available (fetch failed): use cache if present.
             if cached_sl > 0:
                 exchange_sl = cached_sl
             if cached_tp > 0:
@@ -2280,8 +2514,10 @@ class TradingBot:
         """Build and send dashboard snapshot to the central hub."""
         foreign_source_positions = all_positions if all_positions is not None else active_positions
         cex_levels_by_symbol: dict[str, tuple[float, float]] = {}
+        cex_snapshot_fresh = False
         try:
             open_orders = await self.exchange.fetch_open_orders(market_type=MarketType.FUTURES)
+            cex_snapshot_fresh = True
             for order in open_orders:
                 symbol = str(getattr(order, "symbol", "") or "").split(":")[0]
                 stop_price = float(getattr(order, "stop_price", 0.0) or 0.0)
@@ -2295,14 +2531,29 @@ class TradingBot:
                 cex_levels_by_symbol[symbol] = (sl, tp)
         except Exception as e:
             logger.debug("Failed to fetch open orders for CEX SL/TP snapshot: {}", e)
+            if self._is_rate_limited_error(e):
+                self._activate_extreme_cex_cooldown(e)
 
         pos_list = []
+        exchange_unrealized_pnl = 0.0
         active_symbols: set[str] = set()
         for pos in active_positions:
             active_symbols.add(pos.symbol)
+            with contextlib.suppress(TypeError, ValueError):
+                exchange_unrealized_pnl += float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+            display_price = self._dashboard_current_price(pos)
+            notional_value, pnl_pct, pnl_usd = self._dashboard_position_metrics(pos, display_price)
             ts = self.orders.trailing.active_stops.get(pos.symbol)
             sp = self.orders.scaler.get(pos.symbol)
-            risk = self._build_position_risk_snapshot(pos, ts, cex_levels_by_symbol.get(pos.symbol))
+            cex_levels = cex_levels_by_symbol.get(pos.symbol)
+            if cex_snapshot_fresh and cex_levels is None:
+                cex_levels = (0.0, 0.0)
+            risk = self._build_position_risk_snapshot(
+                pos,
+                ts,
+                cex_levels,
+                current_price_override=display_price,
+            )
             await self._sync_runtime_trade_if_changed(pos.symbol)
             age_minutes = self._position_age_minutes(pos.symbol, getattr(pos, "opened_at", None))
             pos_list.append(
@@ -2311,13 +2562,13 @@ class TradingBot:
                     "side": pos.side.value if hasattr(pos.side, "value") else str(pos.side),
                     "amount": pos.amount,
                     "entry_price": pos.entry_price,
-                    "current_price": pos.current_price,
-                    "pnl_pct": pos.pnl_pct,
-                    "pnl_usd": pos.unrealized_pnl,
-                    "leverage": pos.leverage,
+                    "current_price": display_price,
+                    "pnl_pct": pnl_pct,
+                    "pnl_usd": pnl_usd,
+                    "leverage": self._resolve_position_leverage(pos),
                     "market_type": pos.market_type,
                     "strategy": self._resolve_position_strategy(pos),
-                    "notional_value": pos.notional_value,
+                    "notional_value": notional_value,
                     "age_minutes": age_minutes,
                     "breakeven_locked": ts.breakeven_locked if ts else False,
                     "scale_mode": sp.mode.value if sp else "",
@@ -2432,6 +2683,11 @@ class TradingBot:
             # Futures wallet anchor from exchange (e.g. walletBalance/total) when available.
             # Hub prefers this for account-level balance display to avoid free-balance drift.
             "exchange_wallet_balance": wallet_anchor,
+            # Raw exchange unrealized PnL anchor (sum from exchange positions).
+            "exchange_unrealized_pnl": float(exchange_unrealized_pnl),
+            # Some exchanges (e.g., Binance futures) expose account balance and
+            # unrealized PnL separately in the UI account view.
+            "exchange_wallet_requires_unrealized_addition": bool(self.settings.exchange_base == "binance"),
             "status": {
                 "running": self._running,
                 "trading_mode": self.settings.trading_mode,
@@ -2489,6 +2745,7 @@ class TradingBot:
             warmup_done = uptime_min >= self._warmup_minutes
         payload["ready"] = self._entries_allowed(warmup_done)
         payload["entries_paused_low_balance"] = self._low_balance_paused
+        payload["runtime_tuning_rev"] = self._runtime_tuning_revision
 
         try:
             url = f"{hub_url.rstrip('/')}/internal/report"
@@ -2497,13 +2754,7 @@ class TradingBot:
                     logger.warning("Hub report failed: {}", resp.status)
                     return
                 body = await resp.json()
-                for key in body.get("confirmed_keys", []):
-                    self._pending_hub_acks.pop(key, None)
-                if "enabled" in body:
-                    self._hub_enabled = body["enabled"]
-                self._hub_proposal = None
-                if "proposal" in body and self._entries_allowed(warmup_done):
-                    self._hub_proposal = TradeProposal(**body["proposal"])
+                self._apply_hub_report_body(body, warmup_done)
         except Exception as e:
             logger.error("Hub report error: {}", e, exc_info=True)
         self._retry_pending_hub_trades()
@@ -2677,6 +2928,7 @@ class TradingBot:
                 continue
             levels.append(
                 {
+                    "parent_plan_id": str(rec.opened_at or "").strip(),
                     "entry_idx": idx,
                     "side": "short" if side in {"short", "sell"} else "long",
                     "price": float(price),
@@ -2685,21 +2937,44 @@ class TradingBot:
                     "status": "planned",
                     "order_id": "",
                     "strategy": str(rec.strategy or "swing_ladder"),
+                    "mode": "swing_auto",
+                    "exchange": str(self.settings.exchange_base or "").upper(),
+                    "first_entry_price": 0.0,
+                    "last_entry_price": 0.0,
+                    "grid_count": 0,
+                    "margin_amount": 0.0,
+                    "plan_state": "active",
+                    "max_concurrent_limit_orders_on_cex": int(max(1, self._swing_ladder_depth)),
                     "created_at": datetime.now(UTC).isoformat(),
                 }
             )
+        if levels:
+            first_entry = float(levels[0].get("price", 0.0) or 0.0)
+            last_entry = float(levels[-1].get("price", 0.0) or 0.0)
+            margin_amount = 0.0
+            for item in levels:
+                px = float(item.get("price", 0.0) or 0.0)
+                amt = float(item.get("amount", 0.0) or 0.0)
+                lev = max(1, int(item.get("leverage", 1) or 1))
+                if px > 0 and amt > 0:
+                    margin_amount += (px * amt) / float(lev)
+            for item in levels:
+                item["first_entry_price"] = first_entry
+                item["last_entry_price"] = last_entry
+                item["grid_count"] = len(levels)
+                item["margin_amount"] = margin_amount
         return levels
 
-    async def _sync_swing_ladder_to_hub(self, symbol: str, rec: TradeRecord, entries: list[dict[str, Any]]) -> None:
+    async def _sync_swing_entries_to_hub(self, symbol: str, opened_at: str, entries: list[dict[str, Any]]) -> None:
         hub_url = self.settings.hub_url
-        if not hub_url or not rec.opened_at:
+        if not hub_url or not opened_at:
             return
         if not self._hub_session:
             self._hub_session = self._new_hub_session(timeout_seconds=5)
         payload = {
             "bot_id": self.settings.bot_id or "default",
             "symbol": symbol,
-            "opened_at": rec.opened_at,
+            "opened_at": opened_at,
             "entries": entries,
         }
         try:
@@ -2709,15 +2984,18 @@ class TradingBot:
         except Exception as e:
             logger.warning("Hub swing ladder sync error for {}: {}", symbol, e)
 
-    async def _load_swing_ladder_from_hub(self, symbol: str, rec: TradeRecord) -> list[dict[str, Any]]:
+    async def _sync_swing_ladder_to_hub(self, symbol: str, rec: TradeRecord, entries: list[dict[str, Any]]) -> None:
+        await self._sync_swing_entries_to_hub(symbol, str(rec.opened_at or ""), entries)
+
+    async def _load_swing_entries_from_hub(self, symbol: str, opened_at: str) -> list[dict[str, Any]]:
         hub_url = self.settings.hub_url
-        if not hub_url or not rec.opened_at:
+        if not hub_url or not opened_at:
             return []
         if not self._hub_session:
             self._hub_session = self._new_hub_session(timeout_seconds=5)
         try:
             url = f"{hub_url.rstrip('/')}/internal/entry-plan/{self.settings.bot_id or 'default'}/{symbol}"
-            async with self._hub_session.get(url, params={"opened_at": rec.opened_at}) as resp:
+            async with self._hub_session.get(url, params={"opened_at": opened_at}) as resp:
                 if resp.status != 200:
                     return []
                 body = await resp.json()
@@ -2726,11 +3004,24 @@ class TradingBot:
         except Exception:
             return []
 
+    async def _load_swing_ladder_from_hub(self, symbol: str, rec: TradeRecord) -> list[dict[str, Any]]:
+        return await self._load_swing_entries_from_hub(symbol, str(rec.opened_at or ""))
+
     async def _maintain_swing_entry_ladder(self, symbol: str) -> None:
         if not self._is_swing_owner_bot():
             return
         rec = self._open_trades.get(symbol)
         if rec is None or not rec.opened_at:
+            return
+        market_type = MarketType.FUTURES if self.settings.futures_allowed else MarketType.SPOT
+        # Manual swing plans own ladder management for this symbol.
+        # Never run generic swing_auto ladder logic on swing_manual trades.
+        if str(rec.strategy or "").strip().lower() == "swing_manual":
+            with contextlib.suppress(Exception):
+                await self._cancel_swing_ladder_orders_for_symbol(symbol, market_type=market_type)
+            with contextlib.suppress(Exception):
+                await self._sync_swing_entries_to_hub(symbol, str(rec.opened_at or ""), [])
+            self._swing_entry_ladders.pop(symbol, None)
             return
         if symbol not in self._swing_entry_ladders:
             loaded = await self._load_swing_ladder_from_hub(symbol, rec)
@@ -2740,7 +3031,6 @@ class TradingBot:
         if not ladder:
             return
 
-        market_type = MarketType.FUTURES if self.settings.futures_allowed else MarketType.SPOT
         side = str(rec.side or "").strip().lower()
         order_side = OrderSide.SELL if side in {"short", "sell"} else OrderSide.BUY
         open_orders = await self.exchange.fetch_open_orders(symbol, market_type=market_type)
@@ -2753,7 +3043,7 @@ class TradingBot:
             if status == "filled":
                 continue
             if oid and oid in open_by_id:
-                item["status"] = "placed"
+                item["status"] = "placed_on_cex"
                 active += 1
                 continue
             if oid:
@@ -2773,9 +3063,22 @@ class TradingBot:
                 item["status"] = "planned"
                 item["order_id"] = ""
 
-        active = sum(1 for i in ladder if str(i.get("status", "")) == "placed")
+        depth = self._swing_ladder_depth
+        if ladder:
+            with contextlib.suppress(Exception):
+                depth = max(
+                    1,
+                    int(
+                        ladder[0].get(
+                            "max_concurrent_limit_orders_on_cex",
+                            self.settings.max_concurrent_limit_orders_on_cex,
+                        )
+                        or self._swing_ladder_depth
+                    ),
+                )
+        active = sum(1 for i in ladder if str(i.get("status", "")) == "placed_on_cex")
         for item in ladder:
-            if active >= self._swing_ladder_depth:
+            if active >= depth:
                 break
             if str(item.get("status", "planned")) != "planned":
                 continue
@@ -2804,7 +3107,7 @@ class TradingBot:
                 if sp is not None:
                     sp.record_add(float(order.filled or 0.0), float(order.average_price or order.price or price))
             else:
-                item["status"] = "placed"
+                item["status"] = "placed_on_cex"
                 active += 1
 
         await self._sync_swing_ladder_to_hub(symbol, rec, ladder)
@@ -2823,7 +3126,7 @@ class TradingBot:
 
         cancelled = 0
         for item in ladder:
-            if str(item.get("status", "") or "").strip().lower() != "placed":
+            if str(item.get("status", "") or "").strip().lower() != "placed_on_cex":
                 continue
             oid = str(item.get("order_id", "") or "").strip()
             if not oid:
@@ -2840,6 +3143,445 @@ class TradingBot:
         if cancelled > 0:
             await self._sync_swing_ladder_to_hub(symbol, rec, ladder)
         return cancelled
+
+    async def _set_manual_swing_plan_state(self, symbol: str, plan_id: str, plan_state: str) -> None:
+        hub_url = self.settings.hub_url
+        if not hub_url:
+            return
+        if not self._hub_session:
+            self._hub_session = self._new_hub_session(timeout_seconds=5)
+        payload = {
+            "bot_id": self.settings.bot_id or "default",
+            "symbol": symbol,
+            "plan_id": plan_id,
+            "plan_state": plan_state,
+        }
+        with contextlib.suppress(Exception):
+            async with self._hub_session.post(f"{hub_url.rstrip('/')}/internal/manual-swing/plan-state", json=payload):
+                pass
+
+    async def _list_active_manual_swing_plans_from_hub(self) -> list[dict[str, Any]]:
+        hub_url = self.settings.hub_url
+        if not hub_url:
+            return []
+        if not self._hub_session:
+            self._hub_session = self._new_hub_session(timeout_seconds=5)
+        ex = str(self.settings.exchange_base or "").strip().upper()
+        try:
+            url = f"{hub_url.rstrip('/')}/internal/manual-swing/plans/{self.settings.bot_id or 'default'}"
+            async with self._hub_session.get(url, params={"exchange": ex}) as resp:
+                if resp.status != 200:
+                    return []
+                body = await resp.json()
+                plans = body.get("plans", [])
+                return [dict(p) for p in plans] if isinstance(plans, list) else []
+        except Exception:
+            return []
+
+    async def _maintain_manual_swing_plan(self, symbol: str, plan_id: str, *, first_leg_only: bool = False) -> None:
+        market_type = MarketType.FUTURES if self.settings.futures_allowed else MarketType.SPOT
+        rows = await self._load_swing_entries_from_hub(symbol, plan_id)
+        if not rows:
+            return
+        self._cache_manual_swing_stop_bound(symbol, rows)
+        ts = self.orders.trailing.get(symbol)
+        rec = self._open_trades.get(symbol)
+        if ts is not None:
+            self._enforce_manual_swing_stop_bound(
+                symbol,
+                ts,
+                entry_price=float(getattr(rec, "entry_price", 0.0) or 0.0),
+            )
+        plan_state = str(rows[0].get("plan_state", "active") or "active").strip().lower()
+        side = str(rows[0].get("side", "long") or "long").strip().lower()
+        order_side = OrderSide.SELL if side in {"short", "sell"} else OrderSide.BUY
+        depth = max(
+            1,
+            int(
+                rows[0].get("max_concurrent_limit_orders_on_cex", self.settings.max_concurrent_limit_orders_on_cex)
+                or self._swing_ladder_depth
+            ),
+        )
+
+        open_orders = await self.exchange.fetch_open_orders(symbol, market_type=market_type)
+        open_by_id = {str(o.id or ""): o for o in open_orders if str(o.id or "").strip()}
+        had_fill = False
+        active = 0
+
+        for item in rows:
+            oid = str(item.get("order_id", "") or "")
+            status = str(item.get("status", "planned") or "planned").strip().lower()
+            if status in {"filled", "cancelled"}:
+                continue
+            if oid and oid in open_by_id:
+                item["status"] = "placed_on_cex"
+                active += 1
+                continue
+            if oid:
+                with contextlib.suppress(Exception):
+                    fetched = await self.exchange.fetch_order(oid, symbol, market_type=market_type)
+                    if (
+                        fetched.status in {OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED}
+                        and float(fetched.filled or 0) > 0
+                    ):
+                        item["status"] = "filled"
+                        item["order_id"] = str(fetched.id or oid)
+                        had_fill = True
+                        continue
+                    if fetched.status in {OrderStatus.CANCELLED, OrderStatus.FAILED}:
+                        item["status"] = "cancelled"
+                        item["order_id"] = ""
+                        continue
+                item["status"] = "planned"
+                item["order_id"] = ""
+
+        # Reconcile rows that are still "planned" but already exist live on CEX.
+        # This fills missing order_id links instead of placing duplicates.
+        self._reconcile_manual_swing_rows_with_live_limits(rows, open_orders, order_side)
+
+        if plan_state == "cancel_requested":
+            for item in rows:
+                if str(item.get("status", "") or "").strip().lower() != "placed_on_cex":
+                    if str(item.get("status", "") or "").strip().lower() == "planned":
+                        item["status"] = "cancelled"
+                    continue
+                oid = str(item.get("order_id", "") or "").strip()
+                if oid:
+                    with contextlib.suppress(Exception):
+                        await self.exchange.cancel_order(oid, symbol, market_type=market_type)
+                item["status"] = "cancelled"
+                item["order_id"] = ""
+            if symbol in self._open_trades:
+                sig = Signal(
+                    symbol=symbol,
+                    action=SignalAction.CLOSE,
+                    strategy="swing_manual",
+                    reason=f"Manual swing plan cancel ({plan_id})",
+                    market_type=market_type.value,
+                )
+                with contextlib.suppress(Exception):
+                    await self._prepare_symbol_for_forced_close(symbol, market_type=market_type)
+                    await self._process_signal(sig)
+            await self._sync_swing_entries_to_hub(symbol, plan_id, rows)
+            await self._set_manual_swing_plan_state(symbol, plan_id, "cancelled")
+            self._manual_swing_stop_bounds.pop(symbol, None)
+            return
+
+        # Guard: once a manual plan had fills, never place/keep follow-up LIMITs
+        # if the related master trade is no longer open.
+        plan_has_fill = any(str(i.get("status", "") or "").strip().lower() == "filled" for i in rows)
+        if plan_has_fill and symbol not in self._open_trades and not await self._is_symbol_open_on_exchange(symbol):
+            logger.warning(
+                "Manual swing cleanup: plan has fills but trade is closed for {} (plan_id={})",
+                symbol,
+                plan_id,
+            )
+            tracked_live_ids = {
+                str(i.get("order_id", "") or "").strip()
+                for i in rows
+                if str(i.get("status", "") or "").strip().lower() == "placed_on_cex"
+                and str(i.get("order_id", "") or "").strip()
+            }
+            extra_live_ids: set[str] = set()
+            target_side = str(getattr(order_side, "value", order_side) or "").strip().lower()
+            for order in open_orders:
+                oid = str(getattr(order, "id", "") or "").strip()
+                if not oid:
+                    continue
+                side_raw = getattr(order, "side", "")
+                type_raw = getattr(order, "order_type", "")
+                status_raw = getattr(order, "status", "")
+                side_l = str(getattr(side_raw, "value", side_raw) or "").strip().lower()
+                type_l = str(getattr(type_raw, "value", type_raw) or "").strip().lower()
+                status_l = str(getattr(status_raw, "value", status_raw) or "").strip().lower()
+                if side_l != target_side or type_l != OrderType.LIMIT.value:
+                    continue
+                if status_l in {OrderStatus.FILLED.value, OrderStatus.CANCELLED.value, OrderStatus.FAILED.value}:
+                    continue
+                if oid not in tracked_live_ids:
+                    extra_live_ids.add(oid)
+            for oid in tracked_live_ids | extra_live_ids:
+                with contextlib.suppress(Exception):
+                    await self.exchange.cancel_order(oid, symbol, market_type=market_type)
+            for item in rows:
+                status_l = str(item.get("status", "") or "").strip().lower()
+                if status_l == "filled":
+                    continue
+                item["status"] = "cancelled"
+                item["order_id"] = ""
+            await self._sync_swing_entries_to_hub(symbol, plan_id, rows)
+            await self._set_manual_swing_plan_state(symbol, plan_id, "cancelled")
+            self._manual_swing_stop_bounds.pop(symbol, None)
+            return
+
+        tracked_active = sum(1 for item in rows if str(item.get("status", "") or "").strip().lower() == "placed_on_cex")
+        live_active = self._count_live_manual_swing_limits(open_orders, order_side)
+        if live_active > tracked_active:
+            logger.warning(
+                "Manual swing live limit count exceeds tracked plan state for {} (plan_id={}, live={}, tracked={})",
+                symbol,
+                plan_id,
+                live_active,
+                tracked_active,
+            )
+        active = max(tracked_active, live_active)
+        for item in rows:
+            if active >= depth:
+                break
+            status_l = str(item.get("status", "planned") or "").strip().lower()
+            if status_l not in {"planned", "failed"}:
+                continue
+            if first_leg_only and int(item.get("entry_idx", 0) or 0) != 1:
+                continue
+            price = float(item.get("price", 0.0) or 0.0)
+            amount = float(item.get("amount", 0.0) or 0.0)
+            lev = max(1, int(item.get("leverage", self.settings.default_leverage) or 1))
+            if price <= 0 or amount <= 0:
+                item["status"] = "failed"
+                if first_leg_only:
+                    break
+                continue
+            entry_idx = int(item.get("entry_idx", 0) or 0)
+            immediate_first_entry = entry_idx == 1
+            reserve_sig: Signal | None = None
+            reserved_opened_at = ""
+            if immediate_first_entry and symbol not in self._open_trades:
+                reserve_sig = Signal(
+                    symbol=symbol,
+                    action=SignalAction.SELL if order_side == OrderSide.SELL else SignalAction.BUY,
+                    strategy="swing_manual",
+                    reason=f"manual swing plan {plan_id} first entry",
+                    market_type=market_type.value,
+                )
+                reserved_opened_at = await self._reserve_open_trade_with_hub(reserve_sig)
+                if self.settings.hub_url and not reserved_opened_at:
+                    logger.warning(
+                        "Manual swing first-entry skipped for {} idx={} (hub reserve failed)",
+                        symbol,
+                        entry_idx,
+                    )
+                    item["status"] = "failed" if first_leg_only else "planned"
+                    if first_leg_only:
+                        break
+                    continue
+            try:
+                order = await self.exchange.place_order(
+                    symbol=symbol,
+                    side=order_side,
+                    order_type=OrderType.MARKET if immediate_first_entry else OrderType.LIMIT,
+                    amount=amount,
+                    price=None if immediate_first_entry else price,
+                    leverage=lev,
+                    market_type=market_type,
+                )
+            except Exception as e:
+                logger.warning("Manual swing place failed for {} idx={}: {}", symbol, item.get("entry_idx", 0), e)
+                if reserve_sig and reserved_opened_at:
+                    await self._release_open_trade_reservation(reserve_sig, reserved_opened_at, "open_exception")
+                item["status"] = "failed" if first_leg_only else "planned"
+                if first_leg_only:
+                    break
+                continue
+            item["order_id"] = str(order.id or "")
+            if order.status in {OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED} and float(order.filled or 0) > 0:
+                item["status"] = "filled"
+                had_fill = True
+                if reserve_sig and reserved_opened_at and symbol not in self._open_trades:
+                    await self._log_opened_trade(
+                        reserve_sig,
+                        order,
+                        opened_at_override=reserved_opened_at,
+                    )
+            else:
+                if reserve_sig and reserved_opened_at:
+                    status_txt = str(getattr(order.status, "value", order.status) or "pending").lower()
+                    await self._release_open_trade_reservation(
+                        reserve_sig,
+                        reserved_opened_at,
+                        f"failed_fill:{status_txt}",
+                    )
+                    item["status"] = "failed" if first_leg_only else "planned"
+                    if first_leg_only:
+                        break
+                    continue
+                item["status"] = "placed_on_cex"
+                active += 1
+            if first_leg_only:
+                break
+
+        if had_fill and symbol not in self._open_trades:
+            with contextlib.suppress(Exception):
+                await self._claim_orphan_position(symbol, strategy="swing_manual")
+
+        pending = any(str(i.get("status", "")).lower() in {"planned", "placed_on_cex"} for i in rows)
+        await self._sync_swing_entries_to_hub(symbol, plan_id, rows)
+        if not pending:
+            await self._set_manual_swing_plan_state(symbol, plan_id, "completed")
+            self._manual_swing_stop_bounds.pop(symbol, None)
+
+    @staticmethod
+    def _count_live_manual_swing_limits(open_orders: list[Any], order_side: OrderSide) -> int:
+        """Count live symbol limits on CEX for the plan side, even if untracked in plan rows."""
+        target_side = str(getattr(order_side, "value", order_side) or "").strip().lower()
+        count = 0
+        for order in open_orders:
+            side_raw = getattr(order, "side", "")
+            type_raw = getattr(order, "order_type", "")
+            status_raw = getattr(order, "status", "")
+            side = str(getattr(side_raw, "value", side_raw) or "").strip().lower()
+            order_type = str(getattr(type_raw, "value", type_raw) or "").strip().lower()
+            status = str(getattr(status_raw, "value", status_raw) or "").strip().lower()
+            if side != target_side:
+                continue
+            if order_type != OrderType.LIMIT.value:
+                continue
+            if status in {OrderStatus.FILLED.value, OrderStatus.CANCELLED.value, OrderStatus.FAILED.value}:
+                continue
+            count += 1
+        return count
+
+    def _reconcile_manual_swing_rows_with_live_limits(
+        self,
+        rows: list[dict[str, Any]],
+        open_orders: list[Any],
+        order_side: OrderSide,
+    ) -> None:
+        """Attach live CEX LIMIT orders to planned rows by price/amount match."""
+        target_side = str(getattr(order_side, "value", order_side) or "").strip().lower()
+        matched_ids = {
+            str(item.get("order_id", "") or "").strip() for item in rows if str(item.get("order_id", "") or "").strip()
+        }
+        candidates: list[Any] = []
+        for order in open_orders:
+            oid = str(getattr(order, "id", "") or "").strip()
+            if not oid or oid in matched_ids:
+                continue
+            side_raw = getattr(order, "side", "")
+            type_raw = getattr(order, "order_type", "")
+            status_raw = getattr(order, "status", "")
+            side = str(getattr(side_raw, "value", side_raw) or "").strip().lower()
+            order_type = str(getattr(type_raw, "value", type_raw) or "").strip().lower()
+            status = str(getattr(status_raw, "value", status_raw) or "").strip().lower()
+            if side != target_side:
+                continue
+            if order_type != OrderType.LIMIT.value:
+                continue
+            if status in {OrderStatus.FILLED.value, OrderStatus.CANCELLED.value, OrderStatus.FAILED.value}:
+                continue
+            candidates.append(order)
+
+        # Prefer deterministic matching by plan order (entry_idx asc) then first exact candidate.
+        for item in sorted(rows, key=lambda r: int(r.get("entry_idx", 0) or 0)):
+            status = str(item.get("status", "planned") or "planned").strip().lower()
+            if status != "planned":
+                continue
+            target_price = float(item.get("price", 0.0) or 0.0)
+            target_amount = float(item.get("amount", 0.0) or 0.0)
+            if target_price <= 0 or target_amount <= 0:
+                continue
+            picked_idx = -1
+            for idx, order in enumerate(candidates):
+                order_price = float(getattr(order, "price", 0.0) or 0.0)
+                order_amount = float(getattr(order, "amount", 0.0) or 0.0)
+                if abs(order_price - target_price) > max(1e-8, abs(target_price) * 1e-6):
+                    continue
+                if abs(order_amount - target_amount) > max(1e-8, abs(target_amount) * 1e-6):
+                    continue
+                picked_idx = idx
+                break
+            if picked_idx < 0:
+                continue
+            matched = candidates.pop(picked_idx)
+            item["order_id"] = str(getattr(matched, "id", "") or "")
+            item["status"] = "placed_on_cex"
+
+    async def _maintain_manual_swing_plans(self) -> None:
+        if not self._is_swing_owner_bot():
+            return
+        plans = await self._list_active_manual_swing_plans_from_hub()
+        seen_symbols: set[str] = set()
+        for plan in plans:
+            symbol = str(plan.get("symbol", "") or "").strip().upper()
+            plan_id = str(plan.get("plan_id", "") or "").strip()
+            if not symbol or not plan_id:
+                continue
+            if symbol in seen_symbols:
+                logger.warning(
+                    "Skipping duplicate active manual swing plan for {} (plan_id={})",
+                    symbol,
+                    plan_id,
+                )
+                continue
+            seen_symbols.add(symbol)
+            with contextlib.suppress(Exception):
+                await self._maintain_manual_swing_plan(symbol, plan_id)
+
+    def _cache_manual_swing_stop_bound(self, symbol: str, rows: list[dict[str, Any]]) -> None:
+        """Cache per-symbol boundary from an active manual swing plan."""
+        if not rows:
+            return
+        first = rows[0]
+        side_raw = str(first.get("side", "long") or "long").strip().lower()
+        side = "short" if side_raw in {"short", "sell"} else "long"
+        last_entry_price = float(first.get("last_entry_price", 0.0) or 0.0)
+        if last_entry_price <= 0:
+            return
+        self._manual_swing_stop_bounds[str(symbol or "").strip().upper()] = (side, last_entry_price)
+
+    def _enforce_manual_swing_stop_bound(self, symbol: str, ts: Any, *, entry_price: float = 0.0) -> None:
+        """Ensure manual swing trailing stop does not cross ladder last-entry edge."""
+        key = str(symbol or "").strip().upper()
+        bound = self._manual_swing_stop_bounds.get(key)
+        if not bound:
+            return
+        side, last_entry_price = bound
+        if last_entry_price <= 0:
+            return
+        current_stop = float(getattr(ts, "current_stop", 0.0) or 0.0)
+        structure_guard = float(getattr(ts, "structure_guard", 0.0) or 0.0)
+        if side == "long":
+            ts.structure_guard = min(structure_guard, last_entry_price) if structure_guard > 0 else last_entry_price
+            if current_stop > last_entry_price:
+                ts.current_stop = last_entry_price
+        else:
+            ts.structure_guard = max(structure_guard, last_entry_price) if structure_guard > 0 else last_entry_price
+            if current_stop > 0 and current_stop < last_entry_price:
+                ts.current_stop = last_entry_price
+        if float(entry_price or 0.0) > 0:
+            if side == "long":
+                ts.breakeven_locked = float(ts.current_stop or 0.0) >= float(entry_price)
+            else:
+                ts.breakeven_locked = float(ts.current_stop or 0.0) <= float(entry_price)
+
+    async def _cancel_manual_swing_plan_now(self, symbol: str, plan_id: str) -> tuple[bool, str]:
+        if not self._is_swing_owner_bot():
+            return False, "Manual swing cancellation is supported only on swing bot"
+        sym = str(symbol or "").strip().upper()
+        pid = str(plan_id or "").strip()
+        if not sym or not pid:
+            return False, "Missing symbol or plan_id"
+        await self._set_manual_swing_plan_state(sym, pid, "cancel_requested")
+        await self._maintain_manual_swing_plan(sym, pid)
+        return True, f"Cancelled manual swing plan {sym} ({pid})"
+
+    async def _create_manual_swing_plan_now(self, symbol: str, plan_id: str) -> tuple[bool, str]:
+        if not self._is_swing_owner_bot():
+            return False, "Manual swing create-now is supported only on swing bot"
+        sym = str(symbol or "").strip().upper()
+        pid = str(plan_id or "").strip()
+        if not sym or not pid:
+            return False, "Missing symbol or plan_id"
+        await self._maintain_manual_swing_plan(sym, pid, first_leg_only=True)
+        rows = await self._load_swing_entries_from_hub(sym, pid)
+        if not rows:
+            return False, f"Plan not found: {sym} ({pid})"
+        first = next((r for r in rows if int(r.get("entry_idx", 0) or 0) == 1), rows[0])
+        status = str(first.get("status", "") or "").strip().lower()
+        if status == "filled":
+            return True, f"Manual swing first leg opened for {sym}"
+        if status == "placed_on_cex":
+            return False, f"First leg not filled yet for {sym} (status={status})"
+        return False, f"First leg failed for {sym} (status={status or 'unknown'})"
 
     # ---- Hub state recovery & in-memory stats ----
 
@@ -3072,6 +3814,7 @@ class TradingBot:
                 ts.breakeven_locked = recovered_stop >= entry
             else:
                 ts.breakeven_locked = recovered_stop <= entry
+        self._enforce_manual_swing_stop_bound(symbol, ts, entry_price=entry)
 
         try:
             await self.orders._sync_symbol_protection(position, ts)  # type: ignore[attr-defined]
@@ -3591,6 +4334,66 @@ class TradingBot:
                 await asyncio.sleep(max(0.1, delay_seconds))
         return None
 
+    async def _confirm_close_fill(
+        self, sig: Signal, order: Order, attempts: int = 8, delay_seconds: float = 1.0
+    ) -> Order | None:
+        """Confirm close execution before mutating ownership to closed.
+
+        Prevents false local closes when exchange acknowledges but does not
+        actually flatten the position.
+        """
+        market_type = MarketType.FUTURES if sig.market_type == "futures" else MarketType.SPOT
+        tracked_side: OrderSide | None = None
+        rec = self._open_trades.get(sig.symbol)
+        if rec is not None:
+            side_txt = str(rec.side or "").strip().lower()
+            tracked_side = OrderSide.BUY if side_txt in {"buy", "long"} else OrderSide.SELL
+        elif order.side == OrderSide.SELL:
+            tracked_side = OrderSide.BUY
+        elif order.side == OrderSide.BUY:
+            tracked_side = OrderSide.SELL
+
+        for idx in range(max(1, attempts)):
+            if order.id:
+                try:
+                    fetched = await self.exchange.fetch_order(order.id, sig.symbol, market_type=market_type)
+                    if fetched:
+                        order = fetched
+                        if order.status == OrderStatus.FILLED:
+                            return order
+                except Exception as e:
+                    if idx == attempts - 1:
+                        logger.warning(
+                            "Close confirm fetch_order failed for {} [{}]: {!r}",
+                            sig.symbol,
+                            type(e).__name__,
+                            e,
+                        )
+
+            try:
+                positions = await self.exchange.fetch_positions(sig.symbol)
+                still_open = False
+                for pos in positions:
+                    if pos.symbol != sig.symbol or pos.amount <= 0:
+                        continue
+                    if tracked_side is None or pos.side == tracked_side:
+                        still_open = True
+                        break
+                if not still_open:
+                    order.status = OrderStatus.FILLED
+                    return order
+            except Exception as e:
+                if idx == attempts - 1:
+                    logger.warning(
+                        "Close confirm fetch_positions failed for {} [{}]: {!r}",
+                        sig.symbol,
+                        type(e).__name__,
+                        e,
+                    )
+            if idx < attempts - 1:
+                await asyncio.sleep(max(0.1, delay_seconds))
+        return None
+
     async def _process_signal(self, sig: Signal, low_liquidity: bool = False, pyramid: bool = False) -> bool:
         mode_tag = "PYRAMID" if pyramid else ("GAMBLING" if low_liquidity else "WINNERS")
         logger.info(
@@ -3636,12 +4439,12 @@ class TradingBot:
                         order = confirmed
                     else:
                         status_txt = status.value
-                        logger.warning("Signal open not filled for {} (status={})", sig.symbol, status_txt)
-                        if reserved_opened_at:
-                            await self._release_open_trade_reservation(
-                                sig, reserved_opened_at, f"failed_fill:{status_txt}"
-                            )
-                        self._last_queue_exec_reason = f"failed_fill:{status_txt}"
+                        logger.warning(
+                            "Signal open still pending for {} (status={}); keeping reservation for later reconciliation",
+                            sig.symbol,
+                            status_txt,
+                        )
+                        self._last_queue_exec_reason = f"pending_fill_unconfirmed:{status_txt}"
                         return False
                 else:
                     status_txt = status.value
@@ -3650,6 +4453,13 @@ class TradingBot:
                         await self._release_open_trade_reservation(sig, reserved_opened_at, f"failed_fill:{status_txt}")
                     self._last_queue_exec_reason = f"failed_fill:{status_txt}"
                     return False
+            if is_close and isinstance(status, OrderStatus) and status != OrderStatus.FILLED:
+                confirmed_close = await self._confirm_close_fill(sig, order)
+                if confirmed_close is None:
+                    logger.warning("Signal close not confirmed for {} (status={})", sig.symbol, status.value)
+                    self._last_queue_exec_reason = f"close_unconfirmed:{status.value}"
+                    return False
+                order = confirmed_close
             realized_pnl = 0.0
             if is_close:
                 realized_pnl = self._calc_realized_pnl(order)

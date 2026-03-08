@@ -13,14 +13,13 @@ Use this file as the default startup context for new chats.
 
 ## New Chat Startup Instruction
 
-Query/search external `ai-memory` first via `scripts/bootstrap_ai_memory.sh "<task summary>"`.  
-Then read `docs/AI_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/summary.html`,
-`docs/DO_DEPLOYMENT_TRACKER.md`, and `docs/new_ideas.md` before substantial work.  
-If `ai-memory` is unavailable, explicitly report it before proceeding.  
-Treat this repo docs as canonical when conflicts appear.
+Start from this document, then read `docs/DO_DEPLOYMENT_TRACKER.md`,
+`docs/ARCHITECTURE.md`, `docs/summary.html`, and `docs/new_ideas.md` as needed.  
+Use `ai-memory` only when explicitly requested by the user.  
+Treat repo docs as canonical when conflicts appear.
 
 Before implementation, output a 3-bullet startup checklist:
-- `ai-memory` (query + key findings, or explicit unavailability)
+- `ai-memory` (only if explicitly requested)
 - `docs reviewed` (confirm required set)
 - `working assumptions` (for current task)
 
@@ -51,6 +50,7 @@ Before implementation, output a 3-bullet startup checklist:
 - Hub must filter unsupported/untradeable symbols before queue insertion.
 - Idle bots remain silent except activation-file polling.
 - If architecture does not support a new flow, stop and ask before inventing one.
+- Keep runtime config strict in `config/settings.py`: required fields (for example `TRADING_MODE`, `EXCHANGE`, `SESSION_BUDGET`) must not get production/runtime defaults just to satisfy tooling.
 
 ## Current Run Profile
 
@@ -168,6 +168,7 @@ POST /internal/recovery-close         -> close missing-on-exchange records
 - Do not make idle bots call hub endpoints or connect exchanges before activation.
 - Do not bypass hub symbol filtering by pushing raw symbols directly from bots.
 - Do not treat `summary.html` as canonical architecture truth when conflicts appear.
+- For tests/mypy ergonomics, use test bootstrap env defaults in `tests/conftest.py` (or test env files), not runtime defaults in `Settings`.
 
 ## Context Drift Change Log
 

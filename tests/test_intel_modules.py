@@ -1029,6 +1029,42 @@ class TestFearGreedClientSummary:
         assert client._latest.classification == "Fear"
         assert client._latest.previous_value == 35
 
+    @pytest.mark.asyncio
+    async def test_fetch_non_200_returns_false(self, client):
+        mock_resp = AsyncMock()
+        mock_resp.status = 503
+        mock_get_cm = MagicMock()
+        mock_get_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_get_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_sess = MagicMock()
+        mock_sess.get.return_value = mock_get_cm
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_sess)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("intel.fear_greed.aiohttp.ClientSession", return_value=mock_session):
+            ok = await client._fetch()
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_poll_loop_retries_quickly_after_failure(self, client):
+        sleeps: list[int] = []
+
+        async def fake_sleep(seconds: int):
+            sleeps.append(int(seconds))
+            if len(sleeps) >= 2:
+                client._running = False
+
+        client._running = True
+        with (
+            patch.object(client, "_fetch", new=AsyncMock(side_effect=[False, True])),
+            patch("intel.fear_greed.asyncio.sleep", new=AsyncMock(side_effect=fake_sleep)),
+        ):
+            await client._poll_loop()
+
+        assert sleeps[0] == client.retry_interval
+        assert sleeps[1] == client.poll_interval
+
 
 # ── WhaleSentiment ───────────────────────────────────────────────────
 

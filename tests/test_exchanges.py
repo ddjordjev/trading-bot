@@ -392,6 +392,27 @@ class TestBinanceExchange:
         assert positions[0].leverage == 3
 
     @pytest.mark.asyncio
+    async def test_fetch_positions_infers_leverage_from_info_payload(self, binance):
+        binance._futures.fetch_positions = AsyncMock(
+            return_value=[
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "long",
+                    "contracts": 0.1,
+                    "entryPrice": 50_000.0,
+                    "markPrice": 52_000.0,
+                    "leverage": None,
+                    "info": {"leverage": "5"},
+                    "unrealizedPnl": 200.0,
+                },
+            ]
+        )
+        positions = await binance.fetch_positions()
+        assert len(positions) == 1
+        assert positions[0].symbol == "BTC/USDT"
+        assert positions[0].leverage == 5
+
+    @pytest.mark.asyncio
     async def test_fetch_positions_skips_zero_contracts(self, binance):
         binance._futures.fetch_positions = AsyncMock(
             return_value=[

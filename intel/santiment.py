@@ -58,12 +58,22 @@ class SantimentClient:
         self._background_tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
+        if self._running:
+            return
         self._running = True
         self._background_tasks.append(asyncio.create_task(self._poll_loop()))
         logger.info("Santiment monitor started (symbols={}, poll={}s)", self.symbols, self.poll_interval)
 
     async def stop(self) -> None:
+        if not self._running and not self._background_tasks:
+            return
         self._running = False
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
 
     def get(self, symbol: str) -> SocialData | None:
         slug = self._to_slug(symbol)
@@ -142,8 +152,8 @@ class SantimentClient:
                             if values:
                                 data.social_volume = values[-1]
                                 data.social_volume_avg = sum(values) / len(values)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Santiment fetch failed for {}: {}", slug, e)
 
         self._data[slug] = data
 

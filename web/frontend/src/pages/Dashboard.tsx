@@ -1,8 +1,8 @@
 import type { FullSnapshot } from "../hooks/useWebSocket";
-import { postBody } from "../api/client";
+import { get, postBody } from "../api/client";
 import { PositionRow } from "../components/PositionRow";
 import { LogViewer } from "../components/LogViewer";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getBotLabel } from "../utils/botNames";
 import { buildExchangeSymbolUrl } from "../utils/exchangeLinks";
 
@@ -20,11 +20,29 @@ interface Props {
 export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilter = "all", onExchangeFilterChange, exchanges = [] }: Props) {
   const [actionMsg, setActionMsg] = useState("");
   const [logsExpanded, setLogsExpanded] = useState(true);
+  const [manualSwingBusy, setManualSwingBusy] = useState(false);
+  const [manualSwingMsg, setManualSwingMsg] = useState("");
+  const [manualSwingExchange, setManualSwingExchange] = useState("BINANCE");
+  const [manualSwingSymbol, setManualSwingSymbol] = useState("BTC/USDT");
+  const [manualSwingPairs, setManualSwingPairs] = useState<string[]>([]);
+  const [manualSwingPairQuery, setManualSwingPairQuery] = useState("BTC/USDT");
+  const [manualSwingPairOpen, setManualSwingPairOpen] = useState(false);
+  const [manualSwingCurrentPrice, setManualSwingCurrentPrice] = useState<number | null>(null);
+  const [manualSwingPriceLoading, setManualSwingPriceLoading] = useState(false);
+  const [manualSwingPriceError, setManualSwingPriceError] = useState("");
+  const [manualSwingDirection, setManualSwingDirection] = useState("long");
+  const [manualSwingFirstEntry, setManualSwingFirstEntry] = useState("");
+  const [manualSwingLastEntry, setManualSwingLastEntry] = useState("");
+  const [manualSwingGridCount, setManualSwingGridCount] = useState("5");
+  const [manualSwingLeverage, setManualSwingLeverage] = useState("5x");
+  const [manualSwingMargin, setManualSwingMargin] = useState("30");
+  const [manualSwingMaxCex, setManualSwingMaxCex] = useState("3");
   const [actionTarget, setActionTarget] = useState("all");
   const [bulkAction, setBulkAction] = useState("");
   const [orphanAssignees, setOrphanAssignees] = useState<Record<string, string>>({});
   const [manualStopOverride, setManualStopOverride] = useState<boolean | null>(null);
   const hasData = !!data;
+  const manualSwingPairBoxRef = useRef<HTMLDivElement | null>(null);
 
   const s = (data?.status ?? {}) as Partial<FullSnapshot["status"]>;
   const num = (v: unknown, fallback = 0) => {
@@ -65,6 +83,150 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
         .filter((ex) => ALLOWED_EXCHANGES.has(ex)),
     ),
   ).sort();
+  const manualSwingExchanges = safeExchanges.length > 0 ? safeExchanges : ["BINANCE"];
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await get<{ status?: string; pairs?: string[] }>(
+          `/api/manual-swing/pairs?exchange=${encodeURIComponent(manualSwingExchange)}`,
+        );
+        if (!alive) return;
+        const pairs = Array.isArray(res?.pairs) ? res.pairs.filter((p): p is string => typeof p === "string" && p.trim().length > 0) : [];
+        setManualSwingPairs(pairs);
+        if (pairs.length > 0) {
+          setManualSwingSymbol((prev) => {
+            const next = pairs.includes(prev) ? prev : pairs[0];
+            setManualSwingPairQuery(next);
+            return next;
+          });
+        } else {
+          setManualSwingSymbol("");
+          setManualSwingPairQuery("");
+        }
+      } catch {
+        if (!alive) return;
+        setManualSwingPairs([]);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [manualSwingExchange]);
+
+  useEffect(() => {
+    const onMouseDown = (e: MouseEvent) => {
+      if (!manualSwingPairBoxRef.current) return;
+      if (!manualSwingPairBoxRef.current.contains(e.target as Node)) {
+        setManualSwingPairOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+    };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    if (!manualSwingSymbol) {
+      setManualSwingCurrentPrice(null);
+      setManualSwingPriceLoading(false);
+      setManualSwingPriceError("");
+      return () => {
+        alive = false;
+      };
+    }
+    setManualSwingPriceLoading(true);
+    setManualSwingPriceError("");
+    void (async () => {
+      try {
+        const res = await get<{ status?: string; price?: number }>(
+          `/api/manual-swing/pair-price?exchange=${encodeURIComponent(manualSwingExchange)}&symbol=${encodeURIComponent(manualSwingSymbol)}`,
+        );
+        if (!alive) return;
+        const raw = Number(res?.price);
+        if (res?.status === "ok" && Number.isFinite(raw) && raw > 0) {
+          setManualSwingCurrentPrice(raw);
+          setManualSwingFirstEntry(String(raw));
+          setManualSwingLastEntry("");
+          return;
+        }
+        setManualSwingCurrentPrice(null);
+        setManualSwingPriceError("Price unavailable");
+      } catch {
+        if (!alive) return;
+        setManualSwingCurrentPrice(null);
+        setManualSwingPriceError("Price unavailable");
+      } finally {
+        if (alive) setManualSwingPriceLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [manualSwingExchange, manualSwingSymbol]);
+
+  const manualSwingFilteredPairs = useMemo(() => {
+    const query = manualSwingPairQuery.trim().toUpperCase();
+    if (!query) return manualSwingPairs.slice(0, 120);
+    return manualSwingPairs
+      .filter((pair) => pair.toUpperCase().includes(query))
+      .slice(0, 120);
+  }, [manualSwingPairs, manualSwingPairQuery]);
+
+  const mergedPositions = useMemo(() => {
+    const wickAsPositions = wickScalps.map((ws) => {
+      const entry = Number(ws.entry_price || 0);
+      const amount = Number(ws.amount || 0);
+      const sideRaw = String(ws.scalp_side || "").toLowerCase();
+      const side = sideRaw === "long" ? "buy" : sideRaw === "short" ? "sell" : String(ws.scalp_side || "");
+      return {
+        symbol: String(ws.symbol || ""),
+        side,
+        amount,
+        entry_price: entry,
+        current_price: entry,
+        pnl_pct: 0,
+        pnl_usd: 0,
+        leverage: 1,
+        market_type: "futures",
+        strategy: "wick_scalp",
+        stop_loss: null,
+        take_profit: null,
+        exchange_stop_loss: null,
+        exchange_take_profit: null,
+        bot_stop_loss: null,
+        bot_take_profit: null,
+        effective_stop_loss: null,
+        effective_take_profit: null,
+        stop_source: "none",
+        tp_source: "none",
+        risk_state: "none",
+        close_pending: false,
+        close_reason_pending: "",
+        notional_value: entry * amount,
+        age_minutes: Number(ws.age_minutes || 0),
+        breakeven_locked: false,
+        scale_mode: "",
+        scale_phase: "",
+        dca_count: 0,
+        trade_url: "",
+        is_wick_scalp: true,
+        bot_id: (ws as any).bot_id,
+        exchange_name: (ws as any).exchange_name,
+      };
+    });
+    return [...positions, ...wickAsPositions];
+  }, [positions, wickScalps]);
+
+  const parseLeverageInput = (raw: string): number => {
+    const normalized = String(raw || "").trim().toLowerCase().replace(/x/g, "");
+    const parsed = Number(normalized);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 1;
+    return Math.max(1, Math.round(parsed));
+  };
 
   const defaultAssignee = (orphan: any): string => {
     const original = String(orphan.originally_opened_by || "").trim();
@@ -322,7 +484,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
       </div>
 
       <h3 style={{ color: "var(--heading)", marginBottom: "0.5rem" }}>
-        Open Positions ({positions.length})
+        Open Positions ({mergedPositions.length})
       </h3>
       {exchangeAccessHalted && (
         <div
@@ -342,7 +504,7 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
           {exchangeAccessBanner}
         </div>
       )}
-      {positions.length === 0 ? (
+      {mergedPositions.length === 0 ? (
         <div className="empty-state">No open positions</div>
       ) : (
         <div style={{ overflowX: "auto" }}>
@@ -363,8 +525,14 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
               </tr>
             </thead>
             <tbody>
-              {positions.map((p) => (
-                <PositionRow key={`${(p as any).bot_id || ""}:${p.symbol}`} position={p} onAction={() => {}} showBot={showBotColumn} bulkAction={bulkAction} />
+              {mergedPositions.map((p) => (
+                <PositionRow
+                  key={`${(p as any).bot_id || ""}:${p.symbol}:${(p as any).is_wick_scalp ? "wick" : "main"}`}
+                  position={p}
+                  onAction={() => {}}
+                  showBot={showBotColumn}
+                  bulkAction={bulkAction}
+                />
               ))}
             </tbody>
           </table>
@@ -451,6 +619,26 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
                     </td>
                     <td style={{ whiteSpace: "nowrap" }}>
                       <button
+                        className="btn-secondary"
+                        style={{ marginRight: 6 }}
+                        disabled={!String(o.symbol || "").trim()}
+                        title="Recover orphan ownership now"
+                        onClick={async () => {
+                          const payload: Record<string, unknown> = {
+                            symbol: o.symbol,
+                            exchange: String(o.exchange_name || ""),
+                            strategy: "recovered_owner_claim",
+                          };
+                          if (chosenBot) payload.bot_id = chosenBot;
+                          const res = await postBody("/api/orphan/recover-now", payload);
+                          const ok = !!(res && typeof res === "object" && (res as any).success);
+                          setActionMsg(`Recover ${o.symbol}: ${ok ? "OK" : ((res as any)?.message || "failed")}`);
+                          setTimeout(() => setActionMsg(""), 4000);
+                        }}
+                      >
+                        Recover now
+                      </button>
+                      <button
                         className="btn-primary"
                         style={{ marginRight: 6 }}
                         disabled={!chosenBot}
@@ -491,47 +679,164 @@ export function Dashboard({ data, showBotColumn = false, bots = [], exchangeFilt
         </>
       )}
 
-      {wickScalps.length > 0 && (
-        <>
-          <h3 style={{ color: "var(--heading)", margin: "1.5rem 0 0.5rem" }}>
-            Active Wick Scalps ({wickScalps.length})
-          </h3>
-          <table>
-            <thead>
-              <tr>
-                <th>Symbol</th>
-                {showBotColumn && <th>Exchange</th>}
-                {showBotColumn && <th>Bot</th>}
-                <th>Side</th>
-                <th>Entry</th>
-                <th>Amount</th>
-                <th>Age</th>
-                <th>Max Hold</th>
-              </tr>
-            </thead>
-            <tbody>
-              {wickScalps.map((ws) => (
-                <tr key={`${(ws as any).bot_id || ""}:${ws.symbol}`}>
-                  <td>{ws.symbol}</td>
-                  {showBotColumn && <td style={{ fontSize: "0.75rem", fontWeight: 500, textTransform: "uppercase", color: "var(--text-muted)" }}>{(ws as any).exchange_name || "—"}</td>}
-                  {showBotColumn && (
-                    <td style={{ fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", color: "var(--text-muted)" }}>
-                      {(ws as any).bot_id ? getBotLabel(String((ws as any).bot_id)) : "—"}
-                    </td>
-                  )}
-                  <td style={{ color: ws.scalp_side.toLowerCase() === "long" ? "var(--green)" : ws.scalp_side.toLowerCase() === "short" ? "var(--red)" : "var(--text)" }}>
-                    {ws.scalp_side.toUpperCase()}
-                  </td>
-                  <td>{ws.entry_price.toFixed(ws.entry_price < 1 ? 6 : 2)}</td>
-                  <td>{ws.amount.toFixed(6)}</td>
-                  <td>{ws.age_minutes.toFixed(0)}m</td>
-                  <td>{ws.max_hold_minutes}m</td>
-                </tr>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", margin: "1.5rem 0 0.5rem" }}>
+        <span style={{ fontSize: "1.4rem", lineHeight: 1, color: "var(--text-muted)" }}>
+          ▼
+        </span>
+        <h3 style={{ color: "var(--heading)", margin: 0 }}>
+          Manual Swing Plan
+        </h3>
+      </div>
+      <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "0.8rem", marginBottom: "1rem" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "0.5rem", marginBottom: "0.3rem" }}>
+            <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", fontWeight: 600 }}>Exchange</span>
+            <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", fontWeight: 600 }}>Pair</span>
+            <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", fontWeight: 600 }}>Direction</span>
+            <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", fontWeight: 600 }}>First Entry Price</span>
+            <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", fontWeight: 600 }}>Last Entry Price</span>
+            <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", fontWeight: 600 }}>Grid Count</span>
+            <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", fontWeight: 600 }}>Leverage</span>
+            <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", fontWeight: 600 }}>Margin Amount</span>
+            <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", fontWeight: 600 }}>Max Limits on CEX</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "0.5rem" }}>
+            <select value={manualSwingExchange} onChange={(e) => setManualSwingExchange(e.target.value)}>
+              {manualSwingExchanges.map((ex) => (
+                <option key={ex} value={ex}>{ex}</option>
               ))}
-            </tbody>
-          </table>
-        </>
-      )}
+            </select>
+            <div ref={manualSwingPairBoxRef} style={{ position: "relative" }}>
+              <input
+                value={manualSwingPairQuery}
+                onChange={(e) => {
+                  setManualSwingPairQuery(e.target.value.toUpperCase());
+                  setManualSwingPairOpen(true);
+                }}
+                onFocus={() => setManualSwingPairOpen(true)}
+                placeholder={manualSwingPairs.length === 0 ? "No pairs available" : "Search pair"}
+                disabled={manualSwingPairs.length === 0}
+              />
+              {manualSwingPairOpen && manualSwingPairs.length > 0 && (
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "calc(100% + 4px)",
+                    left: 0,
+                    right: 0,
+                    maxHeight: 280,
+                    overflowY: "auto",
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 6,
+                    zIndex: 50,
+                    boxShadow: "0 8px 20px rgba(0, 0, 0, 0.35)",
+                  }}
+                >
+                  {manualSwingFilteredPairs.length === 0 ? (
+                    <div style={{ padding: "0.5rem 0.6rem", color: "var(--text-muted)", fontSize: "0.8rem" }}>
+                      No matches
+                    </div>
+                  ) : (
+                    manualSwingFilteredPairs.map((pair) => (
+                      <button
+                        key={pair}
+                        type="button"
+                        onClick={() => {
+                          setManualSwingSymbol(pair);
+                          setManualSwingPairQuery(pair);
+                          setManualSwingPairOpen(false);
+                        }}
+                        style={{
+                          display: "block",
+                          width: "100%",
+                          textAlign: "left",
+                          padding: "0.45rem 0.6rem",
+                          border: "none",
+                          background: pair === manualSwingSymbol ? "var(--surface-hover)" : "transparent",
+                          color: "var(--text)",
+                          cursor: "pointer",
+                          fontSize: "0.88rem",
+                        }}
+                      >
+                        {pair}
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+            <select value={manualSwingDirection} onChange={(e) => setManualSwingDirection(e.target.value)}>
+              <option value="long">Long</option>
+              <option value="short">Short</option>
+            </select>
+            <input value={manualSwingFirstEntry} onChange={(e) => setManualSwingFirstEntry(e.target.value)} placeholder="First entry price" />
+            <input value={manualSwingLastEntry} onChange={(e) => setManualSwingLastEntry(e.target.value)} placeholder="Last entry price" />
+            <input value={manualSwingGridCount} onChange={(e) => setManualSwingGridCount(e.target.value)} placeholder="Grid count" />
+            <input
+              value={manualSwingLeverage}
+              onChange={(e) => {
+                const raw = e.target.value;
+                const clean = raw.replace(/[^0-9xX]/g, "");
+                if (!clean) {
+                  setManualSwingLeverage("");
+                  return;
+                }
+                const noX = clean.replace(/x/gi, "");
+                setManualSwingLeverage(`${noX}x`);
+              }}
+              placeholder="5x"
+            />
+            <input value={manualSwingMargin} onChange={(e) => setManualSwingMargin(e.target.value)} placeholder="Margin amount" />
+            <input value={manualSwingMaxCex} onChange={(e) => setManualSwingMaxCex(e.target.value)} placeholder="Max limits on CEX (optional)" />
+          </div>
+          <div style={{ marginTop: "0.45rem", fontSize: "0.75rem", color: "var(--text-muted)" }}>
+            {manualSwingPriceLoading
+              ? "Current CEX price: loading..."
+              : manualSwingCurrentPrice !== null
+                ? `Current CEX price: ${manualSwingCurrentPrice}`
+                : `Current CEX price: ${manualSwingPriceError || "unavailable"}`}
+          </div>
+          <div style={{ marginTop: "0.6rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <button
+              className="btn-primary"
+              disabled={manualSwingBusy || !manualSwingSymbol}
+              onClick={async () => {
+                setManualSwingBusy(true);
+                setManualSwingMsg("");
+                try {
+                  const payload: Record<string, unknown> = {
+                    bot_id: "swing",
+                    exchange: manualSwingExchange,
+                    symbol: manualSwingSymbol,
+                    direction: manualSwingDirection,
+                    first_entry_price: Number(manualSwingFirstEntry),
+                    last_entry_price: Number(manualSwingLastEntry),
+                    grid_count: Number(manualSwingGridCount),
+                    leverage: parseLeverageInput(manualSwingLeverage),
+                    margin_amount: Number(manualSwingMargin),
+                  };
+                  if (manualSwingMaxCex.trim()) {
+                    payload.max_concurrent_limit_orders_on_cex = Number(manualSwingMaxCex);
+                  }
+                  const res = await postBody("/api/manual-swing/plans", payload);
+                  const status = String((res as any)?.status || "");
+                  if (status === "ok") {
+                    setManualSwingMsg(`Created plan ${String((res as any)?.plan?.plan_id || "")}`);
+                  } else {
+                    setManualSwingMsg(`Failed: ${String((res as any)?.detail || "unknown")}`);
+                  }
+                } catch (e: any) {
+                  setManualSwingMsg(`Failed: ${e?.message || "request failed"}`);
+                } finally {
+                  setManualSwingBusy(false);
+                }
+              }}
+            >
+              {manualSwingBusy ? "Creating..." : "Create Manual Grid Plan"}
+            </button>
+            {manualSwingMsg && <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{manualSwingMsg}</span>}
+          </div>
+      </div>
 
       <div
         style={{ display: "flex", alignItems: "center", gap: "0.5rem", margin: "1.5rem 0 0.5rem", cursor: "pointer" }}

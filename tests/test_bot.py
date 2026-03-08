@@ -13,7 +13,7 @@ import pytest
 
 from config.settings import get_settings
 from core.models import Signal, SignalAction
-from core.models.order import Order, OrderSide, OrderStatus, OrderType
+from core.models.order import Order, OrderSide, OrderStatus, OrderType, Position
 from core.orders.scaler import ScaleMode
 from db.models import TradeRecord
 from shared.models import ExtremeCandidate, ExtremeWatchlist
@@ -218,15 +218,14 @@ class TestTradingBotStrategyManagement:
             with pytest.raises(ValueError, match="Unknown strategy"):
                 b.add_strategy("unknown_strat", "BTC/USDT", market_type=market_type)
 
-    def test_add_strategy_market_type_not_allowed_fallback_to_spot(self, settings, mock_exchange):
+    def test_add_strategy_market_type_not_allowed_skips(self, settings, mock_exchange):
         settings.allowed_market_types = "spot"
         with patch("bot.create_exchange", return_value=mock_exchange):
             from bot import TradingBot
 
             b = TradingBot(settings=settings)
             b.add_strategy("compound_momentum", "BTC/USDT", market_type="futures")
-            assert len(b._strategies) == 1
-            assert b._strategies[0].market_type == "spot"
+            assert len(b._strategies) == 0
 
     def test_add_strategy_market_type_not_allowed_skip_when_no_fallback(self, settings, mock_exchange):
         settings.allowed_market_types = "futures"
@@ -617,6 +616,65 @@ class TestProcessSignalAndQueue:
         bot.orders.execute_signal.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_process_signal_open_pending_keeps_reservation_until_reconciliation(self, bot):
+        bot.settings.hub_url = "http://hub"
+        bot._reserve_open_trade_with_hub = AsyncMock(return_value="2026-01-01T00:00:00+00:00")
+        bot._release_open_trade_reservation = AsyncMock()
+        bot._confirm_open_fill = AsyncMock(return_value=None)
+        pending_order = Order(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=0.01,
+            status=OrderStatus.PENDING,
+        )
+        bot.orders.execute_signal = AsyncMock(return_value=pending_order)
+        sig = Signal(
+            symbol="BTC/USDT",
+            action=SignalAction.BUY,
+            strength=0.8,
+            strategy="x",
+            reason="test",
+            market_type="futures",
+        )
+        ok = await bot._process_signal(sig)
+        assert ok is False
+        bot._release_open_trade_reservation.assert_not_called()
+        assert str(bot._last_queue_exec_reason).startswith("pending_fill_unconfirmed:")
+
+    @pytest.mark.asyncio
+    async def test_process_signal_close_unconfirmed_does_not_log_close(self, bot):
+        bot._open_trades["BTC/USDT"] = TradeRecord(
+            symbol="BTC/USDT",
+            side="long",
+            strategy="x",
+            action="open",
+            opened_at="2026-01-01T00:00:00+00:00",
+        )
+        pending_close_order = Order(
+            symbol="BTC/USDT",
+            side=OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            amount=0.01,
+            status=OrderStatus.PENDING,
+        )
+        bot.orders.execute_signal = AsyncMock(return_value=pending_close_order)
+        bot._confirm_close_fill = AsyncMock(return_value=None)
+        bot._log_closed_trade = MagicMock()
+        sig = Signal(
+            symbol="BTC/USDT",
+            action=SignalAction.CLOSE,
+            strength=0.2,
+            strategy="x",
+            reason="close",
+            market_type="futures",
+        )
+        ok = await bot._process_signal(sig)
+        assert ok is False
+        bot._log_closed_trade.assert_not_called()
+        assert str(bot._last_queue_exec_reason).startswith("close_unconfirmed:")
+
+    @pytest.mark.asyncio
     async def test_process_trade_queue_empty_returns_early(self, bot):
         bot._hub_proposal = None
         await bot._process_trade_queue()
@@ -900,7 +958,7 @@ class TestCloseAllAndWhaleAndDeployment:
             opened_at="2026-03-06T00:00:00+00:00",
             leverage=1,
         )
-        bot._swing_entry_ladders["BTC/USDT"] = [{"entry_idx": 1, "status": "placed", "order_id": "lad-1"}]
+        bot._swing_entry_ladders["BTC/USDT"] = [{"entry_idx": 1, "status": "placed_on_cex", "order_id": "lad-1"}]
 
         steps: list[str] = []
 
@@ -1550,6 +1608,39 @@ class TestReportDashboardSnapshot:
         assert payload["positions"][0]["age_minutes"] >= 35
 
     @pytest.mark.asyncio
+    async def test_report_dashboard_snapshot_falls_back_to_open_trade_leverage(self, bot):
+        bot.settings.hub_url = "http://hub.example.com"
+        bot._post_to_hub = AsyncMock()
+        bot._sync_runtime_trade_if_changed = AsyncMock()
+        bot._open_trades["SOL/USDT"] = TradeRecord(
+            symbol="SOL/USDT",
+            side="long",
+            strategy="swing_manual",
+            action="open",
+            opened_at=datetime.now(UTC).isoformat(),
+            leverage=5,
+        )
+
+        pos = MagicMock()
+        pos.symbol = "SOL/USDT"
+        pos.side = OrderSide.BUY
+        pos.amount = 0.12
+        pos.entry_price = 82.9
+        pos.current_price = 82.8
+        pos.pnl_pct = -0.1
+        pos.unrealized_pnl = -0.01
+        pos.leverage = 1
+        pos.market_type = "futures"
+        pos.strategy = "swing_manual"
+        pos.notional_value = 9.94
+        pos.opened_at = datetime.now(UTC)
+
+        await bot._report_dashboard_snapshot([pos])
+
+        payload = bot._post_to_hub.call_args[0][1]
+        assert payload["positions"][0]["leverage"] == 5
+
+    @pytest.mark.asyncio
     async def test_report_dashboard_snapshot_uses_free_balance_not_wallet_anchor(self, bot):
         bot.settings.hub_url = "http://hub.example.com"
         bot._post_to_hub = AsyncMock()
@@ -1560,6 +1651,44 @@ class TestReportDashboardSnapshot:
 
         payload = bot._post_to_hub.call_args[0][1]
         assert payload["exchange_balance"] == pytest.approx(1200.0)
+
+    @pytest.mark.asyncio
+    async def test_report_dashboard_snapshot_clears_stale_cex_sl_when_fresh_snapshot_has_none(self, bot, mock_exchange):
+        bot.settings.hub_url = "http://hub.example.com"
+        bot._post_to_hub = AsyncMock()
+        bot._sync_runtime_trade_if_changed = AsyncMock()
+        bot._last_known_cex_protection["SOL/USDT"] = (78.76, 0.0)
+
+        ts = MagicMock()
+        ts.current_stop = 40.0
+        ts.breakeven_locked = False
+        bot.orders.trailing.active_stops["SOL/USDT"] = ts
+
+        mock_exchange.fetch_open_orders = AsyncMock(return_value=[])
+
+        pos = MagicMock()
+        pos.symbol = "SOL/USDT"
+        pos.side = OrderSide.BUY
+        pos.amount = 3.62
+        pos.entry_price = 82.90
+        pos.current_price = 83.07
+        pos.pnl_pct = 0.21
+        pos.unrealized_pnl = 0.63
+        pos.leverage = 5
+        pos.market_type = "futures"
+        pos.strategy = "swing_manual"
+        pos.notional_value = 301.0
+        pos.opened_at = datetime.now(UTC)
+        # Simulate ambiguous position-level field from exchange adapter.
+        pos.stop_loss = 78.76
+
+        await bot._report_dashboard_snapshot([pos])
+
+        payload = bot._post_to_hub.call_args[0][1]
+        row = payload["positions"][0]
+        assert row["exchange_stop_loss"] is None
+        assert row["stop_source"] != "exchange"
+        assert "SOL/USDT" not in bot._last_known_cex_protection
 
     @pytest.mark.asyncio
     async def test_report_dashboard_snapshot_marks_unknown_strategy_as_dynamic(self, bot):
@@ -2476,6 +2605,80 @@ class TestPostToHubAndIntelNews:
             await bot._post_to_hub("http://hub.example.com", {"status": "ok"})
         session.post.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_post_to_hub_applies_runtime_tuning_from_hub_response(self, bot):
+        bot._hub_session = None
+        session = MagicMock()
+        resp = MagicMock()
+        resp.status = 200
+        resp.json = AsyncMock(
+            return_value={
+                "confirmed_keys": [],
+                "runtime_tuning_rev": "rev-123",
+                "runtime_tuning": {
+                    "default_leverage": 7,
+                    "max_concurrent_positions": 4,
+                    "initial_risk_amount": 33.0,
+                },
+            }
+        )
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=None)
+        session.post = MagicMock(return_value=resp)
+
+        with patch("bot.aiohttp.ClientSession", return_value=session):
+            await bot._post_to_hub("http://hub.example.com", {"status": "ok"})
+
+        assert bot._runtime_tuning_revision == "rev-123"
+        assert bot.settings.default_leverage == 7
+        assert bot.settings.max_concurrent_positions == 4
+        assert bot.settings.initial_risk_amount == 33.0
+        assert bot.risk.max_concurrent == bot.settings.effective_max_concurrent_positions
+        assert bot.orders.scaler.initial_risk_amount == 33.0
+
+    @pytest.mark.asyncio
+    async def test_post_to_hub_runtime_tuning_missing_key_resets_to_baseline(self, bot):
+        baseline_leverage = int(bot._runtime_tuning_baseline["default_leverage"])
+        bot.settings.default_leverage = baseline_leverage + 4
+
+        bot._hub_session = None
+        session = MagicMock()
+        resp = MagicMock()
+        resp.status = 200
+        resp.json = AsyncMock(
+            return_value={
+                "confirmed_keys": [],
+                "runtime_tuning_rev": "rev-reset-1",
+                "runtime_tuning": {
+                    "max_concurrent_positions": 6,
+                },
+            }
+        )
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=None)
+        session.post = MagicMock(return_value=resp)
+
+        with patch("bot.aiohttp.ClientSession", return_value=session):
+            await bot._post_to_hub("http://hub.example.com", {"status": "ok"})
+
+        assert bot.settings.default_leverage == baseline_leverage
+        assert bot.settings.max_concurrent_positions == 6
+
+    @pytest.mark.asyncio
+    async def test_maintain_manual_swing_plans_skips_duplicate_symbol_plans(self, bot):
+        bot.settings.bot_id = "swing"
+        bot._list_active_manual_swing_plans_from_hub = AsyncMock(
+            return_value=[
+                {"symbol": "SOL/USDT", "plan_id": "p1"},
+                {"symbol": "SOL/USDT", "plan_id": "p2"},
+            ]
+        )
+        bot._maintain_manual_swing_plan = AsyncMock()
+
+        await bot._maintain_manual_swing_plans()
+
+        bot._maintain_manual_swing_plan.assert_awaited_once_with("SOL/USDT", "p1")
+
     def test_read_shared_intel_news_items_invalid_published_skipped(self, bot):
         bot._multibot = True
         bot._hub_intel_age = 100
@@ -2605,6 +2808,574 @@ class TestQuickHubCheck:
         assert bot._process_trade_queue.await_count == 1
         assert bot._hub_proposal is not None
         assert bot._hub_proposal.symbol == "ETH/USDT"
+
+    @pytest.mark.asyncio
+    async def test_quick_hub_check_maintains_manual_swing_plans_for_swing_bot(self, bot, mock_exchange):
+        bot.settings.hub_url = "http://hub.example.com"
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot._multibot = True
+        bot._started_at = datetime.now(UTC) - timedelta(minutes=5)
+        bot._process_trade_queue = AsyncMock()
+        bot._maintain_manual_swing_plans = AsyncMock()
+        bot._hub_session = self._ok_hub_session()
+        mock_exchange.fetch_positions = AsyncMock(return_value=[])
+
+        await bot._quick_hub_check()
+
+        bot._maintain_manual_swing_plans.assert_awaited_once()
+
+
+class TestManualSwingPlanExecution:
+    @pytest.mark.asyncio
+    async def test_maintain_swing_entry_ladder_skips_for_manual_swing_trade(self, bot):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot._open_trades["SOL/USDT"] = TradeRecord(
+            symbol="SOL/USDT",
+            side="long",
+            strategy="swing_manual",
+            action="open",
+            opened_at="2026-03-07T00:00:00+00:00",
+        )
+        bot._swing_entry_ladders["SOL/USDT"] = [
+            {"entry_idx": 2, "status": "placed_on_cex", "order_id": "auto-1"},
+        ]
+        bot._cancel_swing_ladder_orders_for_symbol = AsyncMock(return_value=1)
+        bot._sync_swing_entries_to_hub = AsyncMock()
+
+        await bot._maintain_swing_entry_ladder("SOL/USDT")
+
+        bot._cancel_swing_ladder_orders_for_symbol.assert_awaited_once()
+        bot._sync_swing_entries_to_hub.assert_awaited_once_with("SOL/USDT", "2026-03-07T00:00:00+00:00", [])
+        assert "SOL/USDT" not in bot._swing_entry_ladders
+
+    @pytest.mark.asyncio
+    async def test_maintain_manual_swing_plan_places_first_entry_as_market(self, bot, mock_exchange):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot._open_trades.clear()
+
+        rows = [
+            {
+                "entry_idx": 1,
+                "side": "long",
+                "price": 100.0,
+                "amount": 1.0,
+                "leverage": 5,
+                "status": "planned",
+                "order_id": "",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 1,
+            },
+            {
+                "entry_idx": 2,
+                "side": "long",
+                "price": 99.0,
+                "amount": 1.01,
+                "leverage": 5,
+                "status": "planned",
+                "order_id": "",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 1,
+            },
+        ]
+        bot._load_swing_entries_from_hub = AsyncMock(return_value=rows)
+        bot._sync_swing_entries_to_hub = AsyncMock()
+        bot._set_manual_swing_plan_state = AsyncMock()
+        bot._claim_orphan_position = AsyncMock()
+        bot._reserve_open_trade_with_hub = AsyncMock(return_value="2026-03-07T00:00:00+00:00")
+        bot._release_open_trade_reservation = AsyncMock()
+        bot._log_opened_trade = AsyncMock()
+        mock_exchange.fetch_open_orders = AsyncMock(return_value=[])
+        mock_exchange.place_order = AsyncMock(
+            return_value=Order(
+                symbol="SOL/USDT",
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                amount=1.0,
+                price=100.0,
+                average_price=100.0,
+                filled=1.0,
+                status=OrderStatus.FILLED,
+                strategy="swing_manual",
+                id="mkt-1",
+            )
+        )
+
+        await bot._maintain_manual_swing_plan("SOL/USDT", "plan-1")
+
+        kwargs = mock_exchange.place_order.await_args_list[0].kwargs
+        assert kwargs["order_type"] == OrderType.MARKET
+        assert kwargs["price"] is None
+        bot._reserve_open_trade_with_hub.assert_awaited_once()
+        bot._log_opened_trade.assert_awaited_once()
+        assert bot._release_open_trade_reservation.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_maintain_manual_swing_plan_skips_first_entry_when_reserve_fails(self, bot, mock_exchange):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot.settings.hub_url = "http://hub.example.com"
+        bot._open_trades.clear()
+
+        rows = [
+            {
+                "entry_idx": 1,
+                "side": "long",
+                "price": 100.0,
+                "amount": 1.0,
+                "leverage": 5,
+                "status": "planned",
+                "order_id": "",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 1,
+            }
+        ]
+        bot._load_swing_entries_from_hub = AsyncMock(return_value=rows)
+        bot._sync_swing_entries_to_hub = AsyncMock()
+        bot._set_manual_swing_plan_state = AsyncMock()
+        bot._claim_orphan_position = AsyncMock()
+        bot._reserve_open_trade_with_hub = AsyncMock(return_value="")
+        bot._release_open_trade_reservation = AsyncMock()
+        bot._log_opened_trade = AsyncMock()
+        mock_exchange.fetch_open_orders = AsyncMock(return_value=[])
+        mock_exchange.place_order = AsyncMock()
+
+        await bot._maintain_manual_swing_plan("SOL/USDT", "plan-1")
+
+        bot._reserve_open_trade_with_hub.assert_awaited_once()
+        mock_exchange.place_order.assert_not_awaited()
+        bot._log_opened_trade.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_create_manual_swing_plan_now_returns_success_when_first_leg_filled(self, bot):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot._maintain_manual_swing_plan = AsyncMock()
+        bot._load_swing_entries_from_hub = AsyncMock(
+            return_value=[{"entry_idx": 1, "status": "filled"}, {"entry_idx": 2, "status": "planned"}]
+        )
+
+        ok, msg = await bot._create_manual_swing_plan_now("SOL/USDT", "plan-1")
+
+        assert ok is True
+        assert "first leg opened" in msg.lower()
+        bot._maintain_manual_swing_plan.assert_awaited_once_with("SOL/USDT", "plan-1", first_leg_only=True)
+
+    @pytest.mark.asyncio
+    async def test_create_manual_swing_plan_now_returns_error_when_first_leg_failed(self, bot):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot._maintain_manual_swing_plan = AsyncMock()
+        bot._load_swing_entries_from_hub = AsyncMock(return_value=[{"entry_idx": 1, "status": "failed"}])
+
+        ok, msg = await bot._create_manual_swing_plan_now("SOL/USDT", "plan-1")
+
+        assert ok is False
+        assert "failed" in msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_maintain_manual_swing_plan_keeps_later_leg_planned_on_place_error(self, bot, mock_exchange):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot._open_trades["SOL/USDT"] = TradeRecord(
+            symbol="SOL/USDT",
+            side="long",
+            strategy="swing_manual",
+            action="open",
+            opened_at="2026-03-07T00:00:00+00:00",
+        )
+
+        rows = [
+            {
+                "entry_idx": 1,
+                "side": "long",
+                "price": 100.0,
+                "amount": 1.0,
+                "leverage": 5,
+                "status": "filled",
+                "order_id": "mkt-1",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 3,
+            },
+            {
+                "entry_idx": 2,
+                "side": "long",
+                "price": 99.0,
+                "amount": 1.01,
+                "leverage": 5,
+                "status": "planned",
+                "order_id": "",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 3,
+            },
+        ]
+        bot._load_swing_entries_from_hub = AsyncMock(return_value=rows)
+        bot._sync_swing_entries_to_hub = AsyncMock()
+        bot._set_manual_swing_plan_state = AsyncMock()
+        bot._claim_orphan_position = AsyncMock()
+        mock_exchange.fetch_open_orders = AsyncMock(return_value=[])
+        mock_exchange.place_order = AsyncMock(side_effect=RuntimeError("exchange reject"))
+
+        await bot._maintain_manual_swing_plan("SOL/USDT", "plan-1")
+
+        synced_rows = bot._sync_swing_entries_to_hub.await_args.args[2]
+        second = next(r for r in synced_rows if int(r.get("entry_idx", 0) or 0) == 2)
+        assert str(second.get("status", "")).lower() == "planned"
+
+    @pytest.mark.asyncio
+    async def test_maintain_manual_swing_plan_respects_live_cex_limit_cap_when_rows_untracked(self, bot, mock_exchange):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot._open_trades["SOL/USDT"] = TradeRecord(
+            symbol="SOL/USDT",
+            side="long",
+            strategy="swing_manual",
+            action="open",
+            opened_at="2026-03-07T00:00:00+00:00",
+        )
+
+        rows = [
+            {
+                "entry_idx": 1,
+                "side": "long",
+                "price": 100.0,
+                "amount": 1.0,
+                "leverage": 5,
+                "status": "filled",
+                "order_id": "mkt-1",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 2,
+            },
+            {
+                "entry_idx": 2,
+                "side": "long",
+                "price": 99.0,
+                "amount": 1.0,
+                "leverage": 5,
+                "status": "planned",
+                "order_id": "",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 2,
+            },
+            {
+                "entry_idx": 3,
+                "side": "long",
+                "price": 98.0,
+                "amount": 1.0,
+                "leverage": 5,
+                "status": "planned",
+                "order_id": "",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 2,
+            },
+        ]
+        bot._load_swing_entries_from_hub = AsyncMock(return_value=rows)
+        bot._sync_swing_entries_to_hub = AsyncMock()
+        bot._set_manual_swing_plan_state = AsyncMock()
+        bot._claim_orphan_position = AsyncMock()
+
+        mock_exchange.fetch_open_orders = AsyncMock(
+            return_value=[
+                Order(
+                    id="ext-1",
+                    symbol="SOL/USDT",
+                    side=OrderSide.BUY,
+                    order_type=OrderType.LIMIT,
+                    amount=1.0,
+                    price=99.0,
+                    status=OrderStatus.OPEN,
+                ),
+                Order(
+                    id="ext-2",
+                    symbol="SOL/USDT",
+                    side=OrderSide.BUY,
+                    order_type=OrderType.LIMIT,
+                    amount=1.0,
+                    price=98.0,
+                    status=OrderStatus.OPEN,
+                ),
+            ]
+        )
+        mock_exchange.place_order = AsyncMock()
+
+        await bot._maintain_manual_swing_plan("SOL/USDT", "plan-1")
+
+        mock_exchange.place_order.assert_not_awaited()
+        synced_rows = bot._sync_swing_entries_to_hub.await_args.args[2]
+        second = next(r for r in synced_rows if int(r.get("entry_idx", 0) or 0) == 2)
+        third = next(r for r in synced_rows if int(r.get("entry_idx", 0) or 0) == 3)
+        assert str(second.get("status", "")).lower() == "placed_on_cex"
+        assert str(third.get("status", "")).lower() == "placed_on_cex"
+
+    @pytest.mark.asyncio
+    async def test_maintain_manual_swing_plan_reconciles_planned_row_with_live_limit(self, bot, mock_exchange):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot._open_trades["SOL/USDT"] = TradeRecord(
+            symbol="SOL/USDT",
+            side="long",
+            strategy="swing_manual",
+            action="open",
+            opened_at="2026-03-07T00:00:00+00:00",
+        )
+
+        rows = [
+            {
+                "entry_idx": 1,
+                "side": "long",
+                "price": 100.0,
+                "amount": 1.0,
+                "leverage": 5,
+                "status": "filled",
+                "order_id": "mkt-1",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 1,
+            },
+            {
+                "entry_idx": 2,
+                "side": "long",
+                "price": 99.0,
+                "amount": 1.01,
+                "leverage": 5,
+                "status": "planned",
+                "order_id": "",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 1,
+            },
+        ]
+        bot._load_swing_entries_from_hub = AsyncMock(return_value=rows)
+        bot._sync_swing_entries_to_hub = AsyncMock()
+        bot._set_manual_swing_plan_state = AsyncMock()
+        bot._claim_orphan_position = AsyncMock()
+        mock_exchange.fetch_open_orders = AsyncMock(
+            return_value=[
+                Order(
+                    id="live-99",
+                    symbol="SOL/USDT",
+                    side=OrderSide.BUY,
+                    order_type=OrderType.LIMIT,
+                    amount=1.01,
+                    price=99.0,
+                    status=OrderStatus.OPEN,
+                )
+            ]
+        )
+        mock_exchange.place_order = AsyncMock()
+
+        await bot._maintain_manual_swing_plan("SOL/USDT", "plan-1")
+
+        mock_exchange.place_order.assert_not_awaited()
+        synced_rows = bot._sync_swing_entries_to_hub.await_args.args[2]
+        second = next(r for r in synced_rows if int(r.get("entry_idx", 0) or 0) == 2)
+        assert str(second.get("status", "")).lower() == "placed_on_cex"
+        assert str(second.get("order_id", "")) == "live-99"
+
+    @pytest.mark.asyncio
+    async def test_maintain_manual_swing_plan_retries_failed_row(self, bot, mock_exchange):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot._open_trades["SOL/USDT"] = TradeRecord(
+            symbol="SOL/USDT",
+            side="long",
+            strategy="swing_manual",
+            action="open",
+            opened_at="2026-03-07T00:00:00+00:00",
+        )
+
+        rows = [
+            {
+                "entry_idx": 1,
+                "side": "long",
+                "price": 100.0,
+                "amount": 1.0,
+                "leverage": 5,
+                "status": "filled",
+                "order_id": "mkt-1",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 3,
+            },
+            {
+                "entry_idx": 2,
+                "side": "long",
+                "price": 99.0,
+                "amount": 1.0,
+                "leverage": 5,
+                "status": "failed",
+                "order_id": "",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 3,
+            },
+        ]
+        bot._load_swing_entries_from_hub = AsyncMock(return_value=rows)
+        bot._sync_swing_entries_to_hub = AsyncMock()
+        bot._set_manual_swing_plan_state = AsyncMock()
+        bot._claim_orphan_position = AsyncMock()
+        mock_exchange.fetch_open_orders = AsyncMock(return_value=[])
+        mock_exchange.place_order = AsyncMock(
+            return_value=Order(
+                id="new-99",
+                symbol="SOL/USDT",
+                side=OrderSide.BUY,
+                order_type=OrderType.LIMIT,
+                amount=1.0,
+                price=99.0,
+                status=OrderStatus.OPEN,
+            )
+        )
+
+        await bot._maintain_manual_swing_plan("SOL/USDT", "plan-1")
+
+        mock_exchange.place_order.assert_awaited_once()
+        synced_rows = bot._sync_swing_entries_to_hub.await_args.args[2]
+        second = next(r for r in synced_rows if int(r.get("entry_idx", 0) or 0) == 2)
+        assert str(second.get("status", "")).lower() == "placed_on_cex"
+        assert str(second.get("order_id", "")) == "new-99"
+
+    @pytest.mark.asyncio
+    async def test_maintain_manual_swing_plan_clamps_existing_trailing_to_last_entry_bound(self, bot, mock_exchange):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot._open_trades["SOL/USDT"] = TradeRecord(
+            symbol="SOL/USDT",
+            side="long",
+            strategy="swing_manual",
+            action="open",
+            entry_price=83.23,
+            opened_at="2026-03-07T00:00:00+00:00",
+        )
+        pos = Position(
+            symbol="SOL/USDT",
+            side=OrderSide.BUY,
+            amount=1.0,
+            entry_price=83.23,
+            current_price=83.15,
+            leverage=5,
+            market_type="futures",
+        )
+        ts = bot.orders.trailing.register(pos, initial_stop_pct=1.0, trailing_mode="pullback", pullback_buffer_pct=5.0)
+        ts.current_stop = 79.07
+
+        rows = [
+            {
+                "entry_idx": 1,
+                "side": "long",
+                "price": 83.23,
+                "amount": 1.0,
+                "leverage": 5,
+                "status": "filled",
+                "order_id": "mkt-1",
+                "plan_state": "active",
+                "first_entry_price": 83.23,
+                "last_entry_price": 40.0,
+                "max_concurrent_limit_orders_on_cex": 3,
+            }
+        ]
+        bot._load_swing_entries_from_hub = AsyncMock(return_value=rows)
+        bot._sync_swing_entries_to_hub = AsyncMock()
+        bot._set_manual_swing_plan_state = AsyncMock()
+        bot._claim_orphan_position = AsyncMock()
+        mock_exchange.fetch_open_orders = AsyncMock(return_value=[])
+
+        await bot._maintain_manual_swing_plan("SOL/USDT", "plan-1")
+
+        assert ts.current_stop == pytest.approx(40.0)
+        assert ts.structure_guard == pytest.approx(40.0)
+
+    @pytest.mark.asyncio
+    async def test_maintain_manual_swing_plan_cleans_limits_when_trade_already_closed(self, bot, mock_exchange):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot._open_trades.clear()
+
+        rows = [
+            {
+                "entry_idx": 1,
+                "side": "long",
+                "price": 100.0,
+                "amount": 1.0,
+                "leverage": 5,
+                "status": "filled",
+                "order_id": "mkt-1",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 3,
+            },
+            {
+                "entry_idx": 2,
+                "side": "long",
+                "price": 99.0,
+                "amount": 1.0,
+                "leverage": 5,
+                "status": "placed_on_cex",
+                "order_id": "tracked-2",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 3,
+            },
+            {
+                "entry_idx": 3,
+                "side": "long",
+                "price": 98.0,
+                "amount": 1.0,
+                "leverage": 5,
+                "status": "planned",
+                "order_id": "",
+                "plan_state": "active",
+                "max_concurrent_limit_orders_on_cex": 3,
+            },
+        ]
+        bot._load_swing_entries_from_hub = AsyncMock(return_value=rows)
+        bot._sync_swing_entries_to_hub = AsyncMock()
+        bot._set_manual_swing_plan_state = AsyncMock()
+        bot._claim_orphan_position = AsyncMock()
+
+        mock_exchange.fetch_open_orders = AsyncMock(
+            return_value=[
+                Order(
+                    id="tracked-2",
+                    symbol="SOL/USDT",
+                    side=OrderSide.BUY,
+                    order_type=OrderType.LIMIT,
+                    amount=1.0,
+                    price=99.0,
+                    status=OrderStatus.OPEN,
+                ),
+                Order(
+                    id="extra-live",
+                    symbol="SOL/USDT",
+                    side=OrderSide.BUY,
+                    order_type=OrderType.LIMIT,
+                    amount=1.0,
+                    price=97.0,
+                    status=OrderStatus.OPEN,
+                ),
+            ]
+        )
+        mock_exchange.fetch_positions = AsyncMock(return_value=[])
+        mock_exchange.cancel_order = AsyncMock(
+            return_value=Order(
+                id="cancelled",
+                symbol="SOL/USDT",
+                side=OrderSide.BUY,
+                order_type=OrderType.LIMIT,
+                amount=1.0,
+                price=99.0,
+                status=OrderStatus.CANCELLED,
+            )
+        )
+        mock_exchange.place_order = AsyncMock()
+
+        await bot._maintain_manual_swing_plan("SOL/USDT", "plan-1")
+
+        mock_exchange.place_order.assert_not_awaited()
+        cancelled_ids = {call.args[0] for call in mock_exchange.cancel_order.await_args_list}
+        assert cancelled_ids == {"tracked-2", "extra-live"}
+        synced_rows = bot._sync_swing_entries_to_hub.await_args.args[2]
+        second = next(r for r in synced_rows if int(r.get("entry_idx", 0) or 0) == 2)
+        third = next(r for r in synced_rows if int(r.get("entry_idx", 0) or 0) == 3)
+        assert str(second.get("status", "")).lower() == "cancelled"
+        assert str(third.get("status", "")).lower() == "cancelled"
+        bot._set_manual_swing_plan_state.assert_awaited_once_with("SOL/USDT", "plan-1", "cancelled")
 
 
 # ── _execute_proposal / _handle_spike ───────────────────────────────────────
@@ -2865,8 +3636,7 @@ class TestRuntimeReconcileStaleConfirmation:
         other = MagicMock()
         other.symbol = "ETH/USDT"
         other.amount = 0.1
-        with patch.object(type(bot.settings), "is_paper_local", MagicMock(return_value=False)):
-            await bot._reconcile_runtime_open_trades([other])
+        await bot._reconcile_runtime_open_trades([other])
 
         assert "BTC/USDT" in bot._open_trades
         assert "BTC/USDT" not in bot._runtime_missing_counts
@@ -2884,8 +3654,7 @@ class TestRuntimeReconcileStaleConfirmation:
         bot._runtime_missing_counts["BTC/USDT"] = bot._RUNTIME_STALE_MISS_THRESHOLD - 1
         mock_exchange.fetch_positions = AsyncMock(return_value=[])
 
-        with patch.object(type(bot.settings), "is_paper_local", MagicMock(return_value=False)):
-            await bot._reconcile_runtime_open_trades([])
+        await bot._reconcile_runtime_open_trades([])
 
         assert "BTC/USDT" not in bot._open_trades
 
@@ -3125,3 +3894,75 @@ class TestRecoveredPolicyNormalization:
         ts = bot.orders.trailing.get("SOL/USDT")
         assert ts is not None
         assert ts.current_stop == pytest.approx(99.0)
+
+    @pytest.mark.asyncio
+    async def test_rehydrate_swing_manual_clamps_stop_to_last_entry_boundary(self, bot):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot.settings.stop_loss_pct = 1.5
+        bot.orders._sync_symbol_protection = AsyncMock(return_value=None)
+        bot._manual_swing_stop_bounds["SOL/USDT"] = ("long", 40.0)
+
+        rec = TradeRecord(
+            symbol="SOL/USDT",
+            side="long",
+            strategy="swing_manual",
+            action="open",
+            scale_mode="",
+            amount=1.0,
+            entry_price=83.23,
+            effective_stop_loss=79.07,
+            opened_at="2026-03-07T12:00:00+00:00",
+        )
+        pos = MagicMock(
+            symbol="SOL/USDT",
+            amount=1.0,
+            side="long",
+            entry_price=83.23,
+            current_price=83.15,
+            leverage=5,
+            market_type="futures",
+        )
+
+        ok = await bot._rehydrate_recovered_position_state("SOL/USDT", rec, pos)
+        assert ok is True
+        ts = bot.orders.trailing.get("SOL/USDT")
+        assert ts is not None
+        assert ts.current_stop == pytest.approx(40.0)
+        assert ts.structure_guard == pytest.approx(40.0)
+
+    @pytest.mark.asyncio
+    async def test_rehydrate_swing_manual_short_clamps_stop_to_last_entry_boundary(self, bot):
+        bot.settings.bot_id = "swing"
+        bot.settings.bot_style = "swing"
+        bot.settings.stop_loss_pct = 1.5
+        bot.orders._sync_symbol_protection = AsyncMock(return_value=None)
+        bot._manual_swing_stop_bounds["SOL/USDT"] = ("short", 120.0)
+
+        rec = TradeRecord(
+            symbol="SOL/USDT",
+            side="short",
+            strategy="swing_manual",
+            action="open",
+            scale_mode="",
+            amount=1.0,
+            entry_price=83.23,
+            effective_stop_loss=79.07,
+            opened_at="2026-03-07T12:00:00+00:00",
+        )
+        pos = MagicMock(
+            symbol="SOL/USDT",
+            amount=1.0,
+            side="short",
+            entry_price=83.23,
+            current_price=83.15,
+            leverage=5,
+            market_type="futures",
+        )
+
+        ok = await bot._rehydrate_recovered_position_state("SOL/USDT", rec, pos)
+        assert ok is True
+        ts = bot.orders.trailing.get("SOL/USDT")
+        assert ts is not None
+        assert ts.current_stop == pytest.approx(120.0)
+        assert ts.structure_guard == pytest.approx(120.0)

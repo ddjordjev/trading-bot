@@ -59,13 +59,23 @@ class CoinMarketCapClient:
         self._background_tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
+        if self._running:
+            return
         self._running = True
         self._background_tasks.append(asyncio.create_task(self._poll_loop()))
         mode = "API key" if self.api_key else "public endpoints"
         logger.info("CoinMarketCap client started (mode={}, poll={}s)", mode, self.poll_interval)
 
     async def stop(self) -> None:
+        if not self._running and not self._background_tasks:
+            return
         self._running = False
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
 
     @property
     def trending(self) -> list[CMCCoin]:

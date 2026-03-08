@@ -29,6 +29,7 @@ def bot_stub(tmp_path):
         _process_signal=AsyncMock(),
         _prepare_symbol_for_forced_close=AsyncMock(),
         _claim_orphan_position=AsyncMock(return_value=(True, "claimed")),
+        _create_manual_swing_plan_now=AsyncMock(return_value=(True, "created")),
         _write_deployment_status=AsyncMock(),
         _quick_hub_check=AsyncMock(),
         _hub_proposal=None,
@@ -40,6 +41,7 @@ def bot_stub(tmp_path):
         extreme_watcher=SimpleNamespace(drain_signals=MagicMock(), sync_watchlist=AsyncMock()),
         orders=SimpleNamespace(
             manual_take_profit=AsyncMock(),
+            _close_sub_position_wick=AsyncMock(return_value=SimpleNamespace(status="filled")),
             trailing=SimpleNamespace(active_stops={}),
         ),
         exchange=SimpleNamespace(fetch_positions=AsyncMock(return_value=[])),
@@ -153,6 +155,45 @@ async def test_close_position_exception(bot_stub):
 
 
 @pytest.mark.asyncio
+async def test_close_wick_scalp_requires_bot():
+    body = _json_body(await cs.close_wick_scalp(_Req({"symbol": "BTC/USDT"})))
+    assert body["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_close_wick_scalp_requires_symbol(bot_stub):
+    cs.set_bot(bot_stub)
+    body = _json_body(await cs.close_wick_scalp(_Req({})))
+    assert body == {"success": False, "message": "Missing symbol"}
+
+
+@pytest.mark.asyncio
+async def test_close_wick_scalp_success(bot_stub, stub_tasks):
+    cs.set_bot(bot_stub)
+    body = _json_body(await cs.close_wick_scalp(_Req({"symbol": "BTC/USDT"})))
+    assert body["success"] is True
+    assert "Closed wick scalp on BTC/USDT" in body["message"]
+    bot_stub.orders._close_sub_position_wick.assert_awaited_once_with("BTC/USDT")
+
+
+@pytest.mark.asyncio
+async def test_close_wick_scalp_no_active_scalp(bot_stub):
+    cs.set_bot(bot_stub)
+    bot_stub.orders._close_sub_position_wick = AsyncMock(return_value=None)
+    body = _json_body(await cs.close_wick_scalp(_Req({"symbol": "BTC/USDT"})))
+    assert body == {"success": False, "message": "No active wick scalp for BTC/USDT"}
+
+
+@pytest.mark.asyncio
+async def test_close_wick_scalp_error(bot_stub):
+    cs.set_bot(bot_stub)
+    bot_stub.orders._close_sub_position_wick = AsyncMock(side_effect=RuntimeError("boom"))
+    body = _json_body(await cs.close_wick_scalp(_Req({"symbol": "BTC/USDT"})))
+    assert body["success"] is False
+    assert "boom" in body["message"]
+
+
+@pytest.mark.asyncio
 async def test_claim_position_paths(bot_stub, stub_tasks):
     cs.set_bot(bot_stub)
     missing = _json_body(await cs.claim_position(_Req({})))
@@ -168,6 +209,20 @@ async def test_claim_position_exception(bot_stub):
     cs.set_bot(bot_stub)
     body = _json_body(await cs.claim_position(_Req({"symbol": "SOL/USDT"})))
     assert body == {"success": False, "message": "claim fail"}
+
+
+@pytest.mark.asyncio
+async def test_create_manual_swing_plan_now_paths(bot_stub, stub_tasks):
+    no_bot = _json_body(await cs.create_manual_swing_plan_now(_Req({"symbol": "SOL/USDT", "plan_id": "p1"})))
+    assert no_bot["success"] is False
+
+    cs.set_bot(bot_stub)
+    missing = _json_body(await cs.create_manual_swing_plan_now(_Req({"symbol": "SOL/USDT"})))
+    assert missing["success"] is False
+
+    ok = _json_body(await cs.create_manual_swing_plan_now(_Req({"symbol": "SOL/USDT", "plan_id": "p1"})))
+    assert ok["success"] is True
+    bot_stub._create_manual_swing_plan_now.assert_awaited_once_with("SOL/USDT", "p1")
 
 
 @pytest.mark.asyncio
@@ -289,6 +344,7 @@ def test_create_app_has_expected_routes():
     assert "/health" in route_paths
     assert "/metrics" in route_paths
     assert "/api/position/close" in route_paths
+    assert "/api/wick-scalp/close" in route_paths
     assert "/api/position/claim" in route_paths
     assert "/api/position/take-profit" in route_paths
     assert "/api/position/tighten-stop" in route_paths

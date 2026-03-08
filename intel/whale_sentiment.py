@@ -87,12 +87,22 @@ class WhaleSentiment:
         self._background_tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
+        if self._running:
+            return
         self._running = True
         self._background_tasks.append(asyncio.create_task(self._poll_loop()))
         logger.info("Whale sentiment monitor started (symbols={}, poll={}s)", self.symbols, self.poll_interval)
 
     async def stop(self) -> None:
+        if not self._running and not self._background_tasks:
+            return
         self._running = False
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
 
     def get(self, symbol: str) -> WhaleSentimentData | None:
         clean = symbol.upper().replace("/USDT", "").replace("USDT", "")
@@ -163,8 +173,8 @@ class WhaleSentiment:
                                 data.long_short_ratio = float(latest.get("longRate", 50)) / max(
                                     float(latest.get("shortRate", 50)), 0.01
                                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Whale sentiment L/S fetch failed for {}: {}", symbol, e)
 
             # Funding rate
             try:
@@ -186,8 +196,8 @@ class WhaleSentiment:
                                 if rate:
                                     data.funding_rate = float(rate)
                                     break
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Whale sentiment funding fetch failed for {}: {}", symbol, e)
 
             # Open interest details
             oi_snap = OISnapshot(timestamp=datetime.now(UTC))
@@ -208,8 +218,8 @@ class WhaleSentiment:
                             if prev_oi > 0:
                                 oi_snap.oi_change_1h_pct = ((cur_oi - prev_oi) / prev_oi) * 100
                             # open_interest_24h_change_pct left 0 — API gives 1h buckets only
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Whale sentiment OI fetch failed for {}: {}", symbol, e)
 
             # Top trader positions (Binance top trader L/S)
             try:
@@ -226,8 +236,8 @@ class WhaleSentiment:
                         if tt_data and isinstance(tt_data, list):
                             latest = tt_data[-1] if isinstance(tt_data[-1], dict) else {}
                             oi_snap.top_trader_long_ratio = float(latest.get("longRate", 50)) / 100.0
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Whale sentiment top-trader fetch failed for {}: {}", symbol, e)
 
             data.oi_snapshot = oi_snap
 

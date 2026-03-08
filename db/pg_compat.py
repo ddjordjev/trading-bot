@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 from psycopg.rows import dict_row
@@ -105,9 +105,20 @@ class PgConnCompat:
             raise DBError(str(exc)) from exc
 
     def executescript(self, script: str) -> None:
-        statements = [s.strip() for s in script.split(";") if s.strip()]
-        for stmt in statements:
-            self.execute(stmt)
+        if self._is_local_fallback:
+            cast(Any, self._conn).executescript(script)
+            return
+        cur = self._conn.cursor()
+        try:
+            # Execute migration scripts as a whole so PostgreSQL blocks
+            # (e.g. DO $$ ... $$;) are parsed correctly.
+            cur.execute(script)
+        except psycopg.errors.UniqueViolation as exc:
+            raise DBIntegrityError(str(exc)) from exc
+        except psycopg.OperationalError as exc:
+            raise DBOperationalError(str(exc)) from exc
+        except psycopg.Error as exc:
+            raise DBError(str(exc)) from exc
 
     def commit(self) -> None:
         # autocommit mode; kept for API parity

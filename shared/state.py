@@ -175,32 +175,6 @@ class SharedState:
             finally:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
-    def apply_trade_queue_updates(
-        self,
-        consumed_ids: list[str],
-        rejected: dict[str, str],
-    ) -> None:
-        """Remove consumed/rejected proposals from the local queue file.
-
-        With the hub-centric model, bots report outcomes directly to the hub.
-        This file-based version is kept for backward compat with SharedState.
-        """
-        if not consumed_ids and not rejected:
-            return
-        lock_path = self._queue_lock_path()
-        lock_path.touch(exist_ok=True)
-        with open(lock_path) as lock_fd:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            try:
-                q = self._read(self._data_dir / "trade_queue.json", TradeQueue) or TradeQueue()
-                remove_ids = set(consumed_ids) | set(rejected.keys())
-                for pid in remove_ids:
-                    q.remove_proposal(pid)
-                q.updated_at = datetime.now(UTC).isoformat()
-                self._write(self._data_dir / "trade_queue.json", q)
-            finally:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-
     def read_trade_queue(self) -> TradeQueue:
         lock_path = self._queue_lock_path()
         lock_path.touch(exist_ok=True)

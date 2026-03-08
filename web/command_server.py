@@ -91,6 +91,67 @@ async def close_position(request: web.Request) -> web.Response:
         return _json(False, str(e))
 
 
+async def close_wick_scalp(request: web.Request) -> web.Response:
+    if not _bot:
+        return _json(False, "Bot not initialized")
+    data = await request.json()
+    symbol = data.get("symbol", "")
+    if not symbol:
+        return _json(False, "Missing symbol")
+    try:
+        order = await _bot.orders._close_sub_position_wick(symbol)
+        if not order:
+            return _json(False, f"No active wick scalp for {symbol}")
+        import asyncio
+
+        task = asyncio.create_task(_nudge_hub(full_snapshot=True))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+        return _json(True, f"Closed wick scalp on {symbol}")
+    except Exception as e:
+        return _json(False, str(e))
+
+
+async def cancel_manual_swing_plan(request: web.Request) -> web.Response:
+    if not _bot:
+        return _json(False, "Bot not initialized")
+    data = await request.json()
+    symbol = data.get("symbol", "")
+    plan_id = data.get("plan_id", "")
+    if not symbol or not plan_id:
+        return _json(False, "Missing symbol or plan_id")
+    try:
+        ok, msg = await _bot._cancel_manual_swing_plan_now(str(symbol), str(plan_id))
+        import asyncio
+
+        task = asyncio.create_task(_nudge_hub(full_snapshot=True))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+        return _json(ok, msg)
+    except Exception as e:
+        return _json(False, str(e))
+
+
+async def create_manual_swing_plan_now(request: web.Request) -> web.Response:
+    if not _bot:
+        return _json(False, "Bot not initialized")
+    data = await request.json()
+    symbol = data.get("symbol", "")
+    plan_id = data.get("plan_id", "")
+    if not symbol or not plan_id:
+        return _json(False, "Missing symbol or plan_id")
+    try:
+        ok, msg = await _bot._create_manual_swing_plan_now(str(symbol), str(plan_id))
+        import asyncio
+
+        task = asyncio.create_task(_nudge_hub(full_snapshot=True))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+        return _json(ok, msg)
+    except Exception as e:
+        return _json(False, str(e))
+
+
 async def claim_position(request: web.Request) -> web.Response:
     if not _bot:
         return _json(False, "Bot not initialized")
@@ -233,6 +294,9 @@ def create_app() -> web.Application:
     app.router.add_get("/health", health)
     app.router.add_get("/metrics", metrics)
     app.router.add_post("/api/position/close", close_position)
+    app.router.add_post("/api/wick-scalp/close", close_wick_scalp)
+    app.router.add_post("/api/swing/manual-plan/cancel", cancel_manual_swing_plan)
+    app.router.add_post("/api/swing/manual-plan/create", create_manual_swing_plan_now)
     app.router.add_post("/api/position/claim", claim_position)
     app.router.add_post("/api/position/take-profit", take_profit)
     app.router.add_post("/api/position/tighten-stop", tighten_stop)

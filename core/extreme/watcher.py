@@ -64,6 +64,19 @@ class ExtremeWatcher:
     def active_count(self) -> int:
         return len(self._watched)
 
+    def latest_price(self, symbol: str) -> float | None:
+        """Return latest WS ticker price for a watched symbol."""
+        ws = self._watched.get(symbol)
+        if not ws or not ws.ticks:
+            return None
+        try:
+            price = float(ws.ticks[-1].price or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(price) or price <= 0:
+            return None
+        return price
+
     def drain_signals(self) -> list[Signal]:
         """Return and clear any pending entry signals."""
         signals = self._pending_signals

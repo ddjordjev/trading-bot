@@ -29,19 +29,30 @@ class FearGreedClient:
 
     API_URL = "https://api.alternative.me/fng/?limit=2"
 
-    def __init__(self, poll_interval: int = 3600):
+    def __init__(self, poll_interval: int = 3600, retry_interval: int = 60):
         self.poll_interval = poll_interval
+        self.retry_interval = max(5, int(retry_interval))
         self._latest: FearGreedReading | None = None
         self._running = False
         self._background_tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
+        if self._running:
+            return
         self._running = True
         self._background_tasks.append(asyncio.create_task(self._poll_loop()))
         logger.info("Fear & Greed monitor started (poll={}s)", self.poll_interval)
 
     async def stop(self) -> None:
+        if not self._running and not self._background_tasks:
+            return
         self._running = False
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
 
     @property
     def latest(self) -> FearGreedReading | None:
@@ -94,39 +105,43 @@ class FearGreedClient:
 
     async def _poll_loop(self) -> None:
         while self._running:
+            fetched_ok = False
             try:
-                await self._fetch()
+                fetched_ok = await self._fetch()
             except Exception as e:
                 logger.error("Fear & Greed fetch error: {}", e)
-            await asyncio.sleep(self.poll_interval)
+            sleep_for = self.poll_interval if fetched_ok else self.retry_interval
+            if not fetched_ok:
+                logger.warning("Fear & Greed fetch failed; retry in {}s", sleep_for)
+            await asyncio.sleep(sleep_for)
 
-    async def _fetch(self) -> None:
+    async def _fetch(self) -> bool:
         async with (
             aiohttp.ClientSession() as session,
             session.get(self.API_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp,
         ):
             if resp.status != 200:
                 logger.warning("Fear & Greed API returned {}", resp.status)
-                return
+                return False
             data = await resp.json()
 
         if not isinstance(data, dict):
-            return
+            return False
 
         entries = data.get("data", [])
         if not isinstance(entries, list) or not entries:
-            return
+            return False
 
         current = entries[0]
         if not isinstance(current, dict):
-            return
+            return False
         previous = entries[1] if len(entries) > 1 and isinstance(entries[1], dict) else {}
 
         try:
             val = int(current.get("value", 50) or 50)
             ts = int(current.get("timestamp", 0) or 0)
         except (TypeError, ValueError):
-            return
+            return False
 
         self._latest = FearGreedReading(
             value=val,
@@ -143,6 +158,7 @@ class FearGreedClient:
             self._latest.previous_value,
             self._latest.previous_classification,
         )
+        return True
 
     def summary(self) -> str:
         if not self._latest:

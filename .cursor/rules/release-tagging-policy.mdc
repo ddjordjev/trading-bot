@@ -1,0 +1,28 @@
+---
+description: Enforce production release tagging and release-folder hygiene
+alwaysApply: true
+---
+
+# Production Release Tagging Policy
+
+When changes are deployed to production, enforce this release flow in order:
+
+1. Bump the version shown in the product/runtime metadata.
+2. Create an annotated git tag for that version (for example `v1.0.1`) at the deployed commit.
+3. Push the tag to origin.
+4. Create or update a release note file under `releases/` for that same version.
+
+## Release Notes Location
+
+- Keep all release notes under a single folder: `releases/`.
+- Use one file per version: `releases/vX.Y.Z.md`.
+- Do not create release notes in scattered locations.
+
+## Minimum Release Note Contents
+
+Each `releases/vX.Y.Z.md` file should include:
+
+- Version
+- Deployed commit hash
+- Deployment date (UTC)
+- Short summary of key changes

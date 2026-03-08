@@ -44,6 +44,9 @@ ALL_PROFILES: list[BotProfile] = [
         allowed_priorities=["critical"],
         env_overrides={
             "DEFAULT_LEVERAGE": "20",
+            "BREAKEVEN_LOCK_PCT": "5.0",
+            "POST_ADD_DEFENSE_STOP_PCT": "2.0",
+            "POST_ADD_REARM_CHASE_PCT": "5.0",
             "MAX_CONCURRENT_POSITIONS": "10",
             "TICK_INTERVAL_IDLE": "30",
             "TICK_INTERVAL_ACTIVE": "30",
@@ -66,6 +69,9 @@ ALL_PROFILES: list[BotProfile] = [
         style="momentum",
         strategies=["compound_momentum", "mean_reversion"],
         env_overrides={
+            "BREAKEVEN_LOCK_PCT": "5.0",
+            "POST_ADD_DEFENSE_STOP_PCT": "2.0",
+            "POST_ADD_REARM_CHASE_PCT": "5.0",
             "HEDGE_ENABLED": "true",
             "HEDGE_RATIO": "0.40",
             "HEDGE_MIN_PROFIT_PCT": "2.0",
@@ -79,6 +85,11 @@ ALL_PROFILES: list[BotProfile] = [
         description="Trend-following with compounding momentum and market-open volatility",
         style="momentum",
         strategies=["compound_momentum", "market_open_volatility"],
+        env_overrides={
+            "BREAKEVEN_LOCK_PCT": "5.0",
+            "POST_ADD_DEFENSE_STOP_PCT": "2.0",
+            "POST_ADD_REARM_CHASE_PCT": "5.0",
+        },
         is_default=False,
     ),
     BotProfile(
@@ -87,6 +98,11 @@ ALL_PROFILES: list[BotProfile] = [
         description="Classic RSI and MACD crossover signals",
         style="momentum",
         strategies=["rsi", "macd"],
+        env_overrides={
+            "BREAKEVEN_LOCK_PCT": "5.0",
+            "POST_ADD_DEFENSE_STOP_PCT": "2.0",
+            "POST_ADD_REARM_CHASE_PCT": "5.0",
+        },
         is_default=False,
     ),
     BotProfile(
@@ -96,6 +112,9 @@ ALL_PROFILES: list[BotProfile] = [
         style="meanrev",
         strategies=["bollinger", "mean_reversion"],
         env_overrides={
+            "BREAKEVEN_LOCK_PCT": "5.0",
+            "POST_ADD_DEFENSE_STOP_PCT": "2.0",
+            "POST_ADD_REARM_CHASE_PCT": "5.0",
             "TICK_INTERVAL_IDLE": "120",
             "TICK_INTERVAL_ACTIVE": "60",
         },
@@ -109,8 +128,11 @@ ALL_PROFILES: list[BotProfile] = [
         strategies=["swing_opportunity", "grid"],
         allowed_priorities=["daily", "swing"],
         env_overrides={
-            "TICK_INTERVAL_IDLE": "600",
-            "TICK_INTERVAL_ACTIVE": "300",
+            "BREAKEVEN_LOCK_PCT": "5.0",
+            "POST_ADD_DEFENSE_STOP_PCT": "2.0",
+            "POST_ADD_REARM_CHASE_PCT": "5.0",
+            "TICK_INTERVAL_IDLE": "900",
+            "TICK_INTERVAL_ACTIVE": "900",
         },
         is_default=False,
     ),
@@ -122,6 +144,9 @@ ALL_PROFILES: list[BotProfile] = [
         strategies=["compound_momentum"],
         allowed_priorities=["critical"],
         env_overrides={
+            "BREAKEVEN_LOCK_PCT": "5.0",
+            "POST_ADD_DEFENSE_STOP_PCT": "2.0",
+            "POST_ADD_REARM_CHASE_PCT": "5.0",
             "TICK_INTERVAL_ACTIVE": "15",
             "STOP_LOSS_PCT": "0.8",
             "TAKE_PROFIT_PCT": "2.0",
@@ -146,6 +171,9 @@ ALL_PROFILES: list[BotProfile] = [
         ],
         allowed_priorities=["critical", "daily", "swing"],
         env_overrides={
+            "BREAKEVEN_LOCK_PCT": "5.0",
+            "POST_ADD_DEFENSE_STOP_PCT": "2.0",
+            "POST_ADD_REARM_CHASE_PCT": "5.0",
             "MAX_CONCURRENT_POSITIONS": "10",
         },
         is_default=False,
@@ -158,6 +186,9 @@ ALL_PROFILES: list[BotProfile] = [
         strategies=["rsi", "bollinger"],
         env_overrides={
             "DEFAULT_LEVERAGE": "3",
+            "BREAKEVEN_LOCK_PCT": "5.0",
+            "POST_ADD_DEFENSE_STOP_PCT": "2.0",
+            "POST_ADD_REARM_CHASE_PCT": "5.0",
             "MAX_POSITION_SIZE_PCT": "3",
             "STOP_LOSS_PCT": "1.0",
             "INITIAL_RISK_AMOUNT": "20",
@@ -172,6 +203,9 @@ ALL_PROFILES: list[BotProfile] = [
         strategies=["compound_momentum", "rsi"],
         env_overrides={
             "DEFAULT_LEVERAGE": "20",
+            "BREAKEVEN_LOCK_PCT": "5.0",
+            "POST_ADD_DEFENSE_STOP_PCT": "2.0",
+            "POST_ADD_REARM_CHASE_PCT": "5.0",
             "MAX_POSITION_SIZE_PCT": "10",
             "TAKE_PROFIT_PCT": "10",
             "INITIAL_RISK_AMOUNT": "100",

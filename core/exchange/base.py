@@ -65,14 +65,32 @@ def parse_stop_price(data: dict[str, Any]) -> float | None:
 
 def infer_position_leverage(raw_position: dict[str, Any]) -> int:
     """Infer leverage when exchange payload omits explicit value."""
-    raw_leverage = raw_position.get("leverage")
-    try:
-        if raw_leverage is not None:
-            parsed = round(float(raw_leverage))
+
+    def _parse_leverage(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            text = str(value).strip().lower()
+            if not text:
+                return None
+            if text.endswith("x"):
+                text = text[:-1]
+            parsed = round(float(text))
             if parsed > 0:
                 return parsed
-    except (TypeError, ValueError):
-        pass
+        except (TypeError, ValueError):
+            return None
+        return None
+
+    direct = _parse_leverage(raw_position.get("leverage"))
+    if direct is not None:
+        return direct
+
+    info = raw_position.get("info") or {}
+    for key in ("leverage", "positionLeverage", "buyLeverage", "sellLeverage"):
+        inferred = _parse_leverage(info.get(key))
+        if inferred is not None:
+            return inferred
 
     try:
         margin_pct = float(raw_position.get("initialMarginPercentage", 0) or 0)
@@ -83,7 +101,6 @@ def infer_position_leverage(raw_position: dict[str, Any]) -> int:
     except (TypeError, ValueError, ZeroDivisionError):
         pass
 
-    info = raw_position.get("info") or {}
     try:
         initial_margin = float(raw_position.get("initialMargin") or info.get("positionInitialMargin") or 0)
         notional = abs(float(raw_position.get("notional") or info.get("notional") or 0))

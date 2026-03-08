@@ -81,6 +81,7 @@ export interface PositionInfo {
   scale_phase: string;
   dca_count: number;
   trade_url: string;
+  is_wick_scalp?: boolean;
 }
 
 export interface MacroEventInfo {
